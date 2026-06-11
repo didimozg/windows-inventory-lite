@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    name: Test
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check dashboard JavaScript
+        shell: pwsh
+        run: node --check server/dashboard/app.js
+
+      - name: Run PowerShell tests
+        shell: pwsh
+        run: |
+          Install-Module Pester -Force -Scope CurrentUser
+          Invoke-Pester -Path .\tests\ScriptSyntax.Tests.ps1
+
+      - name: Build server
+        shell: pwsh
+        run: |
+          .\src\Build-Server.ps1
+          .\build\WindowsInventoryLiteServer.exe --version
+
+      - name: Build client
+        shell: pwsh
+        run: |
+          .\src\Build-Client.ps1 -TargetFramework Net40 -OutputPath .\build\WindowsInventoryLiteClient-net40.exe
+          .\build\WindowsInventoryLiteClient-net40.exe --version

@@ -1,0 +1,7 @@
+output/
+build/
+dist/
+tmp/
+*.log
+*.tmp
+inventory-index.json
