@@ -23,7 +23,7 @@ jobs:
         shell: pwsh
         run: |
           Install-Module Pester -Force -Scope CurrentUser
-          Invoke-Pester -Path .\tests\ScriptSyntax.Tests.ps1
+          Invoke-Pester -Path .\tests\ -CI
 
       - name: Build server
         shell: pwsh

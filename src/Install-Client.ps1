@@ -81,6 +81,11 @@ function Wait-FileRelease {
     throw "File is still locked: $Path"
 }
 
+function ConvertTo-ServiceArgValue {
+    param([string]$Value)
+    return $Value -replace '"', '\"'
+}
+
 if (-not $InstallPath) {
     $InstallPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite'
 }
@@ -125,17 +130,12 @@ if ($LASTEXITCODE -eq 0) {
 Copy-Item -LiteralPath $ClientExecutablePath -Destination $servicePath -Force
 $clientVersion = (& $servicePath --version 2>&1 | Select-Object -First 1)
 
-if ($servicePath -match ' ') {
-    $exeToken = '\"' + ($servicePath -replace '"', '\"') + '\"'
-} else {
-    $exeToken = $servicePath
-}
-$serviceCommand = $exeToken + ' --server-url ' + $ServerUrl + ' --interval-hours ' + $IntervalHours
+$serviceCommand = '"' + (ConvertTo-ServiceArgValue $servicePath) + '" --server-url "' + (ConvertTo-ServiceArgValue $ServerUrl) + '" --interval-hours ' + $IntervalHours
 if ($ServerSharePath) {
-    $serviceCommand += ' --share ' + $ServerSharePath
+    $serviceCommand += ' --share "' + (ConvertTo-ServiceArgValue $ServerSharePath) + '"'
 }
 if ($Token) {
-    $serviceCommand += ' --token ' + $Token
+    $serviceCommand += ' --token "' + (ConvertTo-ServiceArgValue $Token) + '"'
 }
 
 Invoke-ServiceControl -Arguments @('create', $serviceName, 'binPath=', $serviceCommand, 'start=', 'auto', 'DisplayName=', 'Windows Inventory Lite') -FailureMessage "Failed to create service. Run PowerShell as Administrator." | Out-Null

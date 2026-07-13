@@ -6,6 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Built-in `--self-test` mode on the server executable that checks the hand-rolled HTTP header parser, WinRM target/IP-range expansion, and ZIP archive builder without adding a NuGet test framework. Covered by `tests/SelfTest.Tests.ps1` in CI.
+- `--use-https` / `--certificate-thumbprint` server flags now log a startup warning (Windows Event Log and console) stating that TLS is not implemented in this build, instead of silently accepting the flag with no effect.
+
+### Changed
+
+- `Install-Server.ps1`, `Install-Client.ps1`, and `Deploy-ClientGpo.ps1` now quote and escape every value placed in the `sc.exe binPath=` command line, closing a service command-line injection path through `ServerUrl`, `Token`, or paths containing quotes or spaces.
+- `Install-Server.ps1` restricts `server-config.json` to Administrators and SYSTEM after writing it, since the file stores `WebPassword` and `Token` in plain text.
+- `.env.example` variables renamed from the old `WINDOWS_SOFT_INVENTORY_*` prefix to `WINDOWS_INVENTORY_LITE_*` to match the project name.
+- CI now runs every Pester test under `tests/` instead of only `ScriptSyntax.Tests.ps1`.
+
 ## [0.2.0] - 2026-06-11
 
 ### Added

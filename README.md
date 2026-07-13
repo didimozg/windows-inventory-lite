@@ -229,6 +229,124 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 
 `Stale >48h` counts reports older than 48 hours or reports with an invalid timestamp.
 
+## Parameters
+
+### Collect-WindowsInventoryLite.ps1
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `-OutputPath` | `—` | Path for the output JSON report file. |
+| `-ServerSharePath` | `—` | UNC path to the server drop share. When provided, the report is also copied there. |
+| `-SkipSoftware` | `off` | Skip collecting installed software. |
+
+### Install-Server.ps1
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `-ListenPrefix` | `http://+:8080/` | HTTP listener prefix for the server service. |
+| `-DataPath` | `—` | Folder for received JSON report files. Default: `C:\ProgramData\WindowsInventoryLite\drop`. |
+| `-InstallPath` | `—` | Installation folder for the server service. Default: `C:\ProgramData\WindowsInventoryLite`. |
+| `-ContentPath` | `—` | Folder for dashboard HTML, CSS, and JavaScript. Default: `InstallPath\dashboard`. |
+| `-ClientPackagePath` | `—` | Destination folder for the client package on the server. Default: `InstallPath\client-package`. |
+| `-ClientPackageSourcePath` | `—` | Source folder to copy the client package from before installation. |
+| `-ConfigPath` | `—` | Server configuration file path. Default: `InstallPath\server-config.json`. |
+| `-ServerExecutablePath` | `—` | Path to the prebuilt server executable. Triggers a build if omitted. |
+| `-Token` | `—` | Ingestion token required in the `X-Inventory-Token` header. Optional. |
+| `-WebUsername` | `—` | Basic Auth username for dashboard and web API access. Optional. |
+| `-WebPassword` | `—` | Basic Auth password for dashboard and web API access. Optional. |
+| `-InstallLogRetentionDays` | `30` | Default retention period in days for WinRM client action logs. |
+| `-OpenFirewall` | `off` | Create a Windows Firewall inbound rule for the listener port. |
+| `-NoRun` | `off` | Install and configure the service without starting it. |
+
+### Install-Client.ps1
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `-ServerUrl` | `—` | HTTP endpoint that receives client JSON reports. Mandatory. |
+| `-ServerSharePath` | `—` | UNC path to the server drop share for direct file delivery. Optional. |
+| `-Token` | `—` | Ingestion token sent in `X-Inventory-Token`. Optional. |
+| `-IntervalHours` | `6` | Collection interval in hours (1–24). |
+| `-InstallPath` | `—` | Installation folder for the client service. Default: `C:\ProgramData\WindowsInventoryLite`. |
+| `-ClientExecutablePath` | `—` | Path to the prebuilt client executable. Triggers a build if omitted. |
+| `-NoRun` | `off` | Install and configure the service without starting it. |
+
+### Install-ClientWinRM.ps1
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `-ComputerName` | `—` | One or more target computer names or IP addresses. Mandatory. |
+| `-ServerUrl` | `—` | HTTP endpoint that receives client JSON reports. Mandatory. |
+| `-Token` | `—` | Ingestion token sent in `X-Inventory-Token`. Optional. |
+| `-IntervalHours` | `6` | Collection interval in hours (1–24). |
+| `-PackagePath` | `—` | Local path to the GPO client package. Default: `dist\gpo-client`. |
+| `-RemotePackagePath` | `C:\ProgramData\WindowsInventoryLite\WinRMDeploy` | Temporary folder on the remote host for the package. |
+| `-Credential` | `—` | PSCredential for WinRM authentication. Optional. |
+| `-CredentialUsername` | `—` | WinRM username as a plain string. Used if `-Credential` is not provided. |
+| `-CredentialPassword` | `—` | WinRM password as a plain string. Used if `-Credential` is not provided. |
+| `-AddToTrustedHosts` | `off` | Add target computers to WinRM TrustedHosts before connecting. |
+| `-Force` | `off` | Reinstall the client even if the version already matches. |
+| `-KeepRemotePackage` | `off` | Do not delete the temporary package folder from the remote host after deployment. |
+
+### Uninstall-Client.ps1
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `-InstallPath` | `C:\ProgramData\WindowsInventoryLite` | Installation folder to remove. |
+
+### Uninstall-ClientWinRM.ps1
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `-ComputerName` | `—` | One or more target computer names or IP addresses. Mandatory. |
+| `-InstallPath` | `C:\ProgramData\WindowsInventoryLite` | Installation folder to remove on remote hosts. |
+| `-Credential` | `—` | PSCredential for WinRM authentication. Optional. |
+| `-CredentialUsername` | `—` | WinRM username as a plain string. Used if `-Credential` is not provided. |
+| `-CredentialPassword` | `—` | WinRM password as a plain string. Used if `-Credential` is not provided. |
+| `-AddToTrustedHosts` | `off` | Add target computers to WinRM TrustedHosts before connecting. |
+
+### New-ClientGpoPackage.ps1
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `-ServerUrl` | `—` | HTTP endpoint to embed in the client startup script. Mandatory. |
+| `-Token` | `—` | Ingestion token to embed in the client startup script. Optional. |
+| `-IntervalHours` | `6` | Collection interval in hours to embed in the client startup script (1–24). |
+| `-OutputPath` | `—` | Output folder for the package. Default: `dist\gpo-client`. |
+| `-ClientNet35Path` | `—` | Path to the prebuilt .NET 3.5 client executable. Triggers a build if omitted. |
+| `-ClientNet40Path` | `—` | Path to the prebuilt .NET 4 client executable. Triggers a build if omitted. |
+| `-PackageSharePath` | `—` | UNC share path embedded in the `.cmd` wrapper when the executables and script live on a share separate from SYSVOL. |
+
+### Build-Server.ps1
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `-OutputPath` | `—` | Output path for the compiled server executable. Default: `build\WindowsInventoryLiteServer.exe`. |
+
+### Build-Client.ps1
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `-OutputPath` | `—` | Output path for the compiled client executable. Default: `build\WindowsInventoryLiteClient.exe`. |
+| `-TargetFramework` | `Net40` | Target .NET Framework version: `Net35` or `Net40`. |
+
+### Build-InventoryIndex.ps1
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `-DropPath` | `C:\ProgramData\WindowsInventoryLite\drop` | Folder containing JSON report files from clients. |
+| `-DashboardDataPath` | `C:\inetpub\WindowsInventoryLite\data` | Output folder for the generated inventory index. |
+
+### Deploy-ClientGpo.ps1
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `-ServerUrl` | `—` | HTTP endpoint that receives client JSON reports. Mandatory. |
+| `-Token` | `—` | Ingestion token sent in `X-Inventory-Token`. Optional. |
+| `-IntervalHours` | `6` | Collection interval in hours (1–24). |
+| `-InstallPath` | `—` | Installation folder for the client service. Default: `C:\ProgramData\WindowsInventoryLite`. |
+| `-PackageClientPath` | `—` | Path to the client executable in the package. Resolved from the script directory if omitted. |
+| `-Force` | `off` | Reinstall the client even if the version already matches. |
+
 ## Screenshots
 
 The screenshots below use sample hostnames, documentation IP ranges, and placeholder domains.

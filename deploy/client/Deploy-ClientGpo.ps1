@@ -168,6 +168,11 @@ function Get-ServiceBinaryPath {
     return $null
 }
 
+function ConvertTo-ServiceArgValue {
+    param([string]$Value)
+    return $Value -replace '"', '\"'
+}
+
 function Get-DesiredServiceCommand {
     param(
         [string]$ServicePath,
@@ -176,17 +181,9 @@ function Get-DesiredServiceCommand {
         [string]$SharedToken
     )
 
-    # PS 2.0 on Windows 7 mishandles native-command arguments that start with ".
-    # Quote the exe path only when it contains a space; use \" form so the
-    # resulting $command string does not start with " and splatting works correctly.
-    if ($ServicePath -match ' ') {
-        $exeToken = '\"' + ($ServicePath -replace '"', '\"') + '\"'
-    } else {
-        $exeToken = $ServicePath
-    }
-    $command = $exeToken + ' --server-url ' + $Url + ' --interval-hours ' + $Hours
+    $command = '"' + (ConvertTo-ServiceArgValue $ServicePath) + '" --server-url "' + (ConvertTo-ServiceArgValue $Url) + '" --interval-hours ' + $Hours
     if ($SharedToken) {
-        $command += ' --token ' + $SharedToken
+        $command += ' --token "' + (ConvertTo-ServiceArgValue $SharedToken) + '"'
     }
 
     return $command

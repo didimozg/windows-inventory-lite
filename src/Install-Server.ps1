@@ -361,15 +361,25 @@ if (Test-Path -LiteralPath $clientNet40PackagePath) {
     $clientNet40Version = (& $clientNet40PackagePath --version 2>&1 | Select-Object -First 1)
 }
 
-function ConvertTo-ScPathToken {
+function ConvertTo-ServiceArgValue {
     param([string]$Value)
-    if ($Value -match ' ') { return '\"' + ($Value -replace '"', '\"') + '\"' }
-    return $Value
+    return $Value -replace '"', '\"'
 }
 
-$serviceCommand = (ConvertTo-ScPathToken $servicePath) + ' --prefix ' + $ListenPrefix + ' --data ' + (ConvertTo-ScPathToken $DataPath) + ' --content ' + (ConvertTo-ScPathToken $ContentPath) + ' --client-package ' + (ConvertTo-ScPathToken $ClientPackagePath) + ' --winrm-installer ' + (ConvertTo-ScPathToken $winRmInstallerPath) + ' --winrm-uninstaller ' + (ConvertTo-ScPathToken $winRmUninstallerPath)
+function Set-RestrictedFileAcl {
+    param([string]$FilePath)
+    $acl = Get-Acl -LiteralPath $FilePath
+    $acl.SetAccessRuleProtection($true, $false)
+    $adminRule  = New-Object System.Security.AccessControl.FileSystemAccessRule('Administrators', 'FullControl', 'Allow')
+    $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule('SYSTEM',         'FullControl', 'Allow')
+    $acl.AddAccessRule($adminRule)
+    $acl.AddAccessRule($systemRule)
+    Set-Acl -LiteralPath $FilePath -AclObject $acl
+}
+
+$serviceCommand = '"' + (ConvertTo-ServiceArgValue $servicePath) + '" --prefix "' + (ConvertTo-ServiceArgValue $ListenPrefix) + '" --data "' + (ConvertTo-ServiceArgValue $DataPath) + '" --content "' + (ConvertTo-ServiceArgValue $ContentPath) + '" --client-package "' + (ConvertTo-ServiceArgValue $ClientPackagePath) + '" --winrm-installer "' + (ConvertTo-ServiceArgValue $winRmInstallerPath) + '" --winrm-uninstaller "' + (ConvertTo-ServiceArgValue $winRmUninstallerPath) + '"'
 $serviceCommand += ' --install-log-retention-days ' + $InstallLogRetentionDays
-$serviceCommand += ' --config ' + (ConvertTo-ScPathToken $ConfigPath)
+$serviceCommand += ' --config "' + (ConvertTo-ServiceArgValue $ConfigPath) + '"'
 
 $config = @{
     ListenPrefix            = $ListenPrefix
@@ -383,6 +393,7 @@ $config = @{
     WebPassword             = $WebPassword
 }
 Write-ServerConfig -Path $ConfigPath -Config $config
+Set-RestrictedFileAcl -FilePath $ConfigPath
 
 Invoke-ServiceControl -Arguments @('create', $serviceName, 'binPath=', $serviceCommand, 'start=', 'auto', 'DisplayName=', 'Windows Inventory Lite Server') -FailureMessage "Failed to create service. Run PowerShell as Administrator." | Out-Null
 Invoke-ServiceControl -Arguments @('description', $serviceName, "Receives Windows Inventory Lite reports and serves the dashboard. Version $serverVersion.") -FailureMessage "Failed to set service description." | Out-Null

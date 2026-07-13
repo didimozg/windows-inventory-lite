@@ -19,6 +19,12 @@ namespace WindowsInventoryLite
 
         private static int Main(string[] args)
         {
+            if (args.Length > 0 && args[0] == "--self-test")
+            {
+                bool passed = InventoryServer.RunSelfTests(Console.Out);
+                return passed ? 0 : 1;
+            }
+
             ServerOptions options = ServerOptions.Parse(args);
 
             if (options.ShowVersion)
@@ -80,6 +86,12 @@ namespace WindowsInventoryLite
         public string WebPassword;
         public int InstallLogRetentionDays;
         public string ConfigPath;
+        // HTTPS is not implemented in this build. To enable HTTPS, terminate TLS
+        // at a reverse proxy (IIS ARR, nginx, Caddy) in front of this service,
+        // or set UseHttps=true and CertificateThumbprint in a future build that
+        // wraps the TcpListener in SslStream using the specified certificate.
+        public bool UseHttps;
+        public string CertificateThumbprint;
         public bool ConsoleMode;
         public bool ShowVersion;
 
@@ -171,6 +183,14 @@ namespace WindowsInventoryLite
                 {
                     options.ConfigPath = args[++i];
                 }
+                else if (key == "--use-https")
+                {
+                    options.UseHttps = true;
+                }
+                else if (key == "--certificate-thumbprint" && i + 1 < args.Length)
+                {
+                    options.CertificateThumbprint = args[++i];
+                }
             }
 
             LoadConfigFile(options);
@@ -200,6 +220,15 @@ namespace WindowsInventoryLite
                 if (String.IsNullOrEmpty(options.WebPassword))
                 {
                     options.WebPassword = GetConfigString(config, "WebPassword");
+                }
+                if (!options.UseHttps)
+                {
+                    string useHttps = GetConfigString(config, "UseHttps");
+                    options.UseHttps = String.Equals(useHttps, "true", StringComparison.OrdinalIgnoreCase);
+                }
+                if (String.IsNullOrEmpty(options.CertificateThumbprint))
+                {
+                    options.CertificateThumbprint = GetConfigString(config, "CertificateThumbprint");
                 }
             }
             catch
@@ -234,6 +263,22 @@ namespace WindowsInventoryLite
 
         public void Start()
         {
+            if (options.UseHttps)
+            {
+                const string message = "UseHttps is set but TLS is not implemented in this build. "
+                    + "The listener is running as plain HTTP. Terminate TLS at a reverse proxy "
+                    + "(IIS ARR, nginx, Caddy) instead of relying on this flag.";
+                try
+                {
+                    System.Diagnostics.EventLog.WriteEntry(
+                        "WindowsInventoryLite",
+                        message,
+                        System.Diagnostics.EventLogEntryType.Warning);
+                }
+                catch { }
+                Console.Error.WriteLine("WARNING: " + message);
+            }
+
             if (!Directory.Exists(options.DataPath))
             {
                 Directory.CreateDirectory(options.DataPath);
@@ -1513,5 +1558,185 @@ namespace WindowsInventoryLite
         private const string DashboardJs = @"(function(){const staleHours=48;const state={clients:[]};function byId(id){return document.getElementById(id)}function text(v){return v===undefined||v===null||v===''?'Unknown':String(v)}function activated(v){return v?'Activated':'Not detected'}function isStale(c){const d=new Date(c.collectedAt||c.sourceUpdatedAt||0);return Number.isNaN(d.getTime())||((Date.now()-d.getTime())/36e5)>staleHours}function matches(c,q){if(!q)return true;const software=(c.software||[]).map(i=>`${i.name} ${i.version}`).join(' ');const h=[c.computerName,c.domain,c.os&&c.os.caption,c.os&&c.os.version,c.office&&c.office.name,c.office&&c.office.version,software].join(' ').toLowerCase();return h.indexOf(q.toLowerCase())!==-1}function summary(clients){byId('clientCount').textContent=clients.length;byId('windowsActivated').textContent=clients.filter(c=>c.activation&&c.activation.windows&&c.activation.windows.activated).length;byId('officeActivated').textContent=clients.filter(c=>c.activation&&c.activation.office&&c.activation.office.activated).length;byId('staleCount').textContent=clients.filter(isStale).length}function table(clients){const q=byId('searchInput').value.trim();const rows=clients.filter(c=>matches(c,q)).map(c=>{const os=c.os||{},office=c.office||{},a=c.activation||{},wa=a.windows||{},oa=a.office||{},count=(c.software||[]).length;return `<tr class=""${isStale(c)?'stale':''}""><td><strong>${text(c.computerName)}</strong><small>${text(c.domain)}</small></td><td>${text(os.caption)}<small>${text(os.version)} build ${text(os.buildNumber)}</small></td><td>${text(office.name)}<small>${text(office.version)}</small></td><td>${activated(wa.activated)}</td><td>${activated(oa.activated)}</td><td>${count}</td><td>${text(c.collectedAt)}</td></tr>`});byId('inventoryBody').innerHTML=rows.join('')||'<tr><td colspan=""7"" class=""empty"">No matching inventory records.</td></tr>'}function render(){summary(state.clients);table(state.clients)}fetch('/api/v1/clients',{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error(`HTTP ${r.status}`);return r.json()}).then(d=>{state.clients=d.clients||[];byId('generatedAt').textContent=`Generated: ${text(d.generatedAt)}`;render()}).catch(e=>{byId('generatedAt').textContent=`Inventory index is not available: ${e.message}`;render()});byId('searchInput').addEventListener('input',render)}());";
 
         private const string DashboardCss = @":root{--bg:#f5f7fa;--panel:#fff;--text:#17202a;--muted:#5f6b7a;--line:#d9e0e8;--accent:#126f8f;--warn:#fff1c2}*{box-sizing:border-box}body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--text)}.topbar{display:flex;gap:24px;align-items:center;justify-content:space-between;padding:24px 32px;background:var(--panel);border-bottom:1px solid var(--line)}h1{margin:0 0 6px;font-size:24px;font-weight:650}p,small{color:var(--muted)}p{margin:0}input[type=search]{width:min(520px,45vw);min-width:280px;height:40px;padding:0 12px;border:1px solid var(--line);border-radius:6px;font:inherit}main{padding:24px 32px}.summary{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:12px;margin-bottom:18px}.summary div{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}.summary span{display:block;margin-bottom:4px;color:var(--accent);font-size:28px;font-weight:700}.table-wrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:8px}table{width:100%;border-collapse:collapse;min-width:980px}th,td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{background:#edf2f6;font-size:12px;color:var(--muted);text-transform:uppercase}td small{display:block;margin-top:4px}tr.stale td{background:var(--warn)}.empty{padding:28px;text-align:center;color:var(--muted)}@media(max-width:820px){.topbar{align-items:stretch;flex-direction:column;padding:18px}input[type=search]{width:100%;min-width:0}main{padding:18px}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}}";
+
+        // Self-checks for hand-rolled parsing/encoding logic that has no automated
+        // coverage otherwise (no NuGet test framework is used in this project).
+        // Invoked through `--self-test`; exercised by tests/SelfTest.Tests.ps1.
+        internal static bool RunSelfTests(TextWriter output)
+        {
+            bool allPassed = true;
+            allPassed &= SelfTestCheck(output, "FindHeaderEnd finds terminator in a single buffer", TestFindHeaderEndSingleBuffer);
+            allPassed &= SelfTestCheck(output, "FindHeaderEnd finds terminator split across reads", TestFindHeaderEndSplitAcrossReads);
+            allPassed &= SelfTestCheck(output, "FindHeaderEnd returns -1 when terminator is absent", TestFindHeaderEndNoMatch);
+            allPassed &= SelfTestCheck(output, "ExpandInstallTarget expands a short IPv4 range", TestExpandInstallTargetShortRange);
+            allPassed &= SelfTestCheck(output, "ExpandInstallTarget expands a full IPv4 range", TestExpandInstallTargetFullRange);
+            allPassed &= SelfTestCheck(output, "ExpandInstallTarget passes through a single hostname", TestExpandInstallTargetHostname);
+            allPassed &= SelfTestCheck(output, "ExpandInstallTargets de-duplicates and splits on separators", TestExpandInstallTargetsDedup);
+            allPassed &= SelfTestCheck(output, "BuildZip produces a structurally valid archive", TestBuildZipStructure);
+            return allPassed;
+        }
+
+        private static bool SelfTestCheck(TextWriter output, string name, Func<string> testCase)
+        {
+            string failure;
+            try
+            {
+                failure = testCase();
+            }
+            catch (Exception ex)
+            {
+                failure = "threw " + ex.GetType().Name + ": " + ex.Message;
+            }
+
+            if (failure == null)
+            {
+                output.WriteLine("PASS " + name);
+                return true;
+            }
+
+            output.WriteLine("FAIL " + name + " - " + failure);
+            return false;
+        }
+
+        private static string TestFindHeaderEndSingleBuffer()
+        {
+            byte[] data = Encoding.ASCII.GetBytes("GET / HTTP/1.1\r\nHost: x\r\n\r\nBODY");
+            int headerEnd = FindHeaderEnd(data, data.Length, 0);
+            int expected = "GET / HTTP/1.1\r\nHost: x".Length;
+            if (headerEnd != expected)
+            {
+                return "expected header end at " + expected + " but got " + headerEnd;
+            }
+            return null;
+        }
+
+        private static string TestFindHeaderEndSplitAcrossReads()
+        {
+            byte[] firstRead = Encoding.ASCII.GetBytes("abc\r\n\r");
+            int scanOffset = 0;
+            int headerEnd = FindHeaderEnd(firstRead, firstRead.Length, scanOffset);
+            if (headerEnd != -1)
+            {
+                return "expected no match before the terminator byte arrived, got " + headerEnd;
+            }
+            scanOffset = Math.Max(0, firstRead.Length - 3);
+
+            byte[] secondRead = Encoding.ASCII.GetBytes("abc\r\n\r\n");
+            headerEnd = FindHeaderEnd(secondRead, secondRead.Length, scanOffset);
+            if (headerEnd != 3)
+            {
+                return "expected header end at 3 after the terminator completed, got " + headerEnd;
+            }
+            return null;
+        }
+
+        private static string TestFindHeaderEndNoMatch()
+        {
+            byte[] data = Encoding.ASCII.GetBytes("GET / HTTP/1.1\r\nHost: x\r\n");
+            int headerEnd = FindHeaderEnd(data, data.Length, 0);
+            if (headerEnd != -1)
+            {
+                return "expected -1 for an incomplete header block, got " + headerEnd;
+            }
+            return null;
+        }
+
+        private static string TestExpandInstallTargetShortRange()
+        {
+            ArrayList result = ExpandInstallTarget("192.0.2.5-10");
+            string[] expected = new string[] { "192.0.2.5", "192.0.2.6", "192.0.2.7", "192.0.2.8", "192.0.2.9", "192.0.2.10" };
+            return CompareStringLists(expected, result);
+        }
+
+        private static string TestExpandInstallTargetFullRange()
+        {
+            ArrayList result = ExpandInstallTarget("192.0.2.10-192.0.2.12");
+            string[] expected = new string[] { "192.0.2.10", "192.0.2.11", "192.0.2.12" };
+            return CompareStringLists(expected, result);
+        }
+
+        private static string TestExpandInstallTargetHostname()
+        {
+            ArrayList result = ExpandInstallTarget("workstation-01");
+            string[] expected = new string[] { "workstation-01" };
+            return CompareStringLists(expected, result);
+        }
+
+        private static string TestExpandInstallTargetsDedup()
+        {
+            ArrayList result = ExpandInstallTargets("host1, host1;host2\nhost1");
+            string[] expected = new string[] { "host1", "host2" };
+            return CompareStringLists(expected, result);
+        }
+
+        private static string CompareStringLists(string[] expected, ArrayList actual)
+        {
+            if (actual.Count != expected.Length)
+            {
+                return "expected " + expected.Length + " item(s) but got " + actual.Count + " (" + String.Join(",", (string[])actual.ToArray(typeof(string))) + ")";
+            }
+            for (int i = 0; i < expected.Length; i++)
+            {
+                if (!String.Equals((string)actual[i], expected[i], StringComparison.OrdinalIgnoreCase))
+                {
+                    return "expected item " + i + " to be '" + expected[i] + "' but got '" + actual[i] + "'";
+                }
+            }
+            return null;
+        }
+
+        private static string TestBuildZipStructure()
+        {
+            List<string> names = new List<string>();
+            List<byte[]> contents = new List<byte[]>();
+            names.Add("Install-ClientGpo.cmd");
+            contents.Add(Encoding.UTF8.GetBytes("echo hello"));
+            names.Add("readme.txt");
+            contents.Add(Encoding.UTF8.GetBytes(""));
+
+            byte[] zip = BuildZip(names, contents);
+
+            if (zip.Length < 4 || zip[0] != 0x50 || zip[1] != 0x4B || zip[2] != 0x03 || zip[3] != 0x04)
+            {
+                return "missing local file header signature at offset 0";
+            }
+            if (!ContainsSignature(zip, 0x01, 0x02))
+            {
+                return "missing central directory signature (PK\\x01\\x02)";
+            }
+            if (!ContainsSignature(zip, 0x05, 0x06))
+            {
+                return "missing end of central directory signature (PK\\x05\\x06)";
+            }
+
+            byte[] nameBytes = Encoding.UTF8.GetBytes(names[0]);
+            bool nameFound = false;
+            for (int i = 0; i <= zip.Length - nameBytes.Length; i++)
+            {
+                bool match = true;
+                for (int j = 0; j < nameBytes.Length; j++)
+                {
+                    if (zip[i + j] != nameBytes[j]) { match = false; break; }
+                }
+                if (match) { nameFound = true; break; }
+            }
+            if (!nameFound)
+            {
+                return "entry file name '" + names[0] + "' not found in archive bytes";
+            }
+            return null;
+        }
+
+        private static bool ContainsSignature(byte[] data, byte thirdByte, byte fourthByte)
+        {
+            for (int i = 0; i <= data.Length - 4; i++)
+            {
+                if (data[i] == 0x50 && data[i + 1] == 0x4B && data[i + 2] == thirdByte && data[i + 3] == fourthByte)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
     }
 }
