@@ -15,7 +15,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLiteClient";
-        internal const string ProductVersion = "0.1.0";
+        internal const string ProductVersion = "0.5.0";
 
         private static int Main(string[] args)
         {
@@ -563,7 +563,7 @@ namespace WindowsInventoryLite
 
                         string displayVersion = Convert.ToString(item.GetValue("DisplayVersion", ""));
                         string publisher = Convert.ToString(item.GetValue("Publisher", ""));
-                        string installDate = Convert.ToString(item.GetValue("InstallDate", ""));
+                        string installDate = FormatInstallDate(Convert.ToString(item.GetValue("InstallDate", "")));
                         string key = (displayName + "|" + displayVersion + "|" + publisher).ToLowerInvariant();
                         if (seen.ContainsKey(key))
                         {
@@ -580,6 +580,33 @@ namespace WindowsInventoryLite
                     }
                 }
             }
+        }
+
+        // Uninstall registry InstallDate values are an 8-digit YYYYMMDD string
+        // (e.g. "20251013"), not a normal date. Reformat to dd.MM.yyyy; leave
+        // anything that does not match that shape untouched.
+        private static string FormatInstallDate(string raw)
+        {
+            if (String.IsNullOrEmpty(raw) || raw.Length != 8)
+            {
+                return raw;
+            }
+
+            string year = raw.Substring(0, 4);
+            string month = raw.Substring(4, 2);
+            string day = raw.Substring(6, 2);
+
+            int yearNum, monthNum, dayNum;
+            if (!Int32.TryParse(year, out yearNum) || !Int32.TryParse(month, out monthNum) || !Int32.TryParse(day, out dayNum))
+            {
+                return raw;
+            }
+            if (monthNum < 1 || monthNum > 12 || dayNum < 1 || dayNum > 31)
+            {
+                return raw;
+            }
+
+            return day + "." + month + "." + year;
         }
 
         private static bool IsVisibleSoftwareEntry(RegistryKey item)

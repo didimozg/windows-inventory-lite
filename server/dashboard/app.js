@@ -1,14 +1,18 @@
 (function () {
-  const staleHours = 48;
+  const inventoryViews = ['clients', 'software', 'hardware'];
   const state = {
     clients: [], view: getInitialView(), installJobId: null, installPollTimer: null, installJobs: [],
     packageStatus: null,
+    certificateStatus: null, certificateHistory: [],
+    staleHours: 48,
+    licenses: [], editingLicenseId: null, licenseFormComputers: [],
     sort: {
       clients: { key: 'computerName', dir: 1 },
       software: { key: 'name', dir: 1 },
       hwCpu: { key: 'name', dir: 1 },
       hwDisk: { key: 'model', dir: 1 },
-      hwRam: { key: 'totalMb', dir: -1 }
+      hwRam: { key: 'totalMb', dir: -1 },
+      licenses: { key: 'name', dir: 1 }
     }
   };
 
@@ -18,16 +22,21 @@
 
   function getInitialView() {
     const hash = window.location.hash.replace(/^#/, '').toLowerCase();
+    if (hash === 'clients') return 'clients';
     if (hash === 'software') return 'software';
     if (hash === 'hardware') return 'hardware';
     if (hash === 'client-actions' || hash === 'actions' || hash === 'install') return 'install';
     if (hash === 'client-package' || hash === 'package') return 'package';
-    return 'clients';
+    if (hash === 'general') return 'general';
+    if (hash === 'certificate') return 'certificate';
+    if (hash === 'licenses') return 'licenses';
+    if (hash === 'admin-password' || hash === 'admin') return 'admin';
+    return 'dashboard';
   }
 
   function setView(view) {
     state.view = view;
-    const hash = view === 'install' ? 'client-actions' : view === 'package' ? 'client-package' : view;
+    const hash = view === 'install' ? 'client-actions' : view === 'package' ? 'client-package' : view === 'admin' ? 'admin-password' : view;
     if (window.location.hash.replace(/^#/, '') !== hash) {
       window.location.hash = hash;
       return;
@@ -35,6 +44,10 @@
     render();
     if (view === 'install') loadInstallHistory();
     if (view === 'package') loadPackageStatus();
+    if (view === 'general') loadGeneralSettings();
+    if (view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
+    if (view === 'licenses') loadLicenses();
+    if (view === 'admin') loadAdminPasswordStatus();
   }
 
   function text(value) {
@@ -52,6 +65,20 @@
     return date.toLocaleString();
   }
 
+  // Older clients (not yet rebuilt/redeployed) still report installDate as the
+  // raw 8-digit YYYYMMDD registry value instead of a formatted date. Reformat
+  // it here too so existing reports display correctly without waiting for
+  // every agent in the fleet to be updated. Anything that isn't exactly 8
+  // digits (including an already-formatted dd.MM.yyyy value) passes through.
+  function formatInstallDate(raw) {
+    if (!raw || !/^\d{8}$/.test(raw)) return raw;
+    const year = raw.slice(0, 4);
+    const month = Number(raw.slice(4, 6));
+    const day = Number(raw.slice(6, 8));
+    if (month < 1 || month > 12 || day < 1 || day > 31) return raw;
+    return `${String(day).padStart(2, '0')}.${String(month).padStart(2, '0')}.${year}`;
+  }
+
   function formatIpAddresses(client) {
     const addresses = client.ipAddresses || [];
     if (!Array.isArray(addresses) || addresses.length === 0) return '';
@@ -67,9 +94,22 @@
       .replace(/'/g, '&#39;');
   }
 
+  // Same escaping as escapeHtml, but empty/missing values stay empty instead
+  // of becoming "Unknown". Used for free-form license fields where a blank
+  // cell is the correct representation of "not entered".
+  function escapeHtmlOrEmpty(value) {
+    const str = value === undefined || value === null ? '' : String(value);
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   function isStale(client) {
     const date = new Date(client.collectedAt || client.sourceUpdatedAt || 0);
-    return Number.isNaN(date.getTime()) || ((Date.now() - date.getTime()) / 36e5) > staleHours;
+    return Number.isNaN(date.getTime()) || ((Date.now() - date.getTime()) / 36e5) > state.staleHours;
   }
 
   function clientMatches(client, query) {
@@ -167,6 +207,16 @@
       case 'totalMb': return g.totalMb || 0;
       case 'moduleCount': return g.moduleCount || 0;
       case 'count': return g.clients.length;
+      default: return '';
+    }
+  }
+
+  function licenseSortValue(license, key) {
+    switch (key) {
+      case 'name': return (license.name || '').toLowerCase();
+      case 'version': return (license.version || '').toLowerCase();
+      case 'license': return (license.license || '').toLowerCase();
+      case 'comment': return (license.comment || '').toLowerCase();
       default: return '';
     }
   }
@@ -281,6 +331,15 @@
       groups.map(g => [g.totalGb, g.moduleCount || '', g.clients.length, g.clients.map(c => c.computerName).join(', ')])
     );
     downloadCsv('hardware-ram-' + csvDate() + '.csv', rows);
+  }
+
+  function exportLicenses() {
+    const { key: sortKey, dir: sortDir } = state.sort.licenses;
+    const items = applySort(state.licenses, l => licenseSortValue(l, sortKey), sortDir);
+    const rows = [['Name', 'Version', 'License', 'Comment', 'Computers']].concat(
+      items.map(l => [l.name || '', l.version || '', l.license || '', l.comment || '', (l.computers || []).join(', ')])
+    );
+    downloadCsv('licenses-' + csvDate() + '.csv', rows);
   }
 
   function getClientSoftware(client) {
@@ -539,6 +598,580 @@
     el.className = 'pkg-message' + (isError ? ' error' : '');
   }
 
+  function loadCertificateStatus() {
+    fetch('/api/v1/server/certificate', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.certificateStatus = data;
+        renderCertificateStatus(data);
+      })
+      .catch(error => {
+        byId('certStatus').textContent = `Certificate status unavailable: ${error.message}`;
+      });
+  }
+
+  function renderCertificateStatus(data) {
+    byId('certDeleteButton').classList.toggle('hidden', !data.certificatePresent);
+    if (!data.certificatePresent) {
+      byId('certStatus').textContent = 'No certificate configured yet.';
+      return;
+    }
+    const risks = data.risks || [];
+    const parts = [
+      data.useHttps ? 'HTTPS: enabled' : 'HTTPS: disabled (configured but not active - turn on in Settings > General)',
+      'Subject: ' + escapeHtml(data.subject || 'Unknown'),
+      'Expires: ' + escapeHtml(formatDateTime(data.notAfter)),
+      data.isExpired ? '<span class="usb-badge">EXPIRED</span>' : '',
+      risks.length ? `<span class="usb-badge">${risks.length} RISK${risks.length > 1 ? 'S' : ''}</span>` : ''
+    ].filter(Boolean);
+    byId('certStatus').innerHTML = parts.join(' &nbsp;&middot;&nbsp; ');
+  }
+
+  function deleteCertificate() {
+    const data = state.certificateStatus || {};
+    const warning = data.useHttps
+      ? 'Delete the installed certificate? HTTPS is currently using it and will be turned off immediately.'
+      : 'Delete the installed certificate from the local machine store?';
+    if (!window.confirm(warning)) return;
+
+    byId('certDeleteButton').disabled = true;
+    fetch('/api/v1/server/certificate', { method: 'DELETE', cache: 'no-store' })
+      .then(response => response.json().then(responseData => ({ ok: response.ok, data: responseData })))
+      .then(({ ok, data: responseData }) => {
+        if (!ok) throw new Error(responseData.error || 'Delete failed');
+        state.certificateStatus = responseData;
+        renderCertificateStatus(responseData);
+        showCertMessage('Certificate deleted.', false);
+      })
+      .catch(error => {
+        showCertMessage(`Delete failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('certDeleteButton').disabled = false;
+      });
+  }
+
+  function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result;
+        const commaIndex = result.indexOf(',');
+        resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
+      };
+      reader.onerror = () => reject(reader.error || new Error('Failed to read file'));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function showCertMessage(msg, isError) {
+    const el = byId('certMessage');
+    el.textContent = msg;
+    el.className = 'pkg-message' + (isError ? ' error' : '');
+  }
+
+  function uploadCertificate() {
+    const fileInput = byId('certFile');
+    const file = fileInput.files && fileInput.files[0];
+    const password = byId('certPassword').value;
+
+    if (!file) {
+      window.alert('Choose a .pfx or .p12 file.');
+      return;
+    }
+
+    byId('certUploadButton').disabled = true;
+    byId('certMessage').className = 'pkg-message hidden';
+
+    fileToBase64(file)
+      .then(pfxBase64 => fetch('/api/v1/server/certificate', {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pfxBase64, password })
+      }))
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Upload failed');
+        state.certificateStatus = data;
+        renderCertificateStatus(data);
+        loadCertificateHistory();
+        fileInput.value = '';
+        byId('certPassword').value = '';
+        const risks = data.risks || [];
+        showCertMessage(
+          risks.length
+            ? `Certificate uploaded with ${risks.length} risk(s): ${risks.join(' ')} Enable HTTPS from Settings > General when ready.`
+            : 'Certificate uploaded. Enable HTTPS from Settings > General when ready.',
+          risks.length > 0
+        );
+      })
+      .catch(error => {
+        showCertMessage(`Upload failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('certUploadButton').disabled = false;
+      });
+  }
+
+  function loadCertificateHistory() {
+    fetch('/api/v1/server/certificate/history', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.certificateHistory = data.history || [];
+        renderCertificateHistory();
+      })
+      .catch(error => {
+        byId('certHistoryBody').innerHTML = `<tr><td colspan="6" class="empty">History unavailable: ${escapeHtml(error.message)}</td></tr>`;
+      });
+  }
+
+  function renderCertificateHistory() {
+    const rows = state.certificateHistory.map(entry => {
+      const risks = entry.risks || [];
+      // Entries logged before the delete endpoint existed have no id and
+      // cannot be targeted individually.
+      const deleteCell = entry.id
+        ? `<button class="danger-button" type="button" data-delete-cert-history="${escapeHtml(entry.id)}">Delete</button>`
+        : '—';
+      return `<tr>
+        <td>${escapeHtml(formatDateTime(entry.uploadedAt))}</td>
+        <td>${escapeHtml(entry.subject)}</td>
+        <td>${escapeHtml(formatDateTime(entry.notAfter))}</td>
+        <td>${escapeHtml(entry.thumbprint)}</td>
+        <td>${risks.length ? escapeHtml(risks.join(' ')) : '—'}</td>
+        <td>${deleteCell}</td>
+      </tr>`;
+    });
+    byId('certHistoryBody').innerHTML = rows.join('') || '<tr><td colspan="6" class="empty">No certificates uploaded yet.</td></tr>';
+
+    document.querySelectorAll('[data-delete-cert-history]').forEach(button => {
+      button.addEventListener('click', () => removeCertificateHistoryEntry(button.dataset.deleteCertHistory));
+    });
+  }
+
+  function removeCertificateHistoryEntry(id) {
+    if (!window.confirm('Delete this entry from the certificate history log? This does not affect the certificate itself.')) return;
+
+    fetch(`/api/v1/server/certificate/history/${encodeURIComponent(id)}`, { method: 'DELETE', cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        state.certificateHistory = state.certificateHistory.filter(entry => entry.id !== id);
+        renderCertificateHistory();
+      })
+      .catch(error => {
+        window.alert(`Failed to delete history entry: ${error.message}`);
+      });
+  }
+
+  function loadGeneralSettings() {
+    fetch('/api/v1/server/settings', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('generalStaleHours').value = data.staleHours || 48;
+        byId('generalUseHttps').checked = !!data.useHttps;
+        const hint = byId('generalCertHint');
+        if (!data.certificatePresent) {
+          hint.textContent = 'No certificate uploaded yet. Upload one on the Certificate page before enabling HTTPS.';
+          hint.classList.remove('hidden');
+        } else if ((data.risks || []).length) {
+          hint.textContent = `Configured certificate has risks: ${data.risks.join(' ')}`;
+          hint.classList.remove('hidden');
+        } else {
+          hint.classList.add('hidden');
+        }
+      })
+      .catch(error => {
+        showGeneralMessage(`Settings unavailable: ${error.message}`, true);
+      });
+  }
+
+  function showGeneralMessage(msg, isError) {
+    const el = byId('generalMessage');
+    el.textContent = msg;
+    el.className = 'pkg-message' + (isError ? ' error' : '');
+  }
+
+  function saveGeneralSettings(acknowledgeRisks) {
+    const staleHours = Number.parseInt(byId('generalStaleHours').value, 10) || 48;
+    const useHttps = byId('generalUseHttps').checked;
+
+    byId('generalSaveButton').disabled = true;
+    byId('generalMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ staleHours, useHttps, acknowledgeRisks: !!acknowledgeRisks })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
+      .then(({ ok, status, data }) => {
+        if (!ok) {
+          if (status === 409 && (data.risks || []).length) {
+            const confirmed = window.confirm(
+              `${data.error}\n\n${data.risks.join('\n')}\n\nEnable HTTPS anyway?`
+            );
+            if (confirmed) {
+              saveGeneralSettings(true);
+              return;
+            }
+            byId('generalUseHttps').checked = false;
+            throw new Error('HTTPS was not enabled.');
+          }
+          throw new Error(data.error || 'Save failed');
+        }
+        state.staleHours = data.staleHours || 48;
+        renderSummary(state.clients);
+        showGeneralMessage('Settings saved.', false);
+      })
+      .catch(error => {
+        showGeneralMessage(`Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('generalSaveButton').disabled = false;
+      });
+  }
+
+  function showAdminPasswordMessage(msg, isError) {
+    const el = byId('adminPasswordMessage');
+    el.textContent = msg;
+    el.className = 'pkg-message' + (isError ? ' error' : '');
+  }
+
+  function loadAdminPasswordStatus() {
+    fetch('/api/v1/server/admin-password', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.adminPasswordConfigured = !!data.configured;
+        byId('adminCurrentPasswordField').classList.toggle('hidden', !data.configured);
+        byId('adminUsername').value = data.username || '';
+        byId('adminPasswordSaveButton').textContent = data.configured ? 'Change password' : 'Set up Basic Auth';
+        byId('adminPasswordStatusText').textContent = data.configured
+          ? `Basic Auth is configured for user "${data.username}".`
+          : 'Basic Auth is not configured yet. Set a username and password below to turn it on.';
+      })
+      .catch(error => {
+        showAdminPasswordMessage(`Status unavailable: ${error.message}`, true);
+      });
+  }
+
+  function changeAdminPassword() {
+    const configured = !!state.adminPasswordConfigured;
+    const newUsername = byId('adminUsername').value.trim();
+    const currentPassword = byId('adminCurrentPassword').value;
+    const newPassword = byId('adminNewPassword').value;
+    const confirmPassword = byId('adminConfirmPassword').value;
+
+    if (!newUsername) {
+      window.alert('Enter a username.');
+      return;
+    }
+    if (configured && !currentPassword) {
+      window.alert('Enter the current password.');
+      return;
+    }
+    if (newPassword.length < 8) {
+      window.alert('New password must be at least 8 characters.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      window.alert('New password and confirmation do not match.');
+      return;
+    }
+
+    byId('adminPasswordSaveButton').disabled = true;
+    byId('adminPasswordMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/admin-password', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newUsername, currentPassword, newPassword })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Change failed');
+        byId('adminCurrentPassword').value = '';
+        byId('adminNewPassword').value = '';
+        byId('adminConfirmPassword').value = '';
+        showAdminPasswordMessage('Saved. Your browser may prompt for the new credentials on the next request.', false);
+        loadAdminPasswordStatus();
+      })
+      .catch(error => {
+        showAdminPasswordMessage(`Change failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('adminPasswordSaveButton').disabled = false;
+      });
+  }
+
+  function populateSoftwareDatalists() {
+    const names = new Set();
+    const versionsByName = new Map();
+    const allVersions = new Set();
+    state.clients.forEach(client => {
+      (client.software || []).forEach(item => {
+        if (!item.name) return;
+        names.add(item.name);
+        if (item.version) {
+          allVersions.add(item.version);
+          const key = item.name.toLowerCase();
+          if (!versionsByName.has(key)) versionsByName.set(key, new Set());
+          versionsByName.get(key).add(item.version);
+        }
+      });
+    });
+
+    const nameList = byId('softwareNameOptions');
+    nameList.innerHTML = Array.from(names).sort((a, b) => a.localeCompare(b))
+      .map(name => `<option value="${escapeHtml(name)}"></option>`).join('');
+
+    state.softwareVersionsByName = versionsByName;
+    state.softwareAllVersions = allVersions;
+    updateVersionDatalist();
+  }
+
+  function updateVersionDatalist() {
+    const nameField = byId('licenseName');
+    const versionList = byId('softwareVersionOptions');
+    if (!nameField || !versionList) return;
+    const key = nameField.value.trim().toLowerCase();
+    const versions = (state.softwareVersionsByName && state.softwareVersionsByName.get(key)) || state.softwareAllVersions || new Set();
+    versionList.innerHTML = Array.from(versions).sort((a, b) => a.localeCompare(b))
+      .map(version => `<option value="${escapeHtml(version)}"></option>`).join('');
+  }
+
+  function loadLicenses() {
+    fetch('/api/v1/licenses', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.licenses = data.licenses || [];
+        renderLicenses();
+        renderSoftwareTable(state.clients);
+        renderDashboardTiles();
+      })
+      .catch(error => {
+        byId('licensesBody').innerHTML = `<tr><td colspan="7" class="empty">Licenses are not available: ${escapeHtml(error.message)}</td></tr>`;
+      });
+  }
+
+  function renderLicenses() {
+    const { key: sortKey, dir: sortDir } = state.sort.licenses;
+    const items = applySort(state.licenses, l => licenseSortValue(l, sortKey), sortDir);
+    const rows = items.map(license => {
+      const computers = license.computers || [];
+      const licenseId = safeId(license.id);
+
+      return `<tr>
+      <td><button class="link-button" type="button" data-license-computers="${licenseId}">${escapeHtml(license.name)}</button></td>
+      <td>${escapeHtmlOrEmpty(license.version)}</td>
+      <td>${escapeHtmlOrEmpty(license.license)}</td>
+      <td>${escapeHtmlOrEmpty(license.comment)}</td>
+      <td>${computers.length}</td>
+      <td><button class="edit-button" type="button" data-edit-license="${escapeHtml(license.id)}">Edit</button></td>
+      <td><button class="danger-button" type="button" data-delete-license="${escapeHtml(license.id)}">Delete</button></td>
+    </tr>
+    <tr class="details-row hidden" data-license-computers-details="${licenseId}">
+      <td colspan="7"><div class="details"><ul class="computer-list">${computers.map(c => `<li>${escapeHtml(c)}</li>`).join('') || '<li class="empty">No computers linked.</li>'}</ul></div></td>
+    </tr>`;
+    });
+
+    byId('licensesBody').innerHTML = rows.join('') || '<tr><td colspan="7" class="empty">No license records.</td></tr>';
+
+    document.querySelectorAll('[data-edit-license]').forEach(button => {
+      button.addEventListener('click', () => openLicenseForm(button.dataset.editLicense));
+    });
+    document.querySelectorAll('[data-delete-license]').forEach(button => {
+      button.addEventListener('click', () => removeLicense(button.dataset.deleteLicense));
+    });
+    document.querySelectorAll('[data-license-computers]').forEach(button => {
+      button.addEventListener('click', () => {
+        const row = document.querySelector(`[data-license-computers-details="${button.dataset.licenseComputers}"]`);
+        if (row) row.classList.toggle('hidden');
+      });
+    });
+  }
+
+  function openLicenseForm(licenseId, prefill) {
+    state.editingLicenseId = licenseId || null;
+    const license = licenseId ? state.licenses.find(l => l.id === licenseId) : null;
+    byId('licenseName').value = license ? license.name || '' : (prefill && prefill.name) || '';
+    byId('licenseVersion').value = license ? license.version || '' : (prefill && prefill.version) || '';
+    byId('licenseKey').value = license ? license.license || '' : '';
+    byId('licenseComment').value = license ? license.comment || '' : '';
+    byId('licenseComputerInput').value = '';
+    state.licenseFormComputers = license ? (license.computers || []).slice() : [];
+    byId('licenseMessage').className = 'pkg-message hidden';
+    updateVersionDatalist();
+    renderLicenseComputerChips();
+    byId('licenseForm').classList.remove('hidden');
+    byId('licenseName').focus();
+  }
+
+  // Matched by name only: one license record commonly covers several
+  // installed versions of the same software (e.g. a volume license), so
+  // requiring the version to match too would miss those on purpose.
+  function findLicenseForSoftware(name) {
+    const key = value => (value || '').trim().toLowerCase();
+    return state.licenses.find(l => key(l.name) === key(name)) || null;
+  }
+
+  // Entry point from the Software table: jump to Licenses and open the
+  // matching record for editing. Only reachable when a match already exists -
+  // renderSoftwareTable only shows the License button in that case.
+  function openLicenseForSoftware(name, version) {
+    setView('licenses');
+    fetch('/api/v1/licenses', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.licenses = data.licenses || [];
+        renderLicenses();
+        const existing = findLicenseForSoftware(name);
+        openLicenseForm(existing ? existing.id : null, { name, version });
+      })
+      .catch(error => {
+        window.alert(`Could not load licenses: ${error.message}`);
+      });
+  }
+
+  function closeLicenseForm() {
+    state.editingLicenseId = null;
+    state.licenseFormComputers = [];
+    byId('licenseForm').classList.add('hidden');
+  }
+
+  function renderLicenseComputerChips() {
+    const list = byId('licenseComputersList');
+    list.innerHTML = state.licenseFormComputers.map(name => `<li class="chip">
+      ${escapeHtml(name)}
+      <button type="button" data-remove-computer="${escapeHtml(name)}" aria-label="Remove ${escapeHtml(name)}">&times;</button>
+    </li>`).join('');
+
+    list.querySelectorAll('[data-remove-computer]').forEach(button => {
+      button.addEventListener('click', () => removeLicenseComputer(button.dataset.removeComputer));
+    });
+  }
+
+  function addLicenseComputer(name) {
+    const trimmed = (name || '').trim();
+    if (!trimmed) return;
+    const exists = state.licenseFormComputers.some(c => c.toLowerCase() === trimmed.toLowerCase());
+    if (!exists) {
+      state.licenseFormComputers.push(trimmed);
+      renderLicenseComputerChips();
+    }
+  }
+
+  function addLicenseComputerFromInput() {
+    const input = byId('licenseComputerInput');
+    addLicenseComputer(input.value);
+    input.value = '';
+    input.focus();
+  }
+
+  function removeLicenseComputer(name) {
+    state.licenseFormComputers = state.licenseFormComputers.filter(c => c !== name);
+    renderLicenseComputerChips();
+  }
+
+  function getComputersForSoftwareName(name) {
+    const key = (name || '').trim().toLowerCase();
+    if (!key) return [];
+    const computers = [];
+    const seen = new Set();
+    state.clients.forEach(client => {
+      const matches = (client.software || []).some(item => (item.name || '').toLowerCase() === key);
+      const computerKey = (client.computerName || '').toLowerCase();
+      if (matches && client.computerName && !seen.has(computerKey)) {
+        seen.add(computerKey);
+        computers.push(client.computerName);
+      }
+    });
+    return computers;
+  }
+
+  function applySoftwareComputers() {
+    const name = byId('licenseName').value;
+    getComputersForSoftwareName(name).forEach(addLicenseComputer);
+  }
+
+  function saveLicense() {
+    const name = byId('licenseName').value.trim();
+    const version = byId('licenseVersion').value.trim();
+    const license = byId('licenseKey').value.trim();
+    const comment = byId('licenseComment').value.trim();
+    const computers = state.licenseFormComputers;
+
+    if (!name) {
+      window.alert('Enter a name.');
+      return;
+    }
+
+    const editingId = state.editingLicenseId;
+    const url = editingId ? `/api/v1/licenses/${encodeURIComponent(editingId)}` : '/api/v1/licenses';
+    const method = editingId ? 'PUT' : 'POST';
+
+    byId('licenseSaveButton').disabled = true;
+
+    fetch(url, {
+      method,
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, version, license, comment, computers })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        closeLicenseForm();
+        loadLicenses();
+      })
+      .catch(error => {
+        const el = byId('licenseMessage');
+        el.textContent = `Save failed: ${error.message}`;
+        el.className = 'pkg-message error';
+      })
+      .finally(() => {
+        byId('licenseSaveButton').disabled = false;
+      });
+  }
+
+  function removeLicense(licenseId) {
+    const license = state.licenses.find(l => l.id === licenseId);
+    const confirmed = window.confirm(`Delete license record for ${license ? license.name : 'this item'}?`);
+    if (!confirmed) return;
+
+    fetch(`/api/v1/licenses/${encodeURIComponent(licenseId)}`, { method: 'DELETE', cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        state.licenses = state.licenses.filter(l => l.id !== licenseId);
+        renderLicenses();
+        renderSoftwareTable(state.clients);
+        renderDashboardTiles();
+      })
+      .catch(error => {
+        window.alert(`Failed to delete license: ${error.message}`);
+      });
+  }
+
   function getSoftwareGroups(clients) {
     const groups = new Map();
     clients.forEach(client => {
@@ -630,6 +1263,94 @@
     return Array.from(groups.values()).sort((a, b) => b.totalMb - a.totalMb);
   }
 
+  // Top N CPU models by client count, with the rest folded into "Other" so the
+  // chart stays readable on fleets with many distinct models.
+  function getTopCpuModels(clients, limit) {
+    const groups = getCpuGroups(clients)
+      .map(g => ({ label: g.name, count: g.clients.length }))
+      .sort((a, b) => b.count - a.count);
+    if (groups.length <= limit) return groups;
+    const top = groups.slice(0, limit);
+    const otherCount = groups.slice(limit).reduce((sum, g) => sum + g.count, 0);
+    top.push({ label: 'Other', count: otherCount });
+    return top;
+  }
+
+  // Bucketed at the RAM sizes actually seen in the field (4/8/16 GB); anything
+  // above 16 GB is rare enough to lump into one "32 GB+" catch-all rather than
+  // spread thin across more bars.
+  function getRamBuckets(clients) {
+    const buckets = [
+      { label: '4 GB', max: 4 * 1024, count: 0 },
+      { label: '8 GB', max: 8 * 1024, count: 0 },
+      { label: '16 GB', max: 16 * 1024, count: 0 },
+      { label: '32 GB+', max: Infinity, count: 0 }
+    ];
+    clients.forEach(client => {
+      const totalMb = client.ramTotalMb || 0;
+      if (!totalMb) return;
+      const bucket = buckets.find(b => totalMb <= b.max) || buckets[buckets.length - 1];
+      bucket.count++;
+    });
+    return buckets;
+  }
+
+  // Counts disks, not clients - a machine with one SSD and one HDD counts in
+  // both bars, which matches what the Hardware > Storage table already shows.
+  // Disks with no recognizable type are left out entirely rather than shown
+  // as a third "Unknown" bar.
+  function getStorageTypeBreakdown(clients) {
+    const counts = { SSD: 0, HDD: 0 };
+    clients.forEach(client => {
+      (client.disks || []).forEach(disk => {
+        const type = String(disk.type || '').toUpperCase();
+        if (type === 'SSD') counts.SSD++;
+        else if (type === 'HDD') counts.HDD++;
+      });
+    });
+    return Object.keys(counts)
+      .map(label => ({ label, count: counts[label] }))
+      .filter(item => item.count > 0);
+  }
+
+  // Top N software titles by the number of distinct computers that have any
+  // version of it installed - a client with three Chrome versions counts once.
+  function getTopSoftwareNames(clients, limit) {
+    const counts = new Map();
+    clients.forEach(client => {
+      const seenNames = new Set();
+      getClientSoftware(client).forEach(item => {
+        const name = (item.name || '').trim();
+        if (!name) return;
+        const key = name.toLowerCase();
+        if (seenNames.has(key)) return;
+        seenNames.add(key);
+        if (!counts.has(key)) counts.set(key, { label: name, count: 0 });
+        counts.get(key).count++;
+      });
+    });
+    return Array.from(counts.values())
+      .sort((a, b) => b.count - a.count)
+      .slice(0, limit);
+  }
+
+  function renderBarChart(containerId, items) {
+    const container = byId(containerId);
+    if (!items.length) {
+      container.innerHTML = '<p class="empty">No data yet.</p>';
+      return;
+    }
+    const max = Math.max(1, ...items.map(item => item.count));
+    container.innerHTML = items.map(item => {
+      const pct = Math.round((item.count / max) * 100);
+      return `<div class="bar-row">
+        <span class="bar-label" title="${escapeHtml(item.label)}">${escapeHtml(item.label)}</span>
+        <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+        <span class="bar-value">${item.count}</span>
+      </div>`;
+    }).join('');
+  }
+
   function hwMatches(haystack, query) {
     if (!query) return true;
     return haystack.toLowerCase().indexOf(query.toLowerCase()) !== -1;
@@ -647,6 +1368,22 @@
     byId('windowsActivated').textContent = clients.filter(client => client.activation && client.activation.windows && client.activation.windows.activated).length;
     byId('officeActivated').textContent = clients.filter(client => client.activation && client.activation.office && client.activation.office.activated).length;
     byId('staleCount').textContent = clients.filter(isStale).length;
+    byId('staleLabel').textContent = `Stale >${state.staleHours}h`;
+  }
+
+  function renderDashboardTiles() {
+    const clients = state.clients;
+    byId('dashClientCount').textContent = clients.length;
+    byId('dashWindowsActivated').textContent = clients.filter(client => client.activation && client.activation.windows && client.activation.windows.activated).length;
+    byId('dashOfficeActivated').textContent = clients.filter(client => client.activation && client.activation.office && client.activation.office.activated).length;
+    byId('dashStaleCount').textContent = clients.filter(isStale).length;
+    byId('dashStaleLabel').textContent = `Stale >${state.staleHours}h`;
+    byId('dashLicenseCount').textContent = state.licenses.length;
+    byId('dashUsbCount').textContent = clients.filter(client => client.hasUsbStorage).length;
+    renderBarChart('dashSoftwareChart', getTopSoftwareNames(clients, 5));
+    renderBarChart('dashCpuChart', getTopCpuModels(clients, 4));
+    renderBarChart('dashRamChart', getRamBuckets(clients));
+    renderBarChart('dashStorageChart', getStorageTypeBreakdown(clients));
   }
 
   function formatRamModules(modules) {
@@ -678,7 +1415,7 @@
         <td>${escapeHtml(item.name)}</td>
         <td>${escapeHtml(item.version)}</td>
         <td>${escapeHtml(item.publisher)}</td>
-        <td>${escapeHtml(item.installDate)}</td>
+        <td>${escapeHtml(formatInstallDate(item.installDate))}</td>
       </tr>`).join('');
 
       const cpu = client.cpu || {};
@@ -745,9 +1482,10 @@
         <td>${escapeHtml(group.publisher)}</td>
         <td>${group.clients.length}</td>
         <td>${group.clients.map(client => escapeHtml(client.computerName)).join(', ')}</td>
+        <td>${findLicenseForSoftware(group.name) ? `<button class="edit-button" type="button" data-software-license-name="${escapeHtml(group.name)}" data-software-license-version="${escapeHtml(group.version)}">License</button>` : ''}</td>
       </tr>
       <tr class="details-row hidden" data-software-details="${groupId}">
-        <td colspan="5">
+        <td colspan="6">
           <div class="details">
             <h2>${escapeHtml(group.name)}</h2>
             <ul class="computer-list">${computers}</ul>
@@ -756,7 +1494,13 @@
       </tr>`;
     });
 
-    byId('softwareBody').innerHTML = rows.join('') || '<tr><td colspan="5" class="empty">No matching software records.</td></tr>';
+    byId('softwareBody').innerHTML = rows.join('') || '<tr><td colspan="6" class="empty">No matching software records.</td></tr>';
+
+    document.querySelectorAll('[data-software-license-name]').forEach(button => {
+      button.addEventListener('click', () => {
+        openLicenseForSoftware(button.dataset.softwareLicenseName, button.dataset.softwareLicenseVersion);
+      });
+    });
   }
 
   function renderHardwarePage(clients) {
@@ -846,21 +1590,38 @@
   }
 
   function render() {
+    renderDashboardTiles();
     renderSummary(state.clients);
     renderSortHeaders();
     renderTable(state.clients);
     renderSoftwareTable(state.clients);
     renderHardwarePage(state.clients);
+    renderLicenses();
+    populateSoftwareDatalists();
+    byId('dashboardView').classList.toggle('hidden', state.view !== 'dashboard');
     byId('clientsView').classList.toggle('hidden', state.view !== 'clients');
     byId('softwareView').classList.toggle('hidden', state.view !== 'software');
     byId('hardwareView').classList.toggle('hidden', state.view !== 'hardware');
     byId('installView').classList.toggle('hidden', state.view !== 'install');
     byId('packageView').classList.toggle('hidden', state.view !== 'package');
+    byId('generalView').classList.toggle('hidden', state.view !== 'general');
+    byId('certificateView').classList.toggle('hidden', state.view !== 'certificate');
+    byId('licensesView').classList.toggle('hidden', state.view !== 'licenses');
+    byId('adminPasswordView').classList.toggle('hidden', state.view !== 'admin');
+    byId('dashboardTab').classList.toggle('active', state.view === 'dashboard');
     byId('clientsTab').classList.toggle('active', state.view === 'clients');
     byId('softwareTab').classList.toggle('active', state.view === 'software');
     byId('hardwareTab').classList.toggle('active', state.view === 'hardware');
     byId('installTab').classList.toggle('active', state.view === 'install');
     byId('packageTab').classList.toggle('active', state.view === 'package');
+    byId('generalTab').classList.toggle('active', state.view === 'general');
+    byId('certificateTab').classList.toggle('active', state.view === 'certificate');
+    byId('licensesTab').classList.toggle('active', state.view === 'licenses');
+    byId('adminPasswordTab').classList.toggle('active', state.view === 'admin');
+    const isInventoryView = inventoryViews.includes(state.view);
+    byId('summarySection').classList.toggle('hidden', !isInventoryView);
+    byId('searchInput').classList.toggle('hidden', !isInventoryView);
+    byId('generatedAt').classList.toggle('hidden', !isInventoryView);
     bindDetails();
   }
 
@@ -871,7 +1632,9 @@
     })
     .then(data => {
       state.clients = data.clients || [];
-      byId('generatedAt').textContent = `Generated: ${formatDateTime(data.generatedAt)} | Server version: ${text(data.serverVersion)}`;
+      state.staleHours = data.staleHours || 48;
+      byId('generatedAt').textContent = `Generated: ${formatDateTime(data.generatedAt)}`;
+      byId('serverVersionBadge').textContent = `Server: v${text(data.serverVersion)}`;
       render();
     })
     .catch(error => {
@@ -879,7 +1642,12 @@
       render();
     });
 
+  loadLicenses();
+
   byId('searchInput').addEventListener('input', render);
+  byId('dashboardTab').addEventListener('click', () => {
+    setView('dashboard');
+  });
   byId('clientsTab').addEventListener('click', () => {
     setView('clients');
   });
@@ -897,6 +1665,10 @@
     render();
     if (state.view === 'install') loadInstallHistory();
     if (state.view === 'package') loadPackageStatus();
+    if (state.view === 'general') loadGeneralSettings();
+    if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
+    if (state.view === 'licenses') loadLicenses();
+    if (state.view === 'admin') loadAdminPasswordStatus();
   });
   byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
   byId('clientAction').addEventListener('change', updateClientActionUi);
@@ -924,7 +1696,32 @@
   byId('packageTab').addEventListener('click', () => setView('package'));
   byId('pkgSaveButton').addEventListener('click', savePackageConfig);
   byId('pkgDownloadButton').addEventListener('click', () => { window.location.href = '/api/v1/client-package/download'; });
+  byId('generalTab').addEventListener('click', () => setView('general'));
+  byId('generalSaveButton').addEventListener('click', () => saveGeneralSettings(false));
+  byId('certificateTab').addEventListener('click', () => setView('certificate'));
+  byId('certUploadButton').addEventListener('click', uploadCertificate);
+  byId('certDeleteButton').addEventListener('click', deleteCertificate);
+  byId('licensesTab').addEventListener('click', () => setView('licenses'));
+  byId('exportLicensesBtn').addEventListener('click', exportLicenses);
+  byId('licenseAddButton').addEventListener('click', () => openLicenseForm(null));
+  byId('licenseSaveButton').addEventListener('click', saveLicense);
+  byId('licenseCancelButton').addEventListener('click', closeLicenseForm);
+  byId('licenseName').addEventListener('input', updateVersionDatalist);
+  byId('licenseName').addEventListener('change', applySoftwareComputers);
+  byId('licenseComputerAddButton').addEventListener('click', addLicenseComputerFromInput);
+  byId('licenseComputerInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addLicenseComputerFromInput();
+    }
+  });
+  byId('adminPasswordTab').addEventListener('click', () => setView('admin'));
+  byId('adminPasswordSaveButton').addEventListener('click', changeAdminPassword);
   if (state.view === 'package') loadPackageStatus();
+  if (state.view === 'general') loadGeneralSettings();
+  if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
+  if (state.view === 'licenses') loadLicenses();
+  if (state.view === 'admin') loadAdminPasswordStatus();
   updateClientActionUi();
   loadInstallHistory();
 }());

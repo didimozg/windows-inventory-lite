@@ -163,6 +163,31 @@ function Get-ObjectPropertyValue {
     return $null
 }
 
+function ConvertTo-InstallDateText {
+    param(
+        [Parameter()]
+        [AllowNull()]
+        [string]$Value
+    )
+
+    # Uninstall registry InstallDate values are an 8-digit YYYYMMDD string
+    # (e.g. "20251013"), not a normal date. Reformat to dd.MM.yyyy; leave
+    # anything that does not match that shape untouched.
+    if ([string]::IsNullOrEmpty($Value) -or $Value.Length -ne 8 -or $Value -notmatch '^\d{8}$') {
+        return $Value
+    }
+
+    $year = $Value.Substring(0, 4)
+    $month = [int]$Value.Substring(4, 2)
+    $day = [int]$Value.Substring(6, 2)
+
+    if ($month -lt 1 -or $month -gt 12 -or $day -lt 1 -or $day -gt 31) {
+        return $Value
+    }
+
+    return '{0:d2}.{1:d2}.{2}' -f $day, $month, $year
+}
+
 function Invoke-InventoryWmiQuery {
     param(
         [Parameter(Mandatory = $true)]
@@ -238,7 +263,7 @@ function Get-InstalledSoftware {
                     name = $name
                     version = $version
                     publisher = $publisher
-                    installDate = [string](Get-ObjectPropertyValue -InputObject $_ -Name 'InstallDate')
+                    installDate = ConvertTo-InstallDateText -Value ([string](Get-ObjectPropertyValue -InputObject $_ -Name 'InstallDate'))
                 }
                 [void]$items.Add($software)
             }

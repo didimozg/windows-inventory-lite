@@ -51,6 +51,26 @@ param(
     [string]$WebPassword,
 
     [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$CertificateThumbprint,
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$CertificatePfxPath,
+
+    # PFX password is written into the LocalMachine\My store import, not into
+    # server-config.json or the service command line. Same plain-string tradeoff
+    # as WebPassword above: SecureString is not portable across process boundaries
+    # without extra conversion, and the store import happens once, in this process.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', 'CertificatePfxPassword')]
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$CertificatePfxPassword,
+
+    [Parameter()]
+    [switch]$UseHttps,
+
+    [Parameter()]
     [ValidateRange(1, 3650)]
     [int]$InstallLogRetentionDays,
 
@@ -287,6 +307,86 @@ if (-not $PSBoundParameters.ContainsKey('WebPassword')) {
     }
 }
 
+# CertificateThumbprint and UseHttps are re-persisted below from $existingConfig
+# unless a new certificate is supplied on this run, so re-running this script for
+# an unrelated setting (e.g. WebUsername) does not silently disable HTTPS that was
+# configured earlier here or later from the dashboard Certificate tab.
+# $certificateSuppliedThisRun must be captured before $CertificateThumbprint gets
+# backfilled from saved config below - otherwise the auto-imply-UseHttps branch
+# further down cannot tell "operator passed -CertificateThumbprint just now" apart
+# from "this is just the value from last time", and would force UseHttps back on
+# every re-run even after HTTPS was explicitly disabled from the dashboard.
+$certificateSuppliedThisRun = $PSBoundParameters.ContainsKey('CertificateThumbprint') -or [bool]$CertificatePfxPath
+
+if (-not $CertificatePfxPath -and -not $PSBoundParameters.ContainsKey('CertificateThumbprint')) {
+    $savedThumbprint = Get-ConfigValue -Config $existingConfig -Name 'CertificateThumbprint'
+    if ($savedThumbprint) {
+        $CertificateThumbprint = $savedThumbprint
+    }
+}
+
+if (-not $PSBoundParameters.ContainsKey('UseHttps')) {
+    $savedUseHttps = Get-ConfigValue -Config $existingConfig -Name 'UseHttps'
+    if ($savedUseHttps -eq 'true') {
+        $UseHttps = $true
+    }
+}
+
+if ($CertificatePfxPath) {
+    if (-not (Test-Path -LiteralPath $CertificatePfxPath)) {
+        throw "Certificate file not found: $CertificatePfxPath"
+    }
+
+    $securePfxPassword = ConvertTo-SecureString -String $CertificatePfxPassword -Force -AsPlainText
+    $importedCertificate = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(
+        $CertificatePfxPath,
+        $securePfxPassword,
+        [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags] 'MachineKeySet, PersistKeySet, Exportable')
+
+    if (-not $importedCertificate.HasPrivateKey) {
+        throw "Certificate file has no private key: $CertificatePfxPath"
+    }
+
+    $certStore = New-Object System.Security.Cryptography.X509Certificates.X509Store('My', 'LocalMachine')
+    $certStore.Open('ReadWrite')
+    try {
+        $certStore.Add($importedCertificate)
+    }
+    finally {
+        $certStore.Close()
+    }
+
+    $CertificateThumbprint = $importedCertificate.Thumbprint
+    Write-Host "Imported certificate into LocalMachine\My. Thumbprint: $CertificateThumbprint"
+
+    if (-not $PSBoundParameters.ContainsKey('UseHttps')) {
+        $UseHttps = $true
+    }
+}
+elseif ($certificateSuppliedThisRun -and $CertificateThumbprint -and -not $PSBoundParameters.ContainsKey('UseHttps')) {
+    $UseHttps = $true
+}
+
+if ($UseHttps -and -not $CertificateThumbprint) {
+    throw "UseHttps requires -CertificateThumbprint or -CertificatePfxPath."
+}
+
+if ($CertificateThumbprint) {
+    $normalizedThumbprint = ($CertificateThumbprint -replace '[\s:-]', '').ToUpperInvariant()
+    $thumbprintStore = New-Object System.Security.Cryptography.X509Certificates.X509Store('My', 'LocalMachine')
+    $thumbprintStore.Open('ReadOnly')
+    try {
+        $found = $thumbprintStore.Certificates.Find('FindByThumbprint', $normalizedThumbprint, $false)
+        if ($found.Count -eq 0) {
+            Write-Warning "No certificate with thumbprint $normalizedThumbprint was found in LocalMachine\My yet. HTTPS connections will be refused until it is imported (rerun with -CertificatePfxPath, or import it and restart the service)."
+        }
+    }
+    finally {
+        $thumbprintStore.Close()
+    }
+    $CertificateThumbprint = $normalizedThumbprint
+}
+
 if (-not $PSBoundParameters.ContainsKey('InstallLogRetentionDays')) {
     $savedInstallLogRetentionDays = Get-ConfigValue -Config $existingConfig -Name 'InstallLogRetentionDays'
     if ($savedInstallLogRetentionDays) {
@@ -368,10 +468,16 @@ function ConvertTo-ServiceArgValue {
 
 function Set-RestrictedFileAcl {
     param([string]$FilePath)
+    # Use well-known SIDs, not literal account names: 'Administrators'/'SYSTEM'
+    # only resolve on English-locale Windows. The builtin groups have a
+    # localized display name on non-English installs, which throws
+    # IdentityNotMappedException from AddAccessRule with a literal string.
+    $adminSid  = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+    $systemSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
     $acl = Get-Acl -LiteralPath $FilePath
     $acl.SetAccessRuleProtection($true, $false)
-    $adminRule  = New-Object System.Security.AccessControl.FileSystemAccessRule('Administrators', 'FullControl', 'Allow')
-    $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule('SYSTEM',         'FullControl', 'Allow')
+    $adminRule  = New-Object System.Security.AccessControl.FileSystemAccessRule($adminSid, 'FullControl', 'Allow')
+    $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule($systemSid, 'FullControl', 'Allow')
     $acl.AddAccessRule($adminRule)
     $acl.AddAccessRule($systemRule)
     Set-Acl -LiteralPath $FilePath -AclObject $acl
@@ -381,17 +487,26 @@ $serviceCommand = '"' + (ConvertTo-ServiceArgValue $servicePath) + '" --prefix "
 $serviceCommand += ' --install-log-retention-days ' + $InstallLogRetentionDays
 $serviceCommand += ' --config "' + (ConvertTo-ServiceArgValue $ConfigPath) + '"'
 
-$config = @{
-    ListenPrefix            = $ListenPrefix
-    DataPath                = $DataPath
-    InstallPath             = $InstallPath
-    ContentPath             = $ContentPath
-    ClientPackagePath       = $ClientPackagePath
-    InstallLogRetentionDays = $InstallLogRetentionDays
-    Token                   = $Token
-    WebUsername             = $WebUsername
-    WebPassword             = $WebPassword
+# Start from whatever is already on disk instead of a fresh hashtable, so
+# settings this script does not know about (e.g. StaleHours, which is only
+# ever set from the dashboard Settings > General page) survive a reinstall.
+# Write-ServerConfig replaces the whole file rather than merging, so anything
+# left out here would otherwise be silently deleted on every rerun.
+$config = @{}
+foreach ($key in $existingConfig.Keys) {
+    $config[$key] = $existingConfig[$key]
 }
+$config.ListenPrefix            = $ListenPrefix
+$config.DataPath                = $DataPath
+$config.InstallPath             = $InstallPath
+$config.ContentPath             = $ContentPath
+$config.ClientPackagePath       = $ClientPackagePath
+$config.InstallLogRetentionDays = $InstallLogRetentionDays
+$config.Token                   = $Token
+$config.WebUsername             = $WebUsername
+$config.WebPassword             = $WebPassword
+$config.UseHttps                = if ($UseHttps) { 'true' } else { 'false' }
+$config.CertificateThumbprint   = $CertificateThumbprint
 Write-ServerConfig -Path $ConfigPath -Config $config
 Set-RestrictedFileAcl -FilePath $ConfigPath
 
@@ -421,4 +536,10 @@ Write-Host "Client action log retention days: $InstallLogRetentionDays"
 Write-Host "Dashboard URL: $ListenPrefix"
 if ($WebUsername) {
     Write-Host "Web auth user: $WebUsername"
+}
+if ($UseHttps) {
+    Write-Host "HTTPS: enabled, certificate thumbprint $CertificateThumbprint"
+}
+elseif ($CertificateThumbprint) {
+    Write-Host "HTTPS: certificate imported (thumbprint $CertificateThumbprint) but not enabled. Rerun with -UseHttps to switch on."
 }

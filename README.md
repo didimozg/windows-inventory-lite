@@ -16,14 +16,20 @@ The client and server are small self-contained C# services that run on .NET Fram
 - Server runs as a Windows Service on Windows Server or desktop Windows.
 - Inventory data includes OS version, build, architecture, hardware vendor, model, serial number, IP addresses, Office version, activation facts, and installed software.
 - Hardware inventory covers CPU (model, core count, clock speed), RAM (module count, per-module capacity, manufacturer, speed, total capacity), and storage (type HDD/SSD, capacity, model). USB storage devices are flagged separately.
-- The dashboard has five views: Clients, Software, Hardware, Client actions, and Client package.
+- The dashboard navigation is a tree sidebar, pinned in place while the page content scrolls: Dashboard, Inventory (Clients, Software, Hardware), Licenses, Installation (Client actions, Client package), Settings (General, Certificate, Change admin password). The server version badge sits at the bottom of the sidebar.
+- `Dashboard` is the landing page: tile counts for Clients, Windows activated, Office activated, and Stale, a Software card (Licenses count plus a top-5 installed software chart), and a Hardware card (computers with USB storage plus bar-chart breakdowns of CPU models, RAM size, and storage type).
 - The Clients view shows per-computer hardware summary (CPU, RAM, storage) in the expandable detail row alongside the software list.
 - The Hardware view groups machines by CPU model, storage device, and RAM configuration.
 - All dashboard views support column sorting and CSV export with semicolon delimiter for direct opening in Excel.
+- The summary count cards (Clients, Windows activated, Office activated, Stale) show only on Clients, Software, and Hardware.
 - The dashboard displays server version and client agent version.
 - Operators can delete stale or unwanted host records from the dashboard.
 - Operators can install, update, or uninstall clients from the dashboard through WinRM.
 - The Client package tab shows the deployed client exe versions and current CMD settings, lets operators reconfigure the server URL, ingestion token, and reporting interval, and provides a ZIP download of the complete GPO package.
+- HTTPS is a first-class option: bind a certificate at install time by thumbprint or by importing a PFX, or import a new PFX later from the dashboard Certificate tab. Enabling or disabling HTTPS itself is a separate step on the Settings > General page, and every certificate import is checked for common risks (expired, missing private key, no SAN, weak key) and kept in a certificate history log.
+- The stale threshold (default 48 hours) is configurable on Settings > General instead of fixed in code.
+- The Licenses tab tracks a manually entered catalog (name, version, license, comment) separate from the collected software inventory. Name and version can be picked from already-seen installed software or typed freely. Each license can also be linked to specific computers, added manually or auto-filled from installed software. A License button on the Software table opens or creates the matching license record for that software.
+- The Settings > Change admin password page rotates the dashboard's Basic Auth password from the browser, and can also perform the initial setup (username and password) without editing `server-config.json` by hand.
 - GPO deployment scripts support initial install and later client updates.
 - GPO packages include separate .NET 3.5 and .NET 4 client builds to avoid .NET 3.5 prompts on newer Windows versions.
 - Optional Basic Auth protects the dashboard and web API.
@@ -35,17 +41,22 @@ The client and server are small self-contained C# services that run on .NET Fram
 flowchart LR
     Client[Windows client service] -->|POST /api/v1/inventory| Server[Windows server service]
     Server --> Store[(JSON report files)]
-    Browser[Administrator browser] -->|Basic Auth| Server
+    Server --> Licenses[(licenses.json)]
+    Browser[Administrator browser] -->|Basic Auth, optional TLS| Server
     Server --> Dashboard[Embedded dashboard]
     Server -->|WinRM| Targets[Remote client hosts]
     Package[(Client package\n.exe + .cmd + .ps1)] -->|GPO startup| Client
     Server --> Package
     Browser -->|ZIP download| Server
+    Server -->|thumbprint lookup| CertStore[(LocalMachine\My)]
+    Browser -->|PFX upload| CertStore
 ```
 
 The client collects data through WMI and registry reads. It writes a local JSON report under `ProgramData` and sends the same JSON to the server. The server stores one JSON file per computer name. The dashboard builds its views from those server-side report files.
 
 The `Client actions` tab sends install, update, or uninstall commands to remote hosts over WinRM using the server-side client package. The `Client package` tab lets operators configure the package and download it as a ZIP for GPO deployment.
+
+The `Certificate` tab manages TLS: it imports an uploaded PFX into the `LocalMachine\My` certificate store and switches the listener to wrap connections in `SslStream`, without a service restart. The `Licenses` tab manages a separate, admin-entered catalog stored as `licenses.json` under the server's data path.
 
 ## Requirements
 
@@ -211,23 +222,72 @@ The server stores WinRM job logs in `DataPath\_client-install-jobs`. The default
 
 The `Client actions` tab also lets you set the retention period for a specific job. Saved logs contain the action, targets, status, command output, errors, timestamps, and the WinRM username. Passwords are not written to log files.
 
+## HTTPS Setup
+
+The server resolves its TLS certificate from the `LocalMachine\My` Windows certificate store by thumbprint. There is no built-in HttpListener/netsh binding — the server wraps each accepted connection in `SslStream` directly, so enabling or swapping a certificate takes effect without a service restart once it is registered.
+
+Enable HTTPS at install time with a certificate already in the store:
+
+```powershell
+.\src\Install-Server.ps1 -CertificateThumbprint 'AABBCCDD...' -UseHttps
+```
+
+Or import a PFX during install:
+
+```powershell
+.\src\Install-Server.ps1 `
+    -CertificatePfxPath 'C:\certs\inventory.pfx' `
+    -CertificatePfxPassword 'replace-with-the-pfx-password'
+```
+
+`-UseHttps` is implied automatically when a certificate is supplied and not explicitly disabled with `-UseHttps:$false`.
+
+Uploading a certificate and enabling HTTPS are two separate steps. From the dashboard `Certificate` tab, choose a PFX file, enter its password, and upload: the server imports it into `LocalMachine\My` and records it as the configured certificate, but does not touch the HTTPS switch. Turning HTTPS on or off is a Settings > General action, using whichever certificate is currently configured.
+
+Every uploaded certificate is checked for common problems before it can be used: expired or not-yet-valid, missing private key, no Subject Alternative Name, or an RSA key under 2048 bits. If any of these apply, enabling HTTPS on Settings > General returns the risk list instead of switching over; the operator has to explicitly acknowledge the risks to proceed anyway. Every upload is also kept in a certificate history log, visible on the `Certificate` tab, with the risks found at upload time.
+
+The first PFX upload travels over whatever transport is currently active. If the server is still on plain HTTP, do that first upload from a trusted network or the server console, since the PFX password rides along with the request body in that case.
+
+The `Certificate` tab can also delete the configured certificate from `LocalMachine\My`. If HTTPS was using it, deleting it turns HTTPS off in the same action, since there is nothing left to serve it with.
+
 ## Dashboard Usage
 
-The dashboard has five views:
+Navigation is a tree sidebar with five sections, pinned in place while the page content scrolls:
 
+```text
+Dashboard
+Inventory
+  Clients
+  Software
+  Hardware
+Licenses
+Installation
+  Client actions
+  Client package
+Settings
+  General
+  Certificate
+  Change admin password
+```
+
+- `Dashboard`: the landing page (no `#hash` in the URL lands here). Tile counts for Clients, Windows activated, Office activated, and Stale. A Software card shows the Licenses count and a bar chart of the 5 most commonly installed titles (counted by computer, regardless of version). A Hardware card shows computers with USB storage detected, plus bar-chart breakdowns of the top CPU models, RAM size (bucketed at 4/8/16 GB, with everything larger folded into "32 GB+"), and storage type (SSD/HDD only — disks with no recognizable type are left out) across the fleet.
 - `Clients`: one row per computer, with OS, Office, activation status, software count, report time, and client agent version. Computers with USB storage devices show a USB badge. Click a computer name to expand the detail row with CPU, RAM, storage summary, and the full software list.
-- `Software`: one row per software name, version, and publisher, with the count of installations and the computers where the package appears.
+- `Software`: one row per software name, version, and publisher, with the count of installations and the computers where the package appears. A License column links to the matching license record when one already exists for that software name — one license commonly covers several installed versions, so the match is by name only, not name and version.
 - `Hardware`: three grouped tables. CPUs groups machines by processor model. Storage groups machines by disk model, type, and size. RAM groups by total memory and module count. Click any row to expand the list of machines with that configuration. USB storage rows are highlighted.
+- `Licenses`: a manually maintained catalog with Name, Version, License, Comment, Computers, Edit, and Delete columns. Name and Version can be picked from software already seen in inventory reports or typed freely. Version, License, and Comment stay blank when not set, instead of showing a placeholder. Click the Name to expand the linked computers; add computers by typing a name and pressing Enter, or let it auto-fill by selecting a Name that matches installed software. Edit and Delete are separate, distinctly colored buttons.
 - `Client actions`: WinRM actions for installing, updating, or uninstalling the client on a single host, a list of hosts, or an IPv4 range.
 - `Client package`: shows deployed client exe versions and the current CMD settings. Lets you update the server URL, ingestion token, and reporting interval, and download the complete GPO package as a ZIP.
+- `General`: the stale threshold (hours) and the HTTPS on/off switch. Turning HTTPS on re-checks the configured certificate for risks and asks for confirmation if any are found.
+- `Certificate`: shows the active certificate (subject, expiry) and its risks if any, lets you upload a PFX to stage it as the configured certificate, delete the installed certificate from the machine store, and shows the certificate history log with a per-entry delete. It does not toggle HTTPS — that's on `General`.
+- `Change admin password`: rotates the dashboard's Basic Auth password, or performs the initial setup if none is configured yet (no current password required in that case). Rotating an existing password still requires the current one.
 
-Each view has sortable columns. Click a column header to sort ascending; click again to reverse. Click a software or hardware group name to expand the per-computer list.
+Each view has sortable columns. Click a column header to sort ascending; click again to reverse. Click a software, hardware, or license-computers group name to expand the per-computer list.
 
 Each view has an `Export CSV` button. The exported file uses semicolon as the delimiter and a UTF-8 BOM for direct opening in Excel on a Russian or European locale. The export applies the current search filter and the active sort order.
 
 Deleting a host from the dashboard removes the server-side JSON report for that host. If the client service still runs and can reach the server, the host reappears after the next sync.
 
-`Stale >48h` counts reports older than 48 hours or reports with an invalid timestamp.
+`Stale >Nh` counts reports older than the configured stale threshold (default 48 hours, adjustable on `General`) or reports with an invalid timestamp. The summary cards, including this one, show only on Clients, Software, and Hardware.
 
 ## Parameters
 
@@ -254,6 +314,10 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 | `-Token` | `—` | Ingestion token required in the `X-Inventory-Token` header. Optional. |
 | `-WebUsername` | `—` | Basic Auth username for dashboard and web API access. Optional. |
 | `-WebPassword` | `—` | Basic Auth password for dashboard and web API access. Optional. |
+| `-CertificateThumbprint` | `—` | Thumbprint of a certificate already in `LocalMachine\My` to use for HTTPS. Optional. |
+| `-CertificatePfxPath` | `—` | Path to a `.pfx`/`.p12` file to import into `LocalMachine\My` at install time. Optional. |
+| `-CertificatePfxPassword` | `—` | Password for `-CertificatePfxPath`. Required when that parameter is used. |
+| `-UseHttps` | `off` | Enable HTTPS. Implied automatically when a certificate is supplied, unless set to `-UseHttps:$false`. |
 | `-InstallLogRetentionDays` | `30` | Default retention period in days for WinRM client action logs. |
 | `-OpenFirewall` | `off` | Create a Windows Firewall inbound rule for the listener port. |
 | `-NoRun` | `off` | Install and configure the service without starting it. |
@@ -351,15 +415,19 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 
 The screenshots below use sample hostnames, documentation IP ranges, and placeholder domains.
 
-![Clients dashboard](./docs/images/dashboard-clients.png)
+![Dashboard overview](./docs/images/dashboard-overview.png)
 
-![Software dashboard](./docs/images/dashboard-software.png)
+![Clients view](./docs/images/dashboard-clients.png)
 
-![Hardware dashboard](./docs/images/dashboard-hardware.png)
+![Software view](./docs/images/dashboard-software.png)
 
-![Client actions dashboard](./docs/images/dashboard-client-actions.png)
+![Hardware view](./docs/images/dashboard-hardware.png)
 
-![Client package dashboard](./docs/images/dashboard-client-package.png)
+![Licenses view](./docs/images/dashboard-licenses.png)
+
+![Client actions view](./docs/images/dashboard-client-actions.png)
+
+![Client package view](./docs/images/dashboard-client-package.png)
 
 ## Configuration
 
@@ -370,16 +438,22 @@ The screenshots below use sample hostnames, documentation IP ranges, and placeho
 - `ContentPath`: server folder for dashboard HTML, CSS, and JavaScript.
 - `ConfigPath`: server configuration file. Default: `C:\ProgramData\WindowsInventoryLite\server-config.json`.
 - `InstallLogRetentionDays`: default retention period for WinRM client action logs. Default: `30`.
+- `StaleHours`: hours after which a report counts as stale. Default: `48`. Adjustable on the dashboard Settings > General page.
 - `Token`: optional shared token sent in `X-Inventory-Token`.
 - `WebUsername` and `WebPassword`: optional Basic Auth credentials for dashboard and web API access.
+- `UseHttps` and `CertificateThumbprint`: optional HTTPS settings. The certificate itself lives in `LocalMachine\My`, not in this file.
 
 ## Security Notes
 
 - The collector stores activation facts only. It does not export product keys.
-- Basic Auth protects browser access, but plain HTTP does not encrypt credentials. Use HTTPS termination or restrict access to trusted management networks.
+- Basic Auth protects browser access. Plain HTTP does not encrypt credentials in transit — enable HTTPS (see [HTTPS Setup](#https-setup)) or restrict access to trusted management networks.
+- The first PFX upload travels over whatever transport is active at that moment. Do it from a trusted network or the server console if the server is still plain HTTP.
+- A certificate with known risks (expired, no private key, no SAN, weak key) can still be enabled on Settings > General, but only after the operator explicitly acknowledges the specific risks shown — it is not a silent action.
 - Use `-Token`, firewall rules, and network ACLs to limit who can submit inventory reports.
 - Do not place a sensitive token in a broadly readable SYSVOL script. For GPO deployments, prefer firewall scope or a low-sensitivity ingestion token.
 - If you enable the commented central GPO logging block, limit write access to that log folder to the required computer accounts.
+- License records are free-text, admin-entered fields (Name, Version, License, Comment). Do not put secrets or credentials in the License or Comment fields; they are stored in plain JSON and rendered as-is in the dashboard.
+- Setting the initial Basic Auth username and password from the dashboard requires no prior authentication, since the whole dashboard is already open while Basic Auth is unconfigured. Once a password is set, changing it always requires the current one. Set up Basic Auth (or restrict network access) before exposing the server beyond a trusted network.
 - Review [docs/threat-model.md](./docs/threat-model.md) before exposing the server outside a management network.
 
 ## Uninstall

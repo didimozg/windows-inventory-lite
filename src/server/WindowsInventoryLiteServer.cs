@@ -4,7 +4,10 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.ServiceProcess;
 using System.Text;
 using System.Threading;
@@ -15,7 +18,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.2.0";
+        internal const string ProductVersion = "0.5.0";
 
         private static int Main(string[] args)
         {
@@ -86,12 +89,13 @@ namespace WindowsInventoryLite
         public string WebPassword;
         public int InstallLogRetentionDays;
         public string ConfigPath;
-        // HTTPS is not implemented in this build. To enable HTTPS, terminate TLS
-        // at a reverse proxy (IIS ARR, nginx, Caddy) in front of this service,
-        // or set UseHttps=true and CertificateThumbprint in a future build that
-        // wraps the TcpListener in SslStream using the specified certificate.
+        // The certificate is resolved from the LocalMachine\My store by thumbprint
+        // (see InventoryServer.FindCertificateByThumbprint). Install-Server.ps1 can
+        // import a PFX at install time; the dashboard "Certificate" tab can import
+        // and switch to a new PFX later without a service restart.
         public bool UseHttps;
         public string CertificateThumbprint;
+        public int StaleHours;
         public bool ConsoleMode;
         public bool ShowVersion;
 
@@ -106,6 +110,7 @@ namespace WindowsInventoryLite
             options.WinRmInstallerPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-bin\Install-ClientWinRM.ps1");
             options.WinRmUninstallerPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-bin\Uninstall-ClientWinRM.ps1");
             options.InstallLogRetentionDays = 30;
+            options.StaleHours = 48;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -191,6 +196,14 @@ namespace WindowsInventoryLite
                 {
                     options.CertificateThumbprint = args[++i];
                 }
+                else if (key == "--stale-hours" && i + 1 < args.Length)
+                {
+                    int staleHours;
+                    if (Int32.TryParse(args[++i], out staleHours) && staleHours > 0)
+                    {
+                        options.StaleHours = staleHours;
+                    }
+                }
             }
 
             LoadConfigFile(options);
@@ -230,6 +243,15 @@ namespace WindowsInventoryLite
                 {
                     options.CertificateThumbprint = GetConfigString(config, "CertificateThumbprint");
                 }
+                if (options.StaleHours == 48)
+                {
+                    string staleHoursText = GetConfigString(config, "StaleHours");
+                    int staleHoursFromConfig;
+                    if (!String.IsNullOrEmpty(staleHoursText) && Int32.TryParse(staleHoursText, out staleHoursFromConfig) && staleHoursFromConfig > 0)
+                    {
+                        options.StaleHours = staleHoursFromConfig;
+                    }
+                }
             }
             catch
             {
@@ -252,9 +274,12 @@ namespace WindowsInventoryLite
         private readonly ServerOptions options;
         private readonly object installJobsLock = new object();
         private readonly Dictionary<string, InstallJob> installJobs = new Dictionary<string, InstallJob>();
+        private readonly object licensesLock = new object();
+        private readonly object certificateHistoryLock = new object();
         private TcpListener listener;
         private Thread worker;
         private bool running;
+        private volatile X509Certificate2 serverCertificate;
 
         public InventoryServer(ServerOptions options)
         {
@@ -263,21 +288,7 @@ namespace WindowsInventoryLite
 
         public void Start()
         {
-            if (options.UseHttps)
-            {
-                const string message = "UseHttps is set but TLS is not implemented in this build. "
-                    + "The listener is running as plain HTTP. Terminate TLS at a reverse proxy "
-                    + "(IIS ARR, nginx, Caddy) instead of relying on this flag.";
-                try
-                {
-                    System.Diagnostics.EventLog.WriteEntry(
-                        "WindowsInventoryLite",
-                        message,
-                        System.Diagnostics.EventLogEntryType.Warning);
-                }
-                catch { }
-                Console.Error.WriteLine("WARNING: " + message);
-            }
+            LoadServerCertificate();
 
             if (!Directory.Exists(options.DataPath))
             {
@@ -306,6 +317,63 @@ namespace WindowsInventoryLite
             }
         }
 
+        private void LoadServerCertificate()
+        {
+            if (!options.UseHttps || String.IsNullOrEmpty(options.CertificateThumbprint))
+            {
+                serverCertificate = null;
+                return;
+            }
+
+            X509Certificate2 certificate = FindCertificateByThumbprint(options.CertificateThumbprint);
+            serverCertificate = certificate;
+
+            if (certificate == null)
+            {
+                try
+                {
+                    System.Diagnostics.EventLog.WriteEntry(
+                        "WindowsInventoryLite",
+                        "UseHttps is set but no certificate with thumbprint " + options.CertificateThumbprint
+                            + " was found in the LocalMachine\\My store. HTTPS connections will be refused "
+                            + "until a valid certificate is configured (Install-Server.ps1 -CertificateThumbprint / "
+                            + "-CertificatePfxPath, or the dashboard Certificate tab).",
+                        System.Diagnostics.EventLogEntryType.Error);
+                }
+                catch { }
+            }
+        }
+
+        private static X509Certificate2 FindCertificateByThumbprint(string thumbprint)
+        {
+            if (String.IsNullOrEmpty(thumbprint))
+            {
+                return null;
+            }
+
+            string normalized = NormalizeThumbprint(thumbprint);
+            X509Store store = new X509Store(StoreName.My, StoreLocation.LocalMachine);
+            try
+            {
+                store.Open(OpenFlags.ReadOnly);
+                X509Certificate2Collection found = store.Certificates.Find(X509FindType.FindByThumbprint, normalized, false);
+                return found.Count > 0 ? found[0] : null;
+            }
+            finally
+            {
+                store.Close();
+            }
+        }
+
+        private static string NormalizeThumbprint(string thumbprint)
+        {
+            if (thumbprint == null)
+            {
+                return null;
+            }
+            return thumbprint.Replace(" ", "").Replace(":", "").Replace("-", "").ToUpperInvariant();
+        }
+
         private void ListenLoop()
         {
             while (running)
@@ -328,10 +396,33 @@ namespace WindowsInventoryLite
         private void HandleClient(object state)
         {
             using (TcpClient client = (TcpClient)state)
+            using (NetworkStream networkStream = client.GetStream())
             {
-                NetworkStream stream = client.GetStream();
+                // Bounds how long a single connection can sit idle mid-read or
+                // mid-write, including a stalled TLS handshake (a client that
+                // opens the socket and never sends a ClientHello, or a private
+                // key that cannot be used and blocks instead of failing fast).
+                // Without this, enough such connections exhaust the ThreadPool.
+                const int SocketTimeoutMs = 30000;
+                client.ReceiveTimeout = SocketTimeoutMs;
+                client.SendTimeout = SocketTimeoutMs;
+
+                Stream stream = networkStream;
+                SslStream sslStream = null;
                 try
                 {
+                    if (options.UseHttps)
+                    {
+                        X509Certificate2 certificate = serverCertificate;
+                        if (certificate == null)
+                        {
+                            return;
+                        }
+                        sslStream = new SslStream(networkStream, true);
+                        AuthenticateServerStream(sslStream, certificate);
+                        stream = sslStream;
+                    }
+
                     RequestContext request = ReadRequest(stream);
                     if (request.Method == "POST" && request.Path == "/api/v1/inventory")
                     {
@@ -377,6 +468,58 @@ namespace WindowsInventoryLite
                     {
                         DownloadClientPackage(stream);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/server/certificate")
+                    {
+                        SendCertificateStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/server/certificate")
+                    {
+                        ConfigureCertificate(stream, request);
+                    }
+                    else if (request.Method == "DELETE" && request.Path == "/api/v1/server/certificate")
+                    {
+                        DeleteConfiguredCertificate(stream);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/server/certificate/history")
+                    {
+                        SendCertificateHistory(stream);
+                    }
+                    else if (request.Method == "DELETE" && request.Path.StartsWith("/api/v1/server/certificate/history/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        DeleteCertificateHistoryEntry(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/server/settings")
+                    {
+                        SendServerSettings(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/server/settings")
+                    {
+                        ConfigureServerSettings(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/server/admin-password")
+                    {
+                        SendAdminPasswordStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/server/admin-password")
+                    {
+                        ChangeAdminPassword(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/licenses")
+                    {
+                        SendLicenses(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/licenses")
+                    {
+                        CreateLicense(stream, request);
+                    }
+                    else if (request.Method == "PUT" && request.Path.StartsWith("/api/v1/licenses/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        UpdateLicense(stream, request);
+                    }
+                    else if (request.Method == "DELETE" && request.Path.StartsWith("/api/v1/licenses/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        DeleteLicense(stream, request);
+                    }
                     else if (request.Method == "GET" && (request.Path == "/" || request.Path == "/index.html"))
                     {
                         SendDashboardFile(stream, "index.html", DashboardHtml, "text/html; charset=utf-8");
@@ -410,10 +553,30 @@ namespace WindowsInventoryLite
                     }
                     catch { }
                 }
+                finally
+                {
+                    if (sslStream != null)
+                    {
+                        sslStream.Dispose();
+                    }
+                }
             }
         }
 
-        private void ReceiveInventory(NetworkStream stream, RequestContext request)
+        // SslProtocols.None is documented (.NET Framework 4.7+) to mean "let the
+        // OS negotiate the best mutually supported protocol", but on this build's
+        // .NET Framework it means "no protocols enabled" and AuthenticateAsServer
+        // throws ArgumentException - confirmed against real certificates on a
+        // live host. A second AuthenticateAsServer call on the same SslStream
+        // after a failed first attempt hangs rather than cleanly retrying, so
+        // this does not try None at all: it goes straight to an explicit
+        // protocol that is known to work in this environment.
+        private static void AuthenticateServerStream(SslStream sslStream, X509Certificate2 certificate)
+        {
+            sslStream.AuthenticateAsServer(certificate, false, SslProtocols.Tls12, false);
+        }
+
+        private void ReceiveInventory(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
             if (!String.IsNullOrEmpty(options.Token) && token != options.Token)
@@ -430,7 +593,7 @@ namespace WindowsInventoryLite
             SendJson(stream, "{\"status\":\"ok\"}");
         }
 
-        private void DeleteClient(NetworkStream stream, RequestContext request)
+        private void DeleteClient(Stream stream, RequestContext request)
         {
             const string prefix = "/api/v1/clients/";
             string rawComputerName = request.Path.Substring(prefix.Length);
@@ -459,7 +622,7 @@ namespace WindowsInventoryLite
             SendJson(stream, "{\"status\":\"deleted\"}");
         }
 
-        private void StartClientAction(NetworkStream stream, RequestContext request, string action)
+        private void StartClientAction(Stream stream, RequestContext request, string action)
         {
             JavaScriptSerializer serializer = CreateJsonSerializer();
             Dictionary<string, object> payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
@@ -518,7 +681,7 @@ namespace WindowsInventoryLite
             SendJson(stream, "{\"jobId\":\"" + job.Id + "\",\"status\":\"queued\"}");
         }
 
-        private void SendClientInstallJobs(NetworkStream stream)
+        private void SendClientInstallJobs(Stream stream)
         {
             CleanupInstallJobLogs();
             ArrayList jobs = new ArrayList();
@@ -559,7 +722,7 @@ namespace WindowsInventoryLite
             SendJson(stream, serializer.Serialize(response));
         }
 
-        private void SendClientInstallJob(NetworkStream stream, RequestContext request)
+        private void SendClientInstallJob(Stream stream, RequestContext request)
         {
             const string prefix = "/api/v1/client-install/";
             string id = request.Path.Substring(prefix.Length);
@@ -1029,7 +1192,7 @@ namespace WindowsInventoryLite
             }
         }
 
-        private void SendDashboardFile(NetworkStream stream, string fileName, string fallback, string contentType)
+        private void SendDashboardFile(Stream stream, string fileName, string fallback, string contentType)
         {
             string path = Path.Combine(options.ContentPath, fileName);
             if (File.Exists(path))
@@ -1066,11 +1229,12 @@ namespace WindowsInventoryLite
             index["serverVersion"] = Program.ProductVersion;
             index["generatedAt"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
             index["clientCount"] = clients.Count;
+            index["staleHours"] = options.StaleHours;
             index["clients"] = clients;
             return serializer.Serialize(index);
         }
 
-        private static RequestContext ReadRequest(NetworkStream stream)
+        private static RequestContext ReadRequest(Stream stream)
         {
             const int MaxHeaderBytes = 65536;
             const int MaxBodyBytes = 16 * 1024 * 1024;
@@ -1164,7 +1328,7 @@ namespace WindowsInventoryLite
             return -1;
         }
 
-        private static void SendJson(NetworkStream stream, string json)
+        private static void SendJson(Stream stream, string json)
         {
             SendText(stream, json, "application/json; charset=utf-8", 200);
         }
@@ -1176,7 +1340,7 @@ namespace WindowsInventoryLite
             return serializer;
         }
 
-        private static void SendUnauthorized(NetworkStream stream)
+        private static void SendUnauthorized(Stream stream)
         {
             byte[] body = Encoding.UTF8.GetBytes("Unauthorized");
             string header = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Windows Inventory Lite\"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + body.Length + "\r\nConnection: close\r\n\r\n";
@@ -1185,7 +1349,7 @@ namespace WindowsInventoryLite
             stream.Write(body, 0, body.Length);
         }
 
-        private static void SendText(NetworkStream stream, string text, string contentType, int statusCode)
+        private static void SendText(Stream stream, string text, string contentType, int statusCode)
         {
             byte[] body = Encoding.UTF8.GetBytes(text);
             string status = statusCode == 200 ? "OK" : (statusCode == 400 ? "Bad Request" : (statusCode == 401 ? "Unauthorized" : (statusCode == 404 ? "Not Found" : "Error")));
@@ -1267,7 +1431,7 @@ namespace WindowsInventoryLite
             }
         }
 
-        private void SendClientPackageStatus(NetworkStream stream)
+        private void SendClientPackageStatus(Stream stream)
         {
             JavaScriptSerializer serializer = CreateJsonSerializer();
             Dictionary<string, object> result = new Dictionary<string, object>();
@@ -1309,7 +1473,7 @@ namespace WindowsInventoryLite
             SendJson(stream, serializer.Serialize(result));
         }
 
-        private void ConfigureClientPackage(NetworkStream stream, RequestContext request)
+        private void ConfigureClientPackage(Stream stream, RequestContext request)
         {
             if (!Directory.Exists(options.ClientPackagePath))
             {
@@ -1351,7 +1515,7 @@ namespace WindowsInventoryLite
             SendClientPackageStatus(stream);
         }
 
-        private void DownloadClientPackage(NetworkStream stream)
+        private void DownloadClientPackage(Stream stream)
         {
             if (!Directory.Exists(options.ClientPackagePath))
             {
@@ -1387,6 +1551,906 @@ namespace WindowsInventoryLite
 
             byte[] zipBytes = BuildZip(names, contents);
             SendBytes(stream, zipBytes, "application/zip", "windows-inventory-lite-client.zip");
+        }
+
+        private Dictionary<string, object> BuildCertificateStatusPayload()
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["useHttps"] = options.UseHttps;
+            result["thumbprint"] = options.CertificateThumbprint;
+
+            X509Certificate2 certificate = serverCertificate;
+            if (certificate == null && !String.IsNullOrEmpty(options.CertificateThumbprint))
+            {
+                // Not actively serving HTTPS right now, but a certificate is
+                // configured - look it up so the page can still show its details.
+                certificate = FindCertificateByThumbprint(options.CertificateThumbprint);
+            }
+
+            result["certificatePresent"] = certificate != null;
+            if (certificate != null)
+            {
+                result["subject"] = certificate.Subject;
+                result["issuer"] = certificate.Issuer;
+                result["notBefore"] = certificate.NotBefore.ToUniversalTime().ToString("o");
+                result["notAfter"] = certificate.NotAfter.ToUniversalTime().ToString("o");
+                result["isExpired"] = DateTime.UtcNow > certificate.NotAfter.ToUniversalTime();
+                result["risks"] = EvaluateCertificateRisks(certificate);
+            }
+            else
+            {
+                result["subject"] = null;
+                result["issuer"] = null;
+                result["notBefore"] = null;
+                result["notAfter"] = null;
+                result["isExpired"] = null;
+                result["risks"] = new ArrayList();
+            }
+
+            return result;
+        }
+
+        private void SendCertificateStatus(Stream stream)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(BuildCertificateStatusPayload()));
+        }
+
+        // Basic sanity checks so an operator sees the risk before flipping HTTPS on,
+        // not after the service refuses every connection. None of these are exotic:
+        // they are the exact reasons a browser or SslStream.AuthenticateAsServer
+        // will reject a certificate outright.
+        private static List<string> EvaluateCertificateRisks(X509Certificate2 certificate)
+        {
+            List<string> risks = new List<string>();
+            if (certificate == null)
+            {
+                risks.Add("No certificate is configured.");
+                return risks;
+            }
+
+            DateTime nowUtc = DateTime.UtcNow;
+            if (nowUtc > certificate.NotAfter.ToUniversalTime())
+            {
+                risks.Add("The certificate expired on " + certificate.NotAfter.ToUniversalTime().ToString("yyyy-MM-dd") + ".");
+            }
+            if (nowUtc < certificate.NotBefore.ToUniversalTime())
+            {
+                risks.Add("The certificate is not valid until " + certificate.NotBefore.ToUniversalTime().ToString("yyyy-MM-dd") + ".");
+            }
+            if (!certificate.HasPrivateKey)
+            {
+                risks.Add("The certificate has no private key available. The service cannot serve TLS with it.");
+            }
+
+            bool hasSubjectAlternativeName = false;
+            foreach (X509Extension extension in certificate.Extensions)
+            {
+                if (extension.Oid != null && extension.Oid.Value == "2.5.29.17")
+                {
+                    hasSubjectAlternativeName = true;
+                    break;
+                }
+            }
+            if (!hasSubjectAlternativeName)
+            {
+                risks.Add("The certificate has no Subject Alternative Name. Modern browsers reject certificates without a SAN outright, regardless of trust.");
+            }
+
+            try
+            {
+                int keySize = certificate.PublicKey.Key.KeySize;
+                if (keySize > 0 && keySize < 2048)
+                {
+                    risks.Add("The certificate's key is only " + keySize + " bits; most browsers now require at least 2048.");
+                }
+            }
+            catch
+            {
+            }
+
+            return risks;
+        }
+
+        private sealed class CertificateUpload
+        {
+            public byte[] PfxBytes;
+            public string Password;
+            public string Error;
+        }
+
+        private static CertificateUpload ParseCertificateUpload(string requestBody)
+        {
+            CertificateUpload upload = new CertificateUpload();
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(requestBody);
+            }
+            catch
+            {
+                upload.Error = "invalid request body";
+                return upload;
+            }
+
+            string pfxBase64 = Convert.ToString(payload.ContainsKey("pfxBase64") ? payload["pfxBase64"] : "");
+            upload.Password = Convert.ToString(payload.ContainsKey("password") ? payload["password"] : "");
+
+            if (String.IsNullOrEmpty(pfxBase64))
+            {
+                upload.Error = "pfxBase64 is required";
+                return upload;
+            }
+
+            try
+            {
+                upload.PfxBytes = Convert.FromBase64String(pfxBase64);
+            }
+            catch
+            {
+                upload.Error = "pfxBase64 is not valid base64";
+                return upload;
+            }
+
+            const int MaxPfxBytes = 1024 * 1024;
+            if (upload.PfxBytes.Length == 0 || upload.PfxBytes.Length > MaxPfxBytes)
+            {
+                upload.Error = "certificate file must be between 1 byte and 1 MB";
+            }
+
+            return upload;
+        }
+
+        // Imports the PFX into LocalMachine\My so the certificate (and its private
+        // key) survive independently of this one request/response cycle.
+        private static X509Certificate2 ImportCertificateIntoStore(byte[] pfxBytes, string password, out string error, out bool isServerError)
+        {
+            error = null;
+            isServerError = false;
+
+            X509Certificate2 imported;
+            try
+            {
+                imported = new X509Certificate2(
+                    pfxBytes,
+                    password,
+                    X509KeyStorageFlags.MachineKeySet | X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.Exportable);
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    System.Diagnostics.EventLog.WriteEntry(
+                        "WindowsInventoryLite",
+                        "Certificate import failed: " + ex.Message,
+                        System.Diagnostics.EventLogEntryType.Warning);
+                }
+                catch { }
+                error = "could not read the certificate file. Check the password and file format.";
+                return null;
+            }
+
+            if (!imported.HasPrivateKey)
+            {
+                error = "the certificate file has no private key";
+                return null;
+            }
+
+            X509Store store = new X509Store(StoreName.My, StoreLocation.LocalMachine);
+            try
+            {
+                store.Open(OpenFlags.ReadWrite);
+                store.Add(imported);
+            }
+            catch (Exception)
+            {
+                error = "could not import the certificate into the local machine store. Run the service with an account that has store-write rights.";
+                isServerError = true;
+                return null;
+            }
+            finally
+            {
+                store.Close();
+            }
+
+            return imported;
+        }
+
+        // Stores the uploaded certificate as the configured one and, if HTTPS is
+        // already active AND the certificate has no known risks, hot-swaps the
+        // serving certificate immediately. It does NOT turn HTTPS on by itself -
+        // that is a separate decision made from Settings > General, so an operator
+        // can stage a certificate without risking the current connection. A risky
+        // certificate is never hot-swapped in: the live listener keeps serving
+        // whatever it was already serving until the operator explicitly
+        // acknowledges the risk from Settings > General, the same gate that
+        // applies to turning HTTPS on for the first time.
+        private void StoreUploadedCertificate(X509Certificate2 certificate, List<string> risks)
+        {
+            options.CertificateThumbprint = certificate.Thumbprint;
+            if (options.UseHttps && risks.Count == 0)
+            {
+                serverCertificate = certificate;
+            }
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["CertificateThumbprint"] = certificate.Thumbprint;
+            SaveServerConfigValues(updates);
+
+            AppendCertificateHistory(certificate, risks);
+
+            try
+            {
+                System.Diagnostics.EventLog.WriteEntry(
+                    "WindowsInventoryLite",
+                    "Certificate uploaded from the dashboard. Thumbprint: " + certificate.Thumbprint + ".",
+                    System.Diagnostics.EventLogEntryType.Information);
+            }
+            catch { }
+        }
+
+        // Imports an uploaded PFX into LocalMachine\My. The upload itself travels
+        // over whatever transport is currently active - if the server is still
+        // plain HTTP, do the first upload from a trusted network or console
+        // session, since the PFX password rides along with the request body in
+        // that case.
+        private void ConfigureCertificate(Stream stream, RequestContext request)
+        {
+            CertificateUpload upload = ParseCertificateUpload(request.Body);
+            if (upload.Error != null)
+            {
+                SendText(stream, "{\"error\":\"" + upload.Error + "\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string importError;
+            bool isServerError;
+            X509Certificate2 imported = ImportCertificateIntoStore(upload.PfxBytes, upload.Password, out importError, out isServerError);
+            if (imported == null)
+            {
+                SendText(stream, "{\"error\":\"" + importError + "\"}", "application/json; charset=utf-8", isServerError ? 500 : 400);
+                return;
+            }
+
+            List<string> risks = EvaluateCertificateRisks(imported);
+            StoreUploadedCertificate(imported, risks);
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> response = BuildCertificateStatusPayload();
+            SendJson(stream, serializer.Serialize(response));
+        }
+
+        // Removes the currently configured certificate from LocalMachine\My and
+        // clears it from server-config.json. If HTTPS was using this certificate,
+        // HTTPS is turned off too - there would be nothing left to serve it with.
+        private void DeleteConfiguredCertificate(Stream stream)
+        {
+            if (String.IsNullOrEmpty(options.CertificateThumbprint))
+            {
+                SendText(stream, "{\"error\":\"no certificate is configured\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string thumbprint = options.CertificateThumbprint;
+            X509Certificate2 certificate = FindCertificateByThumbprint(thumbprint);
+            if (certificate != null)
+            {
+                X509Store store = new X509Store(StoreName.My, StoreLocation.LocalMachine);
+                try
+                {
+                    store.Open(OpenFlags.ReadWrite);
+                    store.Remove(certificate);
+                }
+                catch (Exception)
+                {
+                    SendText(stream, "{\"error\":\"could not remove the certificate from the local machine store. Run the service with an account that has store-write rights.\"}", "application/json; charset=utf-8", 500);
+                    return;
+                }
+                finally
+                {
+                    store.Close();
+                }
+            }
+
+            options.CertificateThumbprint = null;
+            options.UseHttps = false;
+            serverCertificate = null;
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["CertificateThumbprint"] = "";
+            updates["UseHttps"] = "false";
+            SaveServerConfigValues(updates);
+
+            try
+            {
+                System.Diagnostics.EventLog.WriteEntry(
+                    "WindowsInventoryLite",
+                    "Certificate " + thumbprint + " deleted from the dashboard. HTTPS is now off.",
+                    System.Diagnostics.EventLogEntryType.Information);
+            }
+            catch { }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(BuildCertificateStatusPayload()));
+        }
+
+        private string GetCertificateHistoryDirectory()
+        {
+            return Path.Combine(options.DataPath, "_certificates");
+        }
+
+        private string GetCertificateHistoryFilePath()
+        {
+            return Path.Combine(GetCertificateHistoryDirectory(), "certificate-history.json");
+        }
+
+        private List<Dictionary<string, object>> LoadCertificateHistory()
+        {
+            string path = GetCertificateHistoryFilePath();
+            if (!File.Exists(path))
+            {
+                return new List<Dictionary<string, object>>();
+            }
+
+            List<Dictionary<string, object>> history = new List<Dictionary<string, object>>();
+            try
+            {
+                JavaScriptSerializer serializer = CreateJsonSerializer();
+                string json = File.ReadAllText(path, Encoding.UTF8);
+                ArrayList raw = serializer.Deserialize<ArrayList>(json);
+                if (raw != null)
+                {
+                    foreach (object item in raw)
+                    {
+                        Dictionary<string, object> record = item as Dictionary<string, object>;
+                        if (record != null)
+                        {
+                            history.Add(record);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return history;
+        }
+
+        private void SaveCertificateHistory(List<Dictionary<string, object>> history)
+        {
+            string directory = GetCertificateHistoryDirectory();
+            if (!Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            string json = serializer.Serialize(history);
+            File.WriteAllText(GetCertificateHistoryFilePath(), json, new UTF8Encoding(false));
+        }
+
+        private void AppendCertificateHistory(X509Certificate2 certificate, List<string> risks)
+        {
+            lock (certificateHistoryLock)
+            {
+                List<Dictionary<string, object>> history = LoadCertificateHistory();
+                Dictionary<string, object> record = new Dictionary<string, object>();
+                record["id"] = Guid.NewGuid().ToString("N");
+                record["thumbprint"] = certificate.Thumbprint;
+                record["subject"] = certificate.Subject;
+                record["issuer"] = certificate.Issuer;
+                record["notBefore"] = certificate.NotBefore.ToUniversalTime().ToString("o");
+                record["notAfter"] = certificate.NotAfter.ToUniversalTime().ToString("o");
+                record["uploadedAt"] = DateTime.UtcNow.ToString("o");
+                record["risks"] = risks;
+                history.Add(record);
+                SaveCertificateHistory(history);
+            }
+        }
+
+        private void SendCertificateHistory(Stream stream)
+        {
+            List<Dictionary<string, object>> history;
+            lock (certificateHistoryLock)
+            {
+                history = LoadCertificateHistory();
+            }
+            history.Reverse();
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["history"] = history;
+            SendJson(stream, serializer.Serialize(response));
+        }
+
+        private static string ExtractCertificateHistoryId(string path)
+        {
+            const string prefix = "/api/v1/server/certificate/history/";
+            string id = path.Substring(prefix.Length);
+            int queryStart = id.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                id = id.Substring(0, queryStart);
+            }
+            return Uri.UnescapeDataString(id).Trim();
+        }
+
+        // Removes one entry from the certificate history log. This only ever
+        // touches the log file - it does not affect the certificate itself or
+        // whether it is currently configured/serving HTTPS. Entries written
+        // before this endpoint existed have no "id" field and cannot be
+        // targeted individually; they stay until the whole log is cleared some
+        // other way.
+        private void DeleteCertificateHistoryEntry(Stream stream, RequestContext request)
+        {
+            string id = ExtractCertificateHistoryId(request.Path);
+
+            lock (certificateHistoryLock)
+            {
+                List<Dictionary<string, object>> history = LoadCertificateHistory();
+                int indexToRemove = -1;
+                for (int i = 0; i < history.Count; i++)
+                {
+                    if (String.Equals(GetStringValue(history[i], "id"), id, StringComparison.OrdinalIgnoreCase))
+                    {
+                        indexToRemove = i;
+                        break;
+                    }
+                }
+
+                if (indexToRemove < 0)
+                {
+                    SendText(stream, "{\"error\":\"history entry not found\"}", "application/json; charset=utf-8", 404);
+                    return;
+                }
+
+                history.RemoveAt(indexToRemove);
+                SaveCertificateHistory(history);
+            }
+
+            SendJson(stream, "{\"status\":\"deleted\"}");
+        }
+
+        private void SendServerSettings(Stream stream)
+        {
+            Dictionary<string, object> result = BuildCertificateStatusPayload();
+            result["staleHours"] = options.StaleHours;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void ConfigureServerSettings(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+
+            if (payload.ContainsKey("staleHours"))
+            {
+                int staleHours;
+                if (!Int32.TryParse(Convert.ToString(payload["staleHours"]), out staleHours) || staleHours < 1 || staleHours > 8760)
+                {
+                    SendText(stream, "{\"error\":\"staleHours must be between 1 and 8760\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.StaleHours = staleHours;
+                updates["StaleHours"] = staleHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("useHttps"))
+            {
+                bool requestedUseHttps = Convert.ToBoolean(payload["useHttps"]);
+                bool acknowledgeRisks = payload.ContainsKey("acknowledgeRisks") && Convert.ToBoolean(payload["acknowledgeRisks"]);
+
+                if (requestedUseHttps)
+                {
+                    if (String.IsNullOrEmpty(options.CertificateThumbprint))
+                    {
+                        SendText(stream, "{\"error\":\"no certificate has been uploaded yet. Upload one on the Certificate page first.\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+
+                    X509Certificate2 candidate = FindCertificateByThumbprint(options.CertificateThumbprint);
+                    if (candidate == null)
+                    {
+                        SendText(stream, "{\"error\":\"the configured certificate was not found in LocalMachine\\\\My.\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+
+                    List<string> risks = EvaluateCertificateRisks(candidate);
+                    if (risks.Count > 0 && !acknowledgeRisks)
+                    {
+                        Dictionary<string, object> riskResponse = new Dictionary<string, object>();
+                        riskResponse["error"] = "the certificate has risks that may prevent the service from serving HTTPS. Confirm to proceed anyway.";
+                        riskResponse["risks"] = risks;
+                        SendText(stream, serializer.Serialize(riskResponse), "application/json; charset=utf-8", 409);
+                        return;
+                    }
+
+                    serverCertificate = candidate;
+                    options.UseHttps = true;
+                }
+                else
+                {
+                    options.UseHttps = false;
+                    serverCertificate = null;
+                }
+
+                updates["UseHttps"] = options.UseHttps ? "true" : "false";
+            }
+
+            if (updates.Count > 0)
+            {
+                SaveServerConfigValues(updates);
+            }
+
+            SendServerSettings(stream);
+        }
+
+        private void SendAdminPasswordStatus(Stream stream)
+        {
+            bool configured = !String.IsNullOrEmpty(options.WebUsername) && !String.IsNullOrEmpty(options.WebPassword);
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["configured"] = configured;
+            result["username"] = configured ? options.WebUsername : null;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        // Doubles as first-time setup and password rotation. Bootstrapping without
+        // a current-password check is reachable by anyone on the network while
+        // Basic Auth is unconfigured, but at that point the whole dashboard is
+        // already open (WinRM install/uninstall, client deletion, certificate
+        // upload) - gating only this one endpoint would not meaningfully reduce
+        // exposure. Once configured, changing the password always requires the
+        // current one.
+        private void ChangeAdminPassword(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            bool alreadyConfigured = !String.IsNullOrEmpty(options.WebUsername) && !String.IsNullOrEmpty(options.WebPassword);
+            string newUsername = Convert.ToString(payload.ContainsKey("newUsername") ? payload["newUsername"] : "").Trim();
+            string newPassword = Convert.ToString(payload.ContainsKey("newPassword") ? payload["newPassword"] : "");
+
+            if (alreadyConfigured)
+            {
+                string currentPassword = Convert.ToString(payload.ContainsKey("currentPassword") ? payload["currentPassword"] : "");
+                if (!String.Equals(currentPassword, options.WebPassword, StringComparison.Ordinal))
+                {
+                    SendText(stream, "{\"error\":\"current password is incorrect\"}", "application/json; charset=utf-8", 401);
+                    return;
+                }
+                if (String.IsNullOrEmpty(newUsername))
+                {
+                    newUsername = options.WebUsername;
+                }
+            }
+            else if (String.IsNullOrEmpty(newUsername))
+            {
+                SendText(stream, "{\"error\":\"username is required for initial setup\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            if (newPassword.Length < 8)
+            {
+                SendText(stream, "{\"error\":\"new password must be at least 8 characters\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            options.WebUsername = newUsername;
+            options.WebPassword = newPassword;
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["WebUsername"] = newUsername;
+            updates["WebPassword"] = newPassword;
+            SaveServerConfigValues(updates);
+
+            try
+            {
+                System.Diagnostics.EventLog.WriteEntry(
+                    "WindowsInventoryLite",
+                    alreadyConfigured
+                        ? "Dashboard admin password changed from the Settings page."
+                        : "Dashboard Basic Auth configured for the first time from the Settings page.",
+                    System.Diagnostics.EventLogEntryType.Information);
+            }
+            catch { }
+
+            SendJson(stream, "{\"status\":\"ok\"}");
+        }
+
+        private void SaveServerConfigValues(Dictionary<string, string> updates)
+        {
+            if (String.IsNullOrEmpty(options.ConfigPath))
+            {
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> config;
+            if (File.Exists(options.ConfigPath))
+            {
+                try
+                {
+                    string existing = File.ReadAllText(options.ConfigPath, Encoding.UTF8);
+                    config = serializer.Deserialize<Dictionary<string, object>>(existing) ?? new Dictionary<string, object>();
+                }
+                catch
+                {
+                    config = new Dictionary<string, object>();
+                }
+            }
+            else
+            {
+                config = new Dictionary<string, object>();
+            }
+
+            foreach (KeyValuePair<string, string> pair in updates)
+            {
+                config[pair.Key] = pair.Value;
+            }
+
+            string json = serializer.Serialize(config);
+            File.WriteAllText(options.ConfigPath, json, new UTF8Encoding(false));
+        }
+
+        // License inventory is an admin-entered catalog (name/version/license/comment),
+        // separate from the per-client software lists collected from hosts. Stored as a
+        // single JSON array under a subfolder so it never gets picked up by
+        // BuildClientIndex, which scans DataPath's top-level *.json files as client reports.
+        private string GetLicensesDirectory()
+        {
+            return Path.Combine(options.DataPath, "_licenses");
+        }
+
+        private string GetLicensesFilePath()
+        {
+            return Path.Combine(GetLicensesDirectory(), "licenses.json");
+        }
+
+        private List<Dictionary<string, object>> LoadLicenses()
+        {
+            string path = GetLicensesFilePath();
+            if (!File.Exists(path))
+            {
+                return new List<Dictionary<string, object>>();
+            }
+
+            List<Dictionary<string, object>> licenses = new List<Dictionary<string, object>>();
+            try
+            {
+                JavaScriptSerializer serializer = CreateJsonSerializer();
+                string json = File.ReadAllText(path, Encoding.UTF8);
+                ArrayList raw = serializer.Deserialize<ArrayList>(json);
+                if (raw != null)
+                {
+                    foreach (object item in raw)
+                    {
+                        Dictionary<string, object> record = item as Dictionary<string, object>;
+                        if (record != null)
+                        {
+                            licenses.Add(record);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return licenses;
+        }
+
+        private void SaveLicenses(List<Dictionary<string, object>> licenses)
+        {
+            string directory = GetLicensesDirectory();
+            if (!Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            string json = serializer.Serialize(licenses);
+            File.WriteAllText(GetLicensesFilePath(), json, new UTF8Encoding(false));
+        }
+
+        private static string ExtractLicenseId(string path)
+        {
+            const string prefix = "/api/v1/licenses/";
+            string id = path.Substring(prefix.Length);
+            int queryStart = id.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                id = id.Substring(0, queryStart);
+            }
+            return Uri.UnescapeDataString(id).Trim();
+        }
+
+        // Accepts the raw "computers" payload value (expected to be a JSON array
+        // deserialized as ArrayList) and returns a trimmed, de-duplicated list.
+        // De-duplication is case-insensitive but keeps the first-seen casing,
+        // matching ExpandInstallTargets' behavior for the same kind of input.
+        private static ArrayList NormalizeComputerList(object rawComputers)
+        {
+            ArrayList result = new ArrayList();
+            ArrayList source = rawComputers as ArrayList;
+            if (source == null)
+            {
+                return result;
+            }
+
+            Dictionary<string, bool> seen = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            foreach (object item in source)
+            {
+                string computer = Convert.ToString(item).Trim();
+                if (computer.Length == 0 || seen.ContainsKey(computer))
+                {
+                    continue;
+                }
+                seen[computer] = true;
+                result.Add(computer);
+            }
+            return result;
+        }
+
+        private void SendLicenses(Stream stream)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            List<Dictionary<string, object>> licenses;
+            lock (licensesLock)
+            {
+                licenses = LoadLicenses();
+            }
+
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["licenses"] = licenses;
+            SendJson(stream, serializer.Serialize(response));
+        }
+
+        private void CreateLicense(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string name = Convert.ToString(payload.ContainsKey("name") ? payload["name"] : "").Trim();
+            if (String.IsNullOrEmpty(name))
+            {
+                SendText(stream, "{\"error\":\"name is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string nowUtc = DateTime.UtcNow.ToString("o");
+            Dictionary<string, object> record = new Dictionary<string, object>();
+            record["id"] = Guid.NewGuid().ToString("N");
+            record["name"] = name;
+            record["version"] = Convert.ToString(payload.ContainsKey("version") ? payload["version"] : "").Trim();
+            record["license"] = Convert.ToString(payload.ContainsKey("license") ? payload["license"] : "").Trim();
+            record["comment"] = Convert.ToString(payload.ContainsKey("comment") ? payload["comment"] : "").Trim();
+            record["computers"] = NormalizeComputerList(payload.ContainsKey("computers") ? payload["computers"] : null);
+            record["createdAt"] = nowUtc;
+            record["updatedAt"] = nowUtc;
+
+            lock (licensesLock)
+            {
+                List<Dictionary<string, object>> licenses = LoadLicenses();
+                licenses.Add(record);
+                SaveLicenses(licenses);
+            }
+
+            SendJson(stream, serializer.Serialize(record));
+        }
+
+        private void UpdateLicense(Stream stream, RequestContext request)
+        {
+            string id = ExtractLicenseId(request.Path);
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string name = Convert.ToString(payload.ContainsKey("name") ? payload["name"] : "").Trim();
+            if (String.IsNullOrEmpty(name))
+            {
+                SendText(stream, "{\"error\":\"name is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            lock (licensesLock)
+            {
+                List<Dictionary<string, object>> licenses = LoadLicenses();
+                Dictionary<string, object> record = null;
+                for (int i = 0; i < licenses.Count; i++)
+                {
+                    if (String.Equals(GetStringValue(licenses[i], "id"), id, StringComparison.OrdinalIgnoreCase))
+                    {
+                        record = licenses[i];
+                        break;
+                    }
+                }
+
+                if (record == null)
+                {
+                    SendText(stream, "{\"error\":\"license not found\"}", "application/json; charset=utf-8", 404);
+                    return;
+                }
+
+                record["name"] = name;
+                record["version"] = Convert.ToString(payload.ContainsKey("version") ? payload["version"] : "").Trim();
+                record["license"] = Convert.ToString(payload.ContainsKey("license") ? payload["license"] : "").Trim();
+                record["comment"] = Convert.ToString(payload.ContainsKey("comment") ? payload["comment"] : "").Trim();
+                record["computers"] = NormalizeComputerList(payload.ContainsKey("computers") ? payload["computers"] : null);
+                record["updatedAt"] = DateTime.UtcNow.ToString("o");
+
+                SaveLicenses(licenses);
+                SendJson(stream, serializer.Serialize(record));
+            }
+        }
+
+        private void DeleteLicense(Stream stream, RequestContext request)
+        {
+            string id = ExtractLicenseId(request.Path);
+
+            lock (licensesLock)
+            {
+                List<Dictionary<string, object>> licenses = LoadLicenses();
+                int indexToRemove = -1;
+                for (int i = 0; i < licenses.Count; i++)
+                {
+                    if (String.Equals(GetStringValue(licenses[i], "id"), id, StringComparison.OrdinalIgnoreCase))
+                    {
+                        indexToRemove = i;
+                        break;
+                    }
+                }
+
+                if (indexToRemove < 0)
+                {
+                    SendText(stream, "{\"error\":\"license not found\"}", "application/json; charset=utf-8", 404);
+                    return;
+                }
+
+                licenses.RemoveAt(indexToRemove);
+                SaveLicenses(licenses);
+            }
+
+            SendJson(stream, "{\"status\":\"deleted\"}");
         }
 
         private static string GetExeVersion(string path)
@@ -1545,7 +2609,7 @@ namespace WindowsInventoryLite
             ms.Write(BitConverter.GetBytes(value), 0, 4);
         }
 
-        private static void SendBytes(NetworkStream stream, byte[] data, string contentType, string filename)
+        private static void SendBytes(Stream stream, byte[] data, string contentType, string filename)
         {
             string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Disposition: attachment; filename=\"" + filename + "\"\r\nContent-Length: " + data.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
@@ -1573,6 +2637,9 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ExpandInstallTarget passes through a single hostname", TestExpandInstallTargetHostname);
             allPassed &= SelfTestCheck(output, "ExpandInstallTargets de-duplicates and splits on separators", TestExpandInstallTargetsDedup);
             allPassed &= SelfTestCheck(output, "BuildZip produces a structurally valid archive", TestBuildZipStructure);
+            allPassed &= SelfTestCheck(output, "NormalizeThumbprint strips separators and uppercases", TestNormalizeThumbprint);
+            allPassed &= SelfTestCheck(output, "ExtractLicenseId strips the route prefix and query string", TestExtractLicenseIdWithQuery);
+            allPassed &= SelfTestCheck(output, "ExtractLicenseId decodes URL-encoded ids", TestExtractLicenseIdDecodesEscaping);
             return allPassed;
         }
 
@@ -1723,6 +2790,36 @@ namespace WindowsInventoryLite
             if (!nameFound)
             {
                 return "entry file name '" + names[0] + "' not found in archive bytes";
+            }
+            return null;
+        }
+
+        private static string TestNormalizeThumbprint()
+        {
+            string normalized = NormalizeThumbprint(" 89:b3-87 eb 01 88 ");
+            if (normalized != "89B387EB0188")
+            {
+                return "expected '89B387EB0188' but got '" + normalized + "'";
+            }
+            return null;
+        }
+
+        private static string TestExtractLicenseIdWithQuery()
+        {
+            string id = ExtractLicenseId("/api/v1/licenses/abc123?foo=bar");
+            if (id != "abc123")
+            {
+                return "expected 'abc123' but got '" + id + "'";
+            }
+            return null;
+        }
+
+        private static string TestExtractLicenseIdDecodesEscaping()
+        {
+            string id = ExtractLicenseId("/api/v1/licenses/abc%20123");
+            if (id != "abc 123")
+            {
+                return "expected 'abc 123' but got '" + id + "'";
             }
             return null;
         }

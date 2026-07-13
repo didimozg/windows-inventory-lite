@@ -7,202 +7,418 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header class="topbar">
-    <div>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Dashboard navigation">
       <h1>Windows Inventory Lite</h1>
-      <p id="generatedAt">Waiting for inventory data.</p>
+      <nav class="nav-tree">
+        <button id="dashboardTab" class="nav-item nav-item-root active" type="button">Dashboard</button>
+        <div class="nav-group">
+          <div class="nav-group-title">Inventory</div>
+          <button id="clientsTab" class="nav-item" type="button">Clients</button>
+          <button id="softwareTab" class="nav-item" type="button">Software</button>
+          <button id="hardwareTab" class="nav-item" type="button">Hardware</button>
+        </div>
+        <button id="licensesTab" class="nav-item nav-item-root" type="button">Licenses</button>
+        <div class="nav-group">
+          <div class="nav-group-title">Installation</div>
+          <button id="installTab" class="nav-item" type="button">Client actions</button>
+          <button id="packageTab" class="nav-item" type="button">Client package</button>
+        </div>
+        <div class="nav-group">
+          <div class="nav-group-title">Settings</div>
+          <button id="generalTab" class="nav-item" type="button">General</button>
+          <button id="certificateTab" class="nav-item" type="button">Certificate</button>
+          <button id="adminPasswordTab" class="nav-item" type="button">Change admin password</button>
+        </div>
+      </nav>
+      <div class="sidebar-footer">
+        <span id="serverVersionBadge">Server: unknown</span>
+        <span id="generatedAt">Waiting for inventory data.</span>
+      </div>
+    </aside>
+
+    <div class="content-area">
+      <header class="topbar">
+        <input id="searchInput" type="search" placeholder="Filter computers, OS, Office, software, hardware">
+      </header>
+
+      <main>
+        <section id="dashboardView" class="install-panel" aria-label="Dashboard">
+          <div id="dashboardTiles" class="summary dashboard-tiles">
+            <div><span id="dashClientCount">0</span><small>Clients</small></div>
+            <div><span id="dashWindowsActivated">0</span><small>Windows activated</small></div>
+            <div><span id="dashOfficeActivated">0</span><small>Office activated</small></div>
+            <div><span id="dashStaleCount">0</span><small id="dashStaleLabel">Stale &gt;48h</small></div>
+          </div>
+
+          <div class="dashboard-card">
+            <h2 class="settings-block-title">Software</h2>
+            <div class="summary dash-single-stat">
+              <div><span id="dashLicenseCount">0</span><small>Licenses</small></div>
+            </div>
+            <div class="dash-chart-grid">
+              <div class="dash-chart">
+                <h3>Top software</h3>
+                <div id="dashSoftwareChart" class="bar-chart"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="dashboard-card">
+            <h2 class="settings-block-title">Hardware</h2>
+            <div class="summary dash-single-stat">
+              <div><span id="dashUsbCount">0</span><small>Computers with USB storage</small></div>
+            </div>
+            <div class="dash-chart-grid">
+              <div class="dash-chart">
+                <h3>CPU models</h3>
+                <div id="dashCpuChart" class="bar-chart"></div>
+              </div>
+              <div class="dash-chart">
+                <h3>RAM</h3>
+                <div id="dashRamChart" class="bar-chart"></div>
+              </div>
+              <div class="dash-chart">
+                <h3>Storage type</h3>
+                <div id="dashStorageChart" class="bar-chart"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="generalView" class="install-panel hidden" aria-label="General settings">
+          <div class="settings-block">
+            <h2 class="settings-block-title">Inventory</h2>
+            <div class="pkg-grid general-grid">
+              <label class="pkg-token-field">
+                Stale threshold (hours)
+                <input id="generalStaleHours" type="number" min="1" max="8760" value="48">
+              </label>
+            </div>
+          </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">HTTPS</h2>
+            <div class="pkg-grid general-grid">
+              <label class="check-label">
+                <input id="generalUseHttps" type="checkbox">
+                Enable HTTPS (uses the certificate uploaded on the Certificate page)
+              </label>
+            </div>
+            <p id="generalCertHint" class="cert-hint hidden"></p>
+          </div>
+          <div class="pkg-buttons">
+            <button id="generalSaveButton" class="primary-button" type="button">Save</button>
+          </div>
+          <div id="generalMessage" class="pkg-message hidden"></div>
+        </section>
+
+        <section id="certificateView" class="install-panel hidden" aria-label="Server certificate">
+          <p id="certStatus" class="pkg-status">Loading certificate status...</p>
+          <div class="pkg-buttons">
+            <button id="certDeleteButton" class="danger-button hidden" type="button">Delete installed certificate</button>
+          </div>
+          <div class="pkg-grid">
+            <label class="pkg-url-field">
+              Certificate file (.pfx / .p12)
+              <input id="certFile" type="file" accept=".pfx,.p12">
+            </label>
+            <label class="pkg-token-field">
+              Certificate password
+              <input id="certPassword" type="password" autocomplete="off">
+            </label>
+            <div class="pkg-buttons">
+              <button id="certUploadButton" class="primary-button" type="button">Upload</button>
+            </div>
+          </div>
+          <p class="cert-hint">Uploading only stages the certificate. Turn HTTPS on or off from Settings &gt; General. The first upload travels over whatever transport is currently active - if the server is still plain HTTP, do this from a trusted network or the server console.</p>
+          <div id="certMessage" class="pkg-message hidden"></div>
+          <h2 class="cert-history-heading">Certificate history</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Uploaded</th>
+                  <th>Subject</th>
+                  <th>Expires</th>
+                  <th>Thumbprint</th>
+                  <th>Risks</th>
+                  <th>Delete</th>
+                </tr>
+              </thead>
+              <tbody id="certHistoryBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="adminPasswordView" class="install-panel hidden" aria-label="Change admin password">
+          <p id="adminPasswordStatusText" class="pkg-status">Loading status...</p>
+          <div class="pkg-grid admin-password-grid">
+            <label class="pkg-token-field">
+              Username
+              <input id="adminUsername" type="text" autocomplete="username">
+            </label>
+            <label id="adminCurrentPasswordField" class="pkg-token-field">
+              Current password
+              <input id="adminCurrentPassword" type="password" autocomplete="current-password">
+            </label>
+            <label class="pkg-token-field">
+              New password
+              <input id="adminNewPassword" type="password" autocomplete="new-password">
+            </label>
+            <label class="pkg-token-field">
+              Confirm new password
+              <input id="adminConfirmPassword" type="password" autocomplete="new-password">
+            </label>
+            <div class="pkg-buttons">
+              <button id="adminPasswordSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+          </div>
+          <p class="cert-hint">Your browser may prompt for the new credentials on the next request after saving.</p>
+          <div id="adminPasswordMessage" class="pkg-message hidden"></div>
+        </section>
+
+        <section id="licensesView" class="hidden" aria-label="License inventory">
+          <div class="view-toolbar">
+            <button id="licenseAddButton" class="primary-button" type="button">Add license</button>
+            <button id="exportLicensesBtn" class="export-button" type="button">Export CSV</button>
+          </div>
+          <div id="licenseForm" class="install-panel hidden" aria-label="License entry">
+            <div class="license-grid">
+              <label class="license-name-field">
+                Name
+                <input id="licenseName" type="text" list="softwareNameOptions" placeholder="Select or type a name">
+              </label>
+              <label class="license-version-field">
+                Version
+                <input id="licenseVersion" type="text" list="softwareVersionOptions" placeholder="Version">
+              </label>
+              <label class="license-key-field">
+                License
+                <input id="licenseKey" type="text" placeholder="License type, k...">
+              </label>
+              <label class="license-comment-field">
+                Comment
+                <input id="licenseComment" type="text" placeholder="Free-form notes">
+              </label>
+            </div>
+            <div class="license-computers-field">
+              <label>
+                Computers
+                <div class="chip-input-row">
+                  <input id="licenseComputerInput" type="text" placeholder="Type a computer name and press Enter">
+                  <button id="licenseComputerAddButton" class="export-button" type="button">Add</button>
+                </div>
+              </label>
+              <ul id="licenseComputersList" class="chip-list"></ul>
+            </div>
+            <div class="pkg-buttons license-buttons">
+              <button id="licenseSaveButton" class="primary-button" type="button">Save</button>
+              <button id="licenseCancelButton" class="export-button" type="button">Cancel</button>
+            </div>
+            <div id="licenseMessage" class="pkg-message hidden"></div>
+          </div>
+          <datalist id="softwareNameOptions"></datalist>
+          <datalist id="softwareVersionOptions"></datalist>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th data-sort-table="licenses" data-sort-key="name" class="sortable">Name</th>
+                  <th data-sort-table="licenses" data-sort-key="version" class="sortable">Version</th>
+                  <th data-sort-table="licenses" data-sort-key="license" class="sortable">License</th>
+                  <th data-sort-table="licenses" data-sort-key="comment" class="sortable">Comment</th>
+                  <th>Computers</th>
+                  <th>Edit</th>
+                  <th>Delete</th>
+                </tr>
+              </thead>
+              <tbody id="licensesBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="packageView" class="install-panel hidden" aria-label="Client package">
+          <p id="pkgStatus" class="pkg-status">Loading package status...</p>
+          <div class="pkg-grid">
+            <label class="pkg-url-field">
+              Server URL
+              <input id="pkgServerUrl" type="text" placeholder="http://192.168.1.1:8080/api/v1/inventory">
+            </label>
+            <label class="pkg-token-field">
+              Ingestion token
+              <input id="pkgToken" type="text" autocomplete="off" placeholder="leave empty if not used">
+            </label>
+            <label class="pkg-interval-field">
+              Interval (hours)
+              <input id="pkgIntervalHours" type="number" min="1" max="24" value="6">
+            </label>
+            <div class="pkg-buttons">
+              <button id="pkgSaveButton" class="primary-button" type="button">Save</button>
+              <button id="pkgDownloadButton" class="export-button" type="button">Download GPO package</button>
+            </div>
+          </div>
+          <div id="pkgMessage" class="pkg-message hidden"></div>
+        </section>
+
+        <section id="installView" class="install-panel hidden" aria-label="Remote client actions">
+          <div class="install-grid">
+            <label class="install-action-field">
+              Action
+              <select id="clientAction">
+                <option value="install">Install client</option>
+                <option value="uninstall">Uninstall client</option>
+              </select>
+            </label>
+            <label class="install-targets-field">
+              Targets
+              <textarea id="installTargets" rows="4" placeholder="PC-001&#10;PC-002&#10;192.0.2.10&#10;192.0.2.20-192.0.2.30"></textarea>
+            </label>
+            <label class="install-server-field install-only">
+              Server URL
+              <input id="installServerUrl" type="text" value="">
+            </label>
+            <label class="install-user-field">
+              WinRM user
+              <input id="installUsername" type="text" autocomplete="username" placeholder="DOMAIN\User">
+            </label>
+            <label class="install-password-field">
+              WinRM password
+              <input id="installPassword" type="password" autocomplete="current-password">
+            </label>
+            <label class="check-label install-force-field install-only">
+              <input id="installForce" type="checkbox">
+              Force reinstall
+            </label>
+            <label class="check-label install-trusted-field">
+              <input id="installTrustedHosts" type="checkbox">
+              Add to TrustedHosts
+            </label>
+            <label class="install-retention-field">
+              Log retention days
+              <input id="installRetentionDays" type="number" min="1" max="3650" value="30">
+            </label>
+            <button id="installButton" class="primary-button" type="button">Install client</button>
+          </div>
+          <div id="installStatus" class="install-status empty">No install job started.</div>
+          <div id="installHistory" class="install-history empty">No saved client action logs.</div>
+        </section>
+
+        <section id="clientsView" aria-label="Client inventory">
+          <div class="view-toolbar">
+            <button id="exportClientsBtn" class="export-button" type="button">Export CSV</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th data-sort-table="clients" data-sort-key="computerName" class="sortable">Computer</th>
+                  <th data-sort-table="clients" data-sort-key="clientVersion" class="sortable">Client</th>
+                  <th data-sort-table="clients" data-sort-key="os" class="sortable">OS</th>
+                  <th data-sort-table="clients" data-sort-key="office" class="sortable">Office</th>
+                  <th data-sort-table="clients" data-sort-key="windowsActivated" class="sortable">Windows</th>
+                  <th data-sort-table="clients" data-sort-key="officeActivated" class="sortable">Office activation</th>
+                  <th data-sort-table="clients" data-sort-key="softwareCount" class="sortable">Software</th>
+                  <th data-sort-table="clients" data-sort-key="collectedAt" class="sortable">Collected</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="inventoryBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="softwareView" class="hidden" aria-label="Software inventory">
+          <div class="view-toolbar">
+            <button id="exportSoftwareBtn" class="export-button" type="button">Export CSV</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th data-sort-table="software" data-sort-key="name" class="sortable">Software</th>
+                  <th data-sort-table="software" data-sort-key="version" class="sortable">Version</th>
+                  <th data-sort-table="software" data-sort-key="publisher" class="sortable">Publisher</th>
+                  <th data-sort-table="software" data-sort-key="count" class="sortable">Installations</th>
+                  <th>Computers</th>
+                  <th>License</th>
+                </tr>
+              </thead>
+              <tbody id="softwareBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="hardwareView" class="hidden" aria-label="Hardware inventory">
+          <div class="hw-section">
+            <div class="hw-section-header">
+              <h2 class="hw-heading">CPUs</h2>
+              <button id="exportCpuBtn" class="export-button" type="button">Export CSV</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th data-sort-table="hwCpu" data-sort-key="name" class="sortable">Model</th>
+                    <th data-sort-table="hwCpu" data-sort-key="cores" class="sortable">Cores</th>
+                    <th data-sort-table="hwCpu" data-sort-key="clockMhz" class="sortable">Clock</th>
+                    <th data-sort-table="hwCpu" data-sort-key="count" class="sortable">Machines</th>
+                    <th>Computers</th>
+                  </tr>
+                </thead>
+                <tbody id="hwCpuBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="hw-section">
+            <div class="hw-section-header">
+              <h2 class="hw-heading">Storage</h2>
+              <button id="exportDiskBtn" class="export-button" type="button">Export CSV</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th data-sort-table="hwDisk" data-sort-key="model" class="sortable">Model</th>
+                    <th data-sort-table="hwDisk" data-sort-key="type" class="sortable">Type</th>
+                    <th data-sort-table="hwDisk" data-sort-key="sizeGb" class="sortable">Size</th>
+                    <th data-sort-table="hwDisk" data-sort-key="count" class="sortable">Machines</th>
+                    <th>Computers</th>
+                  </tr>
+                </thead>
+                <tbody id="hwDiskBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="hw-section">
+            <div class="hw-section-header">
+              <h2 class="hw-heading">RAM</h2>
+              <button id="exportRamBtn" class="export-button" type="button">Export CSV</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th data-sort-table="hwRam" data-sort-key="totalMb" class="sortable">Total</th>
+                    <th data-sort-table="hwRam" data-sort-key="moduleCount" class="sortable">Modules</th>
+                    <th data-sort-table="hwRam" data-sort-key="count" class="sortable">Machines</th>
+                    <th>Computers</th>
+                  </tr>
+                </thead>
+                <tbody id="hwRamBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section id="summarySection" class="summary" aria-label="Inventory summary">
+          <div><span id="clientCount">0</span><small>Clients</small></div>
+          <div><span id="windowsActivated">0</span><small>Windows activated</small></div>
+          <div><span id="officeActivated">0</span><small>Office activated</small></div>
+          <div><span id="staleCount">0</span><small id="staleLabel">Stale &gt;48h</small></div>
+        </section>
+      </main>
     </div>
-    <input id="searchInput" type="search" placeholder="Filter computers, OS, Office, software, hardware">
-  </header>
-
-  <main>
-    <nav class="tabs" aria-label="Dashboard views">
-      <button id="clientsTab" class="tab active" type="button">Clients</button>
-      <button id="softwareTab" class="tab" type="button">Software</button>
-      <button id="hardwareTab" class="tab" type="button">Hardware</button>
-      <button id="installTab" class="tab" type="button">Client actions</button>
-      <button id="packageTab" class="tab" type="button">Client package</button>
-    </nav>
-
-    <section id="packageView" class="install-panel hidden" aria-label="Client package">
-      <p id="pkgStatus" class="pkg-status">Loading package status...</p>
-      <div class="pkg-grid">
-        <label class="pkg-url-field">
-          Server URL
-          <input id="pkgServerUrl" type="text" placeholder="http://192.168.1.1:8080/api/v1/inventory">
-        </label>
-        <label class="pkg-token-field">
-          Ingestion token
-          <input id="pkgToken" type="text" autocomplete="off" placeholder="leave empty if not used">
-        </label>
-        <label class="pkg-interval-field">
-          Interval (hours)
-          <input id="pkgIntervalHours" type="number" min="1" max="24" value="6">
-        </label>
-        <div class="pkg-buttons">
-          <button id="pkgSaveButton" class="primary-button" type="button">Save</button>
-          <button id="pkgDownloadButton" class="export-button" type="button">Download GPO package</button>
-        </div>
-      </div>
-      <div id="pkgMessage" class="pkg-message hidden"></div>
-    </section>
-
-    <section id="installView" class="install-panel hidden" aria-label="Remote client actions">
-      <div class="install-grid">
-        <label class="install-action-field">
-          Action
-          <select id="clientAction">
-            <option value="install">Install client</option>
-            <option value="uninstall">Uninstall client</option>
-          </select>
-        </label>
-        <label class="install-targets-field">
-          Targets
-          <textarea id="installTargets" rows="4" placeholder="PC-001&#10;PC-002&#10;192.0.2.10&#10;192.0.2.20-192.0.2.30"></textarea>
-        </label>
-        <label class="install-server-field install-only">
-          Server URL
-          <input id="installServerUrl" type="text" value="">
-        </label>
-        <label class="install-user-field">
-          WinRM user
-          <input id="installUsername" type="text" autocomplete="username" placeholder="DOMAIN\User">
-        </label>
-        <label class="install-password-field">
-          WinRM password
-          <input id="installPassword" type="password" autocomplete="current-password">
-        </label>
-        <label class="check-label install-force-field install-only">
-          <input id="installForce" type="checkbox">
-          Force reinstall
-        </label>
-        <label class="check-label install-trusted-field">
-          <input id="installTrustedHosts" type="checkbox">
-          Add to TrustedHosts
-        </label>
-        <label class="install-retention-field">
-          Log retention days
-          <input id="installRetentionDays" type="number" min="1" max="3650" value="30">
-        </label>
-        <button id="installButton" class="primary-button" type="button">Install client</button>
-      </div>
-      <div id="installStatus" class="install-status empty">No install job started.</div>
-      <div id="installHistory" class="install-history empty">No saved client action logs.</div>
-    </section>
-
-    <section class="summary" aria-label="Inventory summary">
-      <div><span id="clientCount">0</span><small>Clients</small></div>
-      <div><span id="windowsActivated">0</span><small>Windows activated</small></div>
-      <div><span id="officeActivated">0</span><small>Office activated</small></div>
-      <div><span id="staleCount">0</span><small>Stale &gt;48h</small></div>
-    </section>
-
-    <section id="clientsView" aria-label="Client inventory">
-      <div class="view-toolbar">
-        <button id="exportClientsBtn" class="export-button" type="button">Export CSV</button>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th data-sort-table="clients" data-sort-key="computerName" class="sortable">Computer</th>
-              <th data-sort-table="clients" data-sort-key="clientVersion" class="sortable">Client</th>
-              <th data-sort-table="clients" data-sort-key="os" class="sortable">OS</th>
-              <th data-sort-table="clients" data-sort-key="office" class="sortable">Office</th>
-              <th data-sort-table="clients" data-sort-key="windowsActivated" class="sortable">Windows</th>
-              <th data-sort-table="clients" data-sort-key="officeActivated" class="sortable">Office activation</th>
-              <th data-sort-table="clients" data-sort-key="softwareCount" class="sortable">Software</th>
-              <th data-sort-table="clients" data-sort-key="collectedAt" class="sortable">Collected</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="inventoryBody"></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section id="softwareView" class="hidden" aria-label="Software inventory">
-      <div class="view-toolbar">
-        <button id="exportSoftwareBtn" class="export-button" type="button">Export CSV</button>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th data-sort-table="software" data-sort-key="name" class="sortable">Software</th>
-              <th data-sort-table="software" data-sort-key="version" class="sortable">Version</th>
-              <th data-sort-table="software" data-sort-key="publisher" class="sortable">Publisher</th>
-              <th data-sort-table="software" data-sort-key="count" class="sortable">Installations</th>
-              <th>Computers</th>
-            </tr>
-          </thead>
-          <tbody id="softwareBody"></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section id="hardwareView" class="hidden" aria-label="Hardware inventory">
-      <div class="hw-section">
-        <div class="hw-section-header">
-          <h2 class="hw-heading">CPUs</h2>
-          <button id="exportCpuBtn" class="export-button" type="button">Export CSV</button>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th data-sort-table="hwCpu" data-sort-key="name" class="sortable">Model</th>
-                <th data-sort-table="hwCpu" data-sort-key="cores" class="sortable">Cores</th>
-                <th data-sort-table="hwCpu" data-sort-key="clockMhz" class="sortable">Clock</th>
-                <th data-sort-table="hwCpu" data-sort-key="count" class="sortable">Machines</th>
-                <th>Computers</th>
-              </tr>
-            </thead>
-            <tbody id="hwCpuBody"></tbody>
-          </table>
-        </div>
-      </div>
-      <div class="hw-section">
-        <div class="hw-section-header">
-          <h2 class="hw-heading">Storage</h2>
-          <button id="exportDiskBtn" class="export-button" type="button">Export CSV</button>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th data-sort-table="hwDisk" data-sort-key="model" class="sortable">Model</th>
-                <th data-sort-table="hwDisk" data-sort-key="type" class="sortable">Type</th>
-                <th data-sort-table="hwDisk" data-sort-key="sizeGb" class="sortable">Size</th>
-                <th data-sort-table="hwDisk" data-sort-key="count" class="sortable">Machines</th>
-                <th>Computers</th>
-              </tr>
-            </thead>
-            <tbody id="hwDiskBody"></tbody>
-          </table>
-        </div>
-      </div>
-      <div class="hw-section">
-        <div class="hw-section-header">
-          <h2 class="hw-heading">RAM</h2>
-          <button id="exportRamBtn" class="export-button" type="button">Export CSV</button>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th data-sort-table="hwRam" data-sort-key="totalMb" class="sortable">Total</th>
-                <th data-sort-table="hwRam" data-sort-key="moduleCount" class="sortable">Modules</th>
-                <th data-sort-table="hwRam" data-sort-key="count" class="sortable">Machines</th>
-                <th>Computers</th>
-              </tr>
-            </thead>
-            <tbody id="hwRamBody"></tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-  </main>
+  </div>
 
   <script src="app.js"></script>
 </body>
