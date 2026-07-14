@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-14
+
+Closes out the three items left documented-but-not-fixed in 0.5.1's review.
+
+### Fixed
+
+- Report filenames derived from a client-reported computer name could collide with a Windows reserved device name (`CON`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`) - reserved regardless of extension, so `CON.json` is just as blocked as `CON`. A computer reporting one of these names would have made every write to its own report file fail. `SanitizeFileName` now prefixes an underscore when the sanitized name (up to the first `.`) matches one, breaking the collision.
+- Basic Auth credential comparison used `==`/`String.Equals`, which fails fast at the first mismatched byte - a timing side-channel that leaks how many leading characters of a guess were correct (CWE-208). Replaced with a constant-time comparison that always walks the full length of both inputs, applied to both the login check and the "current password" check when rotating the admin password. Both comparisons (username and password) are evaluated unconditionally rather than short-circuited, so the password check's timing can't leak whether the username alone was right.
+- WinRM install/uninstall credentials no longer travel through the spawned `powershell.exe`'s command line. They're written to the child process's stdin instead and read there into a `PSCredential`, using the `-Credential` parameter `Install-ClientWinRM.ps1`/`Uninstall-ClientWinRM.ps1` already supported. Verified end-to-end against a stub WinRM script: the credential round-trips correctly, and a live process listing during the job confirmed no process command line contains the password anymore.
+
 ## [0.5.1] - 2026-07-14
 
 Found by a manual security and code-quality review of the full codebase, not by a user report.

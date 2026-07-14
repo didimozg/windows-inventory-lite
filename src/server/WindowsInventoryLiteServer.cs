@@ -18,7 +18,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.5.1";
+        internal const string ProductVersion = "0.5.2";
 
         private static int Main(string[] args)
         {
@@ -799,18 +799,15 @@ namespace WindowsInventoryLite
             CleanupInstallJobLogs();
         }
 
-        // Known tradeoff: username/password ride along in the spawned
-        // powershell.exe's command line (built below via
-        // BuildPowerShellInstallArguments), which means they are visible for
-        // the life of that process to anything on this machine that can list
-        // process command lines (Task Manager "Details" with the Command
-        // line column, Get-Process, etc.). Reaching that requires local
-        // access to the server already, at which point server-config.json's
-        // own plaintext WebPassword is an equally easy target - this does not
-        // introduce a new privilege boundary, just another instance of the
-        // same one. Not fixed here because the alternative (temp credential
-        // file, named pipe, or similar) is a real redesign, not a one-line
-        // change.
+        // Credentials are never embedded in the command line (see
+        // BuildCredentialReaderSnippet): they travel over the child
+        // process's stdin pipe instead, which - unlike ProcessStartInfo.Arguments -
+        // is not visible to anything inspecting this process's static state
+        // (Task Manager's Command line column, Get-Process, WMI Win32_Process,
+        // etc.). It's still an OS pipe local to this machine, not encrypted
+        // transport, so it doesn't protect against something actively
+        // attached as a debugger - but that already implies far deeper
+        // compromise than reading a process list.
         private Dictionary<string, object> RunClientInstallTarget(string target, string serverUrl, string username, string password, bool force, bool addToTrustedHosts)
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
@@ -831,10 +828,17 @@ namespace WindowsInventoryLite
                 return result;
             }
 
+            bool hasCredential = !String.IsNullOrEmpty(username) && !String.IsNullOrEmpty(password);
+            string commandBody = "[Console]::OutputEncoding = [System.Text.Encoding]::Default; $OutputEncoding = [Console]::OutputEncoding; "
+                + BuildCredentialReaderSnippet(hasCredential)
+                + "& " + QuotePowerShellLiteral(options.WinRmInstallerPath) + " "
+                + BuildPowerShellInstallArguments(target, serverUrl, hasCredential, force, addToTrustedHosts, options.ClientPackagePath);
+
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = "powershell.exe";
-            startInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command " + QuoteArgument("[Console]::OutputEncoding = [System.Text.Encoding]::Default; $OutputEncoding = [Console]::OutputEncoding; & " + QuotePowerShellLiteral(options.WinRmInstallerPath) + " " + BuildPowerShellInstallArguments(target, serverUrl, username, password, force, addToTrustedHosts, options.ClientPackagePath));
+            startInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command " + QuoteArgument(commandBody);
             startInfo.UseShellExecute = false;
+            startInfo.RedirectStandardInput = hasCredential;
             startInfo.RedirectStandardOutput = true;
             startInfo.RedirectStandardError = true;
             startInfo.CreateNoWindow = true;
@@ -843,6 +847,12 @@ namespace WindowsInventoryLite
             {
                 using (Process process = Process.Start(startInfo))
                 {
+                    if (hasCredential)
+                    {
+                        process.StandardInput.WriteLine(username);
+                        process.StandardInput.WriteLine(password);
+                        process.StandardInput.Close();
+                    }
                     string output = process.StandardOutput.ReadToEnd();
                     string error = process.StandardError.ReadToEnd();
                     process.WaitForExit();
@@ -863,7 +873,7 @@ namespace WindowsInventoryLite
             return result;
         }
 
-        // Same command-line credential exposure tradeoff as RunClientInstallTarget above.
+        // Same stdin-based credential passing as RunClientInstallTarget above.
         private Dictionary<string, object> RunClientUninstallTarget(string target, string username, string password, bool addToTrustedHosts)
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
@@ -877,10 +887,17 @@ namespace WindowsInventoryLite
                 return result;
             }
 
+            bool hasCredential = !String.IsNullOrEmpty(username) && !String.IsNullOrEmpty(password);
+            string commandBody = "[Console]::OutputEncoding = [System.Text.Encoding]::Default; $OutputEncoding = [Console]::OutputEncoding; "
+                + BuildCredentialReaderSnippet(hasCredential)
+                + "& " + QuotePowerShellLiteral(options.WinRmUninstallerPath) + " "
+                + BuildPowerShellUninstallArguments(target, hasCredential, addToTrustedHosts);
+
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = "powershell.exe";
-            startInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command " + QuoteArgument("[Console]::OutputEncoding = [System.Text.Encoding]::Default; $OutputEncoding = [Console]::OutputEncoding; & " + QuotePowerShellLiteral(options.WinRmUninstallerPath) + " " + BuildPowerShellUninstallArguments(target, username, password, addToTrustedHosts));
+            startInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command " + QuoteArgument(commandBody);
             startInfo.UseShellExecute = false;
+            startInfo.RedirectStandardInput = hasCredential;
             startInfo.RedirectStandardOutput = true;
             startInfo.RedirectStandardError = true;
             startInfo.CreateNoWindow = true;
@@ -889,6 +906,12 @@ namespace WindowsInventoryLite
             {
                 using (Process process = Process.Start(startInfo))
                 {
+                    if (hasCredential)
+                    {
+                        process.StandardInput.WriteLine(username);
+                        process.StandardInput.WriteLine(password);
+                        process.StandardInput.Close();
+                    }
                     string output = process.StandardOutput.ReadToEnd();
                     string error = process.StandardError.ReadToEnd();
                     process.WaitForExit();
@@ -1144,16 +1167,30 @@ namespace WindowsInventoryLite
             return "'" + value.Replace("'", "''") + "'";
         }
 
-        private static string BuildPowerShellInstallArguments(string target, string serverUrl, string username, string password, bool force, bool addToTrustedHosts, string packagePath)
+        // Fixed, non-secret variable names embedded directly in the command
+        // text - there is nothing user-supplied in this snippet, so there is
+        // nothing to escape or inject through it. $__wilCredential is picked
+        // up by name in BuildPowerShellInstallArguments/
+        // BuildPowerShellUninstallArguments below when hasCredential is true.
+        private static string BuildCredentialReaderSnippet(bool hasCredential)
+        {
+            if (!hasCredential)
+            {
+                return "";
+            }
+            return "$__wilUser = [Console]::In.ReadLine(); $__wilPass = [Console]::In.ReadLine(); "
+                + "$__wilCredential = New-Object System.Management.Automation.PSCredential($__wilUser, (ConvertTo-SecureString -String $__wilPass -AsPlainText -Force)); ";
+        }
+
+        private static string BuildPowerShellInstallArguments(string target, string serverUrl, bool hasCredential, bool force, bool addToTrustedHosts, string packagePath)
         {
             StringBuilder builder = new StringBuilder();
             builder.Append("-ComputerName ").Append(QuotePowerShellLiteral(target));
             builder.Append(" -ServerUrl ").Append(QuotePowerShellLiteral(serverUrl));
             builder.Append(" -PackagePath ").Append(QuotePowerShellLiteral(packagePath));
-            if (!String.IsNullOrEmpty(username) && !String.IsNullOrEmpty(password))
+            if (hasCredential)
             {
-                builder.Append(" -CredentialUsername ").Append(QuotePowerShellLiteral(username));
-                builder.Append(" -CredentialPassword ").Append(QuotePowerShellLiteral(password));
+                builder.Append(" -Credential $__wilCredential");
             }
             if (force)
             {
@@ -1166,14 +1203,13 @@ namespace WindowsInventoryLite
             return builder.ToString();
         }
 
-        private static string BuildPowerShellUninstallArguments(string target, string username, string password, bool addToTrustedHosts)
+        private static string BuildPowerShellUninstallArguments(string target, bool hasCredential, bool addToTrustedHosts)
         {
             StringBuilder builder = new StringBuilder();
             builder.Append("-ComputerName ").Append(QuotePowerShellLiteral(target));
-            if (!String.IsNullOrEmpty(username) && !String.IsNullOrEmpty(password))
+            if (hasCredential)
             {
-                builder.Append(" -CredentialUsername ").Append(QuotePowerShellLiteral(username));
-                builder.Append(" -CredentialPassword ").Append(QuotePowerShellLiteral(password));
+                builder.Append(" -Credential $__wilCredential");
             }
             if (addToTrustedHosts)
             {
@@ -1207,12 +1243,42 @@ namespace WindowsInventoryLite
 
                 string username = decoded.Substring(0, separator);
                 string password = decoded.Substring(separator + 1);
-                return username == options.WebUsername && password == options.WebPassword;
+                // Two separate FixedTimeEquals calls combined with & (not &&):
+                // && would still short-circuit after the username check fails,
+                // making the password comparison's timing an observable signal
+                // for "was the username right." Evaluating both unconditionally
+                // closes that too.
+                bool usernameMatches = FixedTimeEquals(username, options.WebUsername);
+                bool passwordMatches = FixedTimeEquals(password, options.WebPassword);
+                return usernameMatches & passwordMatches;
             }
             catch
             {
                 return false;
             }
+        }
+
+        // Ordinary == (or String.Equals) fails fast at the first mismatched
+        // character, which leaks how many leading characters of a guess were
+        // correct via response timing - a textbook side-channel against
+        // repeated login attempts (CWE-208). This walks the full length of
+        // both inputs every time regardless of where they first differ, so
+        // comparison time does not depend on how close the guess was.
+        // .NET Framework has no built-in constant-time compare
+        // (CryptographicOperations.FixedTimeEquals is .NET Core 2.1+ only).
+        private static bool FixedTimeEquals(string a, string b)
+        {
+            byte[] aBytes = Encoding.UTF8.GetBytes(a ?? "");
+            byte[] bBytes = Encoding.UTF8.GetBytes(b ?? "");
+            int length = Math.Max(aBytes.Length, bBytes.Length);
+            int diff = aBytes.Length ^ bBytes.Length;
+            for (int i = 0; i < length; i++)
+            {
+                byte x = i < aBytes.Length ? aBytes[i] : (byte)0;
+                byte y = i < bBytes.Length ? bBytes[i] : (byte)0;
+                diff |= x ^ y;
+            }
+            return diff == 0;
         }
 
         private void SendDashboardFile(Stream stream, string fileName, string fallback, string contentType)
@@ -1387,11 +1453,28 @@ namespace WindowsInventoryLite
             stream.Write(body, 0, body.Length);
         }
 
+        // Windows reserves these as device names for any file whose name is
+        // exactly one of them up to the first '.', regardless of extension -
+        // "CON.json" is just as reserved as "CON" itself. Case-insensitive.
+        private static readonly string[] ReservedDeviceNames =
+        {
+            "CON", "PRN", "AUX", "NUL",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+        };
+
         // Allowing '.' looks risky at a glance (doesn't ".." mean parent
         // directory?), but it's safe here: '/' and '\' are not in the allowed
         // set, so the result can never contain a path separator, and every
         // caller appends ".json" to it - a value made entirely of dots can
         // never collide with "." or ".." as a whole path segment.
+        //
+        // A computer legitimately reporting itself as one of the reserved
+        // device names above (see ReservedDeviceNames) would otherwise make
+        // every write to its own report file fail, since every caller
+        // appends an extension rather than using the sanitized value bare -
+        // an underscore prefix breaks the match while keeping the name
+        // recognizable.
         private static string SanitizeFileName(string value)
         {
             StringBuilder builder = new StringBuilder();
@@ -1399,7 +1482,19 @@ namespace WindowsInventoryLite
             {
                 builder.Append(Char.IsLetterOrDigit(c) || c == '-' || c == '_' || c == '.' ? c : '_');
             }
-            return builder.ToString();
+            string sanitized = builder.ToString();
+
+            int dotIndex = sanitized.IndexOf('.');
+            string baseName = dotIndex >= 0 ? sanitized.Substring(0, dotIndex) : sanitized;
+            foreach (string reserved in ReservedDeviceNames)
+            {
+                if (String.Equals(baseName, reserved, StringComparison.OrdinalIgnoreCase))
+                {
+                    return "_" + sanitized;
+                }
+            }
+
+            return sanitized;
         }
 
         private sealed class RequestContext
@@ -2164,7 +2259,7 @@ namespace WindowsInventoryLite
             if (alreadyConfigured)
             {
                 string currentPassword = Convert.ToString(payload.ContainsKey("currentPassword") ? payload["currentPassword"] : "");
-                if (!String.Equals(currentPassword, options.WebPassword, StringComparison.Ordinal))
+                if (!FixedTimeEquals(currentPassword, options.WebPassword))
                 {
                     SendText(stream, "{\"error\":\"current password is incorrect\"}", "application/json; charset=utf-8", 401);
                     return;
@@ -2678,6 +2773,9 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "NormalizeThumbprint strips separators and uppercases", TestNormalizeThumbprint);
             allPassed &= SelfTestCheck(output, "ExtractLicenseId strips the route prefix and query string", TestExtractLicenseIdWithQuery);
             allPassed &= SelfTestCheck(output, "ExtractLicenseId decodes URL-encoded ids", TestExtractLicenseIdDecodesEscaping);
+            allPassed &= SelfTestCheck(output, "SanitizeFileName escapes a reserved Windows device name", TestSanitizeFileNameReservedDeviceName);
+            allPassed &= SelfTestCheck(output, "SanitizeFileName leaves a normal computer name untouched", TestSanitizeFileNameNormalName);
+            allPassed &= SelfTestCheck(output, "FixedTimeEquals matches identical strings and rejects everything else", TestFixedTimeEquals);
             return allPassed;
         }
 
@@ -2858,6 +2956,60 @@ namespace WindowsInventoryLite
             if (id != "abc 123")
             {
                 return "expected 'abc 123' but got '" + id + "'";
+            }
+            return null;
+        }
+
+        private static string TestSanitizeFileNameReservedDeviceName()
+        {
+            string[] cases = { "CON", "con", "NUL", "com1", "LPT9", "con.evil" };
+            foreach (string input in cases)
+            {
+                string sanitized = SanitizeFileName(input);
+                int dotIndex = sanitized.IndexOf('.');
+                string baseName = dotIndex >= 0 ? sanitized.Substring(0, dotIndex) : sanitized;
+                foreach (string reserved in ReservedDeviceNames)
+                {
+                    if (String.Equals(baseName, reserved, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return "'" + input + "' sanitized to '" + sanitized + "', which is still a reserved device name";
+                    }
+                }
+            }
+            return null;
+        }
+
+        private static string TestSanitizeFileNameNormalName()
+        {
+            string sanitized = SanitizeFileName("PC-ACCOUNTING-01.example");
+            if (sanitized != "PC-ACCOUNTING-01.example")
+            {
+                return "expected an ordinary name to pass through unchanged, got '" + sanitized + "'";
+            }
+            return null;
+        }
+
+        private static string TestFixedTimeEquals()
+        {
+            if (!FixedTimeEquals("correct horse", "correct horse"))
+            {
+                return "expected identical strings to match";
+            }
+            if (FixedTimeEquals("correct horse", "correct Horse"))
+            {
+                return "expected a case difference to not match";
+            }
+            if (FixedTimeEquals("short", "shorter"))
+            {
+                return "expected different-length strings to not match";
+            }
+            if (!FixedTimeEquals("", ""))
+            {
+                return "expected two empty strings to match";
+            }
+            if (FixedTimeEquals(null, "x"))
+            {
+                return "expected null vs non-empty to not match";
             }
             return null;
         }
