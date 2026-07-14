@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-14
+
+### Changed
+
+- Adopted a formal design-token spec for the dashboard, in both themes: light background `#f8f9fa`, graphite body text `#2d3748`, borders `#e2e8f0`; dark background `#111827`, panels `#1f2937`, body text `#e2e8f0`, headings pinned to white. The accent teal (`#126f8f`) is unchanged in light theme and slightly brightened in dark theme (`#1c93bc`) for contrast, consistent with the existing dark-theme approach.
+- Body font stack now leads with `Inter`/`Roboto` before falling back to `Segoe UI` (the fonts only apply if already installed locally - the dashboard still ships with no web-font/CDN dependency, so it keeps working on isolated networks).
+- IP addresses, OS version/build strings, and certificate thumbprints now render in a monospace stack (`JetBrains Mono` falling back to `Consolas`), matching the rest of the dashboard's existing use of Consolas for install-job output.
+
+## [0.7.1] - 2026-07-14
+
+### Changed
+
+- Replaced the README logo (`docs/images/logo.svg`) with a fuller mark: a monitor containing a small org-chart/tree of connected nodes and a checkmark hub, representing the inventory-collection concept more directly than the earlier plain checkmark-monitor glyph. The dashboard favicon keeps the simpler glyph, since the richer version doesn't read at 16px in a browser tab.
+
 ## [0.7.0] - 2026-07-14
 
 ### Added

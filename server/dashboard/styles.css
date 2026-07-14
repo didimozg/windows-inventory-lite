@@ -1,10 +1,11 @@
 :root {
   color-scheme: light;
-  --bg: #f5f7fa;
+  --bg: #f8f9fa;
   --panel: #ffffff;
-  --text: #17202a;
-  --muted: #5f6b7a;
-  --line: #d9e0e8;
+  --text: #2d3748;
+  --heading: #2d3748;
+  --muted: #718096;
+  --line: #e2e8f0;
   --accent: #126f8f;
   --accent-text: #ffffff;
   --danger: #a9362d;
@@ -35,13 +36,14 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg: #10161c;
-    --panel: #1a222b;
-    --text: #e6edf3;
-    --muted: #8a97a6;
-    --line: #2b3641;
-    --accent: #4fb8de;
-    --accent-text: #062028;
+    --bg: #111827;
+    --panel: #1f2937;
+    --text: #e2e8f0;
+    --heading: #ffffff;
+    --muted: #94a3b8;
+    --line: #374151;
+    --accent: #1c93bc;
+    --accent-text: #04141a;
     --danger: #ff7a6e;
     --danger-bg: #3a1f1e;
     --danger-border: #7a3b35;
@@ -66,13 +68,14 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #10161c;
-  --panel: #1a222b;
-  --text: #e6edf3;
-  --muted: #8a97a6;
-  --line: #2b3641;
-  --accent: #4fb8de;
-  --accent-text: #062028;
+  --bg: #111827;
+  --panel: #1f2937;
+  --text: #e2e8f0;
+  --heading: #ffffff;
+  --muted: #94a3b8;
+  --line: #374151;
+  --accent: #1c93bc;
+  --accent-text: #04141a;
   --danger: #ff7a6e;
   --danger-bg: #3a1f1e;
   --danger-border: #7a3b35;
@@ -100,9 +103,22 @@
 
 body {
   margin: 0;
-  font-family: "Segoe UI", Arial, sans-serif;
+  /* Inter/Roboto first per the design spec; this app ships with no web
+     fonts and no CDN calls (it has to work on isolated/offline networks),
+     so both only apply if already installed locally - Segoe UI is the
+     practical fallback that's always present on the Windows hosts this
+     dashboard targets and is visually close to either. */
+  font-family: "Inter", "Roboto", "Segoe UI", Arial, sans-serif;
   background: var(--bg);
   color: var(--text);
+}
+
+.mono {
+  /* Same reasoning as body: JetBrains Mono only applies if installed
+     locally, falling back to Consolas (already used for install-output
+     logs) which ships with Windows. */
+  font-family: "JetBrains Mono", Consolas, "Courier New", monospace;
+  font-size: 0.92em;
 }
 
 .app-shell {
@@ -138,6 +154,7 @@ body {
 
 .sidebar h1 {
   margin: 0;
+  color: var(--heading);
   font-size: 16px;
   font-weight: 700;
 }
@@ -460,6 +477,7 @@ tr.stale td {
 
 .details h2 {
   margin: 0 0 12px;
+  color: var(--heading);
   font-size: 16px;
 }
 
@@ -651,6 +669,7 @@ select {
 
 .install-history h2 {
   margin: 0 0 10px;
+  color: var(--heading);
   font-size: 16px;
 }
 
@@ -711,6 +730,7 @@ tr.usb-row td {
 
 .hw-heading {
   margin: 0 0 10px;
+  color: var(--heading);
   font-size: 16px;
   font-weight: 650;
 }
@@ -858,12 +878,14 @@ th.sort-desc::after {
 
 .settings-block-title {
   margin: 0 0 12px;
+  color: var(--heading);
   font-size: 15px;
   font-weight: 650;
 }
 
 .cert-history-heading {
   margin: 24px 0 10px;
+  color: var(--heading);
   font-size: 16px;
   font-weight: 650;
 }

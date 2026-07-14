@@ -1,7 +1,28 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="7" fill="#126f8f"/>
-  <rect x="5.5" y="7" width="21" height="13.5" rx="2" fill="none" stroke="#ffffff" stroke-width="2.3"/>
-  <line x1="12.5" y1="24.5" x2="19.5" y2="24.5" stroke="#ffffff" stroke-width="2.3" stroke-linecap="round"/>
-  <line x1="16" y1="20.5" x2="16" y2="24.5" stroke="#ffffff" stroke-width="2.3" stroke-linecap="round"/>
-  <path d="M9.8 13.3 L13.6 17 L22 9.4" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 120 90">
+  <!-- Monitor -->
+  <rect x="10" y="8" width="100" height="62" rx="4" fill="#ffffff" stroke="#126f8f" stroke-width="5"/>
+  <path d="M55 70 L55 76 L50 82 L70 82 L65 76 L65 70" fill="none" stroke="#126f8f" stroke-width="4" stroke-linejoin="round"/>
+  <line x1="40" y1="83" x2="80" y2="83" stroke="#126f8f" stroke-width="4" stroke-linecap="round"/>
+
+  <!-- Tree / org-chart nodes -->
+  <line x1="36" y1="27" x2="44" y2="27" stroke="#126f8f" stroke-width="3"/>
+  <line x1="50" y1="32" x2="57" y2="38" stroke="#126f8f" stroke-width="3"/>
+  <line x1="78" y1="31" x2="71" y2="38" stroke="#126f8f" stroke-width="3"/>
+  <line x1="82" y1="27" x2="88" y2="27" stroke="#126f8f" stroke-width="3"/>
+  <line x1="56" y1="48" x2="35" y2="55" stroke="#126f8f" stroke-width="3"/>
+  <line x1="61" y1="52" x2="55" y2="58" stroke="#126f8f" stroke-width="3"/>
+  <line x1="68" y1="48" x2="78" y2="55" stroke="#126f8f" stroke-width="3"/>
+
+  <rect x="24" y="22" width="12" height="10" rx="1.5" fill="#126f8f"/>
+  <rect x="44" y="22" width="12" height="10" rx="1.5" fill="#126f8f"/>
+  <circle cx="78" cy="27" r="4" fill="#126f8f"/>
+  <rect x="88" y="22" width="12" height="10" rx="1.5" fill="#126f8f"/>
+
+  <rect x="22" y="52" width="11" height="9" rx="1.5" fill="#126f8f"/>
+  <rect x="50" y="55" width="11" height="9" rx="1.5" fill="#126f8f"/>
+  <circle cx="82" cy="58" r="4" fill="#126f8f"/>
+
+  <!-- Hub with checkmark -->
+  <rect x="51" y="36" width="21" height="17" rx="3" fill="#126f8f"/>
+  <path d="M56 44.5 L60 48.5 L68 39.5" fill="none" stroke="#ffffff" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

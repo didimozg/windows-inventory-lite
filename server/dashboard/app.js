@@ -778,7 +778,7 @@
         <td>${escapeHtml(formatDateTime(entry.uploadedAt))}</td>
         <td>${escapeHtml(entry.subject)}</td>
         <td>${escapeHtml(formatDateTime(entry.notAfter))}</td>
-        <td>${escapeHtml(entry.thumbprint)}</td>
+        <td class="mono">${escapeHtml(entry.thumbprint)}</td>
         <td>${risks.length ? escapeHtml(risks.join(' ')) : '—'}</td>
         <td>${deleteCell}</td>
       </tr>`;
@@ -1496,9 +1496,9 @@
       const clientId = safeId(client.computerName || '');
 
       return `<tr class="${staleClass}">
-        <td><button class="link-button" type="button" data-client="${clientId}">${escapeHtml(client.computerName)}</button>${usbBadge}<small>${escapeHtml(client.domain)}</small>${ipAddresses ? `<small>${escapeHtml(ipAddresses)}</small>` : ''}</td>
+        <td><button class="link-button" type="button" data-client="${clientId}">${escapeHtml(client.computerName)}</button>${usbBadge}<small>${escapeHtml(client.domain)}</small>${ipAddresses ? `<small class="mono">${escapeHtml(ipAddresses)}</small>` : ''}</td>
         <td>${escapeHtml(client.clientVersion)}</td>
-        <td>${escapeHtml(os.caption)}<small>${escapeHtml(os.version)} build ${escapeHtml(os.buildNumber)}</small></td>
+        <td>${escapeHtml(os.caption)}<small class="mono">${escapeHtml(os.version)} build ${escapeHtml(os.buildNumber)}</small></td>
         <td>${escapeHtml(office.name)}<small>${escapeHtml(office.version)}</small></td>
         <td>${escapeHtml(activated(windowsActivation.activated))}</td>
         <td>${escapeHtml(activated(officeActivation.activated))}</td>
