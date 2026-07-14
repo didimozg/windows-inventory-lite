@@ -159,16 +159,33 @@ body {
   min-width: 0;
 }
 
-.brand-icon {
+.brand-mark {
   flex-shrink: 0;
-  border-radius: 5px;
+  width: 26px;
+  height: 26px;
 }
 
-.sidebar h1 {
-  margin: 0;
+.brand-word {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  min-width: 0;
+}
+
+.brand-word-main {
   color: var(--heading);
-  font-size: 16px;
+  font-size: 13px;
   font-weight: 700;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+.brand-word-sub {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 2px;
+  text-transform: uppercase;
 }
 
 .theme-toggle {

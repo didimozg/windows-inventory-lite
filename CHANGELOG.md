@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-14
+
+### Changed
+
+- The sidebar brand now uses the real project logo with its wordmark ("Windows Inventory" + "Lite") instead of a small icon next to a plain text heading. It's inlined directly in the page (not loaded as an external image) so its colors can follow the existing `--heading`/`--accent`/`--accent-text` theme variables and stay correct through both OS-based dark mode and the manual light/dark toggle - an external SVG image can only see the OS preference, not the app's own override.
+- `docs/images/logo.svg` (the README logo) now includes the same wordmark, stacked under the icon, matching the artwork provided by the project owner.
+
 ## [0.9.0] - 2026-07-14
 
 ### Added
