@@ -15,7 +15,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLiteClient";
-        internal const string ProductVersion = "0.5.0";
+        internal const string ProductVersion = "0.5.1";
 
         private static int Main(string[] args)
         {
@@ -72,9 +72,18 @@ namespace WindowsInventoryLite
                     InventoryCollector collector = new InventoryCollector(options);
                     collector.CollectAndSave();
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // The service keeps running. Windows Event Log contains the service failure envelope.
+                    // Swallowed so one bad collection cycle (WMI hiccup, network
+                    // blip, disk full) doesn't take down the whole service - the
+                    // timer just tries again next interval. Logged so a
+                    // persistently-failing agent is actually visible somewhere
+                    // instead of silently reporting nothing forever.
+                    try
+                    {
+                        System.Diagnostics.EventLog.WriteEntry(Program.ServiceName, ex.ToString(), System.Diagnostics.EventLogEntryType.Warning);
+                    }
+                    catch { }
                 }
             }
         }
@@ -693,6 +702,10 @@ namespace WindowsInventoryLite
             return Convert.ToString(data[key]);
         }
 
+        // '.' is allowed but '/' and '\' are not, so the result can never
+        // contain a path separator - mirrors the server's SanitizeFileName,
+        // though here the input is always Environment.MachineName, not
+        // network-supplied.
         private static string SanitizeFileName(string value)
         {
             StringBuilder builder = new StringBuilder();

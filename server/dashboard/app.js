@@ -233,10 +233,21 @@
     });
   }
 
+  // Exported fields (computer names, software titles, license comments, ...)
+  // come from client-reported inventory or free-text admin input, not from a
+  // fixed set of safe values. A cell starting with =, +, -, or @ is treated
+  // as a formula by Excel/Sheets when the file is opened (the classic
+  // CSV/formula injection class, CWE-1236). A leading single quote is the
+  // standard mitigation: spreadsheet apps treat it as a "this is text" hint
+  // and do not display it, so the visible value is unchanged.
+  function sanitizeCsvCell(value) {
+    return /^[=+\-@]/.test(value) ? "'" + value : value;
+  }
+
   function downloadCsv(filename, rows) {
     const csv = rows.map(row =>
       row.map(cell => {
-        const s = String(cell == null ? '' : cell);
+        const s = sanitizeCsvCell(String(cell == null ? '' : cell));
         return /[";,\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
       }).join(';')
     ).join('\r\n');

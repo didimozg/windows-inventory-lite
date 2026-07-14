@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-14
+
+Found by a manual security and code-quality review of the full codebase, not by a user report.
+
+### Fixed
+
+- **CSV export (Clients, Software, Hardware, Licenses) was vulnerable to formula/DDE injection.** Exported fields include client-reported and free-text values (computer names, software titles, license comments); a value starting with `=`, `+`, `-`, or `@` is treated as a formula by Excel/Sheets when the file is opened (CWE-1236). Cells are now prefixed with a leading single quote when this applies, the standard mitigation - the visible value is unchanged, but it can no longer be parsed as a formula.
+- `POST /api/v1/inventory` with a malformed JSON body returned a generic 500 instead of the 400 every other endpoint returns for the same problem. Now consistent.
+- The client service's collection-failure catch block claimed "Windows Event Log contains the service failure envelope," but the block was empty - nothing was ever actually logged, so a persistently-failing agent reported nothing and left no trace anywhere. Now writes a real Warning entry to the Event Log, matching what the comment always claimed.
+
+### Security
+
+- Documented, not changed: WinRM install/uninstall credentials are passed to the spawned `powershell.exe` as command-line arguments, making them visible for the life of that process to anything on the server that can list process command lines. This requires local access to the server already, at which point `server-config.json`'s own plaintext `WebPassword` is an equally easy target - not a new privilege boundary, just another instance of the same one. A proper fix (temp credential file, named pipe, or similar) is a real redesign and out of scope for this pass.
+- Reviewed and found acceptable for this use case: Basic Auth credential comparison is not constant-time, a theoretical timing side-channel over a LAN admin tool. Windows reserved device names (`CON`, `NUL`, `COM1`, ...) are not specifically rejected when deriving a report filename from a reported computer name - not a traversal risk (separators are already blocked), just a possible confusing failure for an oddly-named host.
+
 ## [0.5.0] - 2026-07-13
 
 ### Added

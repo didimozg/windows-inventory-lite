@@ -18,7 +18,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.5.0";
+        internal const string ProductVersion = "0.5.1";
 
         private static int Main(string[] args)
         {
@@ -586,7 +586,17 @@ namespace WindowsInventoryLite
             }
 
             JavaScriptSerializer serializer = CreateJsonSerializer();
-            Dictionary<string, object> inventory = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+            Dictionary<string, object> inventory;
+            try
+            {
+                inventory = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
             string computerName = Convert.ToString(inventory.ContainsKey("computerName") ? inventory["computerName"] : "unknown");
             string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
             File.WriteAllText(path, request.Body, new UTF8Encoding(false));
@@ -789,6 +799,18 @@ namespace WindowsInventoryLite
             CleanupInstallJobLogs();
         }
 
+        // Known tradeoff: username/password ride along in the spawned
+        // powershell.exe's command line (built below via
+        // BuildPowerShellInstallArguments), which means they are visible for
+        // the life of that process to anything on this machine that can list
+        // process command lines (Task Manager "Details" with the Command
+        // line column, Get-Process, etc.). Reaching that requires local
+        // access to the server already, at which point server-config.json's
+        // own plaintext WebPassword is an equally easy target - this does not
+        // introduce a new privilege boundary, just another instance of the
+        // same one. Not fixed here because the alternative (temp credential
+        // file, named pipe, or similar) is a real redesign, not a one-line
+        // change.
         private Dictionary<string, object> RunClientInstallTarget(string target, string serverUrl, string username, string password, bool force, bool addToTrustedHosts)
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
@@ -841,6 +863,7 @@ namespace WindowsInventoryLite
             return result;
         }
 
+        // Same command-line credential exposure tradeoff as RunClientInstallTarget above.
         private Dictionary<string, object> RunClientUninstallTarget(string target, string username, string password, bool addToTrustedHosts)
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
@@ -1364,6 +1387,11 @@ namespace WindowsInventoryLite
             stream.Write(body, 0, body.Length);
         }
 
+        // Allowing '.' looks risky at a glance (doesn't ".." mean parent
+        // directory?), but it's safe here: '/' and '\' are not in the allowed
+        // set, so the result can never contain a path separator, and every
+        // caller appends ".json" to it - a value made entirely of dots can
+        // never collide with "." or ".." as a whole path segment.
         private static string SanitizeFileName(string value)
         {
             StringBuilder builder = new StringBuilder();
@@ -2617,10 +2645,20 @@ namespace WindowsInventoryLite
             stream.Write(data, 0, data.Length);
         }
 
+        // Last-resort fallback, used only by SendDashboardFile when ContentPath
+        // is missing the real file (e.g. a botched install that never copied
+        // server\dashboard\* into place). Deliberately a minimal, old snapshot
+        // of the dashboard (no tree nav, no Licenses/Settings/Dashboard pages) -
+        // it exists so the server still answers with something useful instead
+        // of a blank page, not to track feature parity with the real dashboard.
+        // Do not "fix" it to match current features; fix the install/deploy
+        // path that left ContentPath empty instead.
         private const string DashboardHtml = @"<!doctype html><html lang=""en""><head><meta charset=""utf-8""><meta name=""viewport"" content=""width=device-width, initial-scale=1""><title>Windows Inventory Lite</title><link rel=""stylesheet"" href=""/styles.css""></head><body><header class=""topbar""><div><h1>Windows Inventory Lite</h1><p id=""generatedAt"">Waiting for inventory data.</p></div><input id=""searchInput"" type=""search"" placeholder=""Filter computers, OS, Office, software""></header><main><section class=""summary""><div><span id=""clientCount"">0</span><small>Clients</small></div><div><span id=""windowsActivated"">0</span><small>Windows activated</small></div><div><span id=""officeActivated"">0</span><small>Office activated</small></div><div><span id=""staleCount"">0</span><small>Stale &gt;48h</small></div></section><section class=""table-wrap""><table><thead><tr><th>Computer</th><th>OS</th><th>Office</th><th>Windows</th><th>Office activation</th><th>Software</th><th>Collected</th></tr></thead><tbody id=""inventoryBody""></tbody></table></section></main><script src=""/app.js""></script></body></html>";
 
+        // Fallback for /app.js, same reasoning as DashboardHtml above.
         private const string DashboardJs = @"(function(){const staleHours=48;const state={clients:[]};function byId(id){return document.getElementById(id)}function text(v){return v===undefined||v===null||v===''?'Unknown':String(v)}function activated(v){return v?'Activated':'Not detected'}function isStale(c){const d=new Date(c.collectedAt||c.sourceUpdatedAt||0);return Number.isNaN(d.getTime())||((Date.now()-d.getTime())/36e5)>staleHours}function matches(c,q){if(!q)return true;const software=(c.software||[]).map(i=>`${i.name} ${i.version}`).join(' ');const h=[c.computerName,c.domain,c.os&&c.os.caption,c.os&&c.os.version,c.office&&c.office.name,c.office&&c.office.version,software].join(' ').toLowerCase();return h.indexOf(q.toLowerCase())!==-1}function summary(clients){byId('clientCount').textContent=clients.length;byId('windowsActivated').textContent=clients.filter(c=>c.activation&&c.activation.windows&&c.activation.windows.activated).length;byId('officeActivated').textContent=clients.filter(c=>c.activation&&c.activation.office&&c.activation.office.activated).length;byId('staleCount').textContent=clients.filter(isStale).length}function table(clients){const q=byId('searchInput').value.trim();const rows=clients.filter(c=>matches(c,q)).map(c=>{const os=c.os||{},office=c.office||{},a=c.activation||{},wa=a.windows||{},oa=a.office||{},count=(c.software||[]).length;return `<tr class=""${isStale(c)?'stale':''}""><td><strong>${text(c.computerName)}</strong><small>${text(c.domain)}</small></td><td>${text(os.caption)}<small>${text(os.version)} build ${text(os.buildNumber)}</small></td><td>${text(office.name)}<small>${text(office.version)}</small></td><td>${activated(wa.activated)}</td><td>${activated(oa.activated)}</td><td>${count}</td><td>${text(c.collectedAt)}</td></tr>`});byId('inventoryBody').innerHTML=rows.join('')||'<tr><td colspan=""7"" class=""empty"">No matching inventory records.</td></tr>'}function render(){summary(state.clients);table(state.clients)}fetch('/api/v1/clients',{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error(`HTTP ${r.status}`);return r.json()}).then(d=>{state.clients=d.clients||[];byId('generatedAt').textContent=`Generated: ${text(d.generatedAt)}`;render()}).catch(e=>{byId('generatedAt').textContent=`Inventory index is not available: ${e.message}`;render()});byId('searchInput').addEventListener('input',render)}());";
 
+        // Fallback for /styles.css, same reasoning as DashboardHtml above.
         private const string DashboardCss = @":root{--bg:#f5f7fa;--panel:#fff;--text:#17202a;--muted:#5f6b7a;--line:#d9e0e8;--accent:#126f8f;--warn:#fff1c2}*{box-sizing:border-box}body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--text)}.topbar{display:flex;gap:24px;align-items:center;justify-content:space-between;padding:24px 32px;background:var(--panel);border-bottom:1px solid var(--line)}h1{margin:0 0 6px;font-size:24px;font-weight:650}p,small{color:var(--muted)}p{margin:0}input[type=search]{width:min(520px,45vw);min-width:280px;height:40px;padding:0 12px;border:1px solid var(--line);border-radius:6px;font:inherit}main{padding:24px 32px}.summary{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:12px;margin-bottom:18px}.summary div{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}.summary span{display:block;margin-bottom:4px;color:var(--accent);font-size:28px;font-weight:700}.table-wrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:8px}table{width:100%;border-collapse:collapse;min-width:980px}th,td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{background:#edf2f6;font-size:12px;color:var(--muted);text-transform:uppercase}td small{display:block;margin-top:4px}tr.stale td{background:var(--warn)}.empty{padding:28px;text-align:center;color:var(--muted)}@media(max-width:820px){.topbar{align-items:stretch;flex-direction:column;padding:18px}input[type=search]{width:100%;min-width:0}main{padding:18px}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}}";
 
         // Self-checks for hand-rolled parsing/encoding logic that has no automated
