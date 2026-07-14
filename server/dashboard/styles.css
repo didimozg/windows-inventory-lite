@@ -152,6 +152,18 @@ body {
   padding: 0 10px;
 }
 
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.brand-icon {
+  flex-shrink: 0;
+  border-radius: 5px;
+}
+
 .sidebar h1 {
   margin: 0;
   color: var(--heading);
@@ -209,11 +221,25 @@ body {
 }
 
 .nav-item {
-  padding: 8px 10px 8px 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 17px;
   border-left: 3px solid transparent;
   border-radius: 0 6px 6px 0;
   text-align: left;
   font-size: 14px;
+}
+
+.nav-icon {
+  flex-shrink: 0;
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .nav-item:hover {

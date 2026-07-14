@@ -21,28 +21,61 @@
   <div class="app-shell">
     <aside class="sidebar" aria-label="Dashboard navigation">
       <div class="sidebar-header">
-        <h1>Windows Inventory Lite</h1>
+        <div class="brand">
+          <img class="brand-icon" src="favicon.svg" alt="" width="26" height="26">
+          <h1>Windows Inventory Lite</h1>
+        </div>
         <button id="themeToggle" class="theme-toggle" type="button" title="Toggle color theme" aria-label="Toggle color theme">&#9790;</button>
       </div>
       <nav class="nav-tree">
-        <button id="dashboardTab" class="nav-item nav-item-root active" type="button">Dashboard</button>
+        <button id="dashboardTab" class="nav-item nav-item-root active" type="button">
+          <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="2.5" width="6" height="6" rx="1"/><rect x="11.5" y="2.5" width="6" height="6" rx="1"/><rect x="2.5" y="11.5" width="6" height="6" rx="1"/><rect x="11.5" y="11.5" width="6" height="6" rx="1"/></svg>
+          Dashboard
+        </button>
         <div class="nav-group">
           <div class="nav-group-title">Inventory</div>
-          <button id="clientsTab" class="nav-item" type="button">Clients</button>
-          <button id="softwareTab" class="nav-item" type="button">Software</button>
-          <button id="hardwareTab" class="nav-item" type="button">Hardware</button>
+          <button id="clientsTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="10" rx="1.2"/><line x1="7" y1="17" x2="13" y2="17"/><line x1="10" y1="13.5" x2="10" y2="17"/></svg>
+            Clients
+          </button>
+          <button id="softwareTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5 L17.5 6.5 L17.5 13.5 L10 17.5 L2.5 13.5 L2.5 6.5 Z"/><line x1="10" y1="10" x2="17.3" y2="6.3"/><line x1="10" y1="10" x2="2.7" y2="6.3"/><line x1="10" y1="10" x2="10" y2="17.5"/></svg>
+            Software
+          </button>
+          <button id="hardwareTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="5" width="10" height="10" rx="1"/><line x1="8" y1="1.5" x2="8" y2="5"/><line x1="12" y1="1.5" x2="12" y2="5"/><line x1="8" y1="15" x2="8" y2="18.5"/><line x1="12" y1="15" x2="12" y2="18.5"/><line x1="1.5" y1="8" x2="5" y2="8"/><line x1="1.5" y1="12" x2="5" y2="12"/><line x1="15" y1="8" x2="18.5" y2="8"/><line x1="15" y1="12" x2="18.5" y2="12"/></svg>
+            Hardware
+          </button>
         </div>
-        <button id="licensesTab" class="nav-item nav-item-root" type="button">Licenses</button>
+        <button id="licensesTab" class="nav-item nav-item-root" type="button">
+          <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 2.5 h7 l3 3 v12 h-10 z"/><path d="M12 2.5 v3 h3"/><line x1="7" y1="11" x2="13" y2="11"/><line x1="7" y1="14" x2="11" y2="14"/></svg>
+          Licenses
+        </button>
         <div class="nav-group">
           <div class="nav-group-title">Installation</div>
-          <button id="installTab" class="nav-item" type="button">Client actions</button>
-          <button id="packageTab" class="nav-item" type="button">Client package</button>
+          <button id="installTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M11 2 L4 11.5 H9.5 L8.5 18 L16 8 H10.5 Z"/></svg>
+            Client actions
+          </button>
+          <button id="packageTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="4" width="15" height="3.5" rx="0.8"/><path d="M3.5 7.5 v8 h13 v-8"/><line x1="8" y1="10.5" x2="12" y2="10.5"/></svg>
+            Client package
+          </button>
         </div>
         <div class="nav-group">
           <div class="nav-group-title">Settings</div>
-          <button id="generalTab" class="nav-item" type="button">General</button>
-          <button id="certificateTab" class="nav-item" type="button">Certificate</button>
-          <button id="adminPasswordTab" class="nav-item" type="button">Admin password</button>
+          <button id="generalTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3"/><path d="M10 2.5v2M10 15.5v2M17.5 10h-2M4.5 10h-2M15.4 4.6l-1.4 1.4M6 12.6l-1.4 1.4M15.4 15.4l-1.4-1.4M6 7.4L4.6 6"/></svg>
+            General
+          </button>
+          <button id="certificateTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2 L17 4.5 V10 c0 4.5-3 7-7 8-4-1-7-3.5-7-8V4.5 Z"/><path d="M6.8 10 L9 12.2 L13.2 7.8"/></svg>
+            Certificate
+          </button>
+          <button id="adminPasswordTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="4.5" y="9" width="11" height="8.5" rx="1.2"/><path d="M6.5 9V6a3.5 3.5 0 0 1 7 0v3"/></svg>
+            Admin password
+          </button>
         </div>
       </nav>
       <div class="sidebar-footer">

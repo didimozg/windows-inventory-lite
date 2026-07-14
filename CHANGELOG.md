@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-14
+
+### Added
+
+- The project icon now appears inside the dashboard itself, not just the browser tab and README: a small brand mark sits next to the "Windows Inventory Lite" title in the sidebar header.
+- Every sidebar navigation item has a matching flat line icon (inline SVG, `currentColor` stroke so it follows the existing muted/active/hover text color automatically in both themes) - a dashboard grid, monitor, package, chip, document, bolt, archive box, gear, shield, and lock for Dashboard, Clients, Software, Hardware, Licenses, Client actions, Client package, General, Certificate, and Admin password respectively.
+
+Deliberately not carried over from the reference mockup: an avatar/notifications/calendar cluster in the top bar and sparkline trend charts inside the summary tiles. Neither corresponds to a real feature of this app (no user accounts beyond one shared Basic Auth login, no notification system, no historical time-series data collection), and adding them would just be decoration with nothing behind it.
+
 ## [0.8.0] - 2026-07-14
 
 ### Changed
