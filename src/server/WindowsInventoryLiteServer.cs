@@ -18,7 +18,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.5.2";
+        internal const string ProductVersion = "0.7.0";
 
         private static int Main(string[] args)
         {
@@ -77,7 +77,13 @@ namespace WindowsInventoryLite
 
     internal sealed class ServerOptions
     {
+        // The plain HTTP listener's port. Independent of HttpsPort - HTTP and
+        // HTTPS run as two separate listeners on two separate ports (see
+        // InventoryServer's ListenerSlot design), not one port that switches
+        // protocol based on a flag.
         public int Port;
+        public bool EnableHttp;
+        public int HttpsPort;
         public IPAddress Address;
         public string DataPath;
         public string ContentPath;
@@ -103,6 +109,8 @@ namespace WindowsInventoryLite
         {
             ServerOptions options = new ServerOptions();
             options.Port = 8080;
+            options.EnableHttp = true;
+            options.HttpsPort = 8443;
             options.Address = IPAddress.Any;
             options.DataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server");
             options.ContentPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-content");
@@ -137,11 +145,10 @@ namespace WindowsInventoryLite
                 }
                 else if (key == "--prefix" && i + 1 < args.Length)
                 {
-                    string prefix = args[++i].Replace("+", "localhost");
-                    Uri uri;
-                    if (Uri.TryCreate(prefix, UriKind.Absolute, out uri) && uri.Port > 0)
+                    int parsedPort;
+                    if (TryParsePortFromPrefix(args[++i], out parsedPort))
                     {
-                        options.Port = uri.Port;
+                        options.Port = parsedPort;
                     }
                 }
                 else if (key == "--data" && i + 1 < args.Length)
@@ -204,6 +211,18 @@ namespace WindowsInventoryLite
                         options.StaleHours = staleHours;
                     }
                 }
+                else if (key == "--https-port" && i + 1 < args.Length)
+                {
+                    int httpsPort;
+                    if (Int32.TryParse(args[++i], out httpsPort) && httpsPort > 0 && httpsPort <= 65535)
+                    {
+                        options.HttpsPort = httpsPort;
+                    }
+                }
+                else if (key == "--disable-http")
+                {
+                    options.EnableHttp = false;
+                }
             }
 
             LoadConfigFile(options);
@@ -252,10 +271,64 @@ namespace WindowsInventoryLite
                         options.StaleHours = staleHoursFromConfig;
                     }
                 }
+                // Deliberately NOT gated behind "no --prefix was passed" the way
+                // every other field here is gated behind its own IsNullOrEmpty
+                // check: Install-Server.ps1 no longer bakes --prefix into the
+                // service's own start command at all (see its $serviceCommand
+                // construction), specifically so a dashboard-driven port change
+                // (see InventoryServer.ApplySlotState) survives a plain
+                // service restart or reboot, not just a reinstall - matching
+                // how WebUsername/UseHttps/etc. already behave. options.Port
+                // still equalling the compiled-in default (8080) here means
+                // nothing set it explicitly, so config is free to.
+                if (options.Port == 8080)
+                {
+                    int portFromConfig;
+                    if (TryParsePortFromPrefix(GetConfigString(config, "ListenPrefix"), out portFromConfig))
+                    {
+                        options.Port = portFromConfig;
+                    }
+                }
+                if (options.HttpsPort == 8443)
+                {
+                    string httpsPortText = GetConfigString(config, "HttpsPort");
+                    int httpsPortFromConfig;
+                    if (!String.IsNullOrEmpty(httpsPortText) && Int32.TryParse(httpsPortText, out httpsPortFromConfig) && httpsPortFromConfig > 0 && httpsPortFromConfig <= 65535)
+                    {
+                        options.HttpsPort = httpsPortFromConfig;
+                    }
+                }
+                if (options.EnableHttp)
+                {
+                    string enableHttpText = GetConfigString(config, "EnableHttp");
+                    if (enableHttpText != null)
+                    {
+                        options.EnableHttp = String.Equals(enableHttpText, "true", StringComparison.OrdinalIgnoreCase);
+                    }
+                }
             }
             catch
             {
             }
+        }
+
+        // internal, not private: also called from InventoryServer's self-test suite.
+        internal static bool TryParsePortFromPrefix(string prefix, out int port)
+        {
+            port = 0;
+            if (String.IsNullOrEmpty(prefix))
+            {
+                return false;
+            }
+
+            string normalized = prefix.Replace("+", "localhost");
+            Uri uri;
+            if (Uri.TryCreate(normalized, UriKind.Absolute, out uri) && uri.Port > 0)
+            {
+                port = uri.Port;
+                return true;
+            }
+            return false;
         }
 
         private static string GetConfigString(Dictionary<string, object> config, string key)
@@ -276,9 +349,14 @@ namespace WindowsInventoryLite
         private readonly Dictionary<string, InstallJob> installJobs = new Dictionary<string, InstallJob>();
         private readonly object licensesLock = new object();
         private readonly object certificateHistoryLock = new object();
-        private TcpListener listener;
-        private Thread worker;
-        private bool running;
+        private readonly object listenerRestartLock = new object();
+        // HTTP and HTTPS are two fully independent listeners on two
+        // independent ports, each with its own accept thread - not one
+        // listener that wraps connections in TLS or not depending on a flag.
+        // That's what makes it possible to run both at once, run either one
+        // alone, or run neither (see ApplySlotState / ConfigureServerSettings).
+        private readonly ListenerSlot httpSlot = new ListenerSlot();
+        private readonly ListenerSlot httpsSlot = new ListenerSlot();
         private volatile X509Certificate2 serverCertificate;
 
         public InventoryServer(ServerOptions options)
@@ -300,20 +378,154 @@ namespace WindowsInventoryLite
             }
             CleanupInstallJobLogs();
 
-            listener = new TcpListener(options.Address, options.Port);
-            listener.Start();
-            running = true;
-            worker = new Thread(ListenLoop);
-            worker.IsBackground = true;
-            worker.Start();
+            if (options.EnableHttp)
+            {
+                string httpError = ApplySlotState(httpSlot, true, -1, options.Port, false);
+                LogSlotStartupError("HTTP", httpError);
+            }
+
+            if (options.UseHttps && serverCertificate != null)
+            {
+                string httpsError = ApplySlotState(httpsSlot, true, -1, options.HttpsPort, true);
+                LogSlotStartupError("HTTPS", httpsError);
+            }
+
+            if (!httpSlot.Running && !httpsSlot.Running)
+            {
+                // Only reachable by hand-editing server-config.json (the
+                // dashboard's own safety gate in ConfigureServerSettings
+                // refuses to produce this state, and options.UseHttps with no
+                // valid certificate already logs its own error above) - but
+                // the server must still start cleanly rather than crash, since
+                // this is exactly the broken state the documented recovery
+                // procedure (re-edit the config, restart the service) needs
+                // the service to be able to come back up into.
+                try
+                {
+                    System.Diagnostics.EventLog.WriteEntry(
+                        "WindowsInventoryLite",
+                        "Neither HTTP nor HTTPS is listening (EnableHttp is false and HTTPS is not active). "
+                            + "The dashboard is unreachable. Edit server-config.json, set \"EnableHttp\": \"true\", "
+                            + "and restart the service to recover.",
+                        System.Diagnostics.EventLogEntryType.Error);
+                }
+                catch { }
+            }
+        }
+
+        private static void LogSlotStartupError(string label, string error)
+        {
+            if (error == null)
+            {
+                return;
+            }
+            try
+            {
+                System.Diagnostics.EventLog.WriteEntry(
+                    "WindowsInventoryLite",
+                    label + " listener failed to start: " + error,
+                    System.Diagnostics.EventLogEntryType.Error);
+            }
+            catch { }
         }
 
         public void Stop()
         {
-            running = false;
-            if (listener != null)
+            StopSlot(httpSlot);
+            StopSlot(httpsSlot);
+        }
+
+        private sealed class ListenerSlot
+        {
+            public volatile TcpListener Listener;
+            public volatile bool Running;
+            public Thread Worker;
+        }
+
+        private sealed class AcceptState
+        {
+            public ListenerSlot Slot;
+            public TcpListener BoundListener;
+            public bool IsHttps;
+        }
+
+        private sealed class ClientState
+        {
+            public TcpClient Client;
+            public bool IsHttps;
+        }
+
+        private static void StopSlot(ListenerSlot slot)
+        {
+            slot.Running = false;
+            TcpListener listenerToStop = slot.Listener;
+            Thread workerToJoin = slot.Worker;
+            if (listenerToStop != null)
             {
-                listener.Stop();
+                listenerToStop.Stop();
+            }
+            if (workerToJoin != null)
+            {
+                workerToJoin.Join(5000);
+            }
+        }
+
+        // Brings a slot to the desired running/stopped state on the desired
+        // port, changing as little as possible: turning a stopped slot off is
+        // a no-op, and a running slot already on the requested port is left
+        // alone (comparing against previousPort, not by inspecting the live
+        // listener, since the caller always knows what it last asked for).
+        // When a rebind IS needed, the new listener is bound and started
+        // FIRST - if the port is unavailable (already in use, no permission),
+        // Start() throws, the error is returned, and the slot is left exactly
+        // as it was. Only once the new listener is confirmed listening does
+        // the old one get stopped, so there is never a moment where the slot
+        // has committed to a broken new port with no working listener at all.
+        private string ApplySlotState(ListenerSlot slot, bool shouldRun, int previousPort, int newPort, bool isHttps)
+        {
+            lock (listenerRestartLock)
+            {
+                if (!shouldRun)
+                {
+                    if (slot.Running)
+                    {
+                        StopSlot(slot);
+                    }
+                    return null;
+                }
+
+                if (slot.Running && previousPort == newPort)
+                {
+                    return null;
+                }
+
+                TcpListener newListener = new TcpListener(options.Address, newPort);
+                try
+                {
+                    newListener.Start();
+                }
+                catch (Exception ex)
+                {
+                    return "could not bind to port " + newPort + ": " + ex.Message;
+                }
+
+                if (slot.Running)
+                {
+                    StopSlot(slot);
+                }
+
+                slot.Listener = newListener;
+                slot.Running = true;
+
+                AcceptState state = new AcceptState();
+                state.Slot = slot;
+                state.BoundListener = newListener;
+                state.IsHttps = isHttps;
+                slot.Worker = new Thread(new ParameterizedThreadStart(AcceptLoop));
+                slot.Worker.IsBackground = true;
+                slot.Worker.Start(state);
+
+                return null;
             }
         }
 
@@ -374,18 +586,30 @@ namespace WindowsInventoryLite
             return thumbprint.Replace(" ", "").Replace(":", "").Replace("-", "").ToUpperInvariant();
         }
 
-        private void ListenLoop()
+        // Bound to a specific TcpListener/slot pairing passed as thread state
+        // (never read from the shared slot field mid-loop) so a rebind
+        // reassigning slot.Listener can't redirect this thread onto an
+        // instance it didn't start on - see ApplySlotState.
+        private void AcceptLoop(object state)
         {
-            while (running)
+            AcceptState acceptState = (AcceptState)state;
+            ListenerSlot slot = acceptState.Slot;
+            TcpListener boundListener = acceptState.BoundListener;
+            bool isHttps = acceptState.IsHttps;
+
+            while (slot.Running && ReferenceEquals(slot.Listener, boundListener))
             {
                 try
                 {
-                    TcpClient client = listener.AcceptTcpClient();
-                    ThreadPool.QueueUserWorkItem(HandleClient, client);
+                    TcpClient client = boundListener.AcceptTcpClient();
+                    ClientState clientState = new ClientState();
+                    clientState.Client = client;
+                    clientState.IsHttps = isHttps;
+                    ThreadPool.QueueUserWorkItem(HandleClient, clientState);
                 }
                 catch
                 {
-                    if (running)
+                    if (slot.Running && ReferenceEquals(slot.Listener, boundListener))
                     {
                         Thread.Sleep(500);
                     }
@@ -395,7 +619,8 @@ namespace WindowsInventoryLite
 
         private void HandleClient(object state)
         {
-            using (TcpClient client = (TcpClient)state)
+            ClientState clientState = (ClientState)state;
+            using (TcpClient client = clientState.Client)
             using (NetworkStream networkStream = client.GetStream())
             {
                 // Bounds how long a single connection can sit idle mid-read or
@@ -411,7 +636,7 @@ namespace WindowsInventoryLite
                 SslStream sslStream = null;
                 try
                 {
-                    if (options.UseHttps)
+                    if (clientState.IsHttps)
                     {
                         X509Certificate2 certificate = serverCertificate;
                         if (certificate == null)
@@ -531,6 +756,10 @@ namespace WindowsInventoryLite
                     else if (request.Method == "GET" && request.Path == "/styles.css")
                     {
                         SendDashboardFile(stream, "styles.css", DashboardCss, "text/css; charset=utf-8");
+                    }
+                    else if (request.Method == "GET" && request.Path == "/favicon.svg")
+                    {
+                        SendDashboardFile(stream, "favicon.svg", FaviconSvg, "image/svg+xml");
                     }
                     else
                     {
@@ -2139,6 +2368,9 @@ namespace WindowsInventoryLite
         {
             Dictionary<string, object> result = BuildCertificateStatusPayload();
             result["staleHours"] = options.StaleHours;
+            result["port"] = options.Port;
+            result["enableHttp"] = options.EnableHttp;
+            result["httpsPort"] = options.HttpsPort;
             JavaScriptSerializer serializer = CreateJsonSerializer();
             SendJson(stream, serializer.Serialize(result));
         }
@@ -2171,27 +2403,33 @@ namespace WindowsInventoryLite
                 updates["StaleHours"] = staleHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
             }
 
+            // HTTP and HTTPS are validated together, not field-by-field, because
+            // the one rule that actually matters - "at least one of them must
+            // end up reachable" - spans both. Nothing here is applied to the
+            // live listeners until every check below has passed.
+            bool desiredUseHttps = options.UseHttps;
+            X509Certificate2 httpsCandidate = null;
             if (payload.ContainsKey("useHttps"))
             {
-                bool requestedUseHttps = Convert.ToBoolean(payload["useHttps"]);
-                bool acknowledgeRisks = payload.ContainsKey("acknowledgeRisks") && Convert.ToBoolean(payload["acknowledgeRisks"]);
-
-                if (requestedUseHttps)
+                desiredUseHttps = Convert.ToBoolean(payload["useHttps"]);
+                if (desiredUseHttps)
                 {
+                    bool acknowledgeRisks = payload.ContainsKey("acknowledgeRisks") && Convert.ToBoolean(payload["acknowledgeRisks"]);
+
                     if (String.IsNullOrEmpty(options.CertificateThumbprint))
                     {
                         SendText(stream, "{\"error\":\"no certificate has been uploaded yet. Upload one on the Certificate page first.\"}", "application/json; charset=utf-8", 400);
                         return;
                     }
 
-                    X509Certificate2 candidate = FindCertificateByThumbprint(options.CertificateThumbprint);
-                    if (candidate == null)
+                    httpsCandidate = FindCertificateByThumbprint(options.CertificateThumbprint);
+                    if (httpsCandidate == null)
                     {
                         SendText(stream, "{\"error\":\"the configured certificate was not found in LocalMachine\\\\My.\"}", "application/json; charset=utf-8", 400);
                         return;
                     }
 
-                    List<string> risks = EvaluateCertificateRisks(candidate);
+                    List<string> risks = EvaluateCertificateRisks(httpsCandidate);
                     if (risks.Count > 0 && !acknowledgeRisks)
                     {
                         Dictionary<string, object> riskResponse = new Dictionary<string, object>();
@@ -2200,17 +2438,95 @@ namespace WindowsInventoryLite
                         SendText(stream, serializer.Serialize(riskResponse), "application/json; charset=utf-8", 409);
                         return;
                     }
+                }
+            }
 
-                    serverCertificate = candidate;
-                    options.UseHttps = true;
+            bool desiredEnableHttp = options.EnableHttp;
+            if (payload.ContainsKey("enableHttp"))
+            {
+                desiredEnableHttp = Convert.ToBoolean(payload["enableHttp"]);
+            }
+
+            // The one hard rule: refusing this combination here is what makes
+            // "edit server-config.json and restart the service" the ONLY way
+            // to end up with a fully unreachable dashboard, not something
+            // reachable through the dashboard itself. See docs/threat-model.md
+            // and the README's HTTP recovery section.
+            if (!desiredEnableHttp && !desiredUseHttps)
+            {
+                SendText(stream, "{\"error\":\"cannot disable HTTP unless HTTPS is enabled and working - that would make the dashboard unreachable.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            int desiredHttpPort = options.Port;
+            if (payload.ContainsKey("port"))
+            {
+                if (!Int32.TryParse(Convert.ToString(payload["port"]), out desiredHttpPort) || desiredHttpPort < 1 || desiredHttpPort > 65535)
+                {
+                    SendText(stream, "{\"error\":\"port must be between 1 and 65535\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
+
+            int desiredHttpsPort = options.HttpsPort;
+            if (payload.ContainsKey("httpsPort"))
+            {
+                if (!Int32.TryParse(Convert.ToString(payload["httpsPort"]), out desiredHttpsPort) || desiredHttpsPort < 1 || desiredHttpsPort > 65535)
+                {
+                    SendText(stream, "{\"error\":\"httpsPort must be between 1 and 65535\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
+
+            if (desiredEnableHttp && desiredUseHttps && desiredHttpPort == desiredHttpsPort)
+            {
+                SendText(stream, "{\"error\":\"the HTTP and HTTPS ports must be different when both are enabled.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            if (payload.ContainsKey("port") || payload.ContainsKey("enableHttp"))
+            {
+                string httpError = ApplySlotState(httpSlot, desiredEnableHttp, options.Port, desiredHttpPort, false);
+                if (httpError != null)
+                {
+                    SendText(stream, "{\"error\":\"HTTP: " + httpError + "\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.Port = desiredHttpPort;
+                options.EnableHttp = desiredEnableHttp;
+                // ListenPrefix, not just a bare port number, because that's the
+                // format Install-Server.ps1 both writes and re-reads from this
+                // same config file on every install/reinstall - keeping the
+                // same key means a future reinstall picks up this port instead
+                // of reverting to whatever was baked in at install time.
+                updates["ListenPrefix"] = "http://+:" + options.Port + "/";
+                updates["EnableHttp"] = options.EnableHttp ? "true" : "false";
+            }
+
+            if (payload.ContainsKey("useHttps") || payload.ContainsKey("httpsPort"))
+            {
+                if (desiredUseHttps)
+                {
+                    if (httpsCandidate != null)
+                    {
+                        serverCertificate = httpsCandidate;
+                    }
+                    string httpsError = ApplySlotState(httpsSlot, true, options.HttpsPort, desiredHttpsPort, true);
+                    if (httpsError != null)
+                    {
+                        SendText(stream, "{\"error\":\"HTTPS: " + httpsError + "\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
                 }
                 else
                 {
-                    options.UseHttps = false;
+                    ApplySlotState(httpsSlot, false, options.HttpsPort, options.HttpsPort, true);
                     serverCertificate = null;
                 }
-
+                options.UseHttps = desiredUseHttps;
+                options.HttpsPort = desiredHttpsPort;
                 updates["UseHttps"] = options.UseHttps ? "true" : "false";
+                updates["HttpsPort"] = options.HttpsPort.ToString(System.Globalization.CultureInfo.InvariantCulture);
             }
 
             if (updates.Count > 0)
@@ -2756,6 +3072,11 @@ namespace WindowsInventoryLite
         // Fallback for /styles.css, same reasoning as DashboardHtml above.
         private const string DashboardCss = @":root{--bg:#f5f7fa;--panel:#fff;--text:#17202a;--muted:#5f6b7a;--line:#d9e0e8;--accent:#126f8f;--warn:#fff1c2}*{box-sizing:border-box}body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--text)}.topbar{display:flex;gap:24px;align-items:center;justify-content:space-between;padding:24px 32px;background:var(--panel);border-bottom:1px solid var(--line)}h1{margin:0 0 6px;font-size:24px;font-weight:650}p,small{color:var(--muted)}p{margin:0}input[type=search]{width:min(520px,45vw);min-width:280px;height:40px;padding:0 12px;border:1px solid var(--line);border-radius:6px;font:inherit}main{padding:24px 32px}.summary{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:12px;margin-bottom:18px}.summary div{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}.summary span{display:block;margin-bottom:4px;color:var(--accent);font-size:28px;font-weight:700}.table-wrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:8px}table{width:100%;border-collapse:collapse;min-width:980px}th,td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{background:#edf2f6;font-size:12px;color:var(--muted);text-transform:uppercase}td small{display:block;margin-top:4px}tr.stale td{background:var(--warn)}.empty{padding:28px;text-align:center;color:var(--muted)}@media(max-width:820px){.topbar{align-items:stretch;flex-direction:column;padding:18px}input[type=search]{width:100%;min-width:0}main{padding:18px}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}}";
 
+        // Fallback for /favicon.svg. Kept in sync with server\dashboard\favicon.svg,
+        // unlike the HTML/JS/CSS fallbacks above - it's small enough that there's
+        // no tradeoff in keeping it current.
+        private const string FaviconSvg = @"<svg xmlns=""http://www.w3.org/2000/svg"" viewBox=""0 0 32 32""><rect width=""32"" height=""32"" rx=""7"" fill=""#126f8f""/><rect x=""5.5"" y=""7"" width=""21"" height=""13.5"" rx=""2"" fill=""none"" stroke=""#ffffff"" stroke-width=""2.3""/><line x1=""12.5"" y1=""24.5"" x2=""19.5"" y2=""24.5"" stroke=""#ffffff"" stroke-width=""2.3"" stroke-linecap=""round""/><line x1=""16"" y1=""20.5"" x2=""16"" y2=""24.5"" stroke=""#ffffff"" stroke-width=""2.3"" stroke-linecap=""round""/><path d=""M9.8 13.3 L13.6 17 L22 9.4"" fill=""none"" stroke=""#ffffff"" stroke-width=""2.6"" stroke-linecap=""round"" stroke-linejoin=""round""/></svg>";
+
         // Self-checks for hand-rolled parsing/encoding logic that has no automated
         // coverage otherwise (no NuGet test framework is used in this project).
         // Invoked through `--self-test`; exercised by tests/SelfTest.Tests.ps1.
@@ -2776,6 +3097,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "SanitizeFileName escapes a reserved Windows device name", TestSanitizeFileNameReservedDeviceName);
             allPassed &= SelfTestCheck(output, "SanitizeFileName leaves a normal computer name untouched", TestSanitizeFileNameNormalName);
             allPassed &= SelfTestCheck(output, "FixedTimeEquals matches identical strings and rejects everything else", TestFixedTimeEquals);
+            allPassed &= SelfTestCheck(output, "TryParsePortFromPrefix extracts the port from a ListenPrefix URL", TestTryParsePortFromPrefix);
             return allPassed;
         }
 
@@ -3010,6 +3332,28 @@ namespace WindowsInventoryLite
             if (FixedTimeEquals(null, "x"))
             {
                 return "expected null vs non-empty to not match";
+            }
+            return null;
+        }
+
+        private static string TestTryParsePortFromPrefix()
+        {
+            int port;
+            if (!ServerOptions.TryParsePortFromPrefix("http://+:8080/", out port) || port != 8080)
+            {
+                return "expected 'http://+:8080/' to parse to port 8080, got " + port;
+            }
+            if (!ServerOptions.TryParsePortFromPrefix("http://localhost:9000/", out port) || port != 9000)
+            {
+                return "expected 'http://localhost:9000/' to parse to port 9000, got " + port;
+            }
+            if (ServerOptions.TryParsePortFromPrefix("", out port))
+            {
+                return "expected an empty prefix to fail to parse";
+            }
+            if (ServerOptions.TryParsePortFromPrefix(null, out port))
+            {
+                return "expected a null prefix to fail to parse";
             }
             return null;
         }

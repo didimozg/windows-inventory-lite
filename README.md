@@ -1,5 +1,7 @@
 # Windows Inventory Lite
 
+![Windows Inventory Lite](./docs/images/logo.svg)
+
 [![Release](https://img.shields.io/github/v/release/didimozg/windows-inventory-lite?display_name=tag)](https://github.com/didimozg/windows-inventory-lite/releases)
 [![CI](https://github.com/didimozg/windows-inventory-lite/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/didimozg/windows-inventory-lite/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/didimozg/windows-inventory-lite)](./LICENSE)
@@ -27,6 +29,7 @@ The client and server are small self-contained C# services that run on .NET Fram
 - Operators can install, update, or uninstall clients from the dashboard through WinRM.
 - The Client package tab shows the deployed client exe versions and current CMD settings, lets operators reconfigure the server URL, ingestion token, and reporting interval, and provides a ZIP download of the complete GPO package.
 - HTTPS is a first-class option: bind a certificate at install time by thumbprint or by importing a PFX, or import a new PFX later from the dashboard Certificate tab. Enabling or disabling HTTPS itself is a separate step on the Settings > General page, and every certificate import is checked for common risks (expired, missing private key, no SAN, weak key) and kept in a certificate history log.
+- HTTP and HTTPS run as two independent listeners on two independent ports (defaults 8080 and 8443), each start/stop/rebind independently of the other. HTTP can be turned off entirely once HTTPS is confirmed working; the server refuses that change unless HTTPS is genuinely active, so the settings page can never lock itself out.
 - The stale threshold (default 48 hours) is configurable on Settings > General instead of fixed in code.
 - The Licenses tab tracks a manually entered catalog (name, version, license, comment) separate from the collected software inventory. Name and version can be picked from already-seen installed software or typed freely. Each license can also be linked to specific computers, added manually or auto-filled from installed software. A License button on the Software table opens or creates the matching license record for that software.
 - The Settings > Change admin password page rotates the dashboard's Basic Auth password from the browser, and can also perform the initial setup (username and password) without editing `server-config.json` by hand.
@@ -72,7 +75,7 @@ Server:
 - Windows Server or desktop Windows
 - .NET Framework 3.5 or newer
 - Built-in Windows PowerShell for installer scripts
-- One TCP port for the standalone HTTP listener
+- One TCP port for the HTTP listener, plus a second TCP port for HTTPS when enabled (defaults: 8080 and 8443)
 
 Build host:
 
@@ -224,12 +227,14 @@ The `Client actions` tab also lets you set the retention period for a specific j
 
 ## HTTPS Setup
 
-The server resolves its TLS certificate from the `LocalMachine\My` Windows certificate store by thumbprint. There is no built-in HttpListener/netsh binding — the server wraps each accepted connection in `SslStream` directly, so enabling or swapping a certificate takes effect without a service restart once it is registered.
+HTTP and HTTPS run as two independent listeners on two independent ports. The default HTTP port is `8080` (set with `-ListenPrefix`) and the default HTTPS port is `8443` (set with `-HttpsPort`). Both can run together, HTTPS-only, or HTTP-only — the server never multiplexes both protocols on a single port.
+
+The server resolves its TLS certificate from the `LocalMachine\My` Windows certificate store by thumbprint. There is no built-in HttpListener/netsh binding — the server wraps each accepted HTTPS connection in `SslStream` directly, so enabling HTTPS, moving its port, or swapping a certificate takes effect without a service restart once the certificate is registered.
 
 Enable HTTPS at install time with a certificate already in the store:
 
 ```powershell
-.\src\Install-Server.ps1 -CertificateThumbprint 'AABBCCDD...' -UseHttps
+.\src\Install-Server.ps1 -CertificateThumbprint 'AABBCCDD...' -UseHttps -HttpsPort 8443
 ```
 
 Or import a PFX during install:
@@ -240,15 +245,34 @@ Or import a PFX during install:
     -CertificatePfxPassword 'replace-with-the-pfx-password'
 ```
 
-`-UseHttps` is implied automatically when a certificate is supplied and not explicitly disabled with `-UseHttps:$false`.
+`-UseHttps` is implied automatically when a certificate is supplied and not explicitly disabled with `-UseHttps:$false`. `-HttpsPort` defaults to `8443` and must be different from the HTTP port when both listeners are enabled.
 
-Uploading a certificate and enabling HTTPS are two separate steps. From the dashboard `Certificate` tab, choose a PFX file, enter its password, and upload: the server imports it into `LocalMachine\My` and records it as the configured certificate, but does not touch the HTTPS switch. Turning HTTPS on or off is a Settings > General action, using whichever certificate is currently configured.
+Uploading a certificate and enabling HTTPS are two separate steps. From the dashboard `Certificate` tab, choose a PFX file, enter its password, and upload: the server imports it into `LocalMachine\My` and records it as the configured certificate, but does not touch the HTTPS switch. Turning HTTPS on or off, and changing either port, are Settings > General actions, using whichever certificate is currently configured.
 
 Every uploaded certificate is checked for common problems before it can be used: expired or not-yet-valid, missing private key, no Subject Alternative Name, or an RSA key under 2048 bits. If any of these apply, enabling HTTPS on Settings > General returns the risk list instead of switching over; the operator has to explicitly acknowledge the risks to proceed anyway. Every upload is also kept in a certificate history log, visible on the `Certificate` tab, with the risks found at upload time.
 
 The first PFX upload travels over whatever transport is currently active. If the server is still on plain HTTP, do that first upload from a trusted network or the server console, since the PFX password rides along with the request body in that case.
 
 The `Certificate` tab can also delete the configured certificate from `LocalMachine\My`. If HTTPS was using it, deleting it turns HTTPS off in the same action, since there is nothing left to serve it with.
+
+### Disabling HTTP
+
+Once HTTPS is confirmed working, HTTP can be turned off entirely from Settings > General ("Enable HTTP"), or at install time with `-DisableHttp`:
+
+```powershell
+.\src\Install-Server.ps1 -CertificateThumbprint 'AABBCCDD...' -UseHttps -DisableHttp
+```
+
+The server refuses to disable HTTP unless HTTPS is genuinely active at that same moment, so the settings page itself can never turn off both listeners and lock the dashboard out. Disabling HTTP, or changing either port, disconnects the current browser session immediately; reload the dashboard at the new address afterward.
+
+### Recovering from an HTTPS lockout
+
+The safety gate above only checks listener state at the moment HTTP is disabled — it cannot see a certificate expiring, being deleted from the store by another tool, or otherwise breaking later. If that happens after HTTP was already turned off, the dashboard becomes unreachable, since there is no listener left to serve it. Recover with either of these, run locally on the server:
+
+1. **Edit the config file and restart the service** (fastest, no reinstall needed). Open `C:\ProgramData\WindowsInventoryLite\server-config.json`, set `"EnableHttp": "true"`, save, then run `Restart-Service WindowsInventoryLiteServer`. HTTP comes back on its last configured port (`ListenPrefix`), and the dashboard is reachable again to fix or replace the certificate.
+2. **Re-run the installer without `-DisableHttp`.** `.\src\Install-Server.ps1 -ListenPrefix 'http://+:8080/'` updates the same config value and restarts the service.
+
+Either path only restores HTTP — it does not touch the stored certificate or the `UseHttps` setting, so HTTPS resumes normally on its own once a working certificate is back in place.
 
 ## Dashboard Usage
 
@@ -277,7 +301,7 @@ Settings
 - `Licenses`: a manually maintained catalog with Name, Version, License, Comment, Computers, Edit, and Delete columns. Name and Version can be picked from software already seen in inventory reports or typed freely. Version, License, and Comment stay blank when not set, instead of showing a placeholder. Click the Name to expand the linked computers; add computers by typing a name and pressing Enter, or let it auto-fill by selecting a Name that matches installed software. Edit and Delete are separate, distinctly colored buttons.
 - `Client actions`: WinRM actions for installing, updating, or uninstalling the client on a single host, a list of hosts, or an IPv4 range.
 - `Client package`: shows deployed client exe versions and the current CMD settings. Lets you update the server URL, ingestion token, and reporting interval, and download the complete GPO package as a ZIP.
-- `General`: the stale threshold (hours) and the HTTPS on/off switch. Turning HTTPS on re-checks the configured certificate for risks and asks for confirmation if any are found.
+- `General`: three blocks. Inventory holds the stale threshold (hours). Network holds the HTTP port and an Enable HTTP switch. HTTPS holds the HTTPS port and an Enable HTTPS switch. Turning HTTPS on re-checks the configured certificate for risks and asks for confirmation if any are found. Changing a port or disabling HTTP disconnects the current browser session; the page warns before applying either change (see [HTTPS Setup](#https-setup)).
 - `Certificate`: shows the active certificate (subject, expiry) and its risks if any, lets you upload a PFX to stage it as the configured certificate, delete the installed certificate from the machine store, and shows the certificate history log with a per-entry delete. It does not toggle HTTPS — that's on `General`.
 - `Change admin password`: rotates the dashboard's Basic Auth password, or performs the initial setup if none is configured yet (no current password required in that case). Rotating an existing password still requires the current one.
 
@@ -318,6 +342,8 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 | `-CertificatePfxPath` | `—` | Path to a `.pfx`/`.p12` file to import into `LocalMachine\My` at install time. Optional. |
 | `-CertificatePfxPassword` | `—` | Password for `-CertificatePfxPath`. Required when that parameter is used. |
 | `-UseHttps` | `off` | Enable HTTPS. Implied automatically when a certificate is supplied, unless set to `-UseHttps:$false`. |
+| `-HttpsPort` | `8443` | HTTPS listener port, independent of `-ListenPrefix`. Must differ from the HTTP port when both are enabled. |
+| `-DisableHttp` | `off` | Disable the plain HTTP listener. Requires `-UseHttps` (or an already-configured working HTTPS setup); refused otherwise, since it would make the dashboard unreachable. |
 | `-InstallLogRetentionDays` | `30` | Default retention period in days for WinRM client action logs. |
 | `-OpenFirewall` | `off` | Create a Windows Firewall inbound rule for the listener port. |
 | `-NoRun` | `off` | Install and configure the service without starting it. |
@@ -442,6 +468,8 @@ The screenshots below use sample hostnames, documentation IP ranges, and placeho
 - `Token`: optional shared token sent in `X-Inventory-Token`.
 - `WebUsername` and `WebPassword`: optional Basic Auth credentials for dashboard and web API access.
 - `UseHttps` and `CertificateThumbprint`: optional HTTPS settings. The certificate itself lives in `LocalMachine\My`, not in this file.
+- `HttpsPort`: HTTPS listener port, independent of `ListenPrefix`. Default: `8443`.
+- `EnableHttp`: whether the plain HTTP listener runs at all. Default: `true`.
 
 ## Security Notes
 
@@ -454,6 +482,7 @@ The screenshots below use sample hostnames, documentation IP ranges, and placeho
 - If you enable the commented central GPO logging block, limit write access to that log folder to the required computer accounts.
 - License records are free-text, admin-entered fields (Name, Version, License, Comment). Do not put secrets or credentials in the License or Comment fields; they are stored in plain JSON and rendered as-is in the dashboard.
 - Setting the initial Basic Auth username and password from the dashboard requires no prior authentication, since the whole dashboard is already open while Basic Auth is unconfigured. Once a password is set, changing it always requires the current one. Set up Basic Auth (or restrict network access) before exposing the server beyond a trusted network.
+- Disabling HTTP requires HTTPS to be genuinely active at that same moment; the server rejects the change otherwise, so the settings page can never produce a fully unreachable configuration by itself. A certificate that stops working later (expiry, deletion from the store) can still leave the dashboard unreachable after HTTP was disabled — see [Recovering from an HTTPS lockout](#recovering-from-an-https-lockout).
 - Review [docs/threat-model.md](./docs/threat-model.md) before exposing the server outside a management network.
 
 ## Uninstall

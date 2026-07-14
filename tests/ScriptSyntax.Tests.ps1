@@ -42,7 +42,11 @@ Describe 'Windows Inventory Lite project' {
 
         foreach ($path in $paths) {
             Get-ChildItem -LiteralPath $path -Recurse -File | ForEach-Object {
-                (Get-Content -LiteralPath $_.FullName -Raw) | Should -Not -Match '\p{IsCyrillic}'
+                # Explicit UTF8: on a non-Latin default system codepage, Get-Content's
+                # encoding auto-detection misreads UTF8-without-BOM multi-byte
+                # sequences (e.g. an em dash) as unrelated codepoints, some of which
+                # land in the Cyrillic range and produce a false positive here.
+                (Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8) | Should -Not -Match '\p{IsCyrillic}'
             }
         }
     }

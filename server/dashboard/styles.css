@@ -6,9 +6,92 @@
   --muted: #5f6b7a;
   --line: #d9e0e8;
   --accent: #126f8f;
+  --accent-text: #ffffff;
   --danger: #a9362d;
   --danger-bg: #fff3f1;
+  --danger-border: #e1aaa5;
   --warn: #fff1c2;
+  --hover-bg: #eef3f7;
+  --active-bg: #e7f1f5;
+  --accent-soft: #eaf4f8;
+  --table-header-bg: #edf2f6;
+  --row-alt-bg: #f9fbfc;
+  --code-bg: #fbfcfe;
+  --usb-bg: #fff1c2;
+  --usb-border: #e6c84a;
+  --usb-text: #7a5800;
+  --usb-row-bg: #fff8e8;
+  --hw-summary-bg: #f3f7fb;
+  --sortable-hover-bg: #dce8f2;
+  --success-bg: #f0f8ef;
+  --success-border: #b8ddb0;
+  --success-text: #2d5e26;
+}
+
+/* Dark theme: follows the OS preference by default, or an explicit choice
+   saved by the sidebar toggle (see index.html's inline head script and
+   app.js's toggleTheme, which set/read [data-theme] on <html> to avoid a
+   flash of the wrong theme on load). */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #10161c;
+    --panel: #1a222b;
+    --text: #e6edf3;
+    --muted: #8a97a6;
+    --line: #2b3641;
+    --accent: #4fb8de;
+    --accent-text: #062028;
+    --danger: #ff7a6e;
+    --danger-bg: #3a1f1e;
+    --danger-border: #7a3b35;
+    --warn: #4a3f12;
+    --hover-bg: #232e39;
+    --active-bg: #1f3540;
+    --accent-soft: #1c3a44;
+    --table-header-bg: #1f2932;
+    --row-alt-bg: #171f27;
+    --code-bg: #141b22;
+    --usb-bg: #4a3f12;
+    --usb-border: #8a742a;
+    --usb-text: #f0d878;
+    --usb-row-bg: #332a10;
+    --hw-summary-bg: #171f27;
+    --sortable-hover-bg: #24333d;
+    --success-bg: #16321a;
+    --success-border: #2f6a37;
+    --success-text: #8fe39c;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #10161c;
+  --panel: #1a222b;
+  --text: #e6edf3;
+  --muted: #8a97a6;
+  --line: #2b3641;
+  --accent: #4fb8de;
+  --accent-text: #062028;
+  --danger: #ff7a6e;
+  --danger-bg: #3a1f1e;
+  --danger-border: #7a3b35;
+  --warn: #4a3f12;
+  --hover-bg: #232e39;
+  --active-bg: #1f3540;
+  --accent-soft: #1c3a44;
+  --table-header-bg: #1f2932;
+  --row-alt-bg: #171f27;
+  --code-bg: #141b22;
+  --usb-bg: #4a3f12;
+  --usb-border: #8a742a;
+  --usb-text: #f0d878;
+  --usb-row-bg: #332a10;
+  --hw-summary-bg: #171f27;
+  --sortable-hover-bg: #24333d;
+  --success-bg: #16321a;
+  --success-border: #2f6a37;
+  --success-text: #8fe39c;
 }
 
 * {
@@ -44,11 +127,38 @@ body {
   overflow-y: auto;
 }
 
-.sidebar h1 {
-  margin: 0 0 16px;
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 16px;
   padding: 0 10px;
+}
+
+.sidebar h1 {
+  margin: 0;
   font-size: 16px;
   font-weight: 700;
+}
+
+.theme-toggle {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.theme-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .nav-tree {
@@ -65,12 +175,11 @@ body {
 }
 
 .nav-group-title {
-  padding: 10px 10px 4px;
+  margin: 4px 0 2px;
+  padding: 8px 10px 4px 10px;
   color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  font-size: 14px;
+  font-weight: 650;
 }
 
 .nav-item,
@@ -91,12 +200,12 @@ body {
 }
 
 .nav-item:hover {
-  background: #eef3f7;
+  background: var(--hover-bg);
 }
 
 .nav-item.active {
   border-left-color: var(--accent);
-  background: #e7f1f5;
+  background: var(--active-bg);
   color: var(--accent);
   font-weight: 650;
 }
@@ -173,7 +282,7 @@ main {
 .danger-button {
   min-width: 72px;
   padding: 6px 10px;
-  border: 1px solid #e1aaa5;
+  border: 1px solid var(--danger-border);
   border-radius: 6px;
   background: var(--danger-bg);
   color: var(--danger);
@@ -191,7 +300,7 @@ main {
   padding: 6px 10px;
   border: 1px solid var(--accent);
   border-radius: 6px;
-  background: #eaf4f8;
+  background: var(--accent-soft);
   color: var(--accent);
   cursor: pointer;
   font: inherit;
@@ -200,7 +309,7 @@ main {
 
 .edit-button:hover {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-text);
 }
 
 .summary {
@@ -229,7 +338,14 @@ main {
 .dash-chart-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 24px;
+  gap: 16px;
+}
+
+.dash-chart {
+  padding: 12px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
 }
 
 .dash-chart h3 {
@@ -319,7 +435,7 @@ td {
 }
 
 th {
-  background: #edf2f6;
+  background: var(--table-header-bg);
   font-size: 12px;
   color: var(--muted);
   text-transform: uppercase;
@@ -335,7 +451,7 @@ tr.stale td {
 }
 
 .details-row td {
-  background: #f9fbfc;
+  background: var(--row-alt-bg);
 }
 
 .details {
@@ -472,7 +588,7 @@ select {
   border: 1px solid var(--accent);
   border-radius: 6px;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-text);
   cursor: pointer;
   font: inherit;
   font-weight: 650;
@@ -526,7 +642,7 @@ select {
   padding: 8px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: #fbfcfe;
+  background: var(--code-bg);
 }
 
 .install-history {
@@ -576,9 +692,9 @@ pre {
   margin-left: 6px;
   padding: 1px 6px;
   border-radius: 4px;
-  background: #fff1c2;
-  border: 1px solid #e6c84a;
-  color: #7a5800;
+  background: var(--usb-bg);
+  border: 1px solid var(--usb-border);
+  color: var(--usb-text);
   font-size: 11px;
   font-weight: 700;
   vertical-align: middle;
@@ -586,7 +702,7 @@ pre {
 }
 
 tr.usb-row td {
-  background: #fff8e8;
+  background: var(--usb-row-bg);
 }
 
 .hw-section {
@@ -605,7 +721,7 @@ tr.usb-row td {
   gap: 8px 18px;
   margin-bottom: 14px;
   padding: 10px 14px;
-  background: #f3f7fb;
+  background: var(--hw-summary-bg);
   border: 1px solid var(--line);
   border-radius: 6px;
 }
@@ -630,7 +746,7 @@ th.sortable {
 }
 
 th.sortable:hover {
-  background: #dce8f2;
+  background: var(--sortable-hover-bg);
   color: var(--accent);
 }
 
@@ -709,15 +825,15 @@ th.sort-desc::after {
   margin-top: 12px;
   padding: 8px 12px;
   border-radius: 6px;
-  background: #f0f8ef;
-  border: 1px solid #b8ddb0;
-  color: #2d5e26;
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+  color: var(--success-text);
   font-size: 13px;
 }
 
 .pkg-message.error {
   background: var(--danger-bg);
-  border-color: #e1aaa5;
+  border-color: var(--danger-border);
   color: var(--danger);
 }
 
@@ -806,7 +922,7 @@ th.sort-desc::after {
   padding: 4px 6px 4px 10px;
   border: 1px solid var(--line);
   border-radius: 999px;
-  background: #eef3f7;
+  background: var(--hover-bg);
   font-size: 13px;
 }
 
@@ -842,8 +958,8 @@ th.sort-desc::after {
     overflow-y: visible;
   }
 
-  .sidebar h1 {
-    margin: 0;
+  .sidebar-header {
+    margin-bottom: 0;
     padding: 0 10px 0 0;
     flex-basis: 100%;
   }

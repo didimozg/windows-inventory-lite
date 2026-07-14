@@ -71,6 +71,18 @@ param(
     [switch]$UseHttps,
 
     [Parameter()]
+    [ValidateRange(1, 65535)]
+    [int]$HttpsPort,
+
+    # Refused at install time (and again from the dashboard Settings > General
+    # page - see ConfigureServerSettings) unless HTTPS is enabled and working,
+    # since disabling HTTP with no working HTTPS would leave the dashboard
+    # completely unreachable with no way back in except editing
+    # server-config.json by hand and restarting the service.
+    [Parameter()]
+    [switch]$DisableHttp,
+
+    [Parameter()]
     [ValidateRange(1, 3650)]
     [int]$InstallLogRetentionDays,
 
@@ -387,6 +399,39 @@ if ($CertificateThumbprint) {
     $CertificateThumbprint = $normalizedThumbprint
 }
 
+if (-not $PSBoundParameters.ContainsKey('HttpsPort')) {
+    $savedHttpsPort = Get-ConfigValue -Config $existingConfig -Name 'HttpsPort'
+    if ($savedHttpsPort) {
+        $HttpsPort = [int]$savedHttpsPort
+    }
+    else {
+        $HttpsPort = 8443
+    }
+}
+
+if (-not $PSBoundParameters.ContainsKey('DisableHttp')) {
+    $savedEnableHttp = Get-ConfigValue -Config $existingConfig -Name 'EnableHttp'
+    if ($savedEnableHttp -eq 'false') {
+        $DisableHttp = $true
+    }
+}
+
+if ($DisableHttp -and -not $UseHttps) {
+    throw "-DisableHttp requires -UseHttps (or an already-configured working HTTPS setup) - disabling HTTP with no HTTPS would make the dashboard unreachable."
+}
+
+if ($UseHttps -and -not $DisableHttp) {
+    $listenPrefixPort = $null
+    try {
+        $listenPrefixPort = ([Uri]($ListenPrefix -replace '\+', 'localhost')).Port
+    }
+    catch {
+    }
+    if ($listenPrefixPort -and $HttpsPort -eq $listenPrefixPort) {
+        throw "-HttpsPort must be different from the HTTP port ($listenPrefixPort) when both are enabled."
+    }
+}
+
 if (-not $PSBoundParameters.ContainsKey('InstallLogRetentionDays')) {
     $savedInstallLogRetentionDays = Get-ConfigValue -Config $existingConfig -Name 'InstallLogRetentionDays'
     if ($savedInstallLogRetentionDays) {
@@ -483,7 +528,15 @@ function Set-RestrictedFileAcl {
     Set-Acl -LiteralPath $FilePath -AclObject $acl
 }
 
-$serviceCommand = '"' + (ConvertTo-ServiceArgValue $servicePath) + '" --prefix "' + (ConvertTo-ServiceArgValue $ListenPrefix) + '" --data "' + (ConvertTo-ServiceArgValue $DataPath) + '" --content "' + (ConvertTo-ServiceArgValue $ContentPath) + '" --client-package "' + (ConvertTo-ServiceArgValue $ClientPackagePath) + '" --winrm-installer "' + (ConvertTo-ServiceArgValue $winRmInstallerPath) + '" --winrm-uninstaller "' + (ConvertTo-ServiceArgValue $winRmUninstallerPath) + '"'
+# --prefix is deliberately NOT included here, unlike --data/--content/etc.
+# The listen port can be changed later from the dashboard Settings > General
+# page (InventoryServer.RestartListenerOnPort); that only rewrites
+# ListenPrefix in server-config.json, not this service's start command. If
+# --prefix were baked in here too, a plain service restart or reboot would
+# silently revert to whatever port was set at install time. The server reads
+# ListenPrefix from --config on every startup instead, same as WebUsername,
+# UseHttps, and the other dashboard-only settings.
+$serviceCommand = '"' + (ConvertTo-ServiceArgValue $servicePath) + '" --data "' + (ConvertTo-ServiceArgValue $DataPath) + '" --content "' + (ConvertTo-ServiceArgValue $ContentPath) + '" --client-package "' + (ConvertTo-ServiceArgValue $ClientPackagePath) + '" --winrm-installer "' + (ConvertTo-ServiceArgValue $winRmInstallerPath) + '" --winrm-uninstaller "' + (ConvertTo-ServiceArgValue $winRmUninstallerPath) + '"'
 $serviceCommand += ' --install-log-retention-days ' + $InstallLogRetentionDays
 $serviceCommand += ' --config "' + (ConvertTo-ServiceArgValue $ConfigPath) + '"'
 
@@ -507,6 +560,8 @@ $config.WebUsername             = $WebUsername
 $config.WebPassword             = $WebPassword
 $config.UseHttps                = if ($UseHttps) { 'true' } else { 'false' }
 $config.CertificateThumbprint   = $CertificateThumbprint
+$config.HttpsPort               = $HttpsPort
+$config.EnableHttp              = if ($DisableHttp) { 'false' } else { 'true' }
 Write-ServerConfig -Path $ConfigPath -Config $config
 Set-RestrictedFileAcl -FilePath $ConfigPath
 
@@ -514,7 +569,13 @@ Invoke-ServiceControl -Arguments @('create', $serviceName, 'binPath=', $serviceC
 Invoke-ServiceControl -Arguments @('description', $serviceName, "Receives Windows Inventory Lite reports and serves the dashboard. Version $serverVersion.") -FailureMessage "Failed to set service description." | Out-Null
 
 if ($OpenFirewall) {
-    & netsh.exe advfirewall firewall add rule name="Windows Inventory Lite Server" dir=in action=allow protocol=TCP localport=8080 | Out-Null
+    if (-not $DisableHttp) {
+        $httpFirewallPort = if ($listenPrefixPort) { $listenPrefixPort } else { 8080 }
+        & netsh.exe advfirewall firewall add rule name="Windows Inventory Lite Server (HTTP)" dir=in action=allow protocol=TCP localport=$httpFirewallPort | Out-Null
+    }
+    if ($UseHttps) {
+        & netsh.exe advfirewall firewall add rule name="Windows Inventory Lite Server (HTTPS)" dir=in action=allow protocol=TCP localport=$HttpsPort | Out-Null
+    }
 }
 
 if (-not $NoRun) {
@@ -533,12 +594,17 @@ if ($clientNet40Version) {
     Write-Host "Client package Net40 version: $clientNet40Version"
 }
 Write-Host "Client action log retention days: $InstallLogRetentionDays"
-Write-Host "Dashboard URL: $ListenPrefix"
+if ($DisableHttp) {
+    Write-Host "HTTP: disabled"
+}
+else {
+    Write-Host "Dashboard URL (HTTP): $ListenPrefix"
+}
 if ($WebUsername) {
     Write-Host "Web auth user: $WebUsername"
 }
 if ($UseHttps) {
-    Write-Host "HTTPS: enabled, certificate thumbprint $CertificateThumbprint"
+    Write-Host "HTTPS: enabled on port $HttpsPort, certificate thumbprint $CertificateThumbprint"
 }
 elseif ($CertificateThumbprint) {
     Write-Host "HTTPS: certificate imported (thumbprint $CertificateThumbprint) but not enabled. Rerun with -UseHttps to switch on."

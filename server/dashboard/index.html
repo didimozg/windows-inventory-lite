@@ -4,12 +4,26 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Windows Inventory Lite</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <script>
+    // Applied before styles.css loads so a saved dark preference doesn't
+    // flash light first. app.js owns the matching toggleTheme logic.
+    (function () {
+      var saved = localStorage.getItem('wil-theme');
+      if (saved === 'light' || saved === 'dark') {
+        document.documentElement.setAttribute('data-theme', saved);
+      }
+    })();
+  </script>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div class="app-shell">
     <aside class="sidebar" aria-label="Dashboard navigation">
-      <h1>Windows Inventory Lite</h1>
+      <div class="sidebar-header">
+        <h1>Windows Inventory Lite</h1>
+        <button id="themeToggle" class="theme-toggle" type="button" title="Toggle color theme" aria-label="Toggle color theme">&#9790;</button>
+      </div>
       <nav class="nav-tree">
         <button id="dashboardTab" class="nav-item nav-item-root active" type="button">Dashboard</button>
         <div class="nav-group">
@@ -28,7 +42,7 @@
           <div class="nav-group-title">Settings</div>
           <button id="generalTab" class="nav-item" type="button">General</button>
           <button id="certificateTab" class="nav-item" type="button">Certificate</button>
-          <button id="adminPasswordTab" class="nav-item" type="button">Change admin password</button>
+          <button id="adminPasswordTab" class="nav-item" type="button">Admin password</button>
         </div>
       </nav>
       <div class="sidebar-footer">
@@ -97,8 +111,26 @@
             </div>
           </div>
           <div class="settings-block">
+            <h2 class="settings-block-title">Network</h2>
+            <div class="pkg-grid general-grid">
+              <label class="pkg-token-field">
+                HTTP port
+                <input id="generalPort" type="number" min="1" max="65535" value="8080">
+              </label>
+              <label class="check-label">
+                <input id="generalEnableHttp" type="checkbox" checked>
+                Enable HTTP
+              </label>
+            </div>
+            <p class="cert-hint">Disabling HTTP is only possible while HTTPS is enabled and working - otherwise the dashboard would become unreachable. Changing the port or disabling HTTP disconnects this browser session; you'll need to reload the dashboard at the new address.</p>
+          </div>
+          <div class="settings-block">
             <h2 class="settings-block-title">HTTPS</h2>
             <div class="pkg-grid general-grid">
+              <label class="pkg-token-field">
+                HTTPS port
+                <input id="generalHttpsPort" type="number" min="1" max="65535" value="8443">
+              </label>
               <label class="check-label">
                 <input id="generalUseHttps" type="checkbox">
                 Enable HTTPS (uses the certificate uploaded on the Certificate page)

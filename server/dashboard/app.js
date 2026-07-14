@@ -20,6 +20,29 @@
     return document.getElementById(id);
   }
 
+  function currentTheme() {
+    const explicit = document.documentElement.getAttribute('data-theme');
+    if (explicit === 'light' || explicit === 'dark') return explicit;
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+
+  function updateThemeToggle() {
+    const button = byId('themeToggle');
+    if (!button) return;
+    const isDark = currentTheme() === 'dark';
+    // Icon shown is the theme a click switches TO, not the active one.
+    button.innerHTML = isDark ? '&#9728;' : '&#9790;';
+    button.title = isDark ? 'Switch to light theme' : 'Switch to dark theme';
+    button.setAttribute('aria-label', button.title);
+  }
+
+  function toggleTheme() {
+    const next = currentTheme() === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('wil-theme', next);
+    updateThemeToggle();
+  }
+
   function getInitialView() {
     const hash = window.location.hash.replace(/^#/, '').toLowerCase();
     if (hash === 'clients') return 'clients';
@@ -789,7 +812,15 @@
       })
       .then(data => {
         byId('generalStaleHours').value = data.staleHours || 48;
+        byId('generalPort').value = data.port || 8080;
+        byId('generalEnableHttp').checked = data.enableHttp !== false;
+        byId('generalHttpsPort').value = data.httpsPort || 8443;
         byId('generalUseHttps').checked = !!data.useHttps;
+        // Compared against on save to decide whether the "this will disconnect
+        // you" confirmation is actually needed - staleHours/useHttps changes
+        // alone don't move the port this browser is talking to.
+        state.generalLoadedPort = data.port || 8080;
+        state.generalLoadedEnableHttp = data.enableHttp !== false;
         const hint = byId('generalCertHint');
         if (!data.certificatePresent) {
           hint.textContent = 'No certificate uploaded yet. Upload one on the Certificate page before enabling HTTPS.';
@@ -812,9 +843,25 @@
     el.className = 'pkg-message' + (isError ? ' error' : '');
   }
 
-  function saveGeneralSettings(acknowledgeRisks) {
+  function saveGeneralSettings(acknowledgeRisks, confirmedDisruption) {
     const staleHours = Number.parseInt(byId('generalStaleHours').value, 10) || 48;
+    const port = Number.parseInt(byId('generalPort').value, 10) || 8080;
+    const enableHttp = byId('generalEnableHttp').checked;
+    const httpsPort = Number.parseInt(byId('generalHttpsPort').value, 10) || 8443;
     const useHttps = byId('generalUseHttps').checked;
+
+    // Only the HTTP port and the Enable HTTP switch can actually move this
+    // browser's own connection out from under it - staleHours/httpsPort/
+    // useHttps changes don't affect whatever port this page is currently
+    // talking to, so they don't need the same warning.
+    const networkChanged = port !== state.generalLoadedPort || enableHttp !== state.generalLoadedEnableHttp;
+    if (networkChanged && !confirmedDisruption) {
+      const confirmed = window.confirm(
+        'Changing the HTTP port or the "Enable HTTP" setting will disconnect this browser session immediately. '
+          + 'You will need to reload the dashboard at the new address afterward. Continue?'
+      );
+      if (!confirmed) return;
+    }
 
     byId('generalSaveButton').disabled = true;
     byId('generalMessage').className = 'pkg-message hidden';
@@ -823,7 +870,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ staleHours, useHttps, acknowledgeRisks: !!acknowledgeRisks })
+      body: JSON.stringify({ staleHours, port, enableHttp, httpsPort, useHttps, acknowledgeRisks: !!acknowledgeRisks })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
@@ -833,7 +880,7 @@
               `${data.error}\n\n${data.risks.join('\n')}\n\nEnable HTTPS anyway?`
             );
             if (confirmed) {
-              saveGeneralSettings(true);
+              saveGeneralSettings(true, true);
               return;
             }
             byId('generalUseHttps').checked = false;
@@ -842,7 +889,10 @@
           throw new Error(data.error || 'Save failed');
         }
         state.staleHours = data.staleHours || 48;
+        state.generalLoadedPort = data.port || 8080;
+        state.generalLoadedEnableHttp = data.enableHttp !== false;
         renderSummary(state.clients);
+        renderDashboardTiles();
         showGeneralMessage('Settings saved.', false);
       })
       .catch(error => {
@@ -1728,6 +1778,8 @@
   });
   byId('adminPasswordTab').addEventListener('click', () => setView('admin'));
   byId('adminPasswordSaveButton').addEventListener('click', changeAdminPassword);
+  byId('themeToggle').addEventListener('click', toggleTheme);
+  updateThemeToggle();
   if (state.view === 'package') loadPackageStatus();
   if (state.view === 'general') loadGeneralSettings();
   if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }

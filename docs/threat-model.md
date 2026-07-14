@@ -33,7 +33,7 @@
 - WinRM target names, IP addresses, ranges, usernames, and passwords entered by an operator.
 - POST body to `POST /api/v1/server/certificate` (base64 PFX bytes, PFX password) that imports a certificate into `LocalMachine\My` and records it as the configured certificate, without changing whether HTTPS is in use.
 - `DELETE /api/v1/server/certificate`, which removes the configured certificate from `LocalMachine\My` and turns HTTPS off if it was using that certificate. No request body; the only input is the authenticated request itself.
-- POST body to `POST /api/v1/server/settings` (staleHours, useHttps, acknowledgeRisks fields) that changes the stale threshold and switches the listener between HTTP and HTTPS using the currently configured certificate.
+- POST body to `POST /api/v1/server/settings` (staleHours, useHttps, port, enableHttp, httpsPort, acknowledgeRisks fields) that changes the stale threshold and independently starts, stops, or moves the HTTP and HTTPS listeners using the currently configured certificate.
 - POST/PUT bodies to `/api/v1/licenses` (name, version, license, comment, computers fields) written to `licenses.json` and rendered back into the dashboard.
 - POST body to `POST /api/v1/server/admin-password` (newUsername, currentPassword, newPassword) that sets up or rotates the dashboard's Basic Auth username and password. `currentPassword` is required only when Basic Auth is already configured.
 
@@ -54,6 +54,8 @@
 - The admin password endpoint must require the current password to change an already-configured password. It may accept a new username and password without a current password only while Basic Auth is not yet configured — at that point the endpoint is no less exposed than the rest of the dashboard, which is already unauthenticated.
 - TLS connections must use an explicit protocol version (not "negotiate any"), since at least one .NET Framework runtime treats the auto-negotiate value as "no protocols enabled" and rejects the handshake outright.
 - Every accepted socket must have a read/write timeout, so a stalled handshake or a client that opens a connection without sending data cannot hold a server thread indefinitely.
+- `POST /api/v1/server/settings` must reject a request that disables HTTP unless HTTPS is genuinely active (a live listener with a usable certificate) in that same evaluation, so the settings endpoint itself can never leave the server with no reachable listener.
+- Port changes for either listener must bind and start the new listener before touching the old one, so a failed rebind (port in use, no permission) leaves the previously working listener running unaffected.
 
 ## Main Risks
 
@@ -76,6 +78,7 @@
 - License records accept arbitrary free text in the License and Comment fields. They are rendered into the dashboard as escaped text, not executed, but should not be treated as a place to store secrets.
 - If a browser has cached Basic Auth credentials for the dashboard's origin, a malicious page could trigger a same-origin request the browser auto-authenticates (a CSRF-like risk inherent to Basic Auth, not specific to this project). The admin password change endpoint's current-password requirement limits the blast radius of this for that one action; other state-changing endpoints do not have an equivalent second factor.
 - While Basic Auth is unconfigured, anyone who can reach the dashboard can set the initial username and password themselves, effectively claiming the account. This is an accepted tradeoff (see Required Invariants) rather than an oversight: the rest of the dashboard is equally open in that state. The mitigation is operational — configure Basic Auth immediately after install, before exposing the server beyond a trusted network.
+- The HTTP-disable safety gate only evaluates listener state at the moment of the request. An operator can disable HTTP while HTTPS is genuinely working, then have HTTPS later stop working on its own (certificate expiry, deletion from the store by another tool or admin, a private key that no longer matches) with nothing left to re-evaluate the gate. The dashboard becomes unreachable until an administrator with local server access edits `server-config.json` to set `EnableHttp` back to `true` and restarts the service — documented as the recovery procedure in the README. This is an accepted operational risk of the safety gate's design, not a bug in it: the gate protects against the dashboard locking itself out at the moment of the change, not against a certificate degrading afterward.
 
 ## Controls
 
@@ -97,3 +100,5 @@
 - Use the Settings `Change admin password` page to rotate `WebPassword` instead of editing `server-config.json` directly; rotating an existing password still requires the current one and updates the ACL-protected config file in place.
 - Review the certificate history log on the `Certificate` tab periodically; an unexpected entry is a signal that a dashboard account may be compromised.
 - Do not treat an acknowledged certificate risk warning as resolved — replace the flagged certificate with a valid one as soon as practical.
+- Do not disable HTTP until HTTPS has been verified reachable from an actual client, not just accepted by the settings endpoint. Keep local server access (RDP, console) available for the recovery procedure in case a certificate degrades after HTTP is off.
+- Monitor certificate expiry independently of this application if HTTP is disabled in production; there is no built-in alerting for an approaching expiry date.

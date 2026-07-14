@@ -6,6 +6,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-14
+
+### Added
+
+- Dark theme for the dashboard. Follows the OS color scheme by default (`prefers-color-scheme`), with a manual toggle button next to the sidebar title that overrides it and remembers the choice per browser (`localStorage`). An inline head script applies a saved preference before `styles.css` loads, so there's no flash of the wrong theme on first paint.
+- All dashboard colors (nav highlights, table headers, status badges, USB markers, success/error messages, chip backgrounds) are now theme-aware CSS custom properties instead of hardcoded hex values, so both themes stay in sync as the UI evolves.
+
+## [0.6.1] - 2026-07-14
+
+### Added
+
+- A project icon: a teal monitor-with-checkmark mark matching the dashboard's own accent color. Added as the dashboard's browser-tab favicon (`server/dashboard/favicon.svg`, served at `/favicon.svg`) and as a logo at the top of `README.md`/`README_RU.md` (`docs/images/logo.svg`).
+
+### Changed
+
+- The sidebar's top-level section labels (Dashboard, Inventory, Licenses, Installation, Settings) previously mixed two different type styles: standalone entries (Dashboard, Licenses) were 14px, sentence case, while group headers (Inventory, Installation, Settings) were 11px, uppercase, letter-spaced. Group headers now share the same 14px/sentence-case typography as the standalone entries; they keep a muted color as the only remaining visual cue that they aren't clickable.
+
+## [0.6.0] - 2026-07-14
+
+### Added
+
+- HTTP and HTTPS now run as two independent listeners on two independent ports instead of one listener that switches protocol. Default HTTP port is `8080` (`-ListenPrefix`, unchanged), default HTTPS port is `8443` (new `-HttpsPort`). Both can run together, HTTPS-only, or HTTP-only.
+- HTTP can be disabled entirely once HTTPS is confirmed working, from Settings > General or `Install-Server.ps1 -DisableHttp`. The server refuses the change unless HTTPS is genuinely active at that moment, so the settings page can never turn off both listeners and lock the dashboard out. Recovery procedure for a certificate that later breaks after HTTP was disabled is documented in the README's [Recovering from an HTTPS lockout](./README.md#recovering-from-an-https-lockout) section.
+- Settings > General can now change the HTTP port directly from the dashboard (previously only available via `-ListenPrefix` at install time, and previously did not survive a plain service restart - see Fixed).
+- Settings > General reorganized into three blocks: Inventory (stale threshold), Network (HTTP port, Enable HTTP), HTTPS (HTTPS port, Enable HTTPS).
+- The Dashboard's Hardware and Software cards now draw a visible border/background around each mini-chart (CPU models, RAM, Storage type, Top software), so it's clear at a glance which values belong to which chart.
+
+### Changed
+
+- The one dashboard nav tab with a verb-phrase name ("Change admin password") is now "Admin password", matching the noun-phrase, sentence-case style already used by every other tab.
+
+### Fixed
+
+- The HTTP listener port previously only took effect through the `--prefix` argument baked into the Windows Service's own start command at install time; changing it from the dashboard worked until the next plain service restart or reboot, which silently reverted to the old port. Port is now always re-read from `server-config.json` at service startup, matching how every other dashboard-configurable setting already behaved.
+- `Install-Server.ps1 -OpenFirewall` always opened port 8080 regardless of the actual configured HTTP port. Now opens a firewall rule for the real HTTP port, plus a separate rule for the HTTPS port when `-UseHttps` is set.
+
+### Breaking
+
+- Existing installs with HTTPS already enabled were serving it on the same port as HTTP. After upgrading, HTTPS moves to its own port (default `8443`) on the next service restart. Reconfigure firewall rules and any bookmarked `https://` URLs to use the new port, or set `-HttpsPort` to the old port explicitly during the next `Install-Server.ps1` run to keep it unchanged.
+
 ## [0.5.2] - 2026-07-14
 
 Closes out the three items left documented-but-not-fixed in 0.5.1's review.
