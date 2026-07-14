@@ -18,7 +18,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.10.0";
+        internal const string ProductVersion = "0.5.0";
 
         private static int Main(string[] args)
         {
@@ -2484,25 +2484,20 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            if (payload.ContainsKey("port") || payload.ContainsKey("enableHttp"))
-            {
-                string httpError = ApplySlotState(httpSlot, desiredEnableHttp, options.Port, desiredHttpPort, false);
-                if (httpError != null)
-                {
-                    SendText(stream, "{\"error\":\"HTTP: " + httpError + "\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.Port = desiredHttpPort;
-                options.EnableHttp = desiredEnableHttp;
-                // ListenPrefix, not just a bare port number, because that's the
-                // format Install-Server.ps1 both writes and re-reads from this
-                // same config file on every install/reinstall - keeping the
-                // same key means a future reinstall picks up this port instead
-                // of reverting to whatever was baked in at install time.
-                updates["ListenPrefix"] = "http://+:" + options.Port + "/";
-                updates["EnableHttp"] = options.EnableHttp ? "true" : "false";
-            }
-
+            // HTTPS is applied before HTTP, not just validated before HTTP -
+            // deliberately, and in this order for a reason: the dashboard's
+            // General Settings form always submits port/enableHttp/useHttps/
+            // httpsPort together in one request, so "turn HTTPS on and turn
+            // HTTP off" is a single call with both blocks active. ApplySlotState
+            // never touches a slot's old listener when a new bind fails, so
+            // whichever block runs SECOND is the one that's still safe to fail:
+            // if HTTPS is applied first and its bind fails, we return before
+            // ever touching the HTTP slot, so HTTP is untouched. Applying HTTP's
+            // disable first would instead have already stopped a real, working
+            // listener before finding out whether HTTPS could replace it -
+            // exactly the fully-unreachable state the check above exists to
+            // prevent, just reached through a failed bind instead of a bad
+            // request.
             if (payload.ContainsKey("useHttps") || payload.ContainsKey("httpsPort"))
             {
                 if (desiredUseHttps)
@@ -2527,6 +2522,25 @@ namespace WindowsInventoryLite
                 options.HttpsPort = desiredHttpsPort;
                 updates["UseHttps"] = options.UseHttps ? "true" : "false";
                 updates["HttpsPort"] = options.HttpsPort.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("port") || payload.ContainsKey("enableHttp"))
+            {
+                string httpError = ApplySlotState(httpSlot, desiredEnableHttp, options.Port, desiredHttpPort, false);
+                if (httpError != null)
+                {
+                    SendText(stream, "{\"error\":\"HTTP: " + httpError + "\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.Port = desiredHttpPort;
+                options.EnableHttp = desiredEnableHttp;
+                // ListenPrefix, not just a bare port number, because that's the
+                // format Install-Server.ps1 both writes and re-reads from this
+                // same config file on every install/reinstall - keeping the
+                // same key means a future reinstall picks up this port instead
+                // of reverting to whatever was baked in at install time.
+                updates["ListenPrefix"] = "http://+:" + options.Port + "/";
+                updates["EnableHttp"] = options.EnableHttp ? "true" : "false";
             }
 
             if (updates.Count > 0)

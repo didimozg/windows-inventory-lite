@@ -6,111 +6,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-## [0.10.0] - 2026-07-14
+## [0.5.0] - 2026-07-14
 
-### Changed
-
-- The sidebar brand now uses the real project logo with its wordmark ("Windows Inventory" + "Lite") instead of a small icon next to a plain text heading. It's inlined directly in the page (not loaded as an external image) so its colors can follow the existing `--heading`/`--accent`/`--accent-text` theme variables and stay correct through both OS-based dark mode and the manual light/dark toggle - an external SVG image can only see the OS preference, not the app's own override.
-- `docs/images/logo.svg` (the README logo) now includes the same wordmark, stacked under the icon, matching the artwork provided by the project owner.
-
-## [0.9.0] - 2026-07-14
+This entry consolidates everything built in this release cycle — dual HTTP/HTTPS listeners, a security and code-quality review, a dark theme, a project icon, and dashboard design-token/typography work — into one version instead of the string of point releases (0.5.1 through 0.10.0) it actually shipped as internally. Only the net result is documented below.
 
 ### Added
 
-- The project icon now appears inside the dashboard itself, not just the browser tab and README: a small brand mark sits next to the "Windows Inventory Lite" title in the sidebar header.
-- Every sidebar navigation item has a matching flat line icon (inline SVG, `currentColor` stroke so it follows the existing muted/active/hover text color automatically in both themes) - a dashboard grid, monitor, package, chip, document, bolt, archive box, gear, shield, and lock for Dashboard, Clients, Software, Hardware, Licenses, Client actions, Client package, General, Certificate, and Admin password respectively.
-
-Deliberately not carried over from the reference mockup: an avatar/notifications/calendar cluster in the top bar and sparkline trend charts inside the summary tiles. Neither corresponds to a real feature of this app (no user accounts beyond one shared Basic Auth login, no notification system, no historical time-series data collection), and adding them would just be decoration with nothing behind it.
-
-## [0.8.0] - 2026-07-14
-
-### Changed
-
-- Adopted a formal design-token spec for the dashboard, in both themes: light background `#f8f9fa`, graphite body text `#2d3748`, borders `#e2e8f0`; dark background `#111827`, panels `#1f2937`, body text `#e2e8f0`, headings pinned to white. The accent teal (`#126f8f`) is unchanged in light theme and slightly brightened in dark theme (`#1c93bc`) for contrast, consistent with the existing dark-theme approach.
-- Body font stack now leads with `Inter`/`Roboto` before falling back to `Segoe UI` (the fonts only apply if already installed locally - the dashboard still ships with no web-font/CDN dependency, so it keeps working on isolated networks).
-- IP addresses, OS version/build strings, and certificate thumbprints now render in a monospace stack (`JetBrains Mono` falling back to `Consolas`), matching the rest of the dashboard's existing use of Consolas for install-job output.
-
-## [0.7.1] - 2026-07-14
-
-### Changed
-
-- Replaced the README logo (`docs/images/logo.svg`) with a fuller mark: a monitor containing a small org-chart/tree of connected nodes and a checkmark hub, representing the inventory-collection concept more directly than the earlier plain checkmark-monitor glyph. The dashboard favicon keeps the simpler glyph, since the richer version doesn't read at 16px in a browser tab.
-
-## [0.7.0] - 2026-07-14
-
-### Added
-
-- Dark theme for the dashboard. Follows the OS color scheme by default (`prefers-color-scheme`), with a manual toggle button next to the sidebar title that overrides it and remembers the choice per browser (`localStorage`). An inline head script applies a saved preference before `styles.css` loads, so there's no flash of the wrong theme on first paint.
-- All dashboard colors (nav highlights, table headers, status badges, USB markers, success/error messages, chip backgrounds) are now theme-aware CSS custom properties instead of hardcoded hex values, so both themes stay in sync as the UI evolves.
-
-## [0.6.1] - 2026-07-14
-
-### Added
-
-- A project icon: a teal monitor-with-checkmark mark matching the dashboard's own accent color. Added as the dashboard's browser-tab favicon (`server/dashboard/favicon.svg`, served at `/favicon.svg`) and as a logo at the top of `README.md`/`README_RU.md` (`docs/images/logo.svg`).
-
-### Changed
-
-- The sidebar's top-level section labels (Dashboard, Inventory, Licenses, Installation, Settings) previously mixed two different type styles: standalone entries (Dashboard, Licenses) were 14px, sentence case, while group headers (Inventory, Installation, Settings) were 11px, uppercase, letter-spaced. Group headers now share the same 14px/sentence-case typography as the standalone entries; they keep a muted color as the only remaining visual cue that they aren't clickable.
-
-## [0.6.0] - 2026-07-14
-
-### Added
-
+- New Dashboard "Software" card: the Licenses tile (moved out of the top count row) plus a "Top software" bar chart — the 5 most commonly installed titles across the fleet, counted by distinct computer regardless of which version is installed.
 - HTTP and HTTPS now run as two independent listeners on two independent ports instead of one listener that switches protocol. Default HTTP port is `8080` (`-ListenPrefix`, unchanged), default HTTPS port is `8443` (new `-HttpsPort`). Both can run together, HTTPS-only, or HTTP-only.
 - HTTP can be disabled entirely once HTTPS is confirmed working, from Settings > General or `Install-Server.ps1 -DisableHttp`. The server refuses the change unless HTTPS is genuinely active at that moment, so the settings page can never turn off both listeners and lock the dashboard out. Recovery procedure for a certificate that later breaks after HTTP was disabled is documented in the README's [Recovering from an HTTPS lockout](./README.md#recovering-from-an-https-lockout) section.
 - Settings > General can now change the HTTP port directly from the dashboard (previously only available via `-ListenPrefix` at install time, and previously did not survive a plain service restart - see Fixed).
 - Settings > General reorganized into three blocks: Inventory (stale threshold), Network (HTTP port, Enable HTTP), HTTPS (HTTPS port, Enable HTTPS).
-- The Dashboard's Hardware and Software cards now draw a visible border/background around each mini-chart (CPU models, RAM, Storage type, Top software), so it's clear at a glance which values belong to which chart.
+- The Dashboard's Hardware and Software cards draw a visible border/background around each mini-chart (CPU models, RAM, Storage type, Top software), so it's clear at a glance which values belong to which chart.
+- Dark theme for the dashboard. Follows the OS color scheme by default (`prefers-color-scheme`), with a manual toggle button next to the sidebar brand that overrides it and remembers the choice per browser (`localStorage`). An inline head script applies a saved preference before `styles.css` loads, so there's no flash of the wrong theme on first paint. All dashboard colors are theme-aware CSS custom properties: light background `#f8f9fa`, graphite body text `#2d3748`, borders `#e2e8f0`; dark background `#111827`, panels `#1f2937`, body text `#e2e8f0`, headings pinned to white, accent teal `#126f8f` in light / `#1c93bc` in dark.
+- Body font stack leads with `Inter`/`Roboto` before falling back to `Segoe UI` (the fonts only apply if already installed locally - the dashboard still ships with no web-font/CDN dependency, so it keeps working on isolated networks). IP addresses, OS version/build strings, and certificate thumbprints render in a monospace stack (`JetBrains Mono` falling back to `Consolas`), matching the dashboard's existing use of Consolas for install-job output.
+- A project icon and logo: a monitor containing a small org-chart/tree of connected nodes and a checkmark hub, in the app's accent teal. Used as the dashboard's browser-tab favicon (`server/dashboard/favicon.svg`), inlined with its full wordmark ("Windows Inventory" / "Lite") in the dashboard sidebar header - theme-aware, following the same CSS variables as the rest of the UI, so it stays correct through both OS dark mode and the manual toggle - and as the logo at the top of `README.md`/`README_RU.md` (`docs/images/logo.svg`). Every sidebar navigation item also has a matching flat line icon (dashboard grid, monitor, package, chip, document, bolt, archive box, gear, shield, lock).
+- Built-in `--self-test` mode coverage extended: Windows reserved device names, constant-time comparison, and `ListenPrefix` port parsing.
 
 ### Changed
 
-- The one dashboard nav tab with a verb-phrase name ("Change admin password") is now "Admin password", matching the noun-phrase, sentence-case style already used by every other tab.
-
-### Fixed
-
-- The HTTP listener port previously only took effect through the `--prefix` argument baked into the Windows Service's own start command at install time; changing it from the dashboard worked until the next plain service restart or reboot, which silently reverted to the old port. Port is now always re-read from `server-config.json` at service startup, matching how every other dashboard-configurable setting already behaved.
-- `Install-Server.ps1 -OpenFirewall` always opened port 8080 regardless of the actual configured HTTP port. Now opens a firewall rule for the real HTTP port, plus a separate rule for the HTTPS port when `-UseHttps` is set.
-
-### Breaking
-
-- Existing installs with HTTPS already enabled were serving it on the same port as HTTP. After upgrading, HTTPS moves to its own port (default `8443`) on the next service restart. Reconfigure firewall rules and any bookmarked `https://` URLs to use the new port, or set `-HttpsPort` to the old port explicitly during the next `Install-Server.ps1` run to keep it unchanged.
-
-## [0.5.2] - 2026-07-14
-
-Closes out the three items left documented-but-not-fixed in 0.5.1's review.
-
-### Fixed
-
-- Report filenames derived from a client-reported computer name could collide with a Windows reserved device name (`CON`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`) - reserved regardless of extension, so `CON.json` is just as blocked as `CON`. A computer reporting one of these names would have made every write to its own report file fail. `SanitizeFileName` now prefixes an underscore when the sanitized name (up to the first `.`) matches one, breaking the collision.
-- Basic Auth credential comparison used `==`/`String.Equals`, which fails fast at the first mismatched byte - a timing side-channel that leaks how many leading characters of a guess were correct (CWE-208). Replaced with a constant-time comparison that always walks the full length of both inputs, applied to both the login check and the "current password" check when rotating the admin password. Both comparisons (username and password) are evaluated unconditionally rather than short-circuited, so the password check's timing can't leak whether the username alone was right.
-- WinRM install/uninstall credentials no longer travel through the spawned `powershell.exe`'s command line. They're written to the child process's stdin instead and read there into a `PSCredential`, using the `-Credential` parameter `Install-ClientWinRM.ps1`/`Uninstall-ClientWinRM.ps1` already supported. Verified end-to-end against a stub WinRM script: the credential round-trips correctly, and a live process listing during the job confirmed no process command line contains the password anymore.
-
-## [0.5.1] - 2026-07-14
-
-Found by a manual security and code-quality review of the full codebase, not by a user report.
+- Dashboard RAM chart now buckets at the sizes actually seen in the field (4/8/16 GB, with everything above lumped into one "32 GB+") instead of generic ranges.
+- Dashboard Storage chart shows only SSD and HDD; disks with no recognizable type are left out instead of appearing as a third "Unknown" bar.
+- The one dashboard nav tab with a verb-phrase name ("Change admin password") is now "Admin password", matching the noun-phrase, sentence-case style already used by every other tab. The sidebar's top-level section labels also previously mixed two different type styles (standalone entries at 14px sentence case, group headers at 11px uppercase letter-spaced); group headers now share the same 14px/sentence-case typography, keeping only a muted color as the visual cue that they aren't clickable.
 
 ### Fixed
 
 - **CSV export (Clients, Software, Hardware, Licenses) was vulnerable to formula/DDE injection.** Exported fields include client-reported and free-text values (computer names, software titles, license comments); a value starting with `=`, `+`, `-`, or `@` is treated as a formula by Excel/Sheets when the file is opened (CWE-1236). Cells are now prefixed with a leading single quote when this applies, the standard mitigation - the visible value is unchanged, but it can no longer be parsed as a formula.
 - `POST /api/v1/inventory` with a malformed JSON body returned a generic 500 instead of the 400 every other endpoint returns for the same problem. Now consistent.
 - The client service's collection-failure catch block claimed "Windows Event Log contains the service failure envelope," but the block was empty - nothing was ever actually logged, so a persistently-failing agent reported nothing and left no trace anywhere. Now writes a real Warning entry to the Event Log, matching what the comment always claimed.
+- Report filenames derived from a client-reported computer name could collide with a Windows reserved device name (`CON`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`) - reserved regardless of extension, so `CON.json` is just as blocked as `CON`. A computer reporting one of these names would have made every write to its own report file fail. `SanitizeFileName` now prefixes an underscore when the sanitized name (up to the first `.`) matches one, breaking the collision.
+- Basic Auth credential comparison used `==`/`String.Equals`, which fails fast at the first mismatched byte - a timing side-channel that leaks how many leading characters of a guess were correct (CWE-208). Replaced with a constant-time comparison that always walks the full length of both inputs, applied to both the login check and the "current password" check when rotating the admin password. Both comparisons (username and password) are evaluated unconditionally rather than short-circuited, so the password check's timing can't leak whether the username alone was right.
+- WinRM install/uninstall credentials no longer travel through the spawned `powershell.exe`'s command line. They're written to the child process's stdin instead and read there into a `PSCredential`, using the `-Credential` parameter `Install-ClientWinRM.ps1`/`Uninstall-ClientWinRM.ps1` already supported. Verified end-to-end against a stub WinRM script: the credential round-trips correctly, and a live process listing during the job confirmed no process command line contains the password anymore.
+- The HTTP listener port previously only took effect through the `--prefix` argument baked into the Windows Service's own start command at install time; changing it from the dashboard worked until the next plain service restart or reboot, which silently reverted to the old port. Port is now always re-read from `server-config.json` at service startup, matching how every other dashboard-configurable setting already behaved.
+- `Install-Server.ps1 -OpenFirewall` always opened port 8080 regardless of the actual configured HTTP port. Now opens a firewall rule for the real HTTP port, plus a separate rule for the HTTPS port when `-UseHttps` is set.
+- **Found in a follow-up review of the dual-listener work above.** `POST /api/v1/server/settings` applied an HTTP-disable before attempting an HTTPS-enable in the same request. The dashboard's General Settings form always submits both fields together, so "turn HTTPS on and turn HTTP off" in one Save click would stop the (working) HTTP listener first; if the HTTPS bind then failed for any reason (port conflict, permission), the server was left with neither listener running until a service restart - precisely the outcome the endpoint's own safety check exists to prevent, just reached through a failed bind instead of a rejected request. HTTPS is now applied first, so a failed HTTPS bind leaves HTTP untouched.
+- `Install-Server.ps1 -DisableHttp` only warned, and did not block, if the certificate backing an already-configured `-UseHttps` (reloaded from `server-config.json`, not supplied on that run) was no longer present in `LocalMachine\My` - deleted by something outside this tool between runs. A reinstall or update in that state would proceed with HTTP off and HTTPS unable to start, unreachable from the very first start. Now throws instead of warning when `-DisableHttp` is combined with a `-UseHttps` setup whose certificate can't actually be found in the store.
 
-### Security
+### Breaking
 
-- Documented, not changed: WinRM install/uninstall credentials are passed to the spawned `powershell.exe` as command-line arguments, making them visible for the life of that process to anything on the server that can list process command lines. This requires local access to the server already, at which point `server-config.json`'s own plaintext `WebPassword` is an equally easy target - not a new privilege boundary, just another instance of the same one. A proper fix (temp credential file, named pipe, or similar) is a real redesign and out of scope for this pass.
-- Reviewed and found acceptable for this use case: Basic Auth credential comparison is not constant-time, a theoretical timing side-channel over a LAN admin tool. Windows reserved device names (`CON`, `NUL`, `COM1`, ...) are not specifically rejected when deriving a report filename from a reported computer name - not a traversal risk (separators are already blocked), just a possible confusing failure for an oddly-named host.
-
-## [0.5.0] - 2026-07-13
-
-### Added
-
-- New Dashboard "Software" card: the Licenses tile (moved out of the top count row) plus a "Top software" bar chart — the 5 most commonly installed titles across the fleet, counted by distinct computer regardless of which version is installed.
-
-### Changed
-
-- Dashboard RAM chart now buckets at the sizes actually seen in the field (4/8/16 GB, with everything above lumped into one "32 GB+") instead of generic ranges.
-- Dashboard Storage chart shows only SSD and HDD; disks with no recognizable type are left out instead of appearing as a third "Unknown" bar.
+- Existing installs with HTTPS already enabled were serving it on the same port as HTTP. After upgrading, HTTPS moves to its own port (default `8443`) on the next service restart. Reconfigure firewall rules and any bookmarked `https://` URLs to use the new port, or set `-HttpsPort` to the old port explicitly during the next `Install-Server.ps1` run to keep it unchanged.
 
 ## [0.4.0] - 2026-07-13
 

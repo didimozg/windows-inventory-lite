@@ -383,13 +383,15 @@ if ($UseHttps -and -not $CertificateThumbprint) {
     throw "UseHttps requires -CertificateThumbprint or -CertificatePfxPath."
 }
 
+$certificateFoundInStore = $false
 if ($CertificateThumbprint) {
     $normalizedThumbprint = ($CertificateThumbprint -replace '[\s:-]', '').ToUpperInvariant()
     $thumbprintStore = New-Object System.Security.Cryptography.X509Certificates.X509Store('My', 'LocalMachine')
     $thumbprintStore.Open('ReadOnly')
     try {
         $found = $thumbprintStore.Certificates.Find('FindByThumbprint', $normalizedThumbprint, $false)
-        if ($found.Count -eq 0) {
+        $certificateFoundInStore = $found.Count -gt 0
+        if (-not $certificateFoundInStore) {
             Write-Warning "No certificate with thumbprint $normalizedThumbprint was found in LocalMachine\My yet. HTTPS connections will be refused until it is imported (rerun with -CertificatePfxPath, or import it and restart the service)."
         }
     }
@@ -418,6 +420,18 @@ if (-not $PSBoundParameters.ContainsKey('DisableHttp')) {
 
 if ($DisableHttp -and -not $UseHttps) {
     throw "-DisableHttp requires -UseHttps (or an already-configured working HTTPS setup) - disabling HTTP with no HTTPS would make the dashboard unreachable."
+}
+
+# Checking the store, not just $UseHttps/$CertificateThumbprint being set: a
+# previously-working HTTPS setup (UseHttps=true reloaded from server-config.json)
+# can have its certificate deleted from LocalMachine\My by something outside
+# this script (manual cleanup, another admin, an expiry sweep) between runs.
+# Without this, a plain reinstall/update with -DisableHttp already saved from
+# a prior run would only warn about the missing certificate above and still
+# proceed - leaving the service with HTTP off and HTTPS unable to start,
+# fully unreachable from the very first start after install.
+if ($DisableHttp -and $UseHttps -and -not $certificateFoundInStore) {
+    throw "-DisableHttp requires a working HTTPS setup, but the configured certificate (thumbprint $CertificateThumbprint) was not found in LocalMachine\My. Import it first (-CertificatePfxPath), or drop -DisableHttp until it is confirmed working."
 }
 
 if ($UseHttps -and -not $DisableHttp) {
@@ -529,13 +543,14 @@ function Set-RestrictedFileAcl {
 }
 
 # --prefix is deliberately NOT included here, unlike --data/--content/etc.
-# The listen port can be changed later from the dashboard Settings > General
-# page (InventoryServer.RestartListenerOnPort); that only rewrites
-# ListenPrefix in server-config.json, not this service's start command. If
+# The HTTP and HTTPS ports can both be changed later from the dashboard
+# Settings > General page (InventoryServer.ApplySlotState, driven by
+# ConfigureServerSettings); that only rewrites ListenPrefix/HttpsPort/
+# EnableHttp in server-config.json, not this service's start command. If
 # --prefix were baked in here too, a plain service restart or reboot would
 # silently revert to whatever port was set at install time. The server reads
-# ListenPrefix from --config on every startup instead, same as WebUsername,
-# UseHttps, and the other dashboard-only settings.
+# ListenPrefix/HttpsPort/EnableHttp from --config on every startup instead,
+# same as WebUsername, UseHttps, and the other dashboard-only settings.
 $serviceCommand = '"' + (ConvertTo-ServiceArgValue $servicePath) + '" --data "' + (ConvertTo-ServiceArgValue $DataPath) + '" --content "' + (ConvertTo-ServiceArgValue $ContentPath) + '" --client-package "' + (ConvertTo-ServiceArgValue $ClientPackagePath) + '" --winrm-installer "' + (ConvertTo-ServiceArgValue $winRmInstallerPath) + '" --winrm-uninstaller "' + (ConvertTo-ServiceArgValue $winRmUninstallerPath) + '"'
 $serviceCommand += ' --install-log-retention-days ' + $InstallLogRetentionDays
 $serviceCommand += ' --config "' + (ConvertTo-ServiceArgValue $ConfigPath) + '"'
