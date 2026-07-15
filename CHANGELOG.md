@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-15
+
+### Added
+
+- Active Directory Description sync for the Clients table - optional, off by default. When enabled, the server looks up each reporting computer's AD `description` attribute and shows it as a read-only column; the dashboard never writes back to AD.
+- Two sync modes: **on inventory report** (default - refreshes a computer's cached AD data when it next reports, if the cached value is older than the configured sync interval) and **periodic timer** (refreshes every known computer on a fixed schedule, including ones that have stopped reporting).
+- AD authentication defaults to the server's own Windows Service identity; explicit credentials (username/password, stored in `server-config.json` like `WebPassword`) can be used instead, toggled via "Use service account identity" in Settings > General or `-AdSyncEnabled`/`-AdUseServiceAccount` at install time (`Install-Server.ps1`).
+- New `Description` column on the Clients table and in its CSV export, showing "Not found in AD" or "AD unreachable" when a lookup can't resolve.
+- `AdLookupService` escapes client-reported computer names per RFC 4515 before building LDAP filters, closing off LDAP injection from a client-controlled value.
+
 ## [0.6.1] - 2026-07-15
 
 Follow-up review of 0.6.0's new code and comments.
