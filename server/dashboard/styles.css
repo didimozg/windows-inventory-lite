@@ -1,5 +1,6 @@
 :root {
   color-scheme: light;
+  --font-mono: "JetBrains Mono", Consolas, "Courier New", monospace;
   --bg: #f8f9fa;
   --panel: #ffffff;
   --text: #2d3748;
@@ -117,8 +118,21 @@ body {
   /* Same reasoning as body: JetBrains Mono only applies if installed
      locally, falling back to Consolas (already used for install-output
      logs) which ships with Windows. */
-  font-family: "JetBrains Mono", Consolas, "Courier New", monospace;
+  font-family: var(--font-mono);
   font-size: 0.92em;
+}
+
+/* Every count and measurement in the dashboard (stat tiles, bar-chart
+   values, hardware specs) reads in the same monospace/tabular-figure
+   family as .mono - a deliberate, recurring signature rather than a
+   one-off: this app's entire job is displaying machine facts precisely,
+   so numbers read as instrument-panel data throughout, not just in the
+   three spots (IP/version/thumbprint) that use .mono directly. */
+.summary span,
+.bar-value,
+.hw-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .app-shell {
@@ -276,6 +290,18 @@ body {
   font-weight: 650;
 }
 
+/* A dotted "spine" running down the section list, echoing the connector
+   lines in the app's own logo (an org-chart of nodes) instead of a plain
+   solid divider - the sidebar's own section list is, structurally, the
+   same kind of tree the logo depicts. Only sets border/padding, not
+   margin, so it layers onto each element's own existing spacing instead
+   of fighting it for specificity. Vertical-only: doesn't make sense once
+   the sidebar switches to a horizontal bar below 900px, see media query. */
+.nav-tree > * + * {
+  padding-top: 6px;
+  border-top: 1px dotted var(--line);
+}
+
 .sidebar-footer {
   margin-top: auto;
   padding: 10px;
@@ -353,6 +379,30 @@ main {
 
 .danger-button:hover {
   border-color: var(--danger);
+}
+
+/* Quiet variant for routine, frequent, low-stakes deletes (a stale host
+   record, a license entry, a certificate-history log line) - the solid
+   red .danger-button stays reserved for the one genuinely consequential
+   delete in this app (removing the installed certificate, which can turn
+   HTTPS off). Same red only on hover, so the row stays calm at rest but
+   still reads as "delete" on interaction. */
+.danger-button-ghost {
+  min-width: 72px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+}
+
+.danger-button-ghost:hover {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger);
 }
 
 .edit-button {
@@ -471,6 +521,21 @@ main {
   color: var(--accent);
   font-size: 28px;
   font-weight: 700;
+}
+
+/* Reuses the existing USB-badge amber rather than adding a new color -
+   this is the one tile an admin needs to react to, the other summary
+   tiles are neutral facts. Left border, not a full-tile fill, so it
+   reads as a flag rather than an error state. Declared after .summary
+   span/div so its color/background actually win at equal specificity. */
+.tile-alert {
+  border-color: var(--usb-border);
+  border-left: 3px solid var(--usb-border);
+  background: var(--usb-bg);
+}
+
+.tile-alert span {
+  color: var(--usb-text);
 }
 
 .table-wrap {
@@ -767,6 +832,71 @@ tr.usb-row td {
   background: var(--usb-row-bg);
 }
 
+/* Windows/Office activation indicator in the Clients table: a checkmark
+   dot for "activated", reusing the same mark as the app's logo, or a
+   muted dash. Replaces two text cells ("Activated"/"Not detected") that
+   wrapped onto a second line at normal column widths and broke row
+   rhythm - see .status-dot-off's dash for the "off" state instead of an
+   empty circle, which could otherwise read as a loading spinner. */
+.status-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+}
+
+.status-dot svg {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.status-dot-on {
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+
+.status-dot-off {
+  background: var(--hover-bg);
+  color: var(--muted);
+}
+
+.status-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.status-row small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.status-dot-off::after {
+  content: '';
+  width: 6px;
+  height: 2px;
+  background: currentColor;
+  border-radius: 1px;
+}
+
 .hw-section {
   margin-bottom: 24px;
 }
@@ -1032,6 +1162,11 @@ th.sort-desc::after {
   .nav-tree {
     flex-direction: row;
     flex-wrap: wrap;
+  }
+
+  .nav-tree > * + * {
+    padding-top: 0;
+    border-top: 0;
   }
 
   .nav-group {

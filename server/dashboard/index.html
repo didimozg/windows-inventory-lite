@@ -118,7 +118,7 @@
             <div><span id="dashClientCount">0</span><small>Clients</small></div>
             <div><span id="dashWindowsActivated">0</span><small>Windows activated</small></div>
             <div><span id="dashOfficeActivated">0</span><small>Office activated</small></div>
-            <div><span id="dashStaleCount">0</span><small id="dashStaleLabel">Stale &gt;48h</small></div>
+            <div id="dashStaleTile"><span id="dashStaleCount">0</span><small id="dashStaleLabel">Stale &gt;48h</small></div>
           </div>
 
           <div class="dashboard-card">
@@ -198,6 +198,24 @@
             <button id="generalSaveButton" class="primary-button" type="button">Save</button>
           </div>
           <div id="generalMessage" class="pkg-message hidden"></div>
+        </section>
+
+        <section id="generalStatusView" class="dashboard-card hidden" aria-label="Connection status">
+          <h2 class="settings-block-title">Connection status</h2>
+          <div class="status-grid">
+            <div class="status-row">
+              <span id="statusHttpDot" class="status-dot status-dot-off"></span>
+              <span>HTTP<small id="statusHttpDetail" class="mono">-</small></span>
+            </div>
+            <div class="status-row">
+              <span id="statusHttpsDot" class="status-dot status-dot-off"></span>
+              <span>HTTPS<small id="statusHttpsDetail" class="mono">-</small></span>
+            </div>
+            <div class="status-row">
+              <span id="statusCertDot" class="status-dot status-dot-off"></span>
+              <span>Certificate<small id="statusCertDetail">-</small></span>
+            </div>
+          </div>
         </section>
 
         <section id="certificateView" class="install-panel hidden" aria-label="Server certificate">
@@ -427,7 +445,6 @@
                   <th data-sort-table="software" data-sort-key="version" class="sortable">Version</th>
                   <th data-sort-table="software" data-sort-key="publisher" class="sortable">Publisher</th>
                   <th data-sort-table="software" data-sort-key="count" class="sortable">Installations</th>
-                  <th>Computers</th>
                   <th>License</th>
                 </tr>
               </thead>
@@ -450,7 +467,6 @@
                     <th data-sort-table="hwCpu" data-sort-key="cores" class="sortable">Cores</th>
                     <th data-sort-table="hwCpu" data-sort-key="clockMhz" class="sortable">Clock</th>
                     <th data-sort-table="hwCpu" data-sort-key="count" class="sortable">Machines</th>
-                    <th>Computers</th>
                   </tr>
                 </thead>
                 <tbody id="hwCpuBody"></tbody>
@@ -470,7 +486,6 @@
                     <th data-sort-table="hwDisk" data-sort-key="type" class="sortable">Type</th>
                     <th data-sort-table="hwDisk" data-sort-key="sizeGb" class="sortable">Size</th>
                     <th data-sort-table="hwDisk" data-sort-key="count" class="sortable">Machines</th>
-                    <th>Computers</th>
                   </tr>
                 </thead>
                 <tbody id="hwDiskBody"></tbody>
@@ -489,7 +504,6 @@
                     <th data-sort-table="hwRam" data-sort-key="totalMb" class="sortable">Total</th>
                     <th data-sort-table="hwRam" data-sort-key="moduleCount" class="sortable">Modules</th>
                     <th data-sort-table="hwRam" data-sort-key="count" class="sortable">Machines</th>
-                    <th>Computers</th>
                   </tr>
                 </thead>
                 <tbody id="hwRamBody"></tbody>
@@ -502,7 +516,7 @@
           <div><span id="clientCount">0</span><small>Clients</small></div>
           <div><span id="windowsActivated">0</span><small>Windows activated</small></div>
           <div><span id="officeActivated">0</span><small>Office activated</small></div>
-          <div><span id="staleCount">0</span><small id="staleLabel">Stale &gt;48h</small></div>
+          <div id="staleTile"><span id="staleCount">0</span><small id="staleLabel">Stale &gt;48h</small></div>
         </section>
       </main>
     </div>

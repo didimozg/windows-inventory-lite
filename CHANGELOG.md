@@ -6,6 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-15
+
+Design pass based on a live review of the running dashboard (seeded with sample data and inspected via Playwright).
+
+### Added
+
+- Every count and measurement on the dashboard (stat tiles, bar-chart values, Hardware table cores/clock/size/machine counts) now renders in the same monospace/tabular-figure family as IP addresses and version strings, instead of just the three original spots. The whole dashboard reads as one consistent instrument panel for machine facts rather than mixing number styles.
+- The "Stale >Nh" tile gets a distinct amber treatment (reusing the existing USB-badge amber, no new color) whenever it's non-zero - it's the one tile that calls for action; the others are neutral counts.
+- Settings > General gained a "Connection status" panel showing live HTTP/HTTPS reachability and certificate validity at a glance, reusing data the settings endpoint already returns. Previously the page left a large empty area below the form with no summary of current state anywhere in the UI.
+- Windows/Office activation in the Clients table is now a compact checkmark-dot indicator (reusing the same mark as the project logo) instead of "Activated"/"Not detected" text, which wrapped onto a second line at normal column widths and broke row rhythm.
+- The sidebar's section list has a subtle dotted divider between groups, echoing the connector lines in the project's own logo (an org-chart of nodes) instead of a plain gap.
+
+### Changed
+
+- Dropped the always-visible "Computers" comma-list column from the Hardware (CPU/Storage/RAM) and Software tables - it duplicated the same computer list already available one click away (clicking the model/name link expands a details row with the full list), and became an unreadable wall of text once more than a handful of machines shared a value.
+- "Delete" buttons for routine, frequent, reversible-ish actions (removing a host record, a license entry, a certificate-history log line) are now a quiet outlined style, red only on hover. The solid red fill is reserved for the one genuinely consequential delete in the app - removing the installed certificate, which can turn HTTPS off.
+
 ## [0.5.0] - 2026-07-14
 
 This entry consolidates everything built in this release cycle — dual HTTP/HTTPS listeners, a security and code-quality review, a dark theme, a project icon, and dashboard design-token/typography work — into one version instead of the string of point releases (0.5.1 through 0.10.0) it actually shipped as internally. Only the net result is documented below.

@@ -81,6 +81,18 @@
     return value ? 'Activated' : 'Not detected';
   }
 
+  // Compact on/off indicator for the Clients table (Windows/Office
+  // activation): a checkmark dot reusing the same mark as the app's own
+  // logo, or a muted dash. Replaces two "Activated"/"Not detected" text
+  // cells that wrapped awkwardly at typical column widths.
+  function activationBadge(isActivated, label) {
+    const text = `${label}: ${activated(isActivated)}`;
+    const icon = isActivated
+      ? '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10.5 L8.5 14 L15 6.5"/></svg>'
+      : '';
+    return `<span class="status-dot ${isActivated ? 'status-dot-on' : 'status-dot-off'}" role="img" aria-label="${escapeHtml(text)}" title="${escapeHtml(text)}">${icon}</span>`;
+  }
+
   function formatDateTime(value) {
     if (!value) return 'Unknown';
     const date = new Date(value);
@@ -772,7 +784,7 @@
       // Entries logged before the delete endpoint existed have no id and
       // cannot be targeted individually.
       const deleteCell = entry.id
-        ? `<button class="danger-button" type="button" data-delete-cert-history="${escapeHtml(entry.id)}">Delete</button>`
+        ? `<button class="danger-button-ghost" type="button" data-delete-cert-history="${escapeHtml(entry.id)}">Delete</button>`
         : '—';
       return `<tr>
         <td>${escapeHtml(formatDateTime(entry.uploadedAt))}</td>
@@ -831,10 +843,44 @@
         } else {
           hint.classList.add('hidden');
         }
+        renderConnectionStatus(data);
       })
       .catch(error => {
         showGeneralMessage(`Settings unavailable: ${error.message}`, true);
       });
+  }
+
+  // General settings previously left most of the page empty below the form -
+  // this reuses the same settings response to show something an admin
+  // actually can't see anywhere else at a glance: is HTTP/HTTPS actually
+  // reachable right now, and is the certificate backing HTTPS still good.
+  function setStatusDot(dotId, detailId, isOn, detailText) {
+    const dot = byId(dotId);
+    dot.className = 'status-dot ' + (isOn ? 'status-dot-on' : 'status-dot-off');
+    dot.innerHTML = isOn ? '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10.5 L8.5 14 L15 6.5"/></svg>' : '';
+    byId(detailId).textContent = detailText;
+  }
+
+  function renderConnectionStatus(data) {
+    const httpOn = data.enableHttp !== false;
+    setStatusDot('statusHttpDot', 'statusHttpDetail', httpOn, httpOn ? `Port ${data.port}` : 'Disabled');
+
+    const httpsOn = !!data.useHttps;
+    setStatusDot('statusHttpsDot', 'statusHttpsDetail', httpsOn, httpsOn ? `Port ${data.httpsPort}` : 'Disabled');
+
+    let certOn = false;
+    let certDetail = 'Not configured';
+    if (data.certificatePresent) {
+      if (data.isExpired) {
+        certDetail = 'Expired';
+      } else if ((data.risks || []).length) {
+        certDetail = `${data.risks.length} risk${data.risks.length === 1 ? '' : 's'} found`;
+      } else {
+        certOn = true;
+        certDetail = data.notAfter ? `Valid until ${formatDateTime(data.notAfter)}` : 'Valid';
+      }
+    }
+    setStatusDot('statusCertDot', 'statusCertDetail', certOn, certDetail);
   }
 
   function showGeneralMessage(msg, isError) {
@@ -893,6 +939,7 @@
         state.generalLoadedEnableHttp = data.enableHttp !== false;
         renderSummary(state.clients);
         renderDashboardTiles();
+        renderConnectionStatus(data);
         showGeneralMessage('Settings saved.', false);
       })
       .catch(error => {
@@ -1046,7 +1093,7 @@
       <td>${escapeHtmlOrEmpty(license.comment)}</td>
       <td>${computers.length}</td>
       <td><button class="edit-button" type="button" data-edit-license="${escapeHtml(license.id)}">Edit</button></td>
-      <td><button class="danger-button" type="button" data-delete-license="${escapeHtml(license.id)}">Delete</button></td>
+      <td><button class="danger-button-ghost" type="button" data-delete-license="${escapeHtml(license.id)}">Delete</button></td>
     </tr>
     <tr class="details-row hidden" data-license-computers-details="${licenseId}">
       <td colspan="7"><div class="details"><ul class="computer-list">${computers.map(c => `<li>${escapeHtml(c)}</li>`).join('') || '<li class="empty">No computers linked.</li>'}</ul></div></td>
@@ -1428,8 +1475,10 @@
     byId('clientCount').textContent = clients.length;
     byId('windowsActivated').textContent = clients.filter(client => client.activation && client.activation.windows && client.activation.windows.activated).length;
     byId('officeActivated').textContent = clients.filter(client => client.activation && client.activation.office && client.activation.office.activated).length;
-    byId('staleCount').textContent = clients.filter(isStale).length;
+    const staleCount = clients.filter(isStale).length;
+    byId('staleCount').textContent = staleCount;
     byId('staleLabel').textContent = `Stale >${state.staleHours}h`;
+    byId('staleTile').classList.toggle('tile-alert', staleCount > 0);
   }
 
   function renderDashboardTiles() {
@@ -1437,8 +1486,10 @@
     byId('dashClientCount').textContent = clients.length;
     byId('dashWindowsActivated').textContent = clients.filter(client => client.activation && client.activation.windows && client.activation.windows.activated).length;
     byId('dashOfficeActivated').textContent = clients.filter(client => client.activation && client.activation.office && client.activation.office.activated).length;
-    byId('dashStaleCount').textContent = clients.filter(isStale).length;
+    const dashStaleCount = clients.filter(isStale).length;
+    byId('dashStaleCount').textContent = dashStaleCount;
     byId('dashStaleLabel').textContent = `Stale >${state.staleHours}h`;
+    byId('dashStaleTile').classList.toggle('tile-alert', dashStaleCount > 0);
     byId('dashLicenseCount').textContent = state.licenses.length;
     byId('dashUsbCount').textContent = clients.filter(client => client.hasUsbStorage).length;
     renderBarChart('dashSoftwareChart', getTopSoftwareNames(clients, 5));
@@ -1500,11 +1551,11 @@
         <td>${escapeHtml(client.clientVersion)}</td>
         <td>${escapeHtml(os.caption)}<small class="mono">${escapeHtml(os.version)} build ${escapeHtml(os.buildNumber)}</small></td>
         <td>${escapeHtml(office.name)}<small>${escapeHtml(office.version)}</small></td>
-        <td>${escapeHtml(activated(windowsActivation.activated))}</td>
-        <td>${escapeHtml(activated(officeActivation.activated))}</td>
+        <td>${activationBadge(windowsActivation.activated, 'Windows')}</td>
+        <td>${activationBadge(officeActivation.activated, 'Office')}</td>
         <td>${softwareCount}</td>
         <td>${escapeHtml(formatDateTime(client.collectedAt || client.sourceUpdatedAt))}</td>
-        <td><button class="danger-button" type="button" data-delete-client="${escapeHtml(client.computerName)}">Delete</button></td>
+        <td><button class="danger-button-ghost" type="button" data-delete-client="${escapeHtml(client.computerName)}">Delete</button></td>
       </tr>
       <tr class="details-row hidden" data-client-details="${clientId}">
         <td colspan="9">
@@ -1541,12 +1592,11 @@
         <td><button class="link-button" type="button" data-software="${groupId}">${escapeHtml(group.name)}</button></td>
         <td>${escapeHtml(group.version)}</td>
         <td>${escapeHtml(group.publisher)}</td>
-        <td>${group.clients.length}</td>
-        <td>${group.clients.map(client => escapeHtml(client.computerName)).join(', ')}</td>
+        <td class="hw-num">${group.clients.length}</td>
         <td>${findLicenseForSoftware(group.name) ? `<button class="edit-button" type="button" data-software-license-name="${escapeHtml(group.name)}" data-software-license-version="${escapeHtml(group.version)}">License</button>` : ''}</td>
       </tr>
       <tr class="details-row hidden" data-software-details="${groupId}">
-        <td colspan="6">
+        <td colspan="5">
           <div class="details">
             <h2>${escapeHtml(group.name)}</h2>
             <ul class="computer-list">${computers}</ul>
@@ -1555,7 +1605,7 @@
       </tr>`;
     });
 
-    byId('softwareBody').innerHTML = rows.join('') || '<tr><td colspan="6" class="empty">No matching software records.</td></tr>';
+    byId('softwareBody').innerHTML = rows.join('') || '<tr><td colspan="5" class="empty">No matching software records.</td></tr>';
 
     document.querySelectorAll('[data-software-license-name]').forEach(button => {
       button.addEventListener('click', () => {
@@ -1574,16 +1624,15 @@
         const clock = g.clockMhz ? `${(g.clockMhz / 1000).toFixed(2)} GHz` : 'Unknown';
         return `<tr>
           <td><button class="link-button" type="button" data-hw="${id}">${escapeHtml(g.name)}</button></td>
-          <td>${g.cores != null ? g.cores : 'Unknown'}</td>
-          <td>${escapeHtml(clock)}</td>
-          <td>${g.clients.length}</td>
-          <td>${g.clients.map(c => escapeHtml(c.computerName)).join(', ')}</td>
+          <td class="hw-num">${g.cores != null ? g.cores : 'Unknown'}</td>
+          <td class="hw-num">${escapeHtml(clock)}</td>
+          <td class="hw-num">${g.clients.length}</td>
         </tr>
         <tr class="details-row hidden" data-hw-details="${id}">
-          <td colspan="5"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
+          <td colspan="4"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
         </tr>`;
       });
-    byId('hwCpuBody').innerHTML = cpuRows.join('') || '<tr><td colspan="5" class="empty">No CPU data.</td></tr>';
+    byId('hwCpuBody').innerHTML = cpuRows.join('') || '<tr><td colspan="4" class="empty">No CPU data.</td></tr>';
 
     const { key: diskSortKey, dir: diskSortDir } = state.sort.hwDisk;
     const diskRows = applySort(getDiskGroups(clients).filter(g => hwMatches([g.model, g.type, ...g.clients.map(c => c.computerName)].join(' '), query)), g => diskSortValue(g, diskSortKey), diskSortDir).map(g => {
@@ -1594,15 +1643,14 @@
         return `<tr${g.usb ? ' class="usb-row"' : ''}>
           <td><button class="link-button" type="button" data-hw="${id}">${escapeHtml(g.model)}</button>${usbBadge}</td>
           <td>${escapeHtml(g.type)}</td>
-          <td>${escapeHtml(size)}</td>
-          <td>${g.clients.length}</td>
-          <td>${g.clients.map(c => escapeHtml(c.computerName)).join(', ')}</td>
+          <td class="hw-num">${escapeHtml(size)}</td>
+          <td class="hw-num">${g.clients.length}</td>
         </tr>
         <tr class="details-row hidden" data-hw-details="${id}">
-          <td colspan="5"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
+          <td colspan="4"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
         </tr>`;
       });
-    byId('hwDiskBody').innerHTML = diskRows.join('') || '<tr><td colspan="5" class="empty">No storage data.</td></tr>';
+    byId('hwDiskBody').innerHTML = diskRows.join('') || '<tr><td colspan="4" class="empty">No storage data.</td></tr>';
 
     const { key: ramSortKey, dir: ramSortDir } = state.sort.hwRam;
     const ramRows = applySort(getRamGroups(clients).filter(g => hwMatches([g.totalGb, ...g.clients.map(c => c.computerName)].join(' '), query)), g => ramSortValue(g, ramSortKey), ramSortDir).map(g => {
@@ -1610,15 +1658,14 @@
         const computers = g.clients.map(c => `<li>${escapeHtml(c.computerName)}<small>${escapeHtml(c.domain)}</small></li>`).join('');
         return `<tr>
           <td><button class="link-button" type="button" data-hw="${id}">${escapeHtml(g.totalGb)}</button></td>
-          <td>${g.moduleCount || 'Unknown'}</td>
-          <td>${g.clients.length}</td>
-          <td>${g.clients.map(c => escapeHtml(c.computerName)).join(', ')}</td>
+          <td class="hw-num">${g.moduleCount || 'Unknown'}</td>
+          <td class="hw-num">${g.clients.length}</td>
         </tr>
         <tr class="details-row hidden" data-hw-details="${id}">
-          <td colspan="4"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
+          <td colspan="3"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
         </tr>`;
       });
-    byId('hwRamBody').innerHTML = ramRows.join('') || '<tr><td colspan="4" class="empty">No RAM data.</td></tr>';
+    byId('hwRamBody').innerHTML = ramRows.join('') || '<tr><td colspan="3" class="empty">No RAM data.</td></tr>';
   }
 
   function bindDetails() {
@@ -1666,6 +1713,7 @@
     byId('installView').classList.toggle('hidden', state.view !== 'install');
     byId('packageView').classList.toggle('hidden', state.view !== 'package');
     byId('generalView').classList.toggle('hidden', state.view !== 'general');
+    byId('generalStatusView').classList.toggle('hidden', state.view !== 'general');
     byId('certificateView').classList.toggle('hidden', state.view !== 'certificate');
     byId('licensesView').classList.toggle('hidden', state.view !== 'licenses');
     byId('adminPasswordView').classList.toggle('hidden', state.view !== 'admin');
