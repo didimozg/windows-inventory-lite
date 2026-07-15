@@ -446,6 +446,8 @@ namespace WindowsInventoryLite
         private readonly ListenerSlot httpSlot = new ListenerSlot();
         private readonly ListenerSlot httpsSlot = new ListenerSlot();
         private volatile X509Certificate2 serverCertificate;
+        private readonly object adSyncTimerLock = new object();
+        private Timer adSyncTimer;
 
         public InventoryServer(ServerOptions options)
         {
@@ -477,6 +479,8 @@ namespace WindowsInventoryLite
                 string httpsError = ApplySlotState(httpsSlot, true, -1, options.HttpsPort, true);
                 LogSlotStartupError("HTTPS", httpsError);
             }
+
+            ReconfigureAdSyncTimer();
 
             if (!httpSlot.Running && !httpsSlot.Running)
             {
@@ -519,8 +523,81 @@ namespace WindowsInventoryLite
 
         public void Stop()
         {
+            lock (adSyncTimerLock)
+            {
+                if (adSyncTimer != null)
+                {
+                    adSyncTimer.Dispose();
+                    adSyncTimer = null;
+                }
+            }
             StopSlot(httpSlot);
             StopSlot(httpsSlot);
+        }
+
+        // Starts, stops, or restarts the periodic sweep to match the current
+        // options - called once at startup and again whenever AD settings
+        // change through the dashboard (ConfigureServerSettings), so a mode
+        // switch or interval change takes effect without a service restart,
+        // consistent with how every other dashboard-driven setting in this
+        // server behaves.
+        private void ReconfigureAdSyncTimer()
+        {
+            lock (adSyncTimerLock)
+            {
+                if (adSyncTimer != null)
+                {
+                    adSyncTimer.Dispose();
+                    adSyncTimer = null;
+                }
+                if (options.AdSyncEnabled && options.AdSyncMode == "timer")
+                {
+                    TimeSpan interval = TimeSpan.FromHours(Math.Max(1, options.AdSyncIntervalHours));
+                    adSyncTimer = new Timer(RunAdSyncSweep, null, interval, interval);
+                }
+            }
+        }
+
+        // One tick of the "timer" sync mode: walks every saved report and
+        // refreshes AD data for whichever ones are due, independent of
+        // whether that computer has reported inventory recently - the "on
+        // inventory report" mode (Task 3) only ever touches a computer's AD
+        // fields when that computer itself POSTs a new report, so a machine
+        // that's stopped reporting but still exists in AD would otherwise
+        // never refresh.
+        private void RunAdSyncSweep(object state)
+        {
+            if (!options.AdSyncEnabled || options.AdSyncMode != "timer")
+            {
+                return;
+            }
+
+            string[] files;
+            try
+            {
+                files = Directory.GetFiles(options.DataPath, "*.json");
+            }
+            catch
+            {
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            foreach (string file in files)
+            {
+                try
+                {
+                    Dictionary<string, object> inventory = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
+                    string computerName = Convert.ToString(inventory.ContainsKey("computerName") ? inventory["computerName"] : Path.GetFileNameWithoutExtension(file));
+                    ApplyAdSync(inventory, computerName, inventory);
+                    File.WriteAllText(file, serializer.Serialize(inventory), new UTF8Encoding(false));
+                }
+                catch
+                {
+                    // One unreadable/corrupt report must not stop the sweep
+                    // over the rest of the fleet.
+                }
+            }
         }
 
         private sealed class ListenerSlot
