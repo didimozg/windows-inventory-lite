@@ -104,6 +104,16 @@ namespace WindowsInventoryLite
         public int StaleHours;
         public bool ConsoleMode;
         public bool ShowVersion;
+        // AD sync is opt-in and off by default - deployments without AD, or
+        // with a server that isn't domain-joined, are unaffected. See
+        // AdLookupService.cs and InventoryServer.ApplyAdSync.
+        public bool AdSyncEnabled;
+        public string AdSyncMode;
+        public int AdSyncIntervalHours;
+        public string AdDomain;
+        public bool AdUseServiceIdentity;
+        public string AdUsername;
+        public string AdPassword;
 
         public static ServerOptions Parse(string[] args)
         {
@@ -119,6 +129,9 @@ namespace WindowsInventoryLite
             options.WinRmUninstallerPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-bin\Uninstall-ClientWinRM.ps1");
             options.InstallLogRetentionDays = 30;
             options.StaleHours = 48;
+            options.AdSyncMode = "on-report";
+            options.AdSyncIntervalHours = 24;
+            options.AdUseServiceIdentity = true;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -223,6 +236,39 @@ namespace WindowsInventoryLite
                 {
                     options.EnableHttp = false;
                 }
+                else if (key == "--ad-sync-enabled")
+                {
+                    options.AdSyncEnabled = true;
+                }
+                else if (key == "--ad-sync-mode" && i + 1 < args.Length)
+                {
+                    string mode = args[++i].ToLowerInvariant();
+                    if (mode == "on-report" || mode == "timer")
+                    {
+                        options.AdSyncMode = mode;
+                    }
+                }
+                else if (key == "--ad-sync-interval-hours" && i + 1 < args.Length)
+                {
+                    int adHours;
+                    if (Int32.TryParse(args[++i], out adHours) && adHours > 0)
+                    {
+                        options.AdSyncIntervalHours = adHours;
+                    }
+                }
+                else if (key == "--ad-domain" && i + 1 < args.Length)
+                {
+                    options.AdDomain = args[++i];
+                }
+                else if (key == "--ad-username" && i + 1 < args.Length)
+                {
+                    options.AdUsername = args[++i];
+                    options.AdUseServiceIdentity = false;
+                }
+                else if (key == "--ad-password" && i + 1 < args.Length)
+                {
+                    options.AdPassword = args[++i];
+                }
             }
 
             LoadConfigFile(options);
@@ -305,6 +351,48 @@ namespace WindowsInventoryLite
                     {
                         options.EnableHttp = String.Equals(enableHttpText, "true", StringComparison.OrdinalIgnoreCase);
                     }
+                }
+                if (!options.AdSyncEnabled)
+                {
+                    string adSyncEnabledText = GetConfigString(config, "AdSyncEnabled");
+                    options.AdSyncEnabled = String.Equals(adSyncEnabledText, "true", StringComparison.OrdinalIgnoreCase);
+                }
+                if (options.AdSyncMode == "on-report")
+                {
+                    string adSyncModeText = GetConfigString(config, "AdSyncMode");
+                    if (adSyncModeText == "timer" || adSyncModeText == "on-report")
+                    {
+                        options.AdSyncMode = adSyncModeText;
+                    }
+                }
+                if (options.AdSyncIntervalHours == 24)
+                {
+                    string adSyncIntervalText = GetConfigString(config, "AdSyncIntervalHours");
+                    int adSyncIntervalFromConfig;
+                    if (!String.IsNullOrEmpty(adSyncIntervalText) && Int32.TryParse(adSyncIntervalText, out adSyncIntervalFromConfig) && adSyncIntervalFromConfig > 0)
+                    {
+                        options.AdSyncIntervalHours = adSyncIntervalFromConfig;
+                    }
+                }
+                if (String.IsNullOrEmpty(options.AdDomain))
+                {
+                    options.AdDomain = GetConfigString(config, "AdDomain");
+                }
+                if (options.AdUseServiceIdentity)
+                {
+                    string adUseServiceIdentityText = GetConfigString(config, "AdUseServiceIdentity");
+                    if (adUseServiceIdentityText != null)
+                    {
+                        options.AdUseServiceIdentity = String.Equals(adUseServiceIdentityText, "true", StringComparison.OrdinalIgnoreCase);
+                    }
+                }
+                if (String.IsNullOrEmpty(options.AdUsername))
+                {
+                    options.AdUsername = GetConfigString(config, "AdUsername");
+                }
+                if (String.IsNullOrEmpty(options.AdPassword))
+                {
+                    options.AdPassword = GetConfigString(config, "AdPassword");
                 }
             }
             catch
