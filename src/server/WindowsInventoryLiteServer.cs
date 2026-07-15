@@ -448,6 +448,7 @@ namespace WindowsInventoryLite
         private volatile X509Certificate2 serverCertificate;
         private readonly object adSyncTimerLock = new object();
         private Timer adSyncTimer;
+        private readonly object reportFileLock = new object();
 
         public InventoryServer(ServerOptions options)
         {
@@ -587,10 +588,13 @@ namespace WindowsInventoryLite
             {
                 try
                 {
-                    Dictionary<string, object> inventory = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
-                    string computerName = Convert.ToString(inventory.ContainsKey("computerName") ? inventory["computerName"] : Path.GetFileNameWithoutExtension(file));
-                    ApplyAdSync(inventory, computerName, inventory);
-                    File.WriteAllText(file, serializer.Serialize(inventory), new UTF8Encoding(false));
+                    lock (reportFileLock)
+                    {
+                        Dictionary<string, object> inventory = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
+                        string computerName = Convert.ToString(inventory.ContainsKey("computerName") ? inventory["computerName"] : Path.GetFileNameWithoutExtension(file));
+                        ApplyAdSync(inventory, computerName, inventory);
+                        File.WriteAllText(file, serializer.Serialize(inventory), new UTF8Encoding(false));
+                    }
                 }
                 catch
                 {
@@ -994,22 +998,25 @@ namespace WindowsInventoryLite
             string computerName = Convert.ToString(inventory.ContainsKey("computerName") ? inventory["computerName"] : "unknown");
             string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
 
-            Dictionary<string, object> previous = null;
-            if (File.Exists(path))
+            lock (reportFileLock)
             {
-                try
+                Dictionary<string, object> previous = null;
+                if (File.Exists(path))
                 {
-                    previous = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                    try
+                    {
+                        previous = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                    }
+                    catch
+                    {
+                        previous = null;
+                    }
                 }
-                catch
-                {
-                    previous = null;
-                }
-            }
-            ApplyAdSync(inventory, computerName, previous);
+                ApplyAdSync(inventory, computerName, previous);
 
-            string json = serializer.Serialize(inventory);
-            File.WriteAllText(path, json, new UTF8Encoding(false));
+                string json = serializer.Serialize(inventory);
+                File.WriteAllText(path, json, new UTF8Encoding(false));
+            }
             SendJson(stream, "{\"status\":\"ok\"}");
         }
 
