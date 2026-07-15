@@ -11,6 +11,7 @@
 - The TLS server certificate and its private key in the `LocalMachine\My` certificate store.
 - The license inventory catalog (`licenses.json`) with admin-entered Name, Version, License, and Comment fields.
 - The certificate history log (`_certificates/certificate-history.json`) recording every uploaded certificate and the risks found at upload time.
+- Cached Active Directory computer descriptions (adDescription field on each report), and AD credentials when explicit AD credentials (rather than the service identity) are configured.
 
 ## Trust Boundaries
 
@@ -36,6 +37,7 @@
 - POST body to `POST /api/v1/server/settings` (staleHours, useHttps, port, enableHttp, httpsPort, acknowledgeRisks fields) that changes the stale threshold and independently starts, stops, or moves the HTTP and HTTPS listeners using the currently configured certificate.
 - POST/PUT bodies to `/api/v1/licenses` (name, version, license, comment, computers fields) written to `licenses.json` and rendered back into the dashboard.
 - POST body to `POST /api/v1/server/admin-password` (newUsername, currentPassword, newPassword) that sets up or rotates the dashboard's Basic Auth username and password. `currentPassword` is required only when Basic Auth is already configured.
+- The computer name embedded in a client's inventory report, when AD sync is enabled: used to build an LDAP search filter (see AdLookupService.LookupComputerDescription), escaped per RFC 4515 before use.
 
 ## Required Invariants
 
@@ -56,6 +58,8 @@
 - Every accepted socket must have a read/write timeout, so a stalled handshake or a client that opens a connection without sending data cannot hold a server thread indefinitely.
 - `POST /api/v1/server/settings` must reject a request that disables HTTP unless HTTPS is genuinely active (a live listener with a usable certificate) in that same evaluation, so the settings endpoint itself can never leave the server with no reachable listener.
 - Port changes for either listener must bind and start the new listener before touching the old one, so a failed rebind (port in use, no permission) leaves the previously working listener running unaffected.
+- The LDAP filter built from a client-reported computer name must have its special characters escaped before use, to prevent LDAP injection from a maliciously-named reporting host.
+- An unreachable or slow AD must not block or fail inventory report ingestion.
 
 ## Main Risks
 
@@ -79,6 +83,8 @@
 - If a browser has cached Basic Auth credentials for the dashboard's origin, a malicious page could trigger a same-origin request the browser auto-authenticates (a CSRF-like risk inherent to Basic Auth, not specific to this project). The admin password change endpoint's current-password requirement limits the blast radius of this for that one action; other state-changing endpoints do not have an equivalent second factor.
 - While Basic Auth is unconfigured, anyone who can reach the dashboard can set the initial username and password themselves, effectively claiming the account. This is an accepted tradeoff (see Required Invariants) rather than an oversight: the rest of the dashboard is equally open in that state. The mitigation is operational — configure Basic Auth immediately after install, before exposing the server beyond a trusted network.
 - The HTTP-disable safety gate only evaluates listener state at the moment of the request. An operator can disable HTTP while HTTPS is genuinely working, then have HTTPS later stop working on its own (certificate expiry, deletion from the store by another tool or admin, a private key that no longer matches) with nothing left to re-evaluate the gate. The dashboard becomes unreachable until an administrator with local server access edits `server-config.json` to set `EnableHttp` back to `true` and restarts the service — documented as the recovery procedure in the README. This is an accepted operational risk of the safety gate's design, not a bug in it: the gate protects against the dashboard locking itself out at the moment of the change, not against a certificate degrading afterward.
+- If explicit AD credentials are configured (rather than the service account identity), they are stored in server-config.json in plaintext - the same accepted risk as WebPassword/Token, mitigated the same way (ACL-restricted config file).
+- AD sync is opt-in and off by default, so this entire risk surface does not apply to deployments that don't enable it.
 
 ## Controls
 
@@ -102,3 +108,4 @@
 - Do not treat an acknowledged certificate risk warning as resolved — replace the flagged certificate with a valid one as soon as practical.
 - Do not disable HTTP until HTTPS has been verified reachable from an actual client, not just accepted by the settings endpoint. Keep local server access (RDP, console) available for the recovery procedure in case a certificate degrades after HTTP is off.
 - Monitor certificate expiry independently of this application if HTTP is disabled in production; there is no built-in alerting for an approaching expiry date.
+- Prefer the service account identity over explicit AD credentials when the service already runs under a domain account (which WinRM client actions already require) - it needs no additional secret in server-config.json.

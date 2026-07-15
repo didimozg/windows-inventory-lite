@@ -274,6 +274,25 @@ The safety gate above only checks listener state at the moment HTTP is disabled 
 
 Either path only restores HTTP — it does not touch the stored certificate or the `UseHttps` setting, so HTTPS resumes normally on its own once a working certificate is back in place.
 
+## Active Directory Description Sync
+
+Optional and off by default. When enabled, the server looks up each reporting computer's Active Directory `description` attribute and shows it as a column on the `Clients` view - read-only, the dashboard never writes back to AD.
+
+Enable it on Settings > General, in the "Active Directory" block, or at install time:
+
+```powershell
+.\src\Install-Server.ps1 -AdSyncEnabled
+```
+
+Two sync modes:
+
+- **On inventory report** (default): refreshes a computer's cached AD data when it next reports inventory, if the cached value is older than the configured sync interval (default 24 hours).
+- **Periodic timer**: refreshes every known computer on a fixed schedule, independent of whether it has reported recently - useful for computers that still exist in AD but have stopped reporting.
+
+By default the server authenticates to AD using its own Windows Service identity (the same domain account WinRM client actions already require - a `LocalSystem` service can't reach AD any more than it can reach WinRM targets). To use separate, explicit AD credentials instead, uncheck "Use service account identity" and supply a username and password - stored in `server-config.json` in plaintext, the same as `WebPassword`.
+
+If a computer's name has no matching AD computer object, the column shows "Not found in AD"; if AD itself was unreachable at sync time, it shows "AD unreachable".
+
 ## Dashboard Usage
 
 Navigation is a tree sidebar with five sections, pinned in place while the page content scrolls:
