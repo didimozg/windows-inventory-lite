@@ -83,6 +83,32 @@ param(
     [switch]$DisableHttp,
 
     [Parameter()]
+    [switch]$AdSyncEnabled,
+
+    [Parameter()]
+    [ValidateSet('on-report', 'timer')]
+    [string]$AdSyncMode = 'on-report',
+
+    [Parameter()]
+    [ValidateRange(1, 8760)]
+    [int]$AdSyncIntervalHours = 24,
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$AdDomain,
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$AdUsername,
+
+    # AdPassword is written to server-config.json, not passed on the service command
+    # line. Same plain-string tradeoff as WebPassword/CertificatePfxPassword above.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', 'AdPassword')]
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$AdPassword,
+
+    [Parameter()]
     [ValidateRange(1, 3650)]
     [int]$InstallLogRetentionDays,
 
@@ -418,6 +444,46 @@ if (-not $PSBoundParameters.ContainsKey('DisableHttp')) {
     }
 }
 
+if (-not $PSBoundParameters.ContainsKey('AdSyncEnabled')) {
+    $savedAdSyncEnabled = Get-ConfigValue -Config $existingConfig -Name 'AdSyncEnabled'
+    if ($savedAdSyncEnabled -eq 'true') {
+        $AdSyncEnabled = $true
+    }
+}
+if (-not $PSBoundParameters.ContainsKey('AdSyncMode')) {
+    $savedAdSyncMode = Get-ConfigValue -Config $existingConfig -Name 'AdSyncMode'
+    if ($savedAdSyncMode -eq 'timer' -or $savedAdSyncMode -eq 'on-report') {
+        $AdSyncMode = $savedAdSyncMode
+    }
+}
+if (-not $PSBoundParameters.ContainsKey('AdSyncIntervalHours')) {
+    $savedAdSyncIntervalHours = Get-ConfigValue -Config $existingConfig -Name 'AdSyncIntervalHours'
+    if ($savedAdSyncIntervalHours) {
+        $AdSyncIntervalHours = [int]$savedAdSyncIntervalHours
+    }
+}
+if (-not $PSBoundParameters.ContainsKey('AdDomain')) {
+    $savedAdDomain = Get-ConfigValue -Config $existingConfig -Name 'AdDomain'
+    if ($savedAdDomain) {
+        $AdDomain = $savedAdDomain
+    }
+}
+if (-not $PSBoundParameters.ContainsKey('AdUsername')) {
+    $savedAdUsername = Get-ConfigValue -Config $existingConfig -Name 'AdUsername'
+    if ($savedAdUsername) {
+        $AdUsername = $savedAdUsername
+    }
+}
+# AdPassword is deliberately NOT reloaded from the saved config the way
+# AdUsername is - re-running the installer without -AdPassword must not
+# require re-supplying it if it's already saved, but the *existing* saved
+# value is what server-config.json already has and $config.AdPassword
+# below only overwrites it when a new one was actually passed this run.
+$adUseServiceIdentity = [string]::IsNullOrEmpty($AdUsername)
+if ($AdSyncEnabled -and -not $adUseServiceIdentity -and -not $AdPassword -and -not (Get-ConfigValue -Config $existingConfig -Name 'AdPassword')) {
+    throw "-AdUsername was supplied without -AdPassword, and no AD password is already saved - provide -AdPassword."
+}
+
 if ($DisableHttp -and -not $UseHttps) {
     throw "-DisableHttp requires -UseHttps (or an already-configured working HTTPS setup) - disabling HTTP with no HTTPS would make the dashboard unreachable."
 }
@@ -577,6 +643,15 @@ $config.UseHttps                = if ($UseHttps) { 'true' } else { 'false' }
 $config.CertificateThumbprint   = $CertificateThumbprint
 $config.HttpsPort               = $HttpsPort
 $config.EnableHttp              = if ($DisableHttp) { 'false' } else { 'true' }
+$config.AdSyncEnabled           = if ($AdSyncEnabled) { 'true' } else { 'false' }
+$config.AdSyncMode              = $AdSyncMode
+$config.AdSyncIntervalHours     = $AdSyncIntervalHours
+$config.AdDomain                = $AdDomain
+$config.AdUseServiceIdentity    = if ($adUseServiceIdentity) { 'true' } else { 'false' }
+$config.AdUsername              = $AdUsername
+if ($AdPassword) {
+    $config.AdPassword = $AdPassword
+}
 Write-ServerConfig -Path $ConfigPath -Config $config
 Set-RestrictedFileAcl -FilePath $ConfigPath
 
