@@ -194,6 +194,43 @@
             </div>
             <p id="generalCertHint" class="cert-hint hidden"></p>
           </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Active Directory</h2>
+            <div class="pkg-grid general-grid">
+              <label class="check-label">
+                <input id="generalAdSyncEnabled" type="checkbox">
+                Enable AD sync
+              </label>
+              <label class="pkg-token-field">
+                Sync mode
+                <select id="generalAdSyncMode">
+                  <option value="on-report">On inventory report</option>
+                  <option value="timer">Periodic timer</option>
+                </select>
+              </label>
+              <label class="pkg-token-field">
+                Sync interval (hours)
+                <input id="generalAdSyncIntervalHours" type="number" min="1" max="8760" value="24">
+              </label>
+              <label class="pkg-token-field">
+                Domain
+                <input id="generalAdDomain" type="text" placeholder="leave blank to use the server's own domain">
+              </label>
+              <label class="check-label">
+                <input id="generalAdUseServiceIdentity" type="checkbox" checked>
+                Use service account identity
+              </label>
+              <label id="generalAdUsernameField" class="pkg-token-field hidden">
+                AD username
+                <input id="generalAdUsername" type="text" autocomplete="off">
+              </label>
+              <label id="generalAdPasswordField" class="pkg-token-field hidden">
+                AD password
+                <input id="generalAdPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current password">
+              </label>
+            </div>
+            <p class="cert-hint">Shows each computer's Active Directory description next to its inventory record, read-only. Reading the description attribute is allowed to any authenticated domain user by default AD ACLs, so the service account identity usually needs no special AD delegation.</p>
+          </div>
           <div class="pkg-buttons">
             <button id="generalSaveButton" class="primary-button" type="button">Save</button>
           </div>

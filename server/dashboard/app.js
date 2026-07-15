@@ -818,6 +818,17 @@
       });
   }
 
+  function updateAdIdentityFields() {
+    const useServiceIdentity = byId('generalAdUseServiceIdentity').checked;
+    // Also set the inline style: the shared ".pkg-grid label" rule (display: grid)
+    // outranks the ".hidden" class on specificity, so toggling the class alone
+    // does not actually hide these fields inside the AD settings grid.
+    [byId('generalAdUsernameField'), byId('generalAdPasswordField')].forEach(field => {
+      field.classList.toggle('hidden', useServiceIdentity);
+      field.style.display = useServiceIdentity ? 'none' : '';
+    });
+  }
+
   function loadGeneralSettings() {
     fetch('/api/v1/server/settings', { cache: 'no-store' })
       .then(response => {
@@ -845,6 +856,14 @@
         } else {
           hint.classList.add('hidden');
         }
+        byId('generalAdSyncEnabled').checked = !!data.adSyncEnabled;
+        byId('generalAdSyncMode').value = data.adSyncMode || 'on-report';
+        byId('generalAdSyncIntervalHours').value = data.adSyncIntervalHours || 24;
+        byId('generalAdDomain').value = data.adDomain || '';
+        byId('generalAdUseServiceIdentity').checked = data.adUseServiceIdentity !== false;
+        byId('generalAdUsername').value = data.adUsername || '';
+        byId('generalAdPassword').value = '';
+        updateAdIdentityFields();
         renderConnectionStatus(data);
       })
       .catch(error => {
@@ -918,7 +937,16 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ staleHours, port, enableHttp, httpsPort, useHttps, acknowledgeRisks: !!acknowledgeRisks })
+      body: JSON.stringify({
+        staleHours, port, enableHttp, httpsPort, useHttps, acknowledgeRisks: !!acknowledgeRisks,
+        adSyncEnabled: byId('generalAdSyncEnabled').checked,
+        adSyncMode: byId('generalAdSyncMode').value,
+        adSyncIntervalHours: Number.parseInt(byId('generalAdSyncIntervalHours').value, 10) || 24,
+        adDomain: byId('generalAdDomain').value.trim(),
+        adUseServiceIdentity: byId('generalAdUseServiceIdentity').checked,
+        adUsername: byId('generalAdUsername').value.trim(),
+        adPassword: byId('generalAdPassword').value
+      })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
@@ -942,6 +970,7 @@
         renderSummary(state.clients);
         renderDashboardTiles();
         renderConnectionStatus(data);
+        byId('generalAdPassword').value = '';
         showGeneralMessage('Settings saved.', false);
       })
       .catch(error => {
@@ -1809,6 +1838,7 @@
   byId('pkgDownloadButton').addEventListener('click', () => { window.location.href = '/api/v1/client-package/download'; });
   byId('generalTab').addEventListener('click', () => setView('general'));
   byId('generalSaveButton').addEventListener('click', () => saveGeneralSettings(false));
+  byId('generalAdUseServiceIdentity').addEventListener('change', updateAdIdentityFields);
   byId('certificateTab').addEventListener('click', () => setView('certificate'));
   byId('certUploadButton').addEventListener('click', uploadCertificate);
   byId('certDeleteButton').addEventListener('click', deleteCertificate);
