@@ -95,6 +95,22 @@
     return `<span class="status-dot ${isActivated ? 'status-dot-on' : 'status-dot-off'}" role="img" aria-label="${escapeHtml(text)}" title="${escapeHtml(text)}">${icon}</span>`;
   }
 
+  // AD Description column for the Clients table. `<small>` already renders
+  // muted (see the site-wide `small { color: var(--muted) }` rule), so the
+  // placeholder strings need no extra styling class.
+  function formatAdDescription(client) {
+    if (client.adSyncStatus === 'not-found') {
+      return '<small>Not found in AD</small>';
+    }
+    if (client.adSyncStatus === 'error') {
+      return '<small>AD unreachable</small>';
+    }
+    if (client.adDescription) {
+      return escapeHtml(client.adDescription);
+    }
+    return '';
+  }
+
   function formatDateTime(value) {
     if (!value) return 'Unknown';
     const date = new Date(value);
@@ -308,7 +324,7 @@
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.clients;
     const items = applySort(state.clients.filter(c => clientMatches(c, query)), c => clientSortValue(c, sortKey), sortDir);
-    const rows = [['Computer', 'Domain', 'IP Addresses', 'Client Version', 'OS', 'OS Version', 'Build', 'Office', 'Office Version', 'Windows Activated', 'Office Activated', 'Software Count', 'Collected', 'Stale', 'CPU', 'RAM', 'Disks', 'USB Storage']].concat(
+    const rows = [['Computer', 'Domain', 'IP Addresses', 'Client Version', 'OS', 'OS Version', 'Build', 'Office', 'Office Version', 'Windows Activated', 'Office Activated', 'Software Count', 'Collected', 'Stale', 'CPU', 'RAM', 'Disks', 'USB Storage', 'AD Description']].concat(
       items.map(c => {
         const os = c.os || {};
         const office = c.office || {};
@@ -325,7 +341,8 @@
           winAct.activated ? 'Yes' : 'No', officeAct.activated ? 'Yes' : 'No',
           (c.software || []).length, formatDateTime(c.collectedAt || c.sourceUpdatedAt),
           isStale(c) ? 'Yes' : 'No', cpu.name || '', ramText, disksText,
-          c.hasUsbStorage ? 'Yes' : 'No'
+          c.hasUsbStorage ? 'Yes' : 'No',
+          c.adSyncStatus === 'not-found' ? 'Not found in AD' : c.adSyncStatus === 'error' ? 'AD unreachable' : (c.adDescription || '')
         ];
       })
     );
@@ -1586,10 +1603,11 @@
         <td>${activationBadge(officeActivation.activated, 'Office')}</td>
         <td>${softwareCount}</td>
         <td>${escapeHtml(formatDateTime(client.collectedAt || client.sourceUpdatedAt))}</td>
+        <td>${formatAdDescription(client)}</td>
         <td><button class="danger-button-ghost" type="button" data-delete-client="${escapeHtml(client.computerName)}">Delete</button></td>
       </tr>
       <tr class="details-row hidden" data-client-details="${clientId}">
-        <td colspan="9">
+        <td colspan="10">
           <div class="details">
             <div class="hw-summary">
               <div><strong>CPU</strong><span>${cpuText}</span></div>
@@ -1606,7 +1624,7 @@
       </tr>`;
     });
 
-    byId('inventoryBody').innerHTML = rows.join('') || '<tr><td colspan="9" class="empty">No matching inventory records.</td></tr>';
+    byId('inventoryBody').innerHTML = rows.join('') || '<tr><td colspan="10" class="empty">No matching inventory records.</td></tr>';
   }
 
   function renderSoftwareTable(clients) {
