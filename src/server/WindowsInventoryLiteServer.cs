@@ -3200,6 +3200,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "SanitizeFileName leaves a normal computer name untouched", TestSanitizeFileNameNormalName);
             allPassed &= SelfTestCheck(output, "FixedTimeEquals matches identical strings and rejects everything else", TestFixedTimeEquals);
             allPassed &= SelfTestCheck(output, "TryParsePortFromPrefix extracts the port from a ListenPrefix URL", TestTryParsePortFromPrefix);
+            allPassed &= SelfTestCheck(output, "LdapFilterEscaper escapes RFC 4515 special characters", TestLdapFilterEscapeSpecialChars);
+            allPassed &= SelfTestCheck(output, "LdapFilterEscaper leaves a normal computer name untouched", TestLdapFilterEscapeNormalName);
             return allPassed;
         }
 
@@ -3456,6 +3458,27 @@ namespace WindowsInventoryLite
             if (ServerOptions.TryParsePortFromPrefix(null, out port))
             {
                 return "expected a null prefix to fail to parse";
+            }
+            return null;
+        }
+
+        private static string TestLdapFilterEscapeSpecialChars()
+        {
+            string escaped = LdapFilterEscaper.Escape("a*b(c)d\\e\0f");
+            const string expected = "a\\2ab\\28c\\29d\\5ce\\00f";
+            if (escaped != expected)
+            {
+                return "expected '" + expected + "' but got '" + escaped + "'";
+            }
+            return null;
+        }
+
+        private static string TestLdapFilterEscapeNormalName()
+        {
+            string escaped = LdapFilterEscaper.Escape("PC-WINADMIN-01");
+            if (escaped != "PC-WINADMIN-01")
+            {
+                return "expected passthrough but got '" + escaped + "'";
             }
             return null;
         }

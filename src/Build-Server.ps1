@@ -11,7 +11,8 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$serverSource = Join-Path -Path $PSScriptRoot -ChildPath 'server\WindowsInventoryLiteServer.cs'
+$serverDir = Join-Path -Path $PSScriptRoot -ChildPath 'server'
+$serverSources = @(Get-ChildItem -Path $serverDir -Filter '*.cs' | ForEach-Object { $_.FullName })
 
 if (-not $OutputPath) {
     $OutputPath = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteServer.exe'
@@ -48,6 +49,6 @@ if (-not $compiler) {
     /reference:System.Core.dll `
     /reference:System.ServiceProcess.dll `
     /reference:System.Web.Extensions.dll `
-    $serverSource
+    $serverSources
 
 Write-Host "Server executable: $OutputPath"
