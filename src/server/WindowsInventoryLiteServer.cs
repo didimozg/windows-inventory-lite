@@ -916,8 +916,76 @@ namespace WindowsInventoryLite
 
             string computerName = Convert.ToString(inventory.ContainsKey("computerName") ? inventory["computerName"] : "unknown");
             string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
-            File.WriteAllText(path, request.Body, new UTF8Encoding(false));
+
+            Dictionary<string, object> previous = null;
+            if (File.Exists(path))
+            {
+                try
+                {
+                    previous = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                }
+                catch
+                {
+                    previous = null;
+                }
+            }
+            ApplyAdSync(inventory, computerName, previous);
+
+            string json = serializer.Serialize(inventory);
+            File.WriteAllText(path, json, new UTF8Encoding(false));
             SendJson(stream, "{\"status\":\"ok\"}");
+        }
+
+        // Returns true when an AD lookup is due: either there is no
+        // previous sync timestamp at all, or it's older than the
+        // configured interval. Static and parameter-driven (no dependency
+        // on `options` or the clock beyond DateTime.UtcNow) so it's directly
+        // self-testable without standing up a server instance.
+        internal static bool ShouldSyncAd(DateTime? lastSyncedUtc, int intervalHours)
+        {
+            if (lastSyncedUtc == null)
+            {
+                return true;
+            }
+            return (DateTime.UtcNow - lastSyncedUtc.Value).TotalHours >= intervalHours;
+        }
+
+        // Carries the previous adDescription/adSyncedAt/adSyncStatus forward
+        // onto `inventory` when they're still fresh, or performs a lookup
+        // and stamps a new sync time when they're missing or stale. A
+        // no-op when AD sync is disabled. `previous` may be the same object
+        // reference as `inventory` (the timer sweep in Task 4 calls it this
+        // way) - every read of `previous` happens before the corresponding
+        // write to `inventory`, so that's safe.
+        private void ApplyAdSync(Dictionary<string, object> inventory, string computerName, Dictionary<string, object> previous)
+        {
+            if (!options.AdSyncEnabled)
+            {
+                return;
+            }
+
+            DateTime? lastSyncedUtc = null;
+            if (previous != null && previous.ContainsKey("adSyncedAt") && previous["adSyncedAt"] != null)
+            {
+                DateTime parsed;
+                if (DateTime.TryParse(Convert.ToString(previous["adSyncedAt"]), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out parsed))
+                {
+                    lastSyncedUtc = parsed.ToUniversalTime();
+                }
+            }
+
+            if (previous != null && !ShouldSyncAd(lastSyncedUtc, options.AdSyncIntervalHours))
+            {
+                inventory["adDescription"] = previous.ContainsKey("adDescription") ? previous["adDescription"] : null;
+                inventory["adSyncedAt"] = previous.ContainsKey("adSyncedAt") ? previous["adSyncedAt"] : null;
+                inventory["adSyncStatus"] = previous.ContainsKey("adSyncStatus") ? previous["adSyncStatus"] : null;
+                return;
+            }
+
+            AdLookupResult result = AdLookupService.LookupComputerDescription(computerName, options);
+            inventory["adDescription"] = result.Description;
+            inventory["adSyncedAt"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            inventory["adSyncStatus"] = result.Status;
         }
 
         private void DeleteClient(Stream stream, RequestContext request)
@@ -3202,6 +3270,9 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "TryParsePortFromPrefix extracts the port from a ListenPrefix URL", TestTryParsePortFromPrefix);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper escapes RFC 4515 special characters", TestLdapFilterEscapeSpecialChars);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper leaves a normal computer name untouched", TestLdapFilterEscapeNormalName);
+            allPassed &= SelfTestCheck(output, "ShouldSyncAd returns true with no previous timestamp", TestShouldSyncAdNoPreviousTimestamp);
+            allPassed &= SelfTestCheck(output, "ShouldSyncAd returns true for a stale timestamp", TestShouldSyncAdStaleTimestamp);
+            allPassed &= SelfTestCheck(output, "ShouldSyncAd returns false for a fresh timestamp", TestShouldSyncAdFreshTimestamp);
             return allPassed;
         }
 
@@ -3479,6 +3550,35 @@ namespace WindowsInventoryLite
             if (escaped != "PC-WINADMIN-01")
             {
                 return "expected passthrough but got '" + escaped + "'";
+            }
+            return null;
+        }
+
+        private static string TestShouldSyncAdNoPreviousTimestamp()
+        {
+            if (!InventoryServer.ShouldSyncAd(null, 24))
+            {
+                return "expected true when there is no previous sync timestamp";
+            }
+            return null;
+        }
+
+        private static string TestShouldSyncAdStaleTimestamp()
+        {
+            DateTime stale = DateTime.UtcNow.AddHours(-25);
+            if (!InventoryServer.ShouldSyncAd(stale, 24))
+            {
+                return "expected true when the previous sync is older than the interval";
+            }
+            return null;
+        }
+
+        private static string TestShouldSyncAdFreshTimestamp()
+        {
+            DateTime fresh = DateTime.UtcNow.AddHours(-1);
+            if (InventoryServer.ShouldSyncAd(fresh, 24))
+            {
+                return "expected false when the previous sync is within the interval";
             }
             return null;
         }
