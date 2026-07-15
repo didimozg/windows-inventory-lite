@@ -2611,6 +2611,16 @@ namespace WindowsInventoryLite
             result["port"] = options.Port;
             result["enableHttp"] = options.EnableHttp;
             result["httpsPort"] = options.HttpsPort;
+            result["adSyncEnabled"] = options.AdSyncEnabled;
+            result["adSyncMode"] = options.AdSyncMode;
+            result["adSyncIntervalHours"] = options.AdSyncIntervalHours;
+            result["adDomain"] = options.AdDomain;
+            result["adUseServiceIdentity"] = options.AdUseServiceIdentity;
+            // Username is informational (shown in the UI when the explicit-
+            // credentials option is selected); the password is never
+            // returned by this endpoint, matching how WebPassword is never
+            // echoed back either.
+            result["adUsername"] = options.AdUseServiceIdentity ? null : options.AdUsername;
             JavaScriptSerializer serializer = CreateJsonSerializer();
             SendJson(stream, serializer.Serialize(result));
         }
@@ -2781,6 +2791,64 @@ namespace WindowsInventoryLite
                 // of reverting to whatever was baked in at install time.
                 updates["ListenPrefix"] = "http://+:" + options.Port + "/";
                 updates["EnableHttp"] = options.EnableHttp ? "true" : "false";
+            }
+
+            if (payload.ContainsKey("adSyncEnabled") || payload.ContainsKey("adSyncMode") || payload.ContainsKey("adSyncIntervalHours")
+                || payload.ContainsKey("adDomain") || payload.ContainsKey("adUseServiceIdentity") || payload.ContainsKey("adUsername") || payload.ContainsKey("adPassword"))
+            {
+                bool adSyncEnabled = payload.ContainsKey("adSyncEnabled") ? Convert.ToBoolean(payload["adSyncEnabled"]) : options.AdSyncEnabled;
+
+                string adSyncMode = payload.ContainsKey("adSyncMode") ? Convert.ToString(payload["adSyncMode"]) : options.AdSyncMode;
+                if (adSyncMode != "on-report" && adSyncMode != "timer")
+                {
+                    SendText(stream, "{\"error\":\"adSyncMode must be 'on-report' or 'timer'\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+
+                int adSyncIntervalHours = options.AdSyncIntervalHours;
+                if (payload.ContainsKey("adSyncIntervalHours"))
+                {
+                    if (!Int32.TryParse(Convert.ToString(payload["adSyncIntervalHours"]), out adSyncIntervalHours) || adSyncIntervalHours < 1 || adSyncIntervalHours > 8760)
+                    {
+                        SendText(stream, "{\"error\":\"adSyncIntervalHours must be between 1 and 8760\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+
+                string adDomain = payload.ContainsKey("adDomain") ? Convert.ToString(payload["adDomain"]) : options.AdDomain;
+                bool adUseServiceIdentity = payload.ContainsKey("adUseServiceIdentity") ? Convert.ToBoolean(payload["adUseServiceIdentity"]) : options.AdUseServiceIdentity;
+                string adUsername = payload.ContainsKey("adUsername") ? Convert.ToString(payload["adUsername"]) : options.AdUsername;
+                // Blank/omitted password on save means "keep the existing
+                // one" - the dashboard never pre-fills a password field with
+                // the real stored value, so treating blank as "no change"
+                // is the only way to edit other AD fields without being
+                // forced to re-type the password every time.
+                string adPassword = payload.ContainsKey("adPassword") && !String.IsNullOrEmpty(Convert.ToString(payload["adPassword"]))
+                    ? Convert.ToString(payload["adPassword"])
+                    : options.AdPassword;
+
+                if (adSyncEnabled && !adUseServiceIdentity && (String.IsNullOrEmpty(adUsername) || String.IsNullOrEmpty(adPassword)))
+                {
+                    SendText(stream, "{\"error\":\"AD username and password are required when not using the service account identity.\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+
+                options.AdSyncEnabled = adSyncEnabled;
+                options.AdSyncMode = adSyncMode;
+                options.AdSyncIntervalHours = adSyncIntervalHours;
+                options.AdDomain = adDomain;
+                options.AdUseServiceIdentity = adUseServiceIdentity;
+                options.AdUsername = adUsername;
+                options.AdPassword = adPassword;
+                ReconfigureAdSyncTimer();
+
+                updates["AdSyncEnabled"] = options.AdSyncEnabled ? "true" : "false";
+                updates["AdSyncMode"] = options.AdSyncMode;
+                updates["AdSyncIntervalHours"] = options.AdSyncIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                updates["AdDomain"] = options.AdDomain ?? "";
+                updates["AdUseServiceIdentity"] = options.AdUseServiceIdentity ? "true" : "false";
+                updates["AdUsername"] = options.AdUsername ?? "";
+                updates["AdPassword"] = options.AdPassword ?? "";
             }
 
             if (updates.Count > 0)
