@@ -6,7 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-## [0.6.0] - 2026-07-15
+## [0.6.1] - 2026-07-15
+
+Follow-up review of 0.6.0's new code and comments.
+
+### Fixed
+
+- The checkmark SVG markup for the on/off status dot was duplicated verbatim in two functions (`activationBadge`, `setStatusDot`). Extracted to a shared `CHECK_DOT_SVG` constant.
+- The Connection status panel's dots (`setStatusDot`) had no accessible treatment at all - unlike the Clients table's activation dots, which are the only content in their cell and get `role="img"`/`aria-label`, these sit next to text that already states the same thing ("HTTP" + "Port 8080"/"Disabled"), so they're decorative rather than the only source of the information. Marked them `aria-hidden="true"` instead of leaving them unlabeled.
+- A comment above `.status-dot` in styles.css still said "Windows/Office activation indicator in the Clients table" after the same class was reused for the Connection status panel. Updated to describe both.
+
+### Verified, not changed
+
+- Checked whether the two `.dashboard-card` elements on the Dashboard page (Software/Hardware) have a real gap between them, since a screenshot looked like they might - confirmed via computed styles that they sit flush with zero margin on both sides, which is intentional (the flat design spec calls for elements separated by borders/color, not shadows or gaps everywhere), not an accidental missing-spacing bug.
+
+Version 0.6.0 -> 0.6.1.
 
 Design pass based on a live review of the running dashboard (seeded with sample data and inspected via Playwright).
 

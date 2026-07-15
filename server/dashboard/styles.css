@@ -832,12 +832,14 @@ tr.usb-row td {
   background: var(--usb-row-bg);
 }
 
-/* Windows/Office activation indicator in the Clients table: a checkmark
-   dot for "activated", reusing the same mark as the app's logo, or a
-   muted dash. Replaces two text cells ("Activated"/"Not detected") that
-   wrapped onto a second line at normal column widths and broke row
-   rhythm - see .status-dot-off's dash for the "off" state instead of an
-   empty circle, which could otherwise read as a loading spinner. */
+/* Shared on/off dot: a checkmark for "on", reusing the same mark as the
+   app's logo, or a muted dash for "off" - used both by the Clients
+   table's Windows/Office activation indicator (replacing two text cells,
+   "Activated"/"Not detected", that wrapped onto a second line at normal
+   column widths and broke row rhythm) and by the General settings
+   Connection status panel (HTTP/HTTPS/certificate). See .status-dot-off's
+   dash instead of an empty circle, which could otherwise read as a
+   loading spinner. */
 .status-dot {
   display: inline-flex;
   align-items: center;

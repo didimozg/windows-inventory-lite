@@ -81,15 +81,17 @@
     return value ? 'Activated' : 'Not detected';
   }
 
+  // Shared by activationBadge and setStatusDot - both draw the same
+  // checkmark dot for an "on" state, reusing the mark from the project logo.
+  const CHECK_DOT_SVG = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10.5 L8.5 14 L15 6.5"/></svg>';
+
   // Compact on/off indicator for the Clients table (Windows/Office
   // activation): a checkmark dot reusing the same mark as the app's own
   // logo, or a muted dash. Replaces two "Activated"/"Not detected" text
   // cells that wrapped awkwardly at typical column widths.
   function activationBadge(isActivated, label) {
     const text = `${label}: ${activated(isActivated)}`;
-    const icon = isActivated
-      ? '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10.5 L8.5 14 L15 6.5"/></svg>'
-      : '';
+    const icon = isActivated ? CHECK_DOT_SVG : '';
     return `<span class="status-dot ${isActivated ? 'status-dot-on' : 'status-dot-off'}" role="img" aria-label="${escapeHtml(text)}" title="${escapeHtml(text)}">${icon}</span>`;
   }
 
@@ -857,7 +859,7 @@
   function setStatusDot(dotId, detailId, isOn, detailText) {
     const dot = byId(dotId);
     dot.className = 'status-dot ' + (isOn ? 'status-dot-on' : 'status-dot-off');
-    dot.innerHTML = isOn ? '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 10.5 L8.5 14 L15 6.5"/></svg>' : '';
+    dot.innerHTML = isOn ? CHECK_DOT_SVG : '';
     byId(detailId).textContent = detailText;
   }
 
