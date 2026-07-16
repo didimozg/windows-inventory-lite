@@ -1752,7 +1752,10 @@
     const query = byId('searchInput').value.trim();
 
     const { key: cpuSortKey, dir: cpuSortDir } = state.sort.hwCpu;
-    const cpuRows = applySort(getCpuGroups(clients).filter(g => hwMatches([g.name, ...g.clients.map(c => c.computerName)].join(' '), query)), g => cpuSortValue(g, cpuSortKey), cpuSortDir).map(g => {
+    const cpuFiltered = applySort(getCpuGroups(clients).filter(g => hwMatches([g.name, ...g.clients.map(c => c.computerName)].join(' '), query)), g => cpuSortValue(g, cpuSortKey), cpuSortDir);
+    const { items: cpuPageItems, page: cpuPage, totalPages: cpuTotalPages } = paginate(cpuFiltered, state.page.hwCpu, state.pageSize.hwCpu);
+    state.page.hwCpu = cpuPage;
+    const cpuRows = cpuPageItems.map(g => {
         const id = safeId('cpu:' + g.name);
         const computers = g.clients.map(c => `<li>${escapeHtml(c.computerName)}<small>${escapeHtml(c.domain)}</small></li>`).join('');
         const clock = g.clockMhz ? `${(g.clockMhz / 1000).toFixed(2)} GHz` : 'Unknown';
@@ -1767,9 +1770,13 @@
         </tr>`;
       });
     byId('hwCpuBody').innerHTML = cpuRows.join('') || '<tr><td colspan="4" class="empty">No CPU data.</td></tr>';
+    renderPager('hwCpuPager', 'hwCpu', cpuPage, cpuTotalPages, () => renderHardwarePage(state.clients));
 
     const { key: diskSortKey, dir: diskSortDir } = state.sort.hwDisk;
-    const diskRows = applySort(getDiskGroups(clients).filter(g => hwMatches([g.model, g.type, ...g.clients.map(c => c.computerName)].join(' '), query)), g => diskSortValue(g, diskSortKey), diskSortDir).map(g => {
+    const diskFiltered = applySort(getDiskGroups(clients).filter(g => hwMatches([g.model, g.type, ...g.clients.map(c => c.computerName)].join(' '), query)), g => diskSortValue(g, diskSortKey), diskSortDir);
+    const { items: diskPageItems, page: diskPage, totalPages: diskTotalPages } = paginate(diskFiltered, state.page.hwDisk, state.pageSize.hwDisk);
+    state.page.hwDisk = diskPage;
+    const diskRows = diskPageItems.map(g => {
         const id = safeId('disk:' + g.model + g.sizeGb);
         const computers = g.clients.map(c => `<li>${escapeHtml(c.computerName)}<small>${escapeHtml(c.domain)}</small></li>`).join('');
         const usbBadge = g.usb ? ' <span class="usb-badge">USB</span>' : '';
@@ -1785,9 +1792,13 @@
         </tr>`;
       });
     byId('hwDiskBody').innerHTML = diskRows.join('') || '<tr><td colspan="4" class="empty">No storage data.</td></tr>';
+    renderPager('hwDiskPager', 'hwDisk', diskPage, diskTotalPages, () => renderHardwarePage(state.clients));
 
     const { key: ramSortKey, dir: ramSortDir } = state.sort.hwRam;
-    const ramRows = applySort(getRamGroups(clients).filter(g => hwMatches([g.totalGb, ...g.clients.map(c => c.computerName)].join(' '), query)), g => ramSortValue(g, ramSortKey), ramSortDir).map(g => {
+    const ramFiltered = applySort(getRamGroups(clients).filter(g => hwMatches([g.totalGb, ...g.clients.map(c => c.computerName)].join(' '), query)), g => ramSortValue(g, ramSortKey), ramSortDir);
+    const { items: ramPageItems, page: ramPage, totalPages: ramTotalPages } = paginate(ramFiltered, state.page.hwRam, state.pageSize.hwRam);
+    state.page.hwRam = ramPage;
+    const ramRows = ramPageItems.map(g => {
         const id = safeId('ram:' + g.totalMb + ':' + g.moduleCount);
         const computers = g.clients.map(c => `<li>${escapeHtml(c.computerName)}<small>${escapeHtml(c.domain)}</small></li>`).join('');
         return `<tr>
@@ -1800,6 +1811,7 @@
         </tr>`;
       });
     byId('hwRamBody').innerHTML = ramRows.join('') || '<tr><td colspan="3" class="empty">No RAM data.</td></tr>';
+    renderPager('hwRamPager', 'hwRam', ramPage, ramTotalPages, () => renderHardwarePage(state.clients));
   }
 
   function render() {
