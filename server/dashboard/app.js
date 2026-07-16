@@ -837,12 +837,8 @@
 
   function updateAdIdentityFields() {
     const useServiceIdentity = byId('generalAdUseServiceIdentity').checked;
-    // Also set the inline style: the shared ".pkg-grid label" rule (display: grid)
-    // outranks the ".hidden" class on specificity, so toggling the class alone
-    // does not actually hide these fields inside the AD settings grid.
     [byId('generalAdUsernameField'), byId('generalAdPasswordField')].forEach(field => {
       field.classList.toggle('hidden', useServiceIdentity);
-      field.style.display = useServiceIdentity ? 'none' : '';
     });
   }
 

@@ -53,5 +53,20 @@ namespace WindowsInventoryLite
                 ? options.DebugLogPath
                 : Path.Combine(options.DataPath, "_logs", "debug.log");
         }
+
+        // Escapes CR/LF in client-supplied values (e.g. a reported computer
+        // name) before they are embedded in a log line or Event Log
+        // message. Without this, a client that already has a valid
+        // ingestion token could forge additional log lines by putting a
+        // newline in its reported computer name. internal, not private:
+        // also exercised directly by the self-test suite.
+        internal static string SanitizeForLog(string value)
+        {
+            if (value == null)
+            {
+                return String.Empty;
+            }
+            return value.Replace("\r", "\\r").Replace("\n", "\\n");
+        }
     }
 }

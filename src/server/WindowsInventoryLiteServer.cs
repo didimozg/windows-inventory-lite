@@ -106,7 +106,7 @@ namespace WindowsInventoryLite
         public bool ShowVersion;
         // AD sync is opt-in and off by default - deployments without AD, or
         // with a server that isn't domain-joined, are unaffected. See
-        // AdLookupService.cs and InventoryServer.ApplyAdSync.
+        // AdLookupService.cs and InventoryServer.ComputeAdSyncFields.
         public bool AdSyncEnabled;
         public string AdSyncMode;
         public int AdSyncIntervalHours;
@@ -257,7 +257,7 @@ namespace WindowsInventoryLite
                 else if (key == "--ad-sync-interval-hours" && i + 1 < args.Length)
                 {
                     int adHours;
-                    if (Int32.TryParse(args[++i], out adHours) && adHours > 0)
+                    if (Int32.TryParse(args[++i], out adHours) && adHours > 0 && adHours <= 8760)
                     {
                         options.AdSyncIntervalHours = adHours;
                     }
@@ -383,7 +383,7 @@ namespace WindowsInventoryLite
                 {
                     string adSyncIntervalText = GetConfigString(config, "AdSyncIntervalHours");
                     int adSyncIntervalFromConfig;
-                    if (!String.IsNullOrEmpty(adSyncIntervalText) && Int32.TryParse(adSyncIntervalText, out adSyncIntervalFromConfig) && adSyncIntervalFromConfig > 0)
+                    if (!String.IsNullOrEmpty(adSyncIntervalText) && Int32.TryParse(adSyncIntervalText, out adSyncIntervalFromConfig) && adSyncIntervalFromConfig > 0 && adSyncIntervalFromConfig <= 8760)
                     {
                         options.AdSyncIntervalHours = adSyncIntervalFromConfig;
                     }
@@ -611,12 +611,30 @@ namespace WindowsInventoryLite
             {
                 try
                 {
+                    // Read a snapshot and compute the AD fields (live lookup
+                    // included) OUTSIDE reportFileLock - see ComputeAdSyncFields.
+                    // The lock is only taken afterward, to re-read the file's
+                    // CURRENT contents and merge just the AD fields onto them,
+                    // so a client report that arrived for this same computer
+                    // while the lookup was in flight is not clobbered by the
+                    // stale snapshot read here.
+                    Dictionary<string, object> snapshot = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
+                    string computerName = Convert.ToString(snapshot.ContainsKey("computerName") ? snapshot["computerName"] : Path.GetFileNameWithoutExtension(file));
+                    AdSyncFields adFields = ComputeAdSyncFields(computerName, snapshot);
+
                     lock (reportFileLock)
                     {
-                        Dictionary<string, object> inventory = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
-                        string computerName = Convert.ToString(inventory.ContainsKey("computerName") ? inventory["computerName"] : Path.GetFileNameWithoutExtension(file));
-                        ApplyAdSync(inventory, computerName, inventory);
-                        File.WriteAllText(file, serializer.Serialize(inventory), new UTF8Encoding(false));
+                        Dictionary<string, object> current = snapshot;
+                        try
+                        {
+                            current = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
+                        }
+                        catch
+                        {
+                            current = snapshot;
+                        }
+                        ApplyAdSyncFields(current, adFields);
+                        File.WriteAllText(file, serializer.Serialize(current), new UTF8Encoding(false));
                     }
                 }
                 catch
@@ -1024,26 +1042,35 @@ namespace WindowsInventoryLite
             string computerName = Convert.ToString(inventory.ContainsKey("computerName") ? inventory["computerName"] : "unknown");
             string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
 
+            // Read the previous report and compute the AD fields (which may
+            // involve a live, possibly slow AD lookup) BEFORE taking
+            // reportFileLock, so a slow/unreachable AD cannot serialize
+            // ingestion for the rest of the fleet behind this one request.
+            // This unlocked read is safe: a torn/partial read just fails to
+            // deserialize (falls back to previous = null, same as a
+            // brand-new computer), it cannot corrupt anything.
+            Dictionary<string, object> previous = null;
+            if (File.Exists(path))
+            {
+                try
+                {
+                    previous = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                }
+                catch
+                {
+                    previous = null;
+                }
+            }
+            AdSyncFields adFields = ComputeAdSyncFields(computerName, previous);
+
             lock (reportFileLock)
             {
-                Dictionary<string, object> previous = null;
-                if (File.Exists(path))
-                {
-                    try
-                    {
-                        previous = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
-                    }
-                    catch
-                    {
-                        previous = null;
-                    }
-                }
-                ApplyAdSync(inventory, computerName, previous);
+                ApplyAdSyncFields(inventory, adFields);
 
                 string json = serializer.Serialize(inventory);
                 File.WriteAllText(path, json, new UTF8Encoding(false));
             }
-            DebugLogger.Log(options, "Client", "Inventory report accepted from '" + computerName + "'");
+            DebugLogger.Log(options, "Client", "Inventory report accepted from '" + DebugLogger.SanitizeForLog(computerName) + "'");
             SendJson(stream, "{\"status\":\"ok\"}");
         }
 
@@ -1061,19 +1088,35 @@ namespace WindowsInventoryLite
             return (DateTime.UtcNow - lastSyncedUtc.Value).TotalHours >= intervalHours;
         }
 
-        // Carries the previous adDescription/adSyncedAt/adSyncStatus forward
-        // onto `inventory` when they're still fresh, or performs a lookup
-        // and stamps a new sync time when they're missing or stale. A
-        // no-op when AD sync is disabled. `previous` may be the same object
-        // reference as `inventory` (the timer sweep in Task 4 calls it this
-        // way) - every read of `previous` happens before the corresponding
-        // write to `inventory`, so that's safe.
-        private void ApplyAdSync(Dictionary<string, object> inventory, string computerName, Dictionary<string, object> previous)
+        // Holds the AD fields a caller should merge into a report, computed
+        // by ComputeAdSyncFields. Applicable is false when AD sync is
+        // disabled, in which case the other fields are meaningless and
+        // ApplyAdSyncFields is a no-op.
+        private sealed class AdSyncFields
         {
+            public bool Applicable;
+            public object Description;
+            public object Status;
+            public object SyncedAt;
+        }
+
+        // Decides whether a computer's cached AD data is still fresh, and
+        // performs a live AD lookup (AdLookupService, up to ~15s against a
+        // slow or unreachable AD) when it isn't. Deliberately does not
+        // touch reportFileLock or any other lock - a caller must never call
+        // this while holding reportFileLock, since a slow/unreachable AD
+        // would otherwise serialize every inventory report behind whichever
+        // computer's lookup is in flight. Pure with respect to shared state
+        // (only reads `previous` and `options`); the caller is responsible
+        // for merging the result into a report via ApplyAdSyncFields.
+        private AdSyncFields ComputeAdSyncFields(string computerName, Dictionary<string, object> previous)
+        {
+            AdSyncFields fields = new AdSyncFields();
             if (!options.AdSyncEnabled)
             {
-                return;
+                return fields;
             }
+            fields.Applicable = true;
 
             DateTime? lastSyncedUtc = null;
             if (previous != null && previous.ContainsKey("adSyncedAt") && previous["adSyncedAt"] != null)
@@ -1087,16 +1130,50 @@ namespace WindowsInventoryLite
 
             if (previous != null && !ShouldSyncAd(lastSyncedUtc, options.AdSyncIntervalHours))
             {
-                inventory["adDescription"] = previous.ContainsKey("adDescription") ? previous["adDescription"] : null;
-                inventory["adSyncedAt"] = previous.ContainsKey("adSyncedAt") ? previous["adSyncedAt"] : null;
-                inventory["adSyncStatus"] = previous.ContainsKey("adSyncStatus") ? previous["adSyncStatus"] : null;
-                return;
+                fields.Description = previous.ContainsKey("adDescription") ? previous["adDescription"] : null;
+                fields.SyncedAt = previous.ContainsKey("adSyncedAt") ? previous["adSyncedAt"] : null;
+                fields.Status = previous.ContainsKey("adSyncStatus") ? previous["adSyncStatus"] : null;
+                return fields;
             }
 
             AdLookupResult result = AdLookupService.LookupComputerDescription(computerName, options);
-            inventory["adDescription"] = result.Description;
-            inventory["adSyncedAt"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-            inventory["adSyncStatus"] = result.Status;
+            fields.Description = result.Description;
+            fields.Status = result.Status;
+            if (result.Status != "error")
+            {
+                fields.SyncedAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            }
+            else if (previous != null && previous.ContainsKey("adSyncedAt"))
+            {
+                // Do not advance the sync timestamp on a failed lookup - a
+                // transient AD outage should be retried on the next
+                // report/sweep tick, not stick at "AD unreachable" for the
+                // full AdSyncIntervalHours window. Leaving the previous
+                // (already-stale, which is why this attempt ran at all)
+                // timestamp in place means the next ShouldSyncAd check
+                // still sees it as due.
+                fields.SyncedAt = previous["adSyncedAt"];
+            }
+            return fields;
+        }
+
+        // Merges a previously computed AdSyncFields onto `inventory`. Pure,
+        // no I/O, no lock - safe to call from inside reportFileLock right
+        // before writing, which is exactly how both call sites use it: the
+        // (possibly slow) lookup already happened outside the lock via
+        // ComputeAdSyncFields, and only this cheap merge happens inside it.
+        private static void ApplyAdSyncFields(Dictionary<string, object> inventory, AdSyncFields fields)
+        {
+            if (!fields.Applicable)
+            {
+                return;
+            }
+            inventory["adDescription"] = fields.Description;
+            inventory["adSyncStatus"] = fields.Status;
+            if (fields.SyncedAt != null)
+            {
+                inventory["adSyncedAt"] = fields.SyncedAt;
+            }
         }
 
         private void DeleteClient(Stream stream, RequestContext request)
@@ -3454,6 +3531,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ShouldSyncAd returns false for a fresh timestamp", TestShouldSyncAdFreshTimestamp);
             allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath defaults under DataPath when unset", TestDebugLoggerResolvePathDefault);
             allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath honors an explicit DebugLogPath", TestDebugLoggerResolvePathOverride);
+            allPassed &= SelfTestCheck(output, "DebugLogger.SanitizeForLog escapes embedded CR/LF", TestDebugLoggerSanitizeForLog);
             return allPassed;
         }
 
@@ -3786,6 +3864,20 @@ namespace WindowsInventoryLite
             if (actual != @"D:\custom\debug.log")
             {
                 return "expected the explicit DebugLogPath to be used, got '" + actual + "'";
+            }
+            return null;
+        }
+
+        private static string TestDebugLoggerSanitizeForLog()
+        {
+            string actual = DebugLogger.SanitizeForLog("EVIL\r\n2026-01-01T00:00:00Z [Error] forged line");
+            if (actual.IndexOf('\r') >= 0 || actual.IndexOf('\n') >= 0)
+            {
+                return "expected embedded CR/LF to be escaped, got '" + actual + "'";
+            }
+            if (actual.IndexOf("\\r\\n") < 0)
+            {
+                return "expected the escaped '\\r\\n' sequence to be visible, got '" + actual + "'";
             }
             return null;
         }

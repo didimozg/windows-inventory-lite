@@ -134,7 +134,7 @@ namespace WindowsInventoryLite
                 string identity = options.AdUseServiceIdentity
                     ? "service identity"
                     : "explicit account '" + options.AdUsername + "'";
-                string message = "AD lookup for '" + computerName + "' in domain '" + (domain ?? "(unresolved)")
+                string message = "AD lookup for '" + DebugLogger.SanitizeForLog(computerName) + "' in domain '" + (domain ?? "(unresolved)")
                     + "' using " + identity + ": " + result.Status;
                 if (errorDetail != null)
                 {

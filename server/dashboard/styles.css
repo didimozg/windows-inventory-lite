@@ -612,7 +612,14 @@ tr.stale td {
 }
 
 .hidden {
-  display: none;
+  /* !important is deliberate: .hidden is a utility class meant to
+     unconditionally hide an element regardless of any component-specific
+     display rule's specificity (e.g. .pkg-grid label { display: grid }
+     otherwise outranks a plain .hidden on a label nested inside .pkg-grid -
+     see server/dashboard/app.js's updateAdIdentityFields, which no longer
+     needs its own inline style.display workaround now that this wins on
+     its own). */
+  display: none !important;
 }
 
 .install-panel {
