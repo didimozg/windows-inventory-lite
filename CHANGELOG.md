@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-16
+
+Live-stand follow-up to 0.7.0's AD Description sync, driven by testing against a real Active Directory environment.
+
+### Added
+
+- Optional debug log file on both server and client (`--debug-log-enabled` / `DebugLogEnabled`, off by default), writing plain-text lines for AD lookups, client-server report traffic, and unhandled errors - independent of the Windows Event Log, which depends on this machine already having (or being able to auto-register) the relevant event source.
+- AD password is now encrypted at rest in `server-config.json` (Windows DPAPI, `LocalMachine` scope) instead of stored in plaintext, both when saved from the dashboard and when set at install time (`Install-Server.ps1 -AdPassword`).
+
+### Fixed
+
+- Client never negotiated TLS 1.2 explicitly; on older .NET Framework/Windows defaults this could leave the HTTPS handshake unable to complete against a server that only accepts TLS 1.2, while plain HTTP kept working - masking the real cause behind what looked like a routing/config problem.
+- A computer stuck on "AD unreachable" after a transient AD outage no longer waits out the full sync interval before retrying - the sync timestamp is no longer advanced on a failed lookup.
+- The AD/LDAP lookup no longer runs inside the lock that serializes inventory-report writes, so a slow or unreachable AD can no longer delay ingestion for the rest of the fleet.
+- `AdSyncIntervalHours` now enforces the same 1-8760 range on the CLI/config-file path that the settings API already enforced.
+- A CSS specificity bug hid the AD credential fields incorrectly in some cases; `.hidden` now reliably wins over more specific component rules.
+- Client-supplied computer names are now escaped before being written into Event Log or debug-log lines, closing a log-forging gap.
+
 ## [0.7.0] - 2026-07-15
 
 ### Added
