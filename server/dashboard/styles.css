@@ -984,6 +984,24 @@ th.sort-desc::after {
   color: var(--accent);
 }
 
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin: 12px 0 4px;
+}
+
+.pager-button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.pager-status {
+  font-size: 13px;
+  color: var(--muted);
+}
+
 .hw-section-header {
   display: flex;
   align-items: center;

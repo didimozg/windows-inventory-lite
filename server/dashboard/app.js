@@ -13,8 +13,23 @@
       hwDisk: { key: 'model', dir: 1 },
       hwRam: { key: 'totalMb', dir: -1 },
       licenses: { key: 'name', dir: 1 }
-    }
+    },
+    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1 },
+    // clients/software start at a reasonable fallback and are corrected to
+    // the real viewport-fitting value the first time their table becomes
+    // visible (see computeLiveRowsPerPage/recalculateActivePagination).
+    // hwCpu/hwDisk/hwRam are fixed (see HW_PAGE_SIZE) - the three Hardware
+    // sub-tables render stacked in one view and are rarely large enough to
+    // need viewport-adaptive sizing (see this plan's Global Constraints).
+    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20 }
   };
+
+  const MIN_PAGE_SIZE = 5;
+  const HW_PAGE_SIZE = 20;
+  // Reserves room below a table's rows for its pager control plus a small
+  // bottom margin, so the computed page size doesn't crowd the pager off
+  // the bottom edge of the viewport.
+  const PAGER_RESERVE_PX = 56;
 
   function byId(id) {
     return document.getElementById(id);
@@ -209,6 +224,59 @@
       if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
       return String(av).localeCompare(String(bv), undefined, { sensitivity: 'base' }) * dir;
     });
+  }
+
+  // Slices an already-filtered/sorted array to one page and returns
+  // pagination metadata. page is clamped into [1, totalPages] so a stale
+  // page number (e.g. after a search narrows the result set to fewer
+  // pages than the user was previously on) always produces a valid slice
+  // instead of an empty one.
+  function paginate(arr, page, pageSize) {
+    const totalPages = Math.max(1, Math.ceil(arr.length / pageSize));
+    const clampedPage = Math.min(Math.max(1, page), totalPages);
+    const start = (clampedPage - 1) * pageSize;
+    return { items: arr.slice(start, start + pageSize), page: clampedPage, totalPages };
+  }
+
+  // Renders a "Prev  Page N of M  Next" control into containerId, wiring
+  // click handlers that update state.page[tableKey] and invoke onChange
+  // (the calling table's own render function) to redraw with the new
+  // page. Renders nothing when there's only one page, so small result
+  // sets (e.g. a handful of distinct CPU models) don't show a pager that
+  // can never do anything.
+  function renderPager(containerId, tableKey, page, totalPages, onChange) {
+    const container = byId(containerId);
+    if (!container) return;
+    if (totalPages <= 1) {
+      container.innerHTML = '';
+      return;
+    }
+    container.innerHTML = `
+      <button class="export-button pager-button" type="button" data-pager-prev${page <= 1 ? ' disabled' : ''}>Prev</button>
+      <span class="pager-status">Page ${page} of ${totalPages}</span>
+      <button class="export-button pager-button" type="button" data-pager-next${page >= totalPages ? ' disabled' : ''}>Next</button>
+    `;
+    const prevBtn = container.querySelector('[data-pager-prev]');
+    const nextBtn = container.querySelector('[data-pager-next]');
+    if (prevBtn) prevBtn.addEventListener('click', () => { state.page[tableKey] = page - 1; onChange(); });
+    if (nextBtn) nextBtn.addEventListener('click', () => { state.page[tableKey] = page + 1; onChange(); });
+  }
+
+  // Measures how many rows of the table rooted at tbodyId fit between its
+  // current top position and the bottom of the viewport, reserving room
+  // for its pager control. Returns null when the table isn't actually
+  // visible yet (its first row has zero height - e.g. right after a tab
+  // switch, before layout has settled) so callers can skip updating
+  // rather than compute a bogus size from a zero-height row.
+  function computeLiveRowsPerPage(tbodyId) {
+    const tbody = byId(tbodyId);
+    if (!tbody) return null;
+    const firstRow = tbody.querySelector('tr:not(.details-row)');
+    if (!firstRow) return null;
+    const rowHeight = firstRow.offsetHeight;
+    if (!rowHeight) return null;
+    const available = window.innerHeight - tbody.getBoundingClientRect().top - PAGER_RESERVE_PX;
+    return Math.max(MIN_PAGE_SIZE, Math.floor(available / rowHeight));
   }
 
   function clientSortValue(client, key) {
@@ -1568,7 +1636,10 @@
   function renderTable(clients) {
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.clients;
-    const rows = applySort(clients.filter(client => clientMatches(client, query)), c => clientSortValue(c, sortKey), sortDir).map(client => {
+    const filtered = applySort(clients.filter(client => clientMatches(client, query)), c => clientSortValue(c, sortKey), sortDir);
+    const { items: pageItems, page, totalPages } = paginate(filtered, state.page.clients, state.pageSize.clients);
+    state.page.clients = page;
+    const rows = pageItems.map(client => {
       const staleClass = isStale(client) ? ' stale' : '';
       const os = client.os || {};
       const office = client.office || {};
@@ -1634,6 +1705,7 @@
     });
 
     byId('inventoryBody').innerHTML = rows.join('') || '<tr><td colspan="10" class="empty">No matching inventory records.</td></tr>';
+    renderPager('clientsPager', 'clients', page, totalPages, () => renderTable(state.clients));
   }
 
   function renderSoftwareTable(clients) {
@@ -1790,6 +1862,22 @@
     byId('searchInput').classList.toggle('hidden', !isInventoryView);
     byId('generatedAt').classList.toggle('hidden', !isInventoryView);
     bindDetails();
+    recalculateActivePagination();
+  }
+
+  // Re-measures and, if it changed, applies a corrected live page size for
+  // whichever table is now visible. Only Clients/Software are viewport-
+  // adaptive (see this plan's Global Constraints for why Hardware's three
+  // sub-tables use a fixed size instead); this function is a no-op for
+  // every other view.
+  function recalculateActivePagination() {
+    if (state.view === 'clients') {
+      const size = computeLiveRowsPerPage('inventoryBody');
+      if (size && size !== state.pageSize.clients) {
+        state.pageSize.clients = size;
+        renderTable(state.clients);
+      }
+    }
   }
 
   fetch('/api/v1/clients', { cache: 'no-store' })
@@ -1811,7 +1899,20 @@
 
   loadLicenses();
 
-  byId('searchInput').addEventListener('input', render);
+  byId('searchInput').addEventListener('input', () => {
+    state.page.clients = 1;
+    state.page.software = 1;
+    state.page.hwCpu = 1;
+    state.page.hwDisk = 1;
+    state.page.hwRam = 1;
+    render();
+  });
+
+  let paginationResizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(paginationResizeTimer);
+    paginationResizeTimer = setTimeout(recalculateActivePagination, 150);
+  });
   byId('dashboardTab').addEventListener('click', () => {
     setView('dashboard');
   });
@@ -1858,6 +1959,7 @@
       current.key = key;
       current.dir = 1;
     }
+    if (state.page[table] !== undefined) state.page[table] = 1;
     render();
   });
   byId('packageTab').addEventListener('click', () => setView('package'));
