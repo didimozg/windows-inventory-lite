@@ -142,10 +142,18 @@ namespace WindowsInventoryLite
                 }
                 if (result.Status == "error")
                 {
-                    System.Diagnostics.EventLog.WriteEntry(
-                        "WindowsInventoryLite",
-                        message,
-                        System.Diagnostics.EventLogEntryType.Warning);
+                    // Isolated in its own try/catch so a failure to write to
+                    // the Event Log (e.g. the "WindowsInventoryLite" source
+                    // not registered) cannot suppress the debug-log write
+                    // below - the two sinks must be independent.
+                    try
+                    {
+                        System.Diagnostics.EventLog.WriteEntry(
+                            "WindowsInventoryLite",
+                            message,
+                            System.Diagnostics.EventLogEntryType.Warning);
+                    }
+                    catch { }
                 }
                 DebugLogger.Log(options, "AD", message);
             }

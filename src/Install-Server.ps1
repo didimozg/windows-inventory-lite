@@ -263,6 +263,28 @@ function Get-ConfigValue {
     return $null
 }
 
+# Encrypts a secret with Windows DPAPI (LocalMachine scope, not CurrentUser -
+# the server may run as LocalSystem/NetworkService/a service account with no
+# loaded interactive profile, so LocalMachine is the only scope any process
+# on this machine, including the running service, can reliably decrypt with).
+# Stored with a "dpapi:" prefix so WindowsInventoryLiteServer.exe's matching
+# SecretProtector.Unprotect can tell an already-encrypted value apart from a
+# legacy/hand-edited plaintext one (which it uses as-is rather than failing).
+function Protect-AdPassword {
+    param(
+        [string]$PlainText
+    )
+
+    if (-not $PlainText) {
+        return $PlainText
+    }
+
+    Add-Type -AssemblyName System.Security
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($PlainText)
+    $protectedBytes = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
+    return 'dpapi:' + [Convert]::ToBase64String($protectedBytes)
+}
+
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\server-config.json'
 }
@@ -650,7 +672,7 @@ $config.AdDomain                = $AdDomain
 $config.AdUseServiceIdentity    = if ($adUseServiceIdentity) { 'true' } else { 'false' }
 $config.AdUsername              = $AdUsername
 if ($AdPassword) {
-    $config.AdPassword = $AdPassword
+    $config.AdPassword = Protect-AdPassword -PlainText $AdPassword
 }
 Write-ServerConfig -Path $ConfigPath -Config $config
 Set-RestrictedFileAcl -FilePath $ConfigPath

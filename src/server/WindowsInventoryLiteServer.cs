@@ -406,7 +406,9 @@ namespace WindowsInventoryLite
                 }
                 if (String.IsNullOrEmpty(options.AdPassword))
                 {
-                    options.AdPassword = GetConfigString(config, "AdPassword");
+                    // Decrypts a DPAPI-protected value (see SecretProtector.cs);
+                    // a legacy/hand-edited plaintext value is used as-is.
+                    options.AdPassword = SecretProtector.Unprotect(GetConfigString(config, "AdPassword"));
                 }
                 if (!options.DebugLogEnabled)
                 {
@@ -3073,7 +3075,11 @@ namespace WindowsInventoryLite
 
             foreach (KeyValuePair<string, string> pair in updates)
             {
-                config[pair.Key] = pair.Value;
+                // AdPassword is encrypted at rest (DPAPI, see
+                // SecretProtector.cs) - every other key here keeps the
+                // existing plaintext-plus-restricted-ACL precedent already
+                // used for WebPassword/Token.
+                config[pair.Key] = pair.Key == "AdPassword" ? SecretProtector.Protect(pair.Value) : pair.Value;
             }
 
             string json = serializer.Serialize(config);
@@ -3532,6 +3538,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath defaults under DataPath when unset", TestDebugLoggerResolvePathDefault);
             allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath honors an explicit DebugLogPath", TestDebugLoggerResolvePathOverride);
             allPassed &= SelfTestCheck(output, "DebugLogger.SanitizeForLog escapes embedded CR/LF", TestDebugLoggerSanitizeForLog);
+            allPassed &= SelfTestCheck(output, "SecretProtector round-trips a value through Protect/Unprotect", TestSecretProtectorRoundTrip);
+            allPassed &= SelfTestCheck(output, "SecretProtector.Unprotect passes through a legacy plaintext value", TestSecretProtectorLegacyPlaintext);
             return allPassed;
         }
 
@@ -3878,6 +3886,37 @@ namespace WindowsInventoryLite
             if (actual.IndexOf("\\r\\n") < 0)
             {
                 return "expected the escaped '\\r\\n' sequence to be visible, got '" + actual + "'";
+            }
+            return null;
+        }
+
+        private static string TestSecretProtectorRoundTrip()
+        {
+            string original = "Sup3r$ecret AD password with spaces";
+            string protectedValue = SecretProtector.Protect(original);
+            if (protectedValue == original)
+            {
+                return "expected Protect to change the value (encrypt it), it returned the plaintext unchanged";
+            }
+            if (!protectedValue.StartsWith("dpapi:", StringComparison.Ordinal))
+            {
+                return "expected the protected value to carry the 'dpapi:' prefix, got '" + protectedValue + "'";
+            }
+            string roundTripped = SecretProtector.Unprotect(protectedValue);
+            if (roundTripped != original)
+            {
+                return "expected Unprotect(Protect(x)) == x, got '" + roundTripped + "'";
+            }
+            return null;
+        }
+
+        private static string TestSecretProtectorLegacyPlaintext()
+        {
+            string legacy = "a-plaintext-value-with-no-prefix";
+            string actual = SecretProtector.Unprotect(legacy);
+            if (actual != legacy)
+            {
+                return "expected an unprefixed legacy value to pass through unchanged, got '" + actual + "'";
             }
             return null;
         }
