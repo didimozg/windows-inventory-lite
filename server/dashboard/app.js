@@ -1798,35 +1798,6 @@
     byId('hwRamBody').innerHTML = ramRows.join('') || '<tr><td colspan="3" class="empty">No RAM data.</td></tr>';
   }
 
-  function bindDetails() {
-    document.querySelectorAll('[data-client]').forEach(button => {
-      button.addEventListener('click', () => {
-        const row = document.querySelector(`[data-client-details="${button.dataset.client}"]`);
-        if (row) row.classList.toggle('hidden');
-      });
-    });
-
-    document.querySelectorAll('[data-software]').forEach(button => {
-      button.addEventListener('click', () => {
-        const row = document.querySelector(`[data-software-details="${button.dataset.software}"]`);
-        if (row) row.classList.toggle('hidden');
-      });
-    });
-
-    document.querySelectorAll('[data-hw]').forEach(button => {
-      button.addEventListener('click', () => {
-        const row = document.querySelector(`[data-hw-details="${button.dataset.hw}"]`);
-        if (row) row.classList.toggle('hidden');
-      });
-    });
-
-    document.querySelectorAll('[data-delete-client]').forEach(button => {
-      button.addEventListener('click', () => {
-        deleteClient(button.dataset.deleteClient);
-      });
-    });
-  }
-
   function render() {
     renderDashboardTiles();
     renderSummary(state.clients);
@@ -1861,7 +1832,6 @@
     byId('summarySection').classList.toggle('hidden', !isInventoryView);
     byId('searchInput').classList.toggle('hidden', !isInventoryView);
     byId('generatedAt').classList.toggle('hidden', !isInventoryView);
-    bindDetails();
     recalculateActivePagination();
   }
 
@@ -1946,21 +1916,56 @@
   byId('exportCpuBtn').addEventListener('click', exportHardwareCpu);
   byId('exportDiskBtn').addEventListener('click', exportHardwareDisk);
   byId('exportRamBtn').addEventListener('click', exportHardwareRam);
+  // Delegated on document so it keeps working after any of these buttons'
+  // rows get replaced outside the full render() pipeline - e.g. a
+  // standalone renderTable(state.clients) triggered by the Clients pager's
+  // Prev/Next or by recalculateActivePagination's live-resize re-render.
+  // Binding listeners on the buttons themselves (as bindDetails() used to)
+  // requires re-binding after every innerHTML replacement; delegation needs
+  // binding exactly once, here, regardless of how the table DOM changes.
   document.addEventListener('click', e => {
     const th = e.target.closest('th[data-sort-key]');
-    if (!th) return;
-    const table = th.dataset.sortTable;
-    const key = th.dataset.sortKey;
-    const current = state.sort[table];
-    if (!current) return;
-    if (current.key === key) {
-      current.dir = -current.dir;
-    } else {
-      current.key = key;
-      current.dir = 1;
+    if (th) {
+      const table = th.dataset.sortTable;
+      const key = th.dataset.sortKey;
+      const current = state.sort[table];
+      if (!current) return;
+      if (current.key === key) {
+        current.dir = -current.dir;
+      } else {
+        current.key = key;
+        current.dir = 1;
+      }
+      if (state.page[table] !== undefined) state.page[table] = 1;
+      render();
+      return;
     }
-    if (state.page[table] !== undefined) state.page[table] = 1;
-    render();
+
+    const clientBtn = e.target.closest('[data-client]');
+    if (clientBtn) {
+      const row = document.querySelector(`[data-client-details="${clientBtn.dataset.client}"]`);
+      if (row) row.classList.toggle('hidden');
+      return;
+    }
+
+    const softwareBtn = e.target.closest('[data-software]');
+    if (softwareBtn) {
+      const row = document.querySelector(`[data-software-details="${softwareBtn.dataset.software}"]`);
+      if (row) row.classList.toggle('hidden');
+      return;
+    }
+
+    const hwBtn = e.target.closest('[data-hw]');
+    if (hwBtn) {
+      const row = document.querySelector(`[data-hw-details="${hwBtn.dataset.hw}"]`);
+      if (row) row.classList.toggle('hidden');
+      return;
+    }
+
+    const deleteBtn = e.target.closest('[data-delete-client]');
+    if (deleteBtn) {
+      deleteClient(deleteBtn.dataset.deleteClient);
+    }
   });
   byId('packageTab').addEventListener('click', () => setView('package'));
   byId('pkgSaveButton').addEventListener('click', savePackageConfig);
