@@ -1711,7 +1711,10 @@
   function renderSoftwareTable(clients) {
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.software;
-    const rows = applySort(getSoftwareGroups(clients).filter(group => softwareMatches(group, query)), g => softwareSortValue(g, sortKey), sortDir).map(group => {
+    const filtered = applySort(getSoftwareGroups(clients).filter(group => softwareMatches(group, query)), g => softwareSortValue(g, sortKey), sortDir);
+    const { items: pageItems, page, totalPages } = paginate(filtered, state.page.software, state.pageSize.software);
+    state.page.software = page;
+    const rows = pageItems.map(group => {
       const computers = group.clients
         .map(client => `<li>${escapeHtml(client.computerName)}<small>${escapeHtml(client.domain)}</small></li>`)
         .join('');
@@ -1736,6 +1739,7 @@
     });
 
     byId('softwareBody').innerHTML = rows.join('') || '<tr><td colspan="5" class="empty">No matching software records.</td></tr>';
+    renderPager('softwarePager', 'software', page, totalPages, () => renderSoftwareTable(state.clients));
 
     document.querySelectorAll('[data-software-license-name]').forEach(button => {
       button.addEventListener('click', () => {
@@ -1846,6 +1850,12 @@
       if (size && size !== state.pageSize.clients) {
         state.pageSize.clients = size;
         renderTable(state.clients);
+      }
+    } else if (state.view === 'software') {
+      const size = computeLiveRowsPerPage('softwareBody');
+      if (size && size !== state.pageSize.software) {
+        state.pageSize.software = size;
+        renderSoftwareTable(state.clients);
       }
     }
   }
