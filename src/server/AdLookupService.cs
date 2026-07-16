@@ -120,11 +120,15 @@ namespace WindowsInventoryLite
             }
 
             // Every real lookup (as opposed to a cache carry-forward - see
-            // InventoryServer.ApplyAdSync) gets exactly one Event Log entry,
-            // success or failure, so an admin can confirm sync is actually
-            // running and see why a specific computer didn't get a
-            // description without inspecting the per-computer JSON report
-            // by hand.
+            // InventoryServer.ApplyAdSync) gets one line in the debug log
+            // (see DebugLogger.cs), success or failure, so an admin can
+            // confirm sync is actually running without inspecting the
+            // per-computer JSON report by hand. The Windows Event Log stays
+            // reserved for failures only, same as before this file's
+            // debug-log support was added - a lookup on every inventory
+            // report/sweep tick is routine, expected traffic, not something
+            // that belongs in the always-on system event log for every
+            // fleet-sized deployment.
             try
             {
                 string identity = options.AdUseServiceIdentity
@@ -136,10 +140,13 @@ namespace WindowsInventoryLite
                 {
                     message += " (" + errorDetail + ")";
                 }
-                System.Diagnostics.EventLog.WriteEntry(
-                    "WindowsInventoryLite",
-                    message,
-                    result.Status == "error" ? System.Diagnostics.EventLogEntryType.Warning : System.Diagnostics.EventLogEntryType.Information);
+                if (result.Status == "error")
+                {
+                    System.Diagnostics.EventLog.WriteEntry(
+                        "WindowsInventoryLite",
+                        message,
+                        System.Diagnostics.EventLogEntryType.Warning);
+                }
                 DebugLogger.Log(options, "AD", message);
             }
             catch { }
