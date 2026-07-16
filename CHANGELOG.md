@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-07-16
+
+### Fixed
+
+- Timer-mode AD sync's background sweep did not run for a full `AdSyncIntervalHours` (24h by default) after being enabled or reconfigured - its due time was set to the interval itself instead of firing almost immediately, making timer mode look completely inert for the first day of use. The sweep now starts right after enabling/reconfiguring; each computer's own AD data still only refreshes on its own schedule.
+
 ## [0.8.0] - 2026-07-16
 
 Live-stand follow-up to 0.7.0's AD Description sync, driven by testing against a real Active Directory environment.

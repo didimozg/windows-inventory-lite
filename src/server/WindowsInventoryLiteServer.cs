@@ -18,7 +18,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.8.0";
+        internal const string ProductVersion = "0.8.1";
 
         private static int Main(string[] args)
         {
@@ -578,8 +578,18 @@ namespace WindowsInventoryLite
                 }
                 if (options.AdSyncEnabled && options.AdSyncMode == "timer")
                 {
+                    // Due time is Zero, not `interval` - the first sweep
+                    // runs almost immediately after enabling/reconfiguring
+                    // timer mode, not after waiting out a full interval
+                    // (which, at the 24h default, made timer mode look
+                    // completely inert for the first day). Individual
+                    // computers still only actually get re-looked-up when
+                    // their own cached data is due, per ComputeAdSyncFields/
+                    // ShouldSyncAd - this only controls how soon the sweep
+                    // itself starts walking the fleet, not how often any
+                    // one computer's AD data refreshes.
                     TimeSpan interval = TimeSpan.FromHours(Math.Max(1, options.AdSyncIntervalHours));
-                    adSyncTimer = new Timer(RunAdSyncSweep, null, interval, interval);
+                    adSyncTimer = new Timer(RunAdSyncSweep, null, TimeSpan.Zero, interval);
                 }
             }
         }
