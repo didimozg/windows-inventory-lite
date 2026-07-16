@@ -877,6 +877,8 @@
         byId('generalAdUsername').value = data.adUsername || '';
         byId('generalAdPassword').value = '';
         updateAdIdentityFields();
+        byId('generalDebugLogEnabled').checked = !!data.debugLogEnabled;
+        byId('generalDebugLogPath').textContent = data.debugLogPath || '-';
         renderConnectionStatus(data);
       })
       .catch(error => {
@@ -958,7 +960,8 @@
         adDomain: byId('generalAdDomain').value.trim(),
         adUseServiceIdentity: byId('generalAdUseServiceIdentity').checked,
         adUsername: byId('generalAdUsername').value.trim(),
-        adPassword: byId('generalAdPassword').value
+        adPassword: byId('generalAdPassword').value,
+        debugLogEnabled: byId('generalDebugLogEnabled').checked
       })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))

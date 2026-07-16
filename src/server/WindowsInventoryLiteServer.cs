@@ -2736,6 +2736,8 @@ namespace WindowsInventoryLite
             // returned by this endpoint, matching how WebPassword is never
             // echoed back either.
             result["adUsername"] = options.AdUseServiceIdentity ? null : options.AdUsername;
+            result["debugLogEnabled"] = options.DebugLogEnabled;
+            result["debugLogPath"] = DebugLogger.ResolvePath(options);
             JavaScriptSerializer serializer = CreateJsonSerializer();
             SendJson(stream, serializer.Serialize(result));
         }
@@ -2964,6 +2966,15 @@ namespace WindowsInventoryLite
                 updates["AdUseServiceIdentity"] = options.AdUseServiceIdentity ? "true" : "false";
                 updates["AdUsername"] = options.AdUsername ?? "";
                 updates["AdPassword"] = options.AdPassword ?? "";
+            }
+
+            if (payload.ContainsKey("debugLogEnabled"))
+            {
+                // The log path is deliberately not settable from here - it
+                // stays CLI/config-only, so this endpoint can't be used to
+                // make the server write an arbitrary file path.
+                options.DebugLogEnabled = Convert.ToBoolean(payload["debugLogEnabled"]);
+                updates["DebugLogEnabled"] = options.DebugLogEnabled ? "true" : "false";
             }
 
             if (updates.Count > 0)

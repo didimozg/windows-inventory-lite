@@ -231,6 +231,16 @@
             </div>
             <p class="cert-hint">Shows each computer's Active Directory description next to its inventory record, read-only. Reading the description attribute is allowed to any authenticated domain user by default AD ACLs, so the service account identity usually needs no special AD delegation.</p>
           </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Diagnostics</h2>
+            <div class="pkg-grid general-grid">
+              <label class="check-label">
+                <input id="generalDebugLogEnabled" type="checkbox">
+                Enable debug log
+              </label>
+            </div>
+            <p class="cert-hint">Writes a plain-text log of AD lookups, inventory-report traffic, and server errors to <code id="generalDebugLogPath" class="mono">-</code>. Off by default; only meant to be left on for the duration of a troubleshooting session.</p>
+          </div>
           <div class="pkg-buttons">
             <button id="generalSaveButton" class="primary-button" type="button">Save</button>
           </div>
