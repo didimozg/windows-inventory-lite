@@ -109,6 +109,13 @@ param(
     [string]$AdPassword,
 
     [Parameter()]
+    [switch]$DebugLogEnabled,
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$DebugLogPath,
+
+    [Parameter()]
     [ValidateRange(1, 3650)]
     [int]$InstallLogRetentionDays,
 
@@ -506,6 +513,19 @@ if ($AdSyncEnabled -and -not $adUseServiceIdentity -and -not $AdPassword -and -n
     throw "-AdUsername was supplied without -AdPassword, and no AD password is already saved - provide -AdPassword."
 }
 
+if (-not $PSBoundParameters.ContainsKey('DebugLogEnabled')) {
+    $savedDebugLogEnabled = Get-ConfigValue -Config $existingConfig -Name 'DebugLogEnabled'
+    if ($savedDebugLogEnabled -eq 'true') {
+        $DebugLogEnabled = $true
+    }
+}
+if (-not $PSBoundParameters.ContainsKey('DebugLogPath')) {
+    $savedDebugLogPath = Get-ConfigValue -Config $existingConfig -Name 'DebugLogPath'
+    if ($savedDebugLogPath) {
+        $DebugLogPath = $savedDebugLogPath
+    }
+}
+
 if ($DisableHttp -and -not $UseHttps) {
     throw "-DisableHttp requires -UseHttps (or an already-configured working HTTPS setup) - disabling HTTP with no HTTPS would make the dashboard unreachable."
 }
@@ -674,6 +694,8 @@ $config.AdUsername              = $AdUsername
 if ($AdPassword) {
     $config.AdPassword = Protect-AdPassword -PlainText $AdPassword
 }
+$config.DebugLogEnabled         = if ($DebugLogEnabled) { 'true' } else { 'false' }
+$config.DebugLogPath            = $DebugLogPath
 Write-ServerConfig -Path $ConfigPath -Config $config
 Set-RestrictedFileAcl -FilePath $ConfigPath
 

@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-07-16
+
+Whole-branch review pass (security + code quality) covering everything added for AD Description Sync, including the live-stand follow-ups. No Critical or Important findings in security or concurrency; documentation and build-script findings fixed below.
+
+### Fixed
+
+- `Build-Server.ps1`/`Build-Client.ps1` did not check `csc.exe`'s exit code, so a failed compile could print "Server/Client executable: ..." and leave a stale binary in place without any visible error - this is what led to an earlier false-positive "server does not compile" review finding, and would have hidden a real one just as easily. Both scripts now throw on a nonzero exit code.
+- `docs/threat-model.md` and `README_RU.md` still said the AD password is stored in plaintext; it has been DPAPI-encrypted since 0.8.0. Corrected both.
+- `Install-Server.ps1` gained `-DebugLogEnabled`/`-DebugLogPath` parameters - the debug log feature existed on the server exe and in `server-config.json` since 0.8.0 but was never exposed as an install-time parameter, unlike every other setting in this project.
+- Added the AD sync and debug-log parameters to the `Install-Server.ps1` table in both READMEs, and added a Diagnostics section describing the debug log to both READMEs (was previously undocumented outside the CHANGELOG).
+- A stale code comment in `AdLookupService.cs` still referenced `InventoryServer.ApplyAdSync`, a method split into `ComputeAdSyncFields`/`ApplyAdSyncFields` earlier in this branch.
+- The AD username is now sanitized (CRLF-escaped) before being written into a log line, matching the computer name right next to it.
+
 ## [0.8.1] - 2026-07-16
 
 ### Fixed

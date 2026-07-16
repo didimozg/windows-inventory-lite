@@ -289,9 +289,19 @@ Two sync modes:
 - **On inventory report** (default): refreshes a computer's cached AD data when it next reports inventory, if the cached value is older than the configured sync interval (default 24 hours).
 - **Periodic timer**: refreshes every known computer on a fixed schedule, independent of whether it has reported recently - useful for computers that still exist in AD but have stopped reporting.
 
-By default the server authenticates to AD using its own Windows Service identity (the same domain account WinRM client actions already require - a `LocalSystem` service can't reach AD any more than it can reach WinRM targets). To use separate, explicit AD credentials instead, uncheck "Use service account identity" and supply a username and password - stored in `server-config.json` in plaintext, the same as `WebPassword`.
+By default the server authenticates to AD using its own Windows Service identity (the same domain account WinRM client actions already require - a `LocalSystem` service can't reach AD any more than it can reach WinRM targets). To use separate, explicit AD credentials instead, uncheck "Use service account identity" and supply a username and password. Unlike `WebPassword`, the AD password is encrypted at rest (Windows DPAPI, machine scope) rather than stored in plaintext.
 
-If a computer's name has no matching AD computer object, the column shows "Not found in AD"; if AD itself was unreachable at sync time, it shows "AD unreachable".
+If a computer's name has no matching AD computer object, the column shows "Not found in AD"; if AD itself was unreachable at sync time, it shows "AD unreachable" and the next report/sweep retries rather than waiting out the full sync interval.
+
+## Diagnostics
+
+Both the server and the client can write an optional debug log - a plain-text file capturing AD lookups, client-server report traffic, and unhandled errors, independent of the Windows Event Log (which needs its event source registered and won't always be reachable, especially right after a fresh install).
+
+Server: toggle "Enable debug log" on Settings > General, or `--debug-log-enabled` / `DebugLogEnabled` in `server-config.json`. Defaults to `<DataPath>\_logs\debug.log`; override with `--debug-log-path`.
+
+Client: `--debug-log-enabled` (service or `--once` runs), defaults to `%ProgramData%\WindowsInventoryLite\_logs\debug-client.log`; override with `--debug-log-path`.
+
+Off by default on both ends. Meant to be switched on for the duration of a troubleshooting session, not left running indefinitely.
 
 ## Dashboard Usage
 
@@ -314,7 +324,7 @@ Settings
 ```
 
 - `Dashboard`: the landing page (no `#hash` in the URL lands here). Tile counts for Clients, Windows activated, Office activated, and Stale. A Software card shows the Licenses count and a bar chart of the 5 most commonly installed titles (counted by computer, regardless of version). A Hardware card shows computers with USB storage detected, plus bar-chart breakdowns of the top CPU models, RAM size (bucketed at 4/8/16 GB, with everything larger folded into "32 GB+"), and storage type (SSD/HDD only — disks with no recognizable type are left out) across the fleet.
-- `Clients`: one row per computer, with OS, Office, activation status, software count, report time, and client agent version. Computers with USB storage devices show a USB badge. Click a computer name to expand the detail row with CPU, RAM, storage summary, and the full software list.
+- `Clients`: one row per computer, with OS, Office, activation status, software count, report time, client agent version, and the AD Description column (see [Active Directory Description Sync](#active-directory-description-sync)) when AD sync is enabled. Computers with USB storage devices show a USB badge. Click a computer name to expand the detail row with CPU, RAM, storage summary, and the full software list.
 - `Software`: one row per software name, version, and publisher, with the count of installations. Click the name to expand the list of computers where the package appears. A License column links to the matching license record when one already exists for that software name — one license commonly covers several installed versions, so the match is by name only, not name and version.
 - `Hardware`: three grouped tables. CPUs groups machines by processor model. Storage groups machines by disk model, type, and size. RAM groups by total memory and module count. Click any row to expand the list of machines with that configuration. USB storage rows are highlighted.
 - `Licenses`: a manually maintained catalog with Name, Version, License, Comment, Computers, Edit, and Delete columns. Name and Version can be picked from software already seen in inventory reports or typed freely. Version, License, and Comment stay blank when not set, instead of showing a placeholder. Click the Name to expand the linked computers; add computers by typing a name and pressing Enter, or let it auto-fill by selecting a Name that matches installed software. Edit and Delete are separate, distinctly colored buttons.
@@ -366,6 +376,14 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 | `-InstallLogRetentionDays` | `30` | Default retention period in days for WinRM client action logs. |
 | `-OpenFirewall` | `off` | Create a Windows Firewall inbound rule for the listener port. |
 | `-NoRun` | `off` | Install and configure the service without starting it. |
+| `-AdSyncEnabled` | `off` | Enable Active Directory Description sync (see [Active Directory Description Sync](#active-directory-description-sync)). |
+| `-AdSyncMode` | `on-report` | `on-report` or `timer`. |
+| `-AdSyncIntervalHours` | `24` | How often a computer's AD data is refreshed (1–8760). |
+| `-AdDomain` | `—` | AD domain to query. Defaults to the server's own domain when omitted. |
+| `-AdUsername` | `—` | Explicit AD account to authenticate with, instead of the service identity. |
+| `-AdPassword` | `—` | Password for `-AdUsername`. Encrypted at rest (Windows DPAPI) before being written to `server-config.json`. |
+| `-DebugLogEnabled` | `off` | Write the optional debug log (see [Diagnostics](#diagnostics)). |
+| `-DebugLogPath` | `—` | Debug log file path. Default: `DataPath\_logs\debug.log`. |
 
 ### Install-Client.ps1
 
@@ -503,6 +521,8 @@ The screenshots below use sample hostnames, documentation IP ranges, and placeho
 - Setting the initial Basic Auth username and password from the dashboard requires no prior authentication, since the whole dashboard is already open while Basic Auth is unconfigured. Once a password is set, changing it always requires the current one. Set up Basic Auth (or restrict network access) before exposing the server beyond a trusted network.
 - Disabling HTTP requires HTTPS to be genuinely active at that same moment; the server rejects the change otherwise, so the settings page can never produce a fully unreachable configuration by itself. A certificate that stops working later (expiry, deletion from the store) can still leave the dashboard unreachable after HTTP was disabled — see [Recovering from an HTTPS lockout](#recovering-from-an-https-lockout).
 - Review [docs/threat-model.md](./docs/threat-model.md) before exposing the server outside a management network.
+- The AD password (explicit-credentials mode) is encrypted at rest with Windows DPAPI; `WebPassword`/`Token`/the certificate PFX password remain plaintext in `server-config.json`, protected only by the file's restricted ACL.
+- The debug log (see [Diagnostics](#diagnostics)) can contain client-reported computer names and full exception text (including stack traces) but never passwords or tokens. Treat it like any other operational log - avoid leaving it enabled longer than a troubleshooting session needs.
 
 ## Uninstall
 

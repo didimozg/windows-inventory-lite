@@ -57,6 +57,10 @@ if (-not $compiler) {
     /reference:System.Web.Extensions.dll `
     $clientSource
 
+if ($LASTEXITCODE -ne 0) {
+    throw "csc.exe failed with exit code $LASTEXITCODE - see errors above."
+}
+
 Write-Host "Client executable: $OutputPath"
 Write-Host "Compiler: $compiler"
 Write-Host "Target framework: $TargetFramework"

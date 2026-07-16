@@ -120,7 +120,7 @@ namespace WindowsInventoryLite
             }
 
             // Every real lookup (as opposed to a cache carry-forward - see
-            // InventoryServer.ApplyAdSync) gets one line in the debug log
+            // InventoryServer.ComputeAdSyncFields) gets one line in the debug log
             // (see DebugLogger.cs), success or failure, so an admin can
             // confirm sync is actually running without inspecting the
             // per-computer JSON report by hand. The Windows Event Log stays
@@ -133,7 +133,7 @@ namespace WindowsInventoryLite
             {
                 string identity = options.AdUseServiceIdentity
                     ? "service identity"
-                    : "explicit account '" + options.AdUsername + "'";
+                    : "explicit account '" + DebugLogger.SanitizeForLog(options.AdUsername) + "'";
                 string message = "AD lookup for '" + DebugLogger.SanitizeForLog(computerName) + "' in domain '" + (domain ?? "(unresolved)")
                     + "' using " + identity + ": " + result.Status;
                 if (errorDetail != null)
