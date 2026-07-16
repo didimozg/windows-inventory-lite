@@ -332,6 +332,38 @@ function Protect-Secret {
     return 'dpapi:' + [Convert]::ToBase64String($protectedBytes)
 }
 
+# Decrypts a value produced by Protect-Secret. Mirrors
+# SecretProtector.Unprotect (src/server/SecretProtector.cs) so a value
+# reloaded from server-config.json - which may now be "dpapi:"-encrypted
+# thanks to Protect-Secret - comes back out as plaintext for every
+# downstream consumer in this script (the config rewrite re-encrypts it via
+# Protect-Secret regardless, but other consumers, e.g. GPO client package
+# generation, need the real plaintext). Passes through unchanged when the
+# value is empty or not "dpapi:"-prefixed (legacy/hand-edited plaintext),
+# and returns $null on a decrypt failure, matching SecretProtector.Unprotect.
+function Unprotect-Secret {
+    param(
+        [string]$StoredValue
+    )
+
+    if (-not $StoredValue) {
+        return $StoredValue
+    }
+    if (-not $StoredValue.StartsWith('dpapi:')) {
+        return $StoredValue
+    }
+
+    try {
+        Add-Type -AssemblyName System.Security
+        $protectedBytes = [Convert]::FromBase64String($StoredValue.Substring('dpapi:'.Length))
+        $bytes = [System.Security.Cryptography.ProtectedData]::Unprotect($protectedBytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
+        return [System.Text.Encoding]::UTF8.GetString($bytes)
+    }
+    catch {
+        return $null
+    }
+}
+
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\server-config.json'
 }
@@ -396,7 +428,7 @@ if (-not $PSBoundParameters.ContainsKey('ListenPrefix')) {
 if (-not $PSBoundParameters.ContainsKey('Token')) {
     $savedToken = Get-ConfigValue -Config $existingConfig -Name 'Token'
     if ($savedToken) {
-        $Token = $savedToken
+        $Token = Unprotect-Secret -StoredValue $savedToken
     }
 }
 
@@ -410,7 +442,7 @@ if (-not $PSBoundParameters.ContainsKey('WebUsername')) {
 if (-not $PSBoundParameters.ContainsKey('WebPassword')) {
     $savedWebPassword = Get-ConfigValue -Config $existingConfig -Name 'WebPassword'
     if ($savedWebPassword) {
-        $WebPassword = $savedWebPassword
+        $WebPassword = Unprotect-Secret -StoredValue $savedWebPassword
     }
 }
 
