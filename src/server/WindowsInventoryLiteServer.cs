@@ -114,6 +114,12 @@ namespace WindowsInventoryLite
         public bool AdUseServiceIdentity;
         public string AdUsername;
         public string AdPassword;
+        // Off by default - a plain-text file capturing AD lookups,
+        // inventory-report traffic, and unhandled server errors. See
+        // DebugLogger.cs. Only meant for troubleshooting a specific
+        // deployment; not rotated or size-capped.
+        public bool DebugLogEnabled;
+        public string DebugLogPath;
 
         public static ServerOptions Parse(string[] args)
         {
@@ -269,6 +275,14 @@ namespace WindowsInventoryLite
                 {
                     options.AdPassword = args[++i];
                 }
+                else if (key == "--debug-log-enabled")
+                {
+                    options.DebugLogEnabled = true;
+                }
+                else if (key == "--debug-log-path" && i + 1 < args.Length)
+                {
+                    options.DebugLogPath = args[++i];
+                }
             }
 
             LoadConfigFile(options);
@@ -393,6 +407,15 @@ namespace WindowsInventoryLite
                 if (String.IsNullOrEmpty(options.AdPassword))
                 {
                     options.AdPassword = GetConfigString(config, "AdPassword");
+                }
+                if (!options.DebugLogEnabled)
+                {
+                    string debugLogEnabledText = GetConfigString(config, "DebugLogEnabled");
+                    options.DebugLogEnabled = String.Equals(debugLogEnabledText, "true", StringComparison.OrdinalIgnoreCase);
+                }
+                if (String.IsNullOrEmpty(options.DebugLogPath))
+                {
+                    options.DebugLogPath = GetConfigString(config, "DebugLogPath");
                 }
             }
             catch
@@ -945,6 +968,7 @@ namespace WindowsInventoryLite
                             System.Diagnostics.EventLogEntryType.Error);
                     }
                     catch { }
+                    DebugLogger.Log(options, "Error", ex.ToString());
                     try
                     {
                         SendText(stream, "Internal server error.", "text/plain; charset=utf-8", 500);
@@ -979,6 +1003,7 @@ namespace WindowsInventoryLite
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
             if (!String.IsNullOrEmpty(options.Token) && token != options.Token)
             {
+                DebugLogger.Log(options, "Client", "Rejected inventory report: invalid or missing token");
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
                 return;
             }
@@ -991,6 +1016,7 @@ namespace WindowsInventoryLite
             }
             catch
             {
+                DebugLogger.Log(options, "Client", "Rejected inventory report: invalid request body");
                 SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
                 return;
             }
@@ -1017,6 +1043,7 @@ namespace WindowsInventoryLite
                 string json = serializer.Serialize(inventory);
                 File.WriteAllText(path, json, new UTF8Encoding(false));
             }
+            DebugLogger.Log(options, "Client", "Inventory report accepted from '" + computerName + "'");
             SendJson(stream, "{\"status\":\"ok\"}");
         }
 
@@ -3425,6 +3452,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ShouldSyncAd returns true with no previous timestamp", TestShouldSyncAdNoPreviousTimestamp);
             allPassed &= SelfTestCheck(output, "ShouldSyncAd returns true for a stale timestamp", TestShouldSyncAdStaleTimestamp);
             allPassed &= SelfTestCheck(output, "ShouldSyncAd returns false for a fresh timestamp", TestShouldSyncAdFreshTimestamp);
+            allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath defaults under DataPath when unset", TestDebugLoggerResolvePathDefault);
+            allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath honors an explicit DebugLogPath", TestDebugLoggerResolvePathOverride);
             return allPassed;
         }
 
@@ -3731,6 +3760,32 @@ namespace WindowsInventoryLite
             if (InventoryServer.ShouldSyncAd(fresh, 24))
             {
                 return "expected false when the previous sync is within the interval";
+            }
+            return null;
+        }
+
+        private static string TestDebugLoggerResolvePathDefault()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = @"C:\test-data";
+            string expected = Path.Combine(@"C:\test-data", "_logs", "debug.log");
+            string actual = DebugLogger.ResolvePath(options);
+            if (actual != expected)
+            {
+                return "expected '" + expected + "' but got '" + actual + "'";
+            }
+            return null;
+        }
+
+        private static string TestDebugLoggerResolvePathOverride()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = @"C:\test-data";
+            options.DebugLogPath = @"D:\custom\debug.log";
+            string actual = DebugLogger.ResolvePath(options);
+            if (actual != @"D:\custom\debug.log")
+            {
+                return "expected the explicit DebugLogPath to be used, got '" + actual + "'";
             }
             return null;
         }

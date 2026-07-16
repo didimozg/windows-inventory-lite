@@ -140,6 +140,7 @@ namespace WindowsInventoryLite
                     "WindowsInventoryLite",
                     message,
                     result.Status == "error" ? System.Diagnostics.EventLogEntryType.Warning : System.Diagnostics.EventLogEntryType.Information);
+                DebugLogger.Log(options, "AD", message);
             }
             catch { }
 
