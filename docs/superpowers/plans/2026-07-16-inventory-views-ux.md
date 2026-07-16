@@ -17,6 +17,7 @@
 - CSV export (`exportClients`/`exportSoftware`/`exportHardwareCpu`/`exportHardwareDisk`/`exportHardwareRam`) already builds its rows from the full filtered dataset independently of what's rendered in the DOM — it is not touched by this plan and must keep exporting the complete filtered set regardless of pagination.
 - **Correction found during plan research:** the design spec describes "the Hardware table" as if it were one table like Clients/Software. Reading `index.html`/`app.js` shows Hardware is actually three independent, much smaller aggregate tables (CPU models, Storage/Disk models, RAM configurations — each grouped by distinct hardware spec with a "Machines" count, not one row per client) that render simultaneously in the same view, stacked vertically. Splitting one shared "available viewport height" three ways between differently-sized stacked tables adds real layout-measurement complexity for tables that are rarely large (bounded by distinct hardware models seen across the fleet, not by client count). This plan applies full live viewport-adaptive pagination to Clients and Software only (the two single-dominant-table-per-tab views the spec's "fill the window" behavior is actually about), and a fixed, generous page size (20 rows) to the three Hardware sub-tables — still paginated (so an unusually hardware-diverse fleet doesn't produce an endless list), just not resize-adaptive. This preserves the spec's intent (bound every inventory table's length) without disproportionate complexity for tables that rarely need it.
 - MINOR version bump required (new feature, per this workspace's versioning rule): confirm the actual current version via `grep` before assuming a value, bump both `WindowsInventoryLiteServer.cs` and `WindowsInventoryLiteClient.cs`'s `Program.ProductVersion` identically even though client code itself is untouched (matches the precedent set by the prior Dashboard Credential Encryption plan, which bumped both for a server+installer-only change).
+- **Correction found during Task 1's live verification:** every `WindowsInventoryLiteServer.exe --console ...` command in this plan's live-verification steps must include `--content <repo>\server\dashboard` (the repo's actual dashboard source directory). Without it, the server falls back to its default `ContentPath` (`%ProgramData%\WindowsInventoryLite\server-content`), which on a machine with any prior local install/testing can hold a stale, previously-deployed copy of `index.html`/`app.js` — silently serving old content and making live verification validate nothing. Task 1 discovered this the hard way (a stale copy from 2026-07-13 predating this plan). Every task in this plan that starts a server for Playwright verification must pass `--content` pointed at `server/dashboard` in the repo, not rely on the default.
 
 ---
 
@@ -76,7 +77,7 @@ mkdir -p /tmp/wil-col-swap-test/data
 cat > /tmp/wil-col-swap-test/data/TEST-PC01.json << 'EOF'
 {"computerName":"TEST-PC01","domain":"example.local","clientVersion":"1.0.0","os":{"caption":"Windows 11 Pro","version":"10.0","buildNumber":"22631"},"office":{"name":"Microsoft 365","version":"16.0"},"activation":{"windows":{"activated":true},"office":{"activated":true}},"software":[],"collectedAt":"2026-07-16T10:00:00Z","adDescription":"Accounting - 3rd floor"}
 EOF
-tail -f /dev/null | ./build/WindowsInventoryLiteServer.exe --console --prefix http://localhost:18300/ --data /tmp/wil-col-swap-test/data &
+tail -f /dev/null | ./build/WindowsInventoryLiteServer.exe --console --prefix http://localhost:18300/ --data /tmp/wil-col-swap-test/data --content ./server/dashboard &
 sleep 2
 ```
 
@@ -443,7 +444,7 @@ for i in range(1, 61):
     with open(os.path.join(outdir, name + ".json"), "w", encoding="utf-8") as f:
         json.dump(doc, f)
 PYEOF
-tail -f /dev/null | ./build/WindowsInventoryLiteServer.exe --console --prefix http://localhost:18301/ --data /tmp/wil-pagination-test/data &
+tail -f /dev/null | ./build/WindowsInventoryLiteServer.exe --console --prefix http://localhost:18301/ --data /tmp/wil-pagination-test/data --content ./server/dashboard &
 sleep 2
 ```
 
