@@ -18,7 +18,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.8.2";
+        internal const string ProductVersion = "0.9.0";
 
         private static int Main(string[] args)
         {
@@ -2162,17 +2162,29 @@ namespace WindowsInventoryLite
                 string deployPath = Path.Combine(options.ClientPackagePath, "Deploy-ClientGpo.ps1");
                 string cmdPath = Path.Combine(options.ClientPackagePath, "Install-ClientGpo.cmd");
 
+                string net35Version = File.Exists(net35Path) ? GetExeVersion(net35Path) : null;
+                string net40Version = File.Exists(net40Path) ? GetExeVersion(net40Path) : null;
                 result["net35Present"] = File.Exists(net35Path);
-                result["net35Version"] = File.Exists(net35Path) ? GetExeVersion(net35Path) : null;
+                result["net35Version"] = net35Version;
                 result["net40Present"] = File.Exists(net40Path);
-                result["net40Version"] = File.Exists(net40Path) ? GetExeVersion(net40Path) : null;
+                result["net40Version"] = net40Version;
                 result["deployScriptPresent"] = File.Exists(deployPath);
                 result["cmdPresent"] = File.Exists(cmdPath);
+                // Lets the dashboard flag a client package that predates the
+                // server's own build - the exact "Install client reports
+                // 0.1.0 while the server is on 0.8.x" gap that once made
+                // every code fix look like it hadn't taken effect, because
+                // the deployed package was never rebuilt after the source
+                // changed.
+                result["serverVersion"] = Program.ProductVersion;
+                result["net35VersionMismatch"] = net35Version != null && net35Version != Program.ProductVersion;
+                result["net40VersionMismatch"] = net40Version != null && net40Version != Program.ProductVersion;
 
                 Dictionary<string, string> cmdSettings = ParseCmdSettings(cmdPath);
                 result["cmdServerUrl"] = cmdSettings.ContainsKey("serverUrl") ? (object)cmdSettings["serverUrl"] : null;
                 result["cmdIntervalHours"] = cmdSettings.ContainsKey("intervalHours") ? (object)cmdSettings["intervalHours"] : (object)"6";
                 result["cmdToken"] = cmdSettings.ContainsKey("token") ? (object)cmdSettings["token"] : null;
+                result["cmdPackageSharePath"] = cmdSettings.ContainsKey("packageSharePath") ? (object)cmdSettings["packageSharePath"] : null;
             }
             else
             {
@@ -2185,6 +2197,10 @@ namespace WindowsInventoryLite
                 result["cmdServerUrl"] = null;
                 result["cmdIntervalHours"] = "6";
                 result["cmdToken"] = null;
+                result["cmdPackageSharePath"] = null;
+                result["serverVersion"] = Program.ProductVersion;
+                result["net35VersionMismatch"] = false;
+                result["net40VersionMismatch"] = false;
             }
 
             SendJson(stream, serializer.Serialize(result));
@@ -2202,6 +2218,13 @@ namespace WindowsInventoryLite
             Dictionary<string, object> payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
             string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
             string token = Convert.ToString(payload.ContainsKey("token") ? payload["token"] : "");
+            // Only when the GPO startup script and the package files (client
+            // exes, Deploy-ClientGpo.ps1) are deployed to different
+            // locations - e.g. the script runs from SYSVOL but the files
+            // live on a separate share. Blank means "use the folder the
+            // .cmd itself runs from" (%~dp0), which is correct whenever
+            // both are copied to the same place.
+            string packageSharePath = Convert.ToString(payload.ContainsKey("packageSharePath") ? payload["packageSharePath"] : "");
             int intervalHours = 6;
             if (payload.ContainsKey("intervalHours"))
             {
@@ -2219,7 +2242,7 @@ namespace WindowsInventoryLite
             }
 
             string cmdPath = Path.Combine(options.ClientPackagePath, "Install-ClientGpo.cmd");
-            string[] cmdLines = GenerateCmdLines(serverUrl, token, intervalHours);
+            string[] cmdLines = GenerateCmdLines(serverUrl, token, intervalHours, packageSharePath);
             File.WriteAllLines(cmdPath, cmdLines, Encoding.ASCII);
 
             string deployInBin = Path.Combine(Path.GetDirectoryName(options.WinRmInstallerPath), "Deploy-ClientGpo.ps1");
@@ -2237,6 +2260,21 @@ namespace WindowsInventoryLite
             if (!Directory.Exists(options.ClientPackagePath))
             {
                 SendText(stream, "Client package directory not found.", "text/plain; charset=utf-8", 404);
+                return;
+            }
+
+            string cmdPath = Path.Combine(options.ClientPackagePath, "Install-ClientGpo.cmd");
+            if (!File.Exists(cmdPath))
+            {
+                SendText(stream, "{\"error\":\"Configure the server URL on this page and save before downloading - Install-ClientGpo.cmd has not been generated yet.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string net35Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net35.exe");
+            string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
+            if (!File.Exists(net35Path) && !File.Exists(net40Path))
+            {
+                SendText(stream, "{\"error\":\"No client executable found in the package - rebuild the server (which also builds both client targets) or run New-ClientGpoPackage.ps1.\"}", "application/json; charset=utf-8", 400);
                 return;
             }
 
@@ -3404,19 +3442,35 @@ namespace WindowsInventoryLite
                             settings["token"] = t.Substring(start, end - start).Replace("%%", "%");
                     }
                 }
+                else if (t.StartsWith("set PACKAGE_ROOT=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string value = t.Substring(17).Replace("%%", "%");
+                    // "%~dp0" (the script's own folder) is the default -
+                    // only surface it as a configured value when it's
+                    // something else, so the dashboard field shows blank
+                    // (the "using the default" state) rather than the
+                    // literal batch-file token.
+                    if (!String.Equals(value, "%~dp0", StringComparison.OrdinalIgnoreCase))
+                    {
+                        settings["packageSharePath"] = value;
+                    }
+                }
             }
 
             return settings;
         }
 
-        private static string[] GenerateCmdLines(string serverUrl, string token, int intervalHours)
+        private static string[] GenerateCmdLines(string serverUrl, string token, int intervalHours, string packageSharePath)
         {
             string escapedUrl = serverUrl.Replace("%", "%%");
+            string packageRoot = String.IsNullOrEmpty(packageSharePath)
+                ? "%~dp0"
+                : packageSharePath.Replace("%", "%%").TrimEnd('\\');
             List<string> lines = new List<string>();
             lines.Add("@echo off");
             lines.Add("setlocal");
             lines.Add("");
-            lines.Add("set PACKAGE_ROOT=%~dp0");
+            lines.Add("set PACKAGE_ROOT=" + packageRoot);
             lines.Add("set SERVER_URL=" + escapedUrl);
             lines.Add("set INTERVAL_HOURS=" + intervalHours);
             lines.Add("set DEPLOY_SCRIPT=%PACKAGE_ROOT%\\Deploy-ClientGpo.ps1");
@@ -3570,6 +3624,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "DebugLogger.SanitizeForLog escapes embedded CR/LF", TestDebugLoggerSanitizeForLog);
             allPassed &= SelfTestCheck(output, "SecretProtector round-trips a value through Protect/Unprotect", TestSecretProtectorRoundTrip);
             allPassed &= SelfTestCheck(output, "SecretProtector.Unprotect passes through a legacy plaintext value", TestSecretProtectorLegacyPlaintext);
+            allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' default package root", TestParseCmdSettingsDefaultPackageRoot);
+            allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' custom package share path", TestParseCmdSettingsCustomPackageSharePath);
             return allPassed;
         }
 
@@ -3959,6 +4015,46 @@ namespace WindowsInventoryLite
                 return "expected an unprefixed legacy value to pass through unchanged, got '" + actual + "'";
             }
             return null;
+        }
+
+        private static string TestParseCmdSettingsDefaultPackageRoot()
+        {
+            string path = Path.GetTempFileName();
+            try
+            {
+                File.WriteAllLines(path, GenerateCmdLines("https://server/api/v1/inventory", null, 6, null), Encoding.ASCII);
+                Dictionary<string, string> settings = ParseCmdSettings(path);
+                if (settings.ContainsKey("packageSharePath"))
+                {
+                    return "expected no packageSharePath key for the default %~dp0 root, got '" + settings["packageSharePath"] + "'";
+                }
+                return null;
+            }
+            finally
+            {
+                File.Delete(path);
+            }
+        }
+
+        private static string TestParseCmdSettingsCustomPackageSharePath()
+        {
+            string path = Path.GetTempFileName();
+            try
+            {
+                string share = @"\\192.168.24.4\backup\gpo-client";
+                File.WriteAllLines(path, GenerateCmdLines("https://server/api/v1/inventory", null, 6, share), Encoding.ASCII);
+                Dictionary<string, string> settings = ParseCmdSettings(path);
+                if (!settings.ContainsKey("packageSharePath") || settings["packageSharePath"] != share)
+                {
+                    string actual = settings.ContainsKey("packageSharePath") ? settings["packageSharePath"] : "(missing)";
+                    return "expected packageSharePath '" + share + "', got '" + actual + "'";
+                }
+                return null;
+            }
+            finally
+            {
+                File.Delete(path);
+            }
         }
 
         private static bool ContainsSignature(byte[] data, byte thirdByte, byte fourthByte)

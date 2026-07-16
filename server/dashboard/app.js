@@ -609,6 +609,7 @@
         if (data.cmdServerUrl) byId('pkgServerUrl').value = data.cmdServerUrl;
         if (data.cmdIntervalHours) byId('pkgIntervalHours').value = data.cmdIntervalHours;
         if (data.cmdToken) byId('pkgToken').value = data.cmdToken;
+        byId('pkgSharePath').value = data.cmdPackageSharePath || '';
       })
       .catch(error => {
         byId('pkgStatus').textContent = `Package status unavailable: ${error.message}`;
@@ -617,11 +618,19 @@
 
   function renderPackageStatus(data) {
     const parts = [];
-    if (data.net35Present) parts.push('Net 3.5: v' + escapeHtml(data.net35Version || 'unknown'));
-    if (data.net40Present) parts.push('Net 4.0: v' + escapeHtml(data.net40Version || 'unknown'));
+    const versionPart = (label, present, version, mismatch) => {
+      if (!present) return null;
+      const text = `${label}: v${escapeHtml(version || 'unknown')}`;
+      return mismatch ? `<span class="pkg-status-warning" title="Server is v${escapeHtml(data.serverVersion)} - rebuild the server or run New-ClientGpoPackage.ps1 to refresh this package">${text} (outdated)</span>` : text;
+    };
+    const net35Part = versionPart('Net 3.5', data.net35Present, data.net35Version, data.net35VersionMismatch);
+    const net40Part = versionPart('Net 4.0', data.net40Present, data.net40Version, data.net40VersionMismatch);
+    if (net35Part) parts.push(net35Part);
+    if (net40Part) parts.push(net40Part);
     if (!data.net35Present && !data.net40Present) parts.push('No client executables in package');
     if (!data.deployScriptPresent) parts.push('Deploy script missing');
     if (data.cmdServerUrl) parts.push('URL: ' + escapeHtml(data.cmdServerUrl));
+    if (data.cmdPackageSharePath) parts.push('Share: ' + escapeHtml(data.cmdPackageSharePath));
     byId('pkgStatus').innerHTML = parts.join(' &nbsp;&middot;&nbsp; ');
   }
 
@@ -629,6 +638,7 @@
     const serverUrl = byId('pkgServerUrl').value.trim();
     const token = byId('pkgToken').value.trim();
     const intervalHours = parseInt(byId('pkgIntervalHours').value, 10) || 6;
+    const packageSharePath = byId('pkgSharePath').value.trim();
     if (!serverUrl) { window.alert('Enter server URL.'); return; }
 
     byId('pkgSaveButton').disabled = true;
@@ -638,7 +648,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ serverUrl, token, intervalHours })
+      body: JSON.stringify({ serverUrl, token, intervalHours, packageSharePath })
     })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1852,7 +1862,22 @@
   });
   byId('packageTab').addEventListener('click', () => setView('package'));
   byId('pkgSaveButton').addEventListener('click', savePackageConfig);
-  byId('pkgDownloadButton').addEventListener('click', () => { window.location.href = '/api/v1/client-package/download'; });
+  byId('pkgDownloadButton').addEventListener('click', () => {
+    const status = state.packageStatus;
+    if (status && (status.net35VersionMismatch || status.net40VersionMismatch)) {
+      const versions = [
+        status.net35VersionMismatch ? `Net 3.5: v${status.net35Version}` : null,
+        status.net40VersionMismatch ? `Net 4.0: v${status.net40Version}` : null
+      ].filter(Boolean).join(', ');
+      const confirmed = window.confirm(
+        `The packaged client (${versions}) does not match the server version (v${status.serverVersion}). ` +
+        `Rebuild the server (it also builds both client targets) or run New-ClientGpoPackage.ps1 to refresh the package. ` +
+        `Download the outdated package anyway?`
+      );
+      if (!confirmed) return;
+    }
+    window.location.href = '/api/v1/client-package/download';
+  });
   byId('generalTab').addEventListener('click', () => setView('general'));
   byId('generalSaveButton').addEventListener('click', () => saveGeneralSettings(false));
   byId('generalAdUseServiceIdentity').addEventListener('change', updateAdIdentityFields);

@@ -1002,6 +1002,11 @@ th.sort-desc::after {
   color: var(--muted);
 }
 
+.pkg-status-warning {
+  color: var(--usb-text);
+  font-weight: 600;
+}
+
 .pkg-grid {
   display: grid;
   grid-template-columns: minmax(240px, 2fr) minmax(160px, 1fr) 110px auto;

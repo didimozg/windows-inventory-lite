@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-16
+
+Client-package deployment usability, driven by a real GPO deployment failure on the live test stand: the client wasn't installing because the GPO startup script's package share path had no dashboard-configurable equivalent, and the deployed client package could silently go stale relative to the server with no warning.
+
+### Added
+
+- `Build-Server.ps1` now also builds both client targets (Net35, Net40) into `build\`, so the executables `New-ClientGpoPackage.ps1` looks for by default are always current after a server build - no separate step to remember.
+- Client package share path is now configurable on the Client Package dashboard page and via `POST /api/v1/client-package/configure` (`packageSharePath`) - needed whenever the GPO startup script and the client files are deployed to different locations (e.g. script in SYSVOL, files on a separate share). Previously only `New-ClientGpoPackage.ps1 -PackageSharePath` could set this, and any later dashboard-driven save silently reset it back to the script's own folder.
+- The Client Package page now compares the packaged client executables' versions against the running server's version and flags a mismatch. `GET /api/v1/client-package` gains `serverVersion`, `net35VersionMismatch`, `net40VersionMismatch`.
+- `POST /api/v1/client-package/download` now refuses (400, with a clear message) to produce a package before the server URL has been configured, or when no client executable is present at all - previously it would silently include whatever partial set of files existed. Downloading a package with a version-mismatched client still works, but the dashboard now asks for confirmation first.
+
+### Fixed
+
+- An off-by-one in the new `ParseCmdSettings` extension (parsing `PACKAGE_ROOT` back out of the generated `.cmd`) miscounted the `"set PACKAGE_ROOT="` prefix length, corrupting the round-tripped default value - caught immediately via a new self-test before it shipped.
+
 ## [0.8.2] - 2026-07-16
 
 Whole-branch review pass (security + code quality) covering everything added for AD Description Sync, including the live-stand follow-ups. No Critical or Important findings in security or concurrency; documentation and build-script findings fixed below.

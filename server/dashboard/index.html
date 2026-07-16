@@ -405,11 +405,16 @@
               Interval (hours)
               <input id="pkgIntervalHours" type="number" min="1" max="24" value="6">
             </label>
+            <label class="pkg-url-field">
+              Package share path
+              <input id="pkgSharePath" type="text" placeholder="leave blank to use the folder the .cmd itself runs from">
+            </label>
             <div class="pkg-buttons">
               <button id="pkgSaveButton" class="primary-button" type="button">Save</button>
               <button id="pkgDownloadButton" class="export-button" type="button">Download GPO package</button>
             </div>
           </div>
+          <p class="cert-hint">By default the GPO startup script (<code>Install-ClientGpo.cmd</code>) looks for the client files in its own folder. Set this only when the script and the client files are deployed to different locations (for example, the script runs from SYSVOL but the client executables live on a separate file share) - an UNC path such as <code>\\server\share\gpo-client</code>.</p>
           <div id="pkgMessage" class="pkg-message hidden"></div>
         </section>
 

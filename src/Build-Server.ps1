@@ -66,3 +66,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Server executable: $OutputPath"
+
+# Keep the client executables in build\ fresh alongside the server on every
+# build - New-ClientGpoPackage.ps1's own defaults look for exactly these two
+# paths and skip rebuilding when they already exist, so this is what makes
+# "just built the server" and "the deployed client package is current"
+# stay in sync without a separate manual step to remember.
+$clientNet35Path = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteClient-net35.exe'
+$clientNet40Path = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteClient-net40.exe'
+& (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Client.ps1') -OutputPath $clientNet35Path -TargetFramework Net35
+& (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Client.ps1') -OutputPath $clientNet40Path -TargetFramework Net40
