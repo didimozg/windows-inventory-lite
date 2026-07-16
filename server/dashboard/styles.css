@@ -523,6 +523,18 @@ main {
   font-weight: 700;
 }
 
+/* Declared after .summary div/span so it wins at the equal class+type
+   specificity both rule pairs share - same reasoning as .tile-alert
+   just below, which relies on the same ordering. */
+.summary-compact div {
+  padding: 7px 10px;
+}
+
+.summary-compact span {
+  font-size: 15px;
+  margin-bottom: 2px;
+}
+
 /* Reuses the existing USB-badge amber rather than adding a new color -
    this is the one tile an admin needs to react to, the other summary
    tiles are neutral facts. Left border, not a full-tile fill, so it

@@ -113,6 +113,13 @@
       </header>
 
       <main>
+        <section id="summarySection" class="summary summary-compact" aria-label="Inventory summary">
+          <div><span id="clientCount">0</span><small>Clients</small></div>
+          <div><span id="windowsActivated">0</span><small>Windows activated</small></div>
+          <div><span id="officeActivated">0</span><small>Office activated</small></div>
+          <div id="staleTile"><span id="staleCount">0</span><small id="staleLabel">Stale &gt;48h</small></div>
+        </section>
+
         <section id="dashboardView" class="install-panel" aria-label="Dashboard">
           <div id="dashboardTiles" class="summary dashboard-tiles">
             <div><span id="dashClientCount">0</span><small>Clients</small></div>
@@ -568,13 +575,6 @@
             </div>
             <div id="hwRamPager" class="pager"></div>
           </div>
-        </section>
-
-        <section id="summarySection" class="summary" aria-label="Inventory summary">
-          <div><span id="clientCount">0</span><small>Clients</small></div>
-          <div><span id="windowsActivated">0</span><small>Windows activated</small></div>
-          <div><span id="officeActivated">0</span><small>Office activated</small></div>
-          <div id="staleTile"><span id="staleCount">0</span><small id="staleLabel">Stale &gt;48h</small></div>
         </section>
       </main>
     </div>
