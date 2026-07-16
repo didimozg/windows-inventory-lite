@@ -1014,6 +1014,21 @@ th.sort-desc::after {
   align-items: end;
 }
 
+/* The Client Package grid has one more field (Server URL, Package share
+   path, Ingestion token, Interval) than the base .pkg-grid template
+   accounts for (used elsewhere, e.g. the Certificate page, with 3 items) -
+   a shared class change here would reintroduce empty tracks on those other
+   pages, so this is a modifier class rather than an ID-scoped override:
+   an ID selector would outrank the plain-class .pkg-grid rule inside the
+   @media (max-width: 900px) collapse block below regardless of source
+   order, un-collapsing this grid on mobile (this exact class of bug - a
+   more specific selector silently winning over a later, lower-specificity
+   one - already happened once on this branch with .hidden). Keep the
+   field count in sync with index.html's #packageView .pkg-grid. */
+.pkg-grid-package {
+  grid-template-columns: minmax(220px, 1.4fr) minmax(200px, 1.2fr) minmax(140px, 1fr) 110px auto;
+}
+
 .pkg-grid label {
   display: grid;
   gap: 6px;
