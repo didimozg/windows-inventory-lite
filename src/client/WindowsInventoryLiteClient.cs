@@ -729,6 +729,22 @@ namespace WindowsInventoryLite
 
         private static void PostJson(string url, string json, string token)
         {
+            if (url.StartsWith("https:", StringComparison.OrdinalIgnoreCase))
+            {
+                // The server requires exactly TLS 1.2 (see
+                // AuthenticateAsServer(..., SslProtocols.Tls12, ...) on the
+                // server side) with no fallback. This client targets .NET
+                // 3.5/4.0, whose SecurityProtocolType enum predates the
+                // named Tls12 member (added in .NET 4.5) and whose default
+                // enabled protocol set on older Windows/.NET installs may
+                // not include TLS 1.2 at all - without this, the handshake
+                // fails with no usable error, while plain HTTP keeps working
+                // (masking the cause). 3072 = SecurityProtocolType.Tls12's
+                // underlying value; the cast keeps this compiling under the
+                // pre-4.5 target used for the Net35 client build.
+                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
+            }
+
             byte[] body = Encoding.UTF8.GetBytes(json);
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
             request.Method = "POST";
