@@ -92,7 +92,7 @@
 - Prefer a host-specific listener prefix or firewall scope for production.
 - Use HTTPS termination or a reverse proxy outside trusted LAN segments.
 - Keep the server `DataPath` writable only by the server service identity and administrators.
-- Restrict read access to `C:\ProgramData\WindowsInventoryLite\server-config.json` to the service account and administrators. The file contains `Token`, `WebUsername`, and `WebPassword` in plaintext.
+- Restrict read access to `C:\ProgramData\WindowsInventoryLite\server-config.json` to the service account and administrators. `WebUsername` remains plaintext in the file (it is not a secret); `Token`, `WebPassword`, and `AdPassword` are encrypted at rest with Windows DPAPI (see Main Risks section above).
 - Review generated JSON before sharing it outside the organization.
 - Protect the dashboard with Basic Auth and network restrictions before enabling WinRM client actions.
 - Prefer DNS computer names and Kerberos for WinRM. Use IP targets with TrustedHosts only on a trusted management network.
