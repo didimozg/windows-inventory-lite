@@ -19,10 +19,19 @@ namespace WindowsInventoryLite
     {
         private const string Prefix = "dpapi:";
 
-        internal static string Protect(string plaintext)
+        internal static string Protect(string plaintext, ServerOptions options)
         {
             if (String.IsNullOrEmpty(plaintext))
             {
+                return plaintext;
+            }
+            if (plaintext.StartsWith(Prefix, StringComparison.Ordinal))
+            {
+                // Already protected - a caller passing back a previously
+                // stored value (rather than a fresh plaintext one) must not
+                // be encrypted a second time, which would make Unprotect's
+                // single decrypt pass return the still-prefixed inner
+                // string instead of the real password.
                 return plaintext;
             }
             try
@@ -35,7 +44,11 @@ namespace WindowsInventoryLite
                 // If DPAPI is unavailable for some reason, fall back to
                 // storing the plaintext rather than losing the value
                 // entirely - matches this project's existing "AD sync
-                // must degrade, never hard-fail" posture.
+                // must degrade, never hard-fail" posture. Logged (when the
+                // opt-in debug log is enabled) because this is a
+                // confidentiality control failing silently, unlike most of
+                // this project's other degrade-gracefully paths.
+                DebugLogger.Log(options, "Error", "AD password could not be encrypted at rest (DPAPI unavailable) - stored in plaintext instead.");
                 return plaintext;
             }
         }

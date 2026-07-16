@@ -626,14 +626,23 @@ namespace WindowsInventoryLite
 
                     lock (reportFileLock)
                     {
-                        Dictionary<string, object> current = snapshot;
+                        Dictionary<string, object> current;
                         try
                         {
                             current = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
                         }
                         catch
                         {
-                            current = snapshot;
+                            // A transient re-read failure right before
+                            // writing means this thread cannot confirm the
+                            // file is still what was snapshotted above -
+                            // skip this file rather than risk overwriting a
+                            // fresher write (e.g. a client report that
+                            // landed for this same computer while the AD
+                            // lookup was in flight) with the stale
+                            // snapshot. The AD fields get reapplied on the
+                            // next sweep tick.
+                            continue;
                         }
                         ApplyAdSyncFields(current, adFields);
                         File.WriteAllText(file, serializer.Serialize(current), new UTF8Encoding(false));
@@ -3079,7 +3088,7 @@ namespace WindowsInventoryLite
                 // SecretProtector.cs) - every other key here keeps the
                 // existing plaintext-plus-restricted-ACL precedent already
                 // used for WebPassword/Token.
-                config[pair.Key] = pair.Key == "AdPassword" ? SecretProtector.Protect(pair.Value) : pair.Value;
+                config[pair.Key] = pair.Key == "AdPassword" ? SecretProtector.Protect(pair.Value, options) : pair.Value;
             }
 
             string json = serializer.Serialize(config);
@@ -3892,8 +3901,9 @@ namespace WindowsInventoryLite
 
         private static string TestSecretProtectorRoundTrip()
         {
+            ServerOptions options = new ServerOptions();
             string original = "Sup3r$ecret AD password with spaces";
-            string protectedValue = SecretProtector.Protect(original);
+            string protectedValue = SecretProtector.Protect(original, options);
             if (protectedValue == original)
             {
                 return "expected Protect to change the value (encrypt it), it returned the plaintext unchanged";
@@ -3906,6 +3916,15 @@ namespace WindowsInventoryLite
             if (roundTripped != original)
             {
                 return "expected Unprotect(Protect(x)) == x, got '" + roundTripped + "'";
+            }
+            // Protecting an already-protected value must be a no-op, not a
+            // second encryption pass - otherwise a caller that accidentally
+            // re-saves a stored value (rather than fresh plaintext) would
+            // corrupt it, since Unprotect only ever decrypts once.
+            string protectedTwice = SecretProtector.Protect(protectedValue, options);
+            if (protectedTwice != protectedValue)
+            {
+                return "expected Protect to be a no-op on an already-'dpapi:'-prefixed value, got a different value";
             }
             return null;
         }
