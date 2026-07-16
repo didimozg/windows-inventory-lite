@@ -111,7 +111,7 @@ Notes:
 
 ## `Install-Server.ps1` change
 
-`Protect-AdPassword` (added earlier this session) is renamed to `Protect-Secret` with no behavioral change — same DPAPI/`LocalMachine` call, same `"dpapi:"` prefix, same Base64 encoding, kept byte-for-byte compatible with `SecretProtector.Unprotect`:
+`Protect-AdPassword` (added earlier this session) is renamed to `Protect-Secret`, with one behavioral addition beyond the rename: a no-op guard for a value that is already `"dpapi:"`-prefixed. This guard did not matter for `AdPassword` (it is deliberately never reloaded from saved config, per its own design note in this file, so `Protect-AdPassword` never previously saw an already-encrypted value as input) — but it is required for `Token`/`WebPassword`, which **do** reload from saved config when not passed on the command line (`Install-Server.ps1:387-405`: `if (-not $PSBoundParameters.ContainsKey('Token')) { ...  $Token = $savedToken }`, same pattern for `WebPassword`). Once those two fields are stored encrypted, a re-run of the installer without `-Token`/`-WebPassword` would load the *already-encrypted* `"dpapi:..."` string into `$Token`/`$WebPassword` and then encrypt it a second time, corrupting the stored value — exactly the class of bug `SecretProtector.Protect`'s own no-op guard (C# side, added earlier this session) already exists to prevent. `Protect-Secret` needs the identical guard on the PowerShell side:
 
 ```powershell
 function Protect-Secret {
@@ -120,6 +120,14 @@ function Protect-Secret {
     )
 
     if (-not $PlainText) {
+        return $PlainText
+    }
+    if ($PlainText.StartsWith('dpapi:')) {
+        # Already encrypted - Token/WebPassword reload their saved (already
+        # "dpapi:"-prefixed) value from server-config.json on a re-run
+        # unless a new one is passed on the command line; re-encrypting
+        # that value here would corrupt it, since Unprotect only ever
+        # decrypts once.
         return $PlainText
     }
 
