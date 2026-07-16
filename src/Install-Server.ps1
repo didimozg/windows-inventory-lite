@@ -40,6 +40,38 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
+    [string]$ClientNet35ExecutablePath,
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$ClientNet40ExecutablePath,
+
+    # When set, Install-Server.ps1 produces a complete, ready-to-deploy GPO
+    # package (both client executables, Deploy-ClientGpo.ps1, and a fully
+    # configured Install-ClientGpo.cmd) in ClientPackagePath by calling
+    # New-ClientGpoPackage.ps1, instead of only refreshing the two exe
+    # files. This is the URL clients will report to - e.g.
+    # "https://server.domain.local/api/v1/inventory" - not this server's
+    # own listen address, which is why it has no derived default: guessing
+    # wrong here would silently ship a broken GPO package.
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$ClientServerUrl,
+
+    [Parameter()]
+    [ValidateRange(1, 24)]
+    [int]$ClientIntervalHours = 6,
+
+    # Only when the GPO startup script and the package files are deployed to
+    # different locations (e.g. the script runs from SYSVOL but the files
+    # live on a separate share) - passed straight through to
+    # New-ClientGpoPackage.ps1. Blank means the script's own folder.
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$PackageSharePath,
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
     [string]$Token,
 
     [Parameter()]
@@ -573,6 +605,22 @@ if (-not (Test-Path -LiteralPath $ServerExecutablePath)) {
     & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Server.ps1') -OutputPath $ServerExecutablePath
 }
 
+if (-not $ClientNet35ExecutablePath) {
+    $projectRoot = Split-Path -Parent $PSScriptRoot
+    $ClientNet35ExecutablePath = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteClient-net35.exe'
+}
+if (-not (Test-Path -LiteralPath $ClientNet35ExecutablePath)) {
+    & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Client.ps1') -OutputPath $ClientNet35ExecutablePath -TargetFramework Net35
+}
+
+if (-not $ClientNet40ExecutablePath) {
+    $projectRoot = Split-Path -Parent $PSScriptRoot
+    $ClientNet40ExecutablePath = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteClient-net40.exe'
+}
+if (-not (Test-Path -LiteralPath $ClientNet40ExecutablePath)) {
+    & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Client.ps1') -OutputPath $ClientNet40ExecutablePath -TargetFramework Net40
+}
+
 foreach ($path in @($InstallPath, $DataPath, $ContentPath, $ClientPackagePath)) {
     if (-not (Test-Path -LiteralPath $path)) {
         New-Item -Path $path -ItemType Directory -Force | Out-Null
@@ -613,12 +661,44 @@ if (Test-Path -LiteralPath $deployScriptSource) {
     Copy-Item -LiteralPath $deployScriptSource -Destination $deployScriptBinPath -Force
 }
 
-if ($ClientPackageSourcePath -and (Test-Path -LiteralPath $ClientPackageSourcePath)) {
-    Copy-Item -Path (Join-Path -Path $ClientPackageSourcePath -ChildPath '*') -Destination $ClientPackagePath -Recurse -Force
-}
-
 $clientNet35PackagePath = Join-Path -Path $ClientPackagePath -ChildPath 'WindowsInventoryLiteClient-net35.exe'
 $clientNet40PackagePath = Join-Path -Path $ClientPackagePath -ChildPath 'WindowsInventoryLiteClient-net40.exe'
+
+if ($ClientServerUrl) {
+    # Produces a complete, ready-to-deploy package (both client exes,
+    # Deploy-ClientGpo.ps1, and a fully configured Install-ClientGpo.cmd) in
+    # one step - reuses New-ClientGpoPackage.ps1 rather than reimplementing
+    # its .cmd-generation logic a third time (the dashboard's
+    # ConfigureClientPackage already has its own C#-side copy for
+    # already-running-service edits).
+    $gpoPackageParams = @{
+        ServerUrl       = $ClientServerUrl
+        IntervalHours   = $ClientIntervalHours
+        OutputPath      = $ClientPackagePath
+        ClientNet35Path = $ClientNet35ExecutablePath
+        ClientNet40Path = $ClientNet40ExecutablePath
+    }
+    if ($Token) {
+        $gpoPackageParams.Token = $Token
+    }
+    if ($PackageSharePath) {
+        $gpoPackageParams.PackageSharePath = $PackageSharePath
+    }
+    & (Join-Path -Path $PSScriptRoot -ChildPath 'New-ClientGpoPackage.ps1') @gpoPackageParams
+}
+else {
+    if ($ClientPackageSourcePath -and (Test-Path -LiteralPath $ClientPackageSourcePath)) {
+        Copy-Item -Path (Join-Path -Path $ClientPackageSourcePath -ChildPath '*') -Destination $ClientPackagePath -Recurse -Force
+    }
+    # Even without a full GPO package request, keep the two executables
+    # themselves current - this is what was missing before: a server
+    # reinstall/upgrade left a stale client-package\*.exe in place with no
+    # warning, since ClientPackageSourcePath (dist\gpo-client) is only
+    # populated by a separate, easy-to-forget packaging step.
+    Copy-Item -LiteralPath $ClientNet35ExecutablePath -Destination $clientNet35PackagePath -Force
+    Copy-Item -LiteralPath $ClientNet40ExecutablePath -Destination $clientNet40PackagePath -Force
+}
+
 $clientNet35Version = $null
 $clientNet40Version = $null
 if (Test-Path -LiteralPath $clientNet35PackagePath) {

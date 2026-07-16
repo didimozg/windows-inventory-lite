@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-16
+
+### Added
+
+- `Install-Server.ps1` now keeps the client package's executables current on every run, not just at first install - it builds them (via `Build-Client.ps1`, matching how `-ServerExecutablePath` already worked) if missing and always copies the current build into `ClientPackagePath`. Previously, `ClientPackagePath` was only ever populated from `-ClientPackageSourcePath` (`dist\gpo-client`), an easy-to-forget separate packaging step - a server reinstall/upgrade with no extra flags left a stale client package in place with no warning.
+- `Install-Server.ps1` gains `-ClientServerUrl` (opt-in, no derived default - guessing wrong would silently ship a broken GPO package): when set, it produces a complete, ready-to-deploy GPO package (both client executables, `Deploy-ClientGpo.ps1`, and a fully configured `Install-ClientGpo.cmd`) directly in `ClientPackagePath` by calling `New-ClientGpoPackage.ps1`, instead of a separate manual packaging step or dashboard visit. New `-ClientIntervalHours` (default 6) and `-PackageSharePath` accompany it; `-Token` is reused from the server's own ingestion token.
+- Moved "Package share path" up to sit directly under "Server URL" on the Client Package dashboard page - it was easy to miss below the interval field.
+
 ## [0.9.0] - 2026-07-16
 
 Client-package deployment usability, driven by a real GPO deployment failure on the live test stand: the client wasn't installing because the GPO startup script's package share path had no dashboard-configurable equivalent, and the deployed client package could silently go stale relative to the server with no warning.

@@ -364,6 +364,11 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 | `-ClientPackageSourcePath` | `—` | Source folder to copy the client package from before installation. |
 | `-ConfigPath` | `—` | Server configuration file path. Default: `InstallPath\server-config.json`. |
 | `-ServerExecutablePath` | `—` | Path to the prebuilt server executable. Triggers a build if omitted. |
+| `-ClientNet35ExecutablePath` | `—` | Path to the prebuilt .NET 3.5 client executable. Triggers a build if omitted; always copied into `ClientPackagePath` to keep it current. |
+| `-ClientNet40ExecutablePath` | `—` | Path to the prebuilt .NET 4 client executable. Triggers a build if omitted; always copied into `ClientPackagePath` to keep it current. |
+| `-ClientServerUrl` | `—` | When set, produces a complete, ready-to-deploy GPO package (both client executables, `Deploy-ClientGpo.ps1`, and a configured `Install-ClientGpo.cmd`) in `ClientPackagePath` — the URL clients report to, e.g. `https://server.domain.local/api/v1/inventory`. No derived default. |
+| `-ClientIntervalHours` | `6` | Collection interval embedded in the generated `Install-ClientGpo.cmd`, when `-ClientServerUrl` is set (1–24). |
+| `-PackageSharePath` | `—` | GPO package share path embedded in the generated `Install-ClientGpo.cmd`, when `-ClientServerUrl` is set. Only needed when the GPO startup script and the client files are deployed to different locations. Default: the script's own folder. |
 | `-Token` | `—` | Ingestion token required in the `X-Inventory-Token` header. Optional. |
 | `-WebUsername` | `—` | Basic Auth username for dashboard and web API access. Optional. |
 | `-WebPassword` | `—` | Basic Auth password for dashboard and web API access. Optional. |

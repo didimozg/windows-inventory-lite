@@ -208,9 +208,9 @@ http://inventory.example.local:8080/
     -OutputPath '.\dist\gpo-client'
 ```
 
-`Install-Server.ps1` копирует `.\dist\gpo-client` в `C:\ProgramData\WindowsInventoryLite\client-package`, если такая папка существует. Также можно передать `-ClientPackageSourcePath` и `-ClientPackagePath`.
+`Install-Server.ps1` копирует `.\dist\gpo-client` в `C:\ProgramData\WindowsInventoryLite\client-package`, если такая папка существует. Также можно передать `-ClientPackageSourcePath` и `-ClientPackagePath`. Начиная с 0.9.0 установщик сам следит, чтобы оба клиентских exe в `ClientPackagePath` всегда были актуальной сборки (пересобирает при отсутствии, копирует при каждом запуске) — отдельный шаг с `New-ClientGpoPackage.ps1` для этого больше не обязателен. Чтобы сразу получить полностью готовый пакет (exe + `Deploy-ClientGpo.ps1` + настроенный `Install-ClientGpo.cmd`) прямо при установке сервера, передайте `-ClientServerUrl` (при необходимости — `-ClientIntervalHours` и `-PackageSharePath`).
 
-После установки адрес сервера, токен и интервал в `Install-ClientGpo.cmd` можно скорректировать через вкладку `Client package` в web-интерфейсе без повторного запуска сборки.
+После установки адрес сервера, токен, интервал и путь до сетевой папки в `Install-ClientGpo.cmd` можно скорректировать через вкладку `Client package` в web-интерфейсе без повторного запуска сборки.
 
 Если серверная служба работает от имени LocalSystem, установка по WinRM на удаленные компьютеры обычно не сработает. Запускайте службу от доменной учетной записи с нужными правами локального администратора или используйте управляемую сервисную учетную запись с такими же правами.
 Не передавайте пароль WinRM через web-интерфейс по обычному HTTP за пределами доверенной сети администрирования.
@@ -364,6 +364,11 @@ Settings
 | `-ClientPackageSourcePath` | `—` | Исходная папка для копирования клиентского пакета перед установкой. |
 | `-ConfigPath` | `—` | Путь к файлу конфигурации сервера. По умолчанию: `InstallPath\server-config.json`. |
 | `-ServerExecutablePath` | `—` | Путь к заранее собранному серверному исполняемому файлу. Если не указан, запускается сборка. |
+| `-ClientNet35ExecutablePath` | `—` | Путь к заранее собранному клиентскому exe (.NET 3.5). Если не указан — собирается; всегда копируется в `ClientPackagePath`, чтобы пакет оставался актуальным. |
+| `-ClientNet40ExecutablePath` | `—` | Путь к заранее собранному клиентскому exe (.NET 4). Если не указан — собирается; всегда копируется в `ClientPackagePath`, чтобы пакет оставался актуальным. |
+| `-ClientServerUrl` | `—` | Если указан — сразу собирает полностью готовый GPO-пакет (оба exe, `Deploy-ClientGpo.ps1`, настроенный `Install-ClientGpo.cmd`) в `ClientPackagePath`. Это адрес, на который будут отчитываться клиенты, например `https://server.domain.local/api/v1/inventory`. Значения по умолчанию нет намеренно. |
+| `-ClientIntervalHours` | `6` | Интервал сбора, встраиваемый в сгенерированный `Install-ClientGpo.cmd`, если указан `-ClientServerUrl` (1–24). |
+| `-PackageSharePath` | `—` | Путь до сетевой папки с пакетом, встраиваемый в сгенерированный `Install-ClientGpo.cmd`, если указан `-ClientServerUrl`. Нужен только когда GPO-скрипт и файлы клиента лежат в разных местах. По умолчанию — папка самого скрипта. |
 | `-Token` | `—` | Токен приема отчетов, ожидаемый в заголовке `X-Inventory-Token`. Необязателен. |
 | `-WebUsername` | `—` | Имя пользователя Basic Auth для web-интерфейса и web API. Необязателен. |
 | `-WebPassword` | `—` | Пароль Basic Auth для web-интерфейса и web API. Необязателен. |
@@ -376,6 +381,14 @@ Settings
 | `-InstallLogRetentionDays` | `30` | Срок хранения логов клиентских действий WinRM в днях. |
 | `-OpenFirewall` | `off` | Создать входящее правило Windows Firewall для порта слушателя. |
 | `-NoRun` | `off` | Установить и настроить службу без запуска. |
+| `-AdSyncEnabled` | `off` | Включить синхронизацию Description из Active Directory (см. [Синхронизация Description из Active Directory](#синхронизация-description-из-active-directory)). |
+| `-AdSyncMode` | `on-report` | `on-report` или `timer`. |
+| `-AdSyncIntervalHours` | `24` | Как часто обновляются AD-данные компьютера (1–8760). |
+| `-AdDomain` | `—` | Домен AD для запроса. По умолчанию — собственный домен сервера. |
+| `-AdUsername` | `—` | Явная учётная запись AD вместо identity службы. |
+| `-AdPassword` | `—` | Пароль для `-AdUsername`. Шифруется (Windows DPAPI) перед записью в `server-config.json`. |
+| `-DebugLogEnabled` | `off` | Вести необязательный debug-лог (см. [Диагностика](#диагностика)). |
+| `-DebugLogPath` | `—` | Путь к файлу debug-лога. По умолчанию: `DataPath\_logs\debug.log`. |
 
 ### Install-Client.ps1
 

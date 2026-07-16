@@ -397,6 +397,10 @@
               Server URL
               <input id="pkgServerUrl" type="text" placeholder="http://192.168.1.1:8080/api/v1/inventory">
             </label>
+            <label class="pkg-url-field">
+              Package share path
+              <input id="pkgSharePath" type="text" placeholder="leave blank to use the folder the .cmd itself runs from">
+            </label>
             <label class="pkg-token-field">
               Ingestion token
               <input id="pkgToken" type="text" autocomplete="off" placeholder="leave empty if not used">
@@ -404,10 +408,6 @@
             <label class="pkg-interval-field">
               Interval (hours)
               <input id="pkgIntervalHours" type="number" min="1" max="24" value="6">
-            </label>
-            <label class="pkg-url-field">
-              Package share path
-              <input id="pkgSharePath" type="text" placeholder="leave blank to use the folder the .cmd itself runs from">
             </label>
             <div class="pkg-buttons">
               <button id="pkgSaveButton" class="primary-button" type="button">Save</button>
