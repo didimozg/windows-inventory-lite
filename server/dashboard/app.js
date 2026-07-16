@@ -1611,8 +1611,8 @@
         <td>${activationBadge(windowsActivation.activated, 'Windows')}</td>
         <td>${activationBadge(officeActivation.activated, 'Office')}</td>
         <td>${softwareCount}</td>
-        <td>${escapeHtml(formatDateTime(client.collectedAt || client.sourceUpdatedAt))}</td>
         <td>${formatAdDescription(client)}</td>
+        <td>${escapeHtml(formatDateTime(client.collectedAt || client.sourceUpdatedAt))}</td>
         <td><button class="danger-button-ghost" type="button" data-delete-client="${escapeHtml(client.computerName)}">Delete</button></td>
       </tr>
       <tr class="details-row hidden" data-client-details="${clientId}">
