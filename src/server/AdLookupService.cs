@@ -76,9 +76,11 @@ namespace WindowsInventoryLite
             AdLookupResult result = new AdLookupResult();
             DirectoryEntry entry = null;
             DirectorySearcher searcher = null;
+            string domain = null;
+            string errorDetail = null;
             try
             {
-                string domain = !String.IsNullOrEmpty(options.AdDomain)
+                domain = !String.IsNullOrEmpty(options.AdDomain)
                     ? options.AdDomain
                     : Domain.GetComputerDomain().Name;
                 string ldapPath = "LDAP://" + domain;
@@ -96,34 +98,52 @@ namespace WindowsInventoryLite
                 if (found == null)
                 {
                     result.Status = "not-found";
-                    return result;
                 }
-
-                if (found.Properties["description"].Count > 0)
+                else
                 {
-                    result.Description = Convert.ToString(found.Properties["description"][0]);
+                    if (found.Properties["description"].Count > 0)
+                    {
+                        result.Description = Convert.ToString(found.Properties["description"][0]);
+                    }
+                    result.Status = "ok";
                 }
-                result.Status = "ok";
-                return result;
             }
             catch (Exception ex)
             {
-                try
-                {
-                    System.Diagnostics.EventLog.WriteEntry(
-                        "WindowsInventoryLite",
-                        "AD lookup failed for '" + computerName + "': " + ex.Message,
-                        System.Diagnostics.EventLogEntryType.Warning);
-                }
-                catch { }
                 result.Status = "error";
-                return result;
+                errorDetail = ex.Message;
             }
             finally
             {
                 if (searcher != null) searcher.Dispose();
                 if (entry != null) entry.Dispose();
             }
+
+            // Every real lookup (as opposed to a cache carry-forward - see
+            // InventoryServer.ApplyAdSync) gets exactly one Event Log entry,
+            // success or failure, so an admin can confirm sync is actually
+            // running and see why a specific computer didn't get a
+            // description without inspecting the per-computer JSON report
+            // by hand.
+            try
+            {
+                string identity = options.AdUseServiceIdentity
+                    ? "service identity"
+                    : "explicit account '" + options.AdUsername + "'";
+                string message = "AD lookup for '" + computerName + "' in domain '" + (domain ?? "(unresolved)")
+                    + "' using " + identity + ": " + result.Status;
+                if (errorDetail != null)
+                {
+                    message += " (" + errorDetail + ")";
+                }
+                System.Diagnostics.EventLog.WriteEntry(
+                    "WindowsInventoryLite",
+                    message,
+                    result.Status == "error" ? System.Diagnostics.EventLogEntryType.Warning : System.Diagnostics.EventLogEntryType.Information);
+            }
+            catch { }
+
+            return result;
         }
     }
 }
