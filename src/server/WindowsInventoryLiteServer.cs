@@ -303,7 +303,7 @@ namespace WindowsInventoryLite
                 Dictionary<string, object> config = serializer.Deserialize<Dictionary<string, object>>(json);
                 if (String.IsNullOrEmpty(options.Token))
                 {
-                    options.Token = GetConfigString(config, "Token");
+                    options.Token = SecretProtector.Unprotect(GetConfigString(config, "Token"));
                 }
                 if (String.IsNullOrEmpty(options.WebUsername))
                 {
@@ -311,7 +311,7 @@ namespace WindowsInventoryLite
                 }
                 if (String.IsNullOrEmpty(options.WebPassword))
                 {
-                    options.WebPassword = GetConfigString(config, "WebPassword");
+                    options.WebPassword = SecretProtector.Unprotect(GetConfigString(config, "WebPassword"));
                 }
                 if (!options.UseHttps)
                 {
@@ -3115,6 +3115,18 @@ namespace WindowsInventoryLite
             SendJson(stream, "{\"status\":\"ok\"}");
         }
 
+        // AdPassword, WebPassword, and Token are encrypted at rest (DPAPI,
+        // see SecretProtector.cs) before being written to server-config.json
+        // by SaveServerConfigValues below, and decrypted on load by
+        // LoadConfigFile. CertificatePfxPassword is NOT in this set - it is
+        // never persisted to server-config.json at all (it flows only into
+        // a local SecureString used once for a PFX import, in both
+        // ConfigureCertificate here and Install-Server.ps1's own import
+        // step), so there is nothing to encrypt for it.
+        private static readonly HashSet<string> EncryptedConfigKeys = new HashSet<string>(
+            new[] { "AdPassword", "WebPassword", "Token" },
+            StringComparer.Ordinal);
+
         private void SaveServerConfigValues(Dictionary<string, string> updates)
         {
             if (String.IsNullOrEmpty(options.ConfigPath))
@@ -3143,11 +3155,7 @@ namespace WindowsInventoryLite
 
             foreach (KeyValuePair<string, string> pair in updates)
             {
-                // AdPassword is encrypted at rest (DPAPI, see
-                // SecretProtector.cs) - every other key here keeps the
-                // existing plaintext-plus-restricted-ACL precedent already
-                // used for WebPassword/Token.
-                config[pair.Key] = pair.Key == "AdPassword" ? SecretProtector.Protect(pair.Value, options) : pair.Value;
+                config[pair.Key] = EncryptedConfigKeys.Contains(pair.Key) ? SecretProtector.Protect(pair.Value, options) : pair.Value;
             }
 
             string json = serializer.Serialize(config);
