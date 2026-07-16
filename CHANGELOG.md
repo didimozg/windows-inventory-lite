@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-16
+
+### Added
+
+- `WebPassword` and `Token` are now encrypted at rest with Windows DPAPI, matching `AdPassword`. Any secret still stored as plaintext from an older install is migrated to encrypted form automatically on the next service start - no manual action needed.
+
+### Fixed
+
+- Confirmed `CertificatePfxPassword` was never persisted to `server-config.json` in the first place (it is used once, transiently, for a PFX import) - corrected an earlier design assumption to the contrary before it shipped.
+
 ## [0.10.1] - 2026-07-16
 
 ### Fixed
