@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-07-16
+
+### Fixed
+
+- The Client Package page's grid layout broke when the "Package share path" field was added (a 4th field, but the shared `.pkg-grid` CSS was still templated for 3) - `Ingestion token` and `Interval` were squeezed into the wrong tracks and the Save/Download buttons wrapped onto their own row. Found via a live Playwright design review.
+- The first fix attempt (an ID-scoped override) introduced a worse bug: it silently un-collapsed the grid on mobile, overflowing a 480px viewport, since an ID selector outranks the mobile breakpoint's plain-class collapse rule regardless of source order. Replaced with a modifier class instead, matching the existing `.general-grid`/`.admin-password-grid` pattern.
+
 ## [0.10.0] - 2026-07-16
 
 ### Added
