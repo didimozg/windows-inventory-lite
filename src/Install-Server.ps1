@@ -309,12 +309,20 @@ function Get-ConfigValue {
 # Stored with a "dpapi:" prefix so WindowsInventoryLiteServer.exe's matching
 # SecretProtector.Unprotect can tell an already-encrypted value apart from a
 # legacy/hand-edited plaintext one (which it uses as-is rather than failing).
-function Protect-AdPassword {
+# Used for AdPassword, Token, and WebPassword - the no-op guard below matters
+# for Token/WebPassword specifically, since (unlike AdPassword) they reload
+# their saved value from server-config.json on a re-run when not passed
+# explicitly; without the guard, an already-encrypted saved value would be
+# encrypted a second time and corrupted.
+function Protect-Secret {
     param(
         [string]$PlainText
     )
 
     if (-not $PlainText) {
+        return $PlainText
+    }
+    if ($PlainText.StartsWith('dpapi:')) {
         return $PlainText
     }
 
@@ -758,9 +766,9 @@ $config.InstallPath             = $InstallPath
 $config.ContentPath             = $ContentPath
 $config.ClientPackagePath       = $ClientPackagePath
 $config.InstallLogRetentionDays = $InstallLogRetentionDays
-$config.Token                   = $Token
+$config.Token                   = Protect-Secret -PlainText $Token
 $config.WebUsername             = $WebUsername
-$config.WebPassword             = $WebPassword
+$config.WebPassword             = Protect-Secret -PlainText $WebPassword
 $config.UseHttps                = if ($UseHttps) { 'true' } else { 'false' }
 $config.CertificateThumbprint   = $CertificateThumbprint
 $config.HttpsPort               = $HttpsPort
@@ -772,7 +780,7 @@ $config.AdDomain                = $AdDomain
 $config.AdUseServiceIdentity    = if ($adUseServiceIdentity) { 'true' } else { 'false' }
 $config.AdUsername              = $AdUsername
 if ($AdPassword) {
-    $config.AdPassword = Protect-AdPassword -PlainText $AdPassword
+    $config.AdPassword = Protect-Secret -PlainText $AdPassword
 }
 $config.DebugLogEnabled         = if ($DebugLogEnabled) { 'true' } else { 'false' }
 $config.DebugLogPath            = $DebugLogPath
