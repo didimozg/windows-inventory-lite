@@ -482,6 +482,7 @@ namespace WindowsInventoryLite
 
         public void Start()
         {
+            MigratePlaintextSecrets();
             LoadServerCertificate();
 
             if (!Directory.Exists(options.DataPath))
@@ -1107,6 +1108,72 @@ namespace WindowsInventoryLite
                 return true;
             }
             return (DateTime.UtcNow - lastSyncedUtc.Value).TotalHours >= intervalHours;
+        }
+
+        // Returns true when a raw config value is still plaintext and
+        // needs migrating to encrypted storage - i.e. it's non-empty and
+        // does not already carry SecretProtector's "dpapi:" prefix. Pure
+        // and parameter-driven so it's directly self-testable without a
+        // live config file.
+        internal static bool NeedsMigration(string rawValue)
+        {
+            return !String.IsNullOrEmpty(rawValue) && !rawValue.StartsWith("dpapi:", StringComparison.Ordinal);
+        }
+
+        // Detects any of the 3 encrypted secrets (see EncryptedConfigKeys)
+        // still stored as plaintext in server-config.json and re-encrypts
+        // them in a single batched rewrite. Runs once per service start,
+        // as the very first action inside Start() - cheap (one small JSON
+        // parse, at most 3 DPAPI calls) and must never throw, since a
+        // migration failure must not prevent the server from starting.
+        private void MigratePlaintextSecrets()
+        {
+            if (String.IsNullOrEmpty(options.ConfigPath) || !File.Exists(options.ConfigPath))
+            {
+                return;
+            }
+
+            Dictionary<string, object> config;
+            try
+            {
+                config = CreateJsonSerializer().Deserialize<Dictionary<string, object>>(
+                    File.ReadAllText(options.ConfigPath, Encoding.UTF8));
+            }
+            catch
+            {
+                return;
+            }
+
+            if (config == null)
+            {
+                return;
+            }
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            foreach (string key in EncryptedConfigKeys)
+            {
+                string raw = config.ContainsKey(key) ? Convert.ToString(config[key]) : null;
+                if (NeedsMigration(raw))
+                {
+                    updates[key] = raw;
+                }
+            }
+
+            if (updates.Count > 0)
+            {
+                try
+                {
+                    SaveServerConfigValues(updates);
+                    DebugLogger.Log(options, "Server", "Migrated " + updates.Count + " plaintext secret(s) in server-config.json to encrypted storage.");
+                }
+                catch
+                {
+                    // A migration failure must not prevent the server from
+                    // starting - the affected secret(s) simply stay
+                    // plaintext until the next successful attempt (every
+                    // subsequent startup retries).
+                }
+            }
         }
 
         // Holds the AD fields a caller should merge into a report, computed
@@ -3632,6 +3699,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "DebugLogger.SanitizeForLog escapes embedded CR/LF", TestDebugLoggerSanitizeForLog);
             allPassed &= SelfTestCheck(output, "SecretProtector round-trips a value through Protect/Unprotect", TestSecretProtectorRoundTrip);
             allPassed &= SelfTestCheck(output, "SecretProtector.Unprotect passes through a legacy plaintext value", TestSecretProtectorLegacyPlaintext);
+            allPassed &= SelfTestCheck(output, "NeedsMigration flags a plaintext value", TestNeedsMigrationPlaintextValue);
+            allPassed &= SelfTestCheck(output, "NeedsMigration does not flag an already-encrypted or empty value", TestNeedsMigrationAlreadyEncryptedOrEmpty);
             allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' default package root", TestParseCmdSettingsDefaultPackageRoot);
             allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' custom package share path", TestParseCmdSettingsCustomPackageSharePath);
             return allPassed;
@@ -4021,6 +4090,32 @@ namespace WindowsInventoryLite
             if (actual != legacy)
             {
                 return "expected an unprefixed legacy value to pass through unchanged, got '" + actual + "'";
+            }
+            return null;
+        }
+
+        private static string TestNeedsMigrationPlaintextValue()
+        {
+            if (!NeedsMigration("a-plaintext-secret"))
+            {
+                return "expected a non-empty, unprefixed value to need migration";
+            }
+            return null;
+        }
+
+        private static string TestNeedsMigrationAlreadyEncryptedOrEmpty()
+        {
+            if (NeedsMigration("dpapi:AQAAANCMnd8BFdERjHoAwE"))
+            {
+                return "expected an already-'dpapi:'-prefixed value to not need migration";
+            }
+            if (NeedsMigration(null))
+            {
+                return "expected a null value to not need migration";
+            }
+            if (NeedsMigration(""))
+            {
+                return "expected an empty value to not need migration";
             }
             return null;
         }
