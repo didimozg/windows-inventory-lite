@@ -202,6 +202,17 @@ $installClientQuestions = @(
     @{ Name = 'NoRun'; Prompt = 'Skip starting the service immediately after install'; Type = 'Switch' }
 )
 
+$installClientWinRMQuestions = @(
+    @{ Name = 'ComputerName'; Prompt = 'Target computer names (comma-separated)'; Type = 'StringArray'; Mandatory = $true }
+    @{ Name = 'ServerUrl'; Prompt = 'Server URL (e.g. https://server.domain.local/api/v1/inventory)'; Type = 'String'; Mandatory = $true }
+    @{ Name = 'Token'; Prompt = 'Inventory ingestion token (leave blank if the server has none configured)'; Type = 'SecureString'; Mandatory = $false }
+    @{ Name = 'IntervalHours'; Prompt = 'Collection interval in hours'; Type = 'Int'; Default = '6'; Mandatory = $false }
+    @{ Name = 'CredentialUsername'; Prompt = 'Credential username (leave blank to use current user context)'; Type = 'String'; Mandatory = $false }
+    @{ Name = 'CredentialPassword'; Prompt = 'Credential password (leave blank to use current user context)'; Type = 'SecureString'; Mandatory = $false }
+    @{ Name = 'AddToTrustedHosts'; Prompt = 'Add target computers to WinRM TrustedHosts (needed for non-domain-joined or workgroup targets)'; Type = 'Switch' }
+    @{ Name = 'Force'; Prompt = 'Overwrite an already-installed client on the target machines'; Type = 'Switch' }
+)
+
 $uninstallClientQuestions = @(
     @{ Name = 'InstallPath'; Prompt = 'Client install path (leave blank for default)'; Type = 'String'; Mandatory = $false }
 )
@@ -212,6 +223,12 @@ $flows = [ordered]@{
         ScriptName   = 'Install-Client.ps1'
         Questions    = $installClientQuestions
         SecretParams = @('Token')
+    }
+    '3' = @{
+        Label        = 'Deploy client to remote machines (WinRM)'
+        ScriptName   = 'Install-ClientWinRM.ps1'
+        Questions    = $installClientWinRMQuestions
+        SecretParams = @('Token', 'CredentialPassword')
     }
     '5' = @{
         Label        = 'Uninstall client (local)'
