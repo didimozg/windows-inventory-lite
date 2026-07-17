@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-17
+
+### Added
+
+- The dashboard now polls for new inventory data every 30 seconds and updates in place, without disturbing the current page, sort, search, or any expanded detail rows. Polling pauses while the browser tab isn't visible and catches up immediately when it becomes visible again.
+
+### Fixed
+
+- Expanded detail rows (Clients/Software/Hardware "show details") no longer collapse when the table re-renders for an unrelated reason (e.g. clicking the pager's Next/Prev buttons).
+
 ## [0.14.0] - 2026-07-17
 
 ### Fixed
