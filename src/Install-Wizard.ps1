@@ -202,6 +202,44 @@ $installClientQuestions = @(
     @{ Name = 'NoRun'; Prompt = 'Skip starting the service immediately after install'; Type = 'Switch' }
 )
 
+$installServerQuestions = @(
+    # Network
+    @{ Name = 'ListenPrefix'; Prompt = 'Listen prefix'; Type = 'String'; Default = 'http://+:8080/'; Mandatory = $false }
+    @{ Name = 'OpenFirewall'; Prompt = 'Open the Windows Firewall for the listen port(s)'; Type = 'Switch' }
+
+    # HTTPS
+    @{ Name = 'UseHttps'; Prompt = 'Enable HTTPS'; Type = 'Switch' }
+    @{ Name = 'HttpsPort'; Prompt = 'HTTPS port (leave blank for default)'; Type = 'Int'; Mandatory = $false }
+    @{ Name = 'CertificateThumbprint'; Prompt = 'Existing certificate thumbprint in LocalMachine\My (leave blank if importing a PFX instead)'; Type = 'String'; Mandatory = $false }
+    @{ Name = 'CertificatePfxPath'; Prompt = 'PFX file to import (leave blank if using an existing certificate)'; Type = 'String'; Mandatory = $false }
+    @{ Name = 'CertificatePfxPassword'; Prompt = 'PFX password (leave blank if not importing a PFX)'; Type = 'SecureString'; Mandatory = $false }
+    @{ Name = 'DisableHttp'; Prompt = 'Disable plain HTTP once HTTPS is confirmed working (refused unless HTTPS is enabled)'; Type = 'Switch' }
+
+    # Basic Auth / dashboard access
+    @{ Name = 'WebUsername'; Prompt = 'Dashboard username'; Type = 'String'; Mandatory = $false }
+    @{ Name = 'WebPassword'; Prompt = 'Dashboard password'; Type = 'SecureString'; Mandatory = $false }
+    @{ Name = 'Token'; Prompt = 'Inventory ingestion token (leave blank to auto-generate)'; Type = 'SecureString'; Mandatory = $false }
+
+    # Active Directory description sync
+    @{ Name = 'AdSyncEnabled'; Prompt = 'Enable Active Directory description sync'; Type = 'Switch' }
+    @{ Name = 'AdSyncMode'; Prompt = 'AD sync mode'; Type = 'ValidateSet'; Choices = @('on-report', 'timer'); Default = 'on-report'; Mandatory = $false }
+    @{ Name = 'AdSyncIntervalHours'; Prompt = 'AD sync interval in hours (only used for timer mode)'; Type = 'Int'; Default = '24'; Mandatory = $false }
+    @{ Name = 'AdDomain'; Prompt = 'AD domain (leave blank to use the service account identity)'; Type = 'String'; Mandatory = $false }
+    @{ Name = 'AdUsername'; Prompt = 'AD username for explicit credentials (leave blank to use the service account identity)'; Type = 'String'; Mandatory = $false }
+    @{ Name = 'AdPassword'; Prompt = 'AD password for explicit credentials (leave blank to use the service account identity)'; Type = 'SecureString'; Mandatory = $false }
+
+    # Client package / GPO deployment
+    @{ Name = 'ClientServerUrl'; Prompt = 'Server URL clients will report to, e.g. https://server.domain.local/api/v1/inventory (leave blank to skip building a ready-to-deploy GPO package now)'; Type = 'String'; Mandatory = $false }
+    @{ Name = 'ClientIntervalHours'; Prompt = 'Client collection interval in hours'; Type = 'Int'; Default = '6'; Mandatory = $false }
+
+    # Logging
+    @{ Name = 'DebugLogEnabled'; Prompt = 'Enable debug logging'; Type = 'Switch' }
+    @{ Name = 'InstallLogRetentionDays'; Prompt = 'Client-action log retention in days (leave blank for default)'; Type = 'Int'; Mandatory = $false }
+
+    # Final
+    @{ Name = 'NoRun'; Prompt = 'Skip starting the service immediately after install'; Type = 'Switch' }
+)
+
 $installClientWinRMQuestions = @(
     @{ Name = 'ComputerName'; Prompt = 'Target computer names (comma-separated)'; Type = 'StringArray'; Mandatory = $true }
     @{ Name = 'ServerUrl'; Prompt = 'Server URL (e.g. https://server.domain.local/api/v1/inventory)'; Type = 'String'; Mandatory = $true }
@@ -218,6 +256,12 @@ $uninstallClientQuestions = @(
 )
 
 $flows = [ordered]@{
+    '1' = @{
+        Label        = 'Install server'
+        ScriptName   = 'Install-Server.ps1'
+        Questions    = $installServerQuestions
+        SecretParams = @('WebPassword', 'Token', 'CertificatePfxPassword', 'AdPassword')
+    }
     '2' = @{
         Label        = 'Install client (local)'
         ScriptName   = 'Install-Client.ps1'
