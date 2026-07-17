@@ -314,6 +314,11 @@ body {
 
 .sidebar-footer #generatedAt {
   font-size: 11px;
+  transition: color 0.3s ease;
+}
+
+.generated-at-flash {
+  color: var(--accent);
 }
 
 .content-area {

@@ -1885,6 +1885,83 @@
     }
   }
 
+  let lastClientsFingerprint = null;
+  let pollTimer = null;
+
+  // A cheap "did anything meaningful change" signal: each client's name
+  // and most recent report timestamp, sorted for a stable order
+  // regardless of how the server orders its response. Deliberately not a
+  // full JSON diff of every field (software lists, hardware specs, etc.)
+  // - a new/removed client or an updated report timestamp is what "new
+  // data arrived" means here, and that's cheap to compute on every poll
+  // tick. Not based on the server's own generatedAt field, which is the
+  // HTTP response's build time (DateTime.UtcNow on every call, server
+  // side), not the data's time - it differs on every poll regardless of
+  // whether anything changed.
+  function computeClientsFingerprint(clients) {
+    return clients
+      .map(c => (c.computerName || '') + '|' + (c.collectedAt || c.sourceUpdatedAt || ''))
+      .sort()
+      .join(';');
+  }
+
+  // Briefly highlights the "Generated: ..." timestamp so an attentive
+  // user notices a background poll just brought in new data - no toast,
+  // no layout shift, nothing that steals focus.
+  function flashGeneratedAt() {
+    const el = byId('generatedAt');
+    el.classList.add('generated-at-flash');
+    window.setTimeout(() => el.classList.remove('generated-at-flash'), 1000);
+  }
+
+  // Re-fetches the same endpoint the initial page load uses. Skips all
+  // render work entirely when the fingerprint is unchanged, so a no-op
+  // poll tick costs one small GET request and nothing else. A failed poll
+  // (network hiccup, a brief server restart) is silent by design - only
+  // the initial page-load fetch shows an error banner; a background poll
+  // just retries next tick.
+  function pollForUpdates() {
+    fetch('/api/v1/clients', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        const fingerprint = computeClientsFingerprint(data.clients || []);
+        if (fingerprint === lastClientsFingerprint) return;
+        lastClientsFingerprint = fingerprint;
+        state.clients = data.clients || [];
+        state.staleHours = data.staleHours || 48;
+        byId('generatedAt').textContent = `Generated: ${formatDateTime(data.generatedAt)}`;
+        byId('serverVersionBadge').textContent = `Server: v${text(data.serverVersion)}`;
+        render();
+        flashGeneratedAt();
+      })
+      .catch(() => {
+        // Silent - see function comment above.
+      });
+  }
+
+  function startPolling() {
+    if (pollTimer) return;
+    pollTimer = window.setInterval(pollForUpdates, 30000);
+  }
+
+  function stopPolling() {
+    if (!pollTimer) return;
+    window.clearInterval(pollTimer);
+    pollTimer = null;
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      stopPolling();
+    } else {
+      startPolling();
+      pollForUpdates(); // catch up immediately, don't wait up to 30s
+    }
+  });
+
   fetch('/api/v1/clients', { cache: 'no-store' })
     .then(response => {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1893,6 +1970,7 @@
     .then(data => {
       state.clients = data.clients || [];
       state.staleHours = data.staleHours || 48;
+      lastClientsFingerprint = computeClientsFingerprint(state.clients);
       byId('generatedAt').textContent = `Generated: ${formatDateTime(data.generatedAt)}`;
       byId('serverVersionBadge').textContent = `Server: v${text(data.serverVersion)}`;
       render();
@@ -1900,6 +1978,13 @@
     .catch(error => {
       byId('generatedAt').textContent = `Inventory index is not available: ${error.message}`;
       render();
+    })
+    .finally(() => {
+      // Start polling whether the initial load succeeded or failed - if
+      // the server was only briefly unavailable when the page opened, the
+      // first successful poll recovers automatically instead of leaving
+      // the user stuck on the error message until they manually reload.
+      startPolling();
     });
 
   loadLicenses();
