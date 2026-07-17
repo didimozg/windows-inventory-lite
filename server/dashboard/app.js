@@ -21,7 +21,15 @@
     // hwCpu/hwDisk/hwRam are fixed (see HW_PAGE_SIZE) - the three Hardware
     // sub-tables render stacked in one view and are rarely large enough to
     // need viewport-adaptive sizing (see this plan's Global Constraints).
-    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20 }
+    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20 },
+    // Prefixed keys ('client:'/'software:'/'hw:' + id) so the three
+    // separate data-*-details attribute namespaces can't collide in one
+    // Set. Drives each render function's initial hidden/visible class for
+    // a details row, instead of every row always starting hidden - keeps
+    // "expanded" state alive across any re-render (pager Next/Prev, a
+    // live-resize page-size correction, or a background data poll), not
+    // just the one that happened to be showing when the row was expanded.
+    expandedDetails: new Set()
   };
 
   const MIN_PAGE_SIZE = 5;
@@ -1673,6 +1681,7 @@
       }).join('<br>') || 'Unknown';
 
       const clientId = safeId(client.computerName || '');
+      const detailsHidden = state.expandedDetails.has('client:' + clientId) ? '' : 'hidden';
 
       return `<tr class="${staleClass}">
         <td><button class="link-button" type="button" data-client="${clientId}">${escapeHtml(client.computerName)}</button>${usbBadge}<small>${escapeHtml(client.domain)}</small>${ipAddresses ? `<small class="mono">${escapeHtml(ipAddresses)}</small>` : ''}</td>
@@ -1686,7 +1695,7 @@
         <td>${escapeHtml(formatDateTime(client.collectedAt || client.sourceUpdatedAt))}</td>
         <td><button class="danger-button-ghost" type="button" data-delete-client="${escapeHtml(client.computerName)}">Delete</button></td>
       </tr>
-      <tr class="details-row hidden" data-client-details="${clientId}">
+      <tr class="details-row ${detailsHidden}" data-client-details="${clientId}">
         <td colspan="10">
           <div class="details">
             <div class="hw-summary">
@@ -1720,6 +1729,7 @@
         .join('');
 
       const groupId = safeId(softwareKey(group));
+      const detailsHidden = state.expandedDetails.has('software:' + groupId) ? '' : 'hidden';
 
       return `<tr>
         <td><button class="link-button" type="button" data-software="${groupId}">${escapeHtml(group.name)}</button></td>
@@ -1728,7 +1738,7 @@
         <td class="hw-num">${group.clients.length}</td>
         <td>${findLicenseForSoftware(group.name) ? `<button class="edit-button" type="button" data-software-license-name="${escapeHtml(group.name)}" data-software-license-version="${escapeHtml(group.version)}">License</button>` : ''}</td>
       </tr>
-      <tr class="details-row hidden" data-software-details="${groupId}">
+      <tr class="details-row ${detailsHidden}" data-software-details="${groupId}">
         <td colspan="5">
           <div class="details">
             <h2>${escapeHtml(group.name)}</h2>
@@ -1757,6 +1767,7 @@
     state.page.hwCpu = cpuPage;
     const cpuRows = cpuPageItems.map(g => {
         const id = safeId('cpu:' + g.name);
+        const detailsHidden = state.expandedDetails.has('hw:' + id) ? '' : 'hidden';
         const computers = g.clients.map(c => `<li>${escapeHtml(c.computerName)}<small>${escapeHtml(c.domain)}</small></li>`).join('');
         const clock = g.clockMhz ? `${(g.clockMhz / 1000).toFixed(2)} GHz` : 'Unknown';
         return `<tr>
@@ -1765,7 +1776,7 @@
           <td class="hw-num">${escapeHtml(clock)}</td>
           <td class="hw-num">${g.clients.length}</td>
         </tr>
-        <tr class="details-row hidden" data-hw-details="${id}">
+        <tr class="details-row ${detailsHidden}" data-hw-details="${id}">
           <td colspan="4"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
         </tr>`;
       });
@@ -1778,6 +1789,7 @@
     state.page.hwDisk = diskPage;
     const diskRows = diskPageItems.map(g => {
         const id = safeId('disk:' + g.model + g.sizeGb);
+        const detailsHidden = state.expandedDetails.has('hw:' + id) ? '' : 'hidden';
         const computers = g.clients.map(c => `<li>${escapeHtml(c.computerName)}<small>${escapeHtml(c.domain)}</small></li>`).join('');
         const usbBadge = g.usb ? ' <span class="usb-badge">USB</span>' : '';
         const size = g.sizeGb ? `${g.sizeGb} GB` : 'Unknown';
@@ -1787,7 +1799,7 @@
           <td class="hw-num">${escapeHtml(size)}</td>
           <td class="hw-num">${g.clients.length}</td>
         </tr>
-        <tr class="details-row hidden" data-hw-details="${id}">
+        <tr class="details-row ${detailsHidden}" data-hw-details="${id}">
           <td colspan="4"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
         </tr>`;
       });
@@ -1800,13 +1812,14 @@
     state.page.hwRam = ramPage;
     const ramRows = ramPageItems.map(g => {
         const id = safeId('ram:' + g.totalMb + ':' + g.moduleCount);
+        const detailsHidden = state.expandedDetails.has('hw:' + id) ? '' : 'hidden';
         const computers = g.clients.map(c => `<li>${escapeHtml(c.computerName)}<small>${escapeHtml(c.domain)}</small></li>`).join('');
         return `<tr>
           <td><button class="link-button" type="button" data-hw="${id}">${escapeHtml(g.totalGb)}</button></td>
           <td class="hw-num">${g.moduleCount || 'Unknown'}</td>
           <td class="hw-num">${g.clients.length}</td>
         </tr>
-        <tr class="details-row hidden" data-hw-details="${id}">
+        <tr class="details-row ${detailsHidden}" data-hw-details="${id}">
           <td colspan="3"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
         </tr>`;
       });
@@ -1965,22 +1978,34 @@
 
     const clientBtn = e.target.closest('[data-client]');
     if (clientBtn) {
+      const key = 'client:' + clientBtn.dataset.client;
       const row = document.querySelector(`[data-client-details="${clientBtn.dataset.client}"]`);
-      if (row) row.classList.toggle('hidden');
+      if (row) {
+        const nowHidden = row.classList.toggle('hidden');
+        if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
+      }
       return;
     }
 
     const softwareBtn = e.target.closest('[data-software]');
     if (softwareBtn) {
+      const key = 'software:' + softwareBtn.dataset.software;
       const row = document.querySelector(`[data-software-details="${softwareBtn.dataset.software}"]`);
-      if (row) row.classList.toggle('hidden');
+      if (row) {
+        const nowHidden = row.classList.toggle('hidden');
+        if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
+      }
       return;
     }
 
     const hwBtn = e.target.closest('[data-hw]');
     if (hwBtn) {
+      const key = 'hw:' + hwBtn.dataset.hw;
       const row = document.querySelector(`[data-hw-details="${hwBtn.dataset.hw}"]`);
-      if (row) row.classList.toggle('hidden');
+      if (row) {
+        const nowHidden = row.classList.toggle('hidden');
+        if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
+      }
       return;
     }
 
