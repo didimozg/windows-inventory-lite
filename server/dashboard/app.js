@@ -519,7 +519,7 @@
       });
   }
 
-  function renderInstallJob(job) {
+  function renderInstallJob(job, statusElementId = 'installStatus') {
     const results = job.results || [];
     const rows = results.map(result => `<tr>
       <td>${escapeHtml(result.target)}</td>
@@ -528,8 +528,9 @@
       <td><pre class="install-output">${escapeHtml((result.error || result.output || '').trim())}</pre></td>
     </tr>`).join('');
 
-    byId('installStatus').classList.remove('empty');
-    byId('installStatus').innerHTML = `<div class="job-header">
+    const statusElement = byId(statusElementId);
+    statusElement.classList.remove('empty');
+    statusElement.innerHTML = `<div class="job-header">
         <strong>Job ${escapeHtml(job.id)}</strong>
         <span>${escapeHtml(job.action || 'install')}</span>
         <span>${escapeHtml(job.status)}</span>
@@ -597,22 +598,22 @@
       });
   }
 
-  function pollInstallJob(jobId) {
+  function pollInstallJob(jobId, statusElementId = 'installStatus', onComplete = loadInstallHistory) {
     fetch(`/api/v1/client-install/${encodeURIComponent(jobId)}`, { cache: 'no-store' })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
       })
       .then(job => {
-        renderInstallJob(job);
+        renderInstallJob(job, statusElementId);
         if (job.status === 'completed' && state.installPollTimer) {
           window.clearInterval(state.installPollTimer);
           state.installPollTimer = null;
-          loadInstallHistory();
+          onComplete();
         }
       })
       .catch(error => {
-        byId('installStatus').textContent = `Install job status is not available: ${error.message}`;
+        byId(statusElementId).textContent = `Install job status is not available: ${error.message}`;
       });
   }
 
@@ -742,6 +743,96 @@
     } else {
       badge.classList.add('hidden');
     }
+  }
+
+  function loadClientUpdateCredentials() {
+    fetch('/api/v1/client-updates/credentials', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        if (data.username) byId('updatesUsername').value = data.username;
+      })
+      .catch(() => {});
+  }
+
+  function saveClientUpdateCredentials() {
+    const username = byId('updatesUsername').value.trim();
+    const password = byId('updatesPassword').value;
+    const messageElement = byId('updatesCredentialsMessage');
+
+    byId('updatesSaveCredentialsButton').disabled = true;
+    fetch('/api/v1/client-updates/credentials', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(() => {
+        byId('updatesPassword').value = '';
+        messageElement.classList.remove('hidden', 'error');
+        messageElement.textContent = 'Saved.';
+      })
+      .catch(error => {
+        messageElement.classList.remove('hidden');
+        messageElement.classList.add('error');
+        messageElement.textContent = `Failed to save: ${error.message}`;
+      })
+      .finally(() => {
+        byId('updatesSaveCredentialsButton').disabled = false;
+      });
+  }
+
+  function updateUpdatesSelectionState() {
+    const checkboxes = Array.from(document.querySelectorAll('.updates-row-checkbox'));
+    const anyChecked = checkboxes.some(checkbox => checkbox.checked);
+    byId('updatesPushButton').disabled = !anyChecked;
+  }
+
+  function startClientUpdateJob() {
+    const targets = Array.from(document.querySelectorAll('.updates-row-checkbox:checked'))
+      .map(checkbox => checkbox.dataset.computerName);
+    if (targets.length === 0) return;
+
+    const username = byId('updatesUsername').value.trim();
+    const password = byId('updatesPassword').value;
+    // #installServerUrl is populated once, unconditionally, on page load
+    // (see the byId('installServerUrl').value = ... line near the bottom
+    // of this file) - it always holds a real value by the time any tab is
+    // used, so reusing it here needs no extra loading/fallback logic.
+    const serverUrl = byId('installServerUrl').value.trim();
+
+    byId('updatesPushButton').disabled = true;
+    byId('updatesStatus').classList.add('empty');
+    byId('updatesStatus').textContent = 'Starting update job...';
+
+    fetch('/api/v1/client-install', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targets: targets.join('\n'), serverUrl, username, password, force: false, addToTrustedHosts: false, retentionDays: 30 })
+    })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.updateJobId = data.jobId;
+        if (state.updatePollTimer) window.clearInterval(state.updatePollTimer);
+        pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates());
+        state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates()), 3000);
+      })
+      .catch(error => {
+        byId('updatesStatus').textContent = `Failed to start update job: ${error.message}`;
+      })
+      .finally(() => {
+        byId('updatesPushButton').disabled = false;
+      });
   }
 
   function loadPackageStatus() {
@@ -2101,7 +2192,7 @@
     render();
     if (state.view === 'install') loadInstallHistory();
     if (state.view === 'package') loadPackageStatus();
-    if (state.view === 'updates') loadClientUpdates();
+    if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); }
     if (state.view === 'general') loadGeneralSettings();
     if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (state.view === 'licenses') loadLicenses();
@@ -2180,6 +2271,18 @@
   });
   byId('packageTab').addEventListener('click', () => setView('package'));
   byId('updatesTab').addEventListener('click', () => setView('updates'));
+  byId('updatesSaveCredentialsButton').addEventListener('click', saveClientUpdateCredentials);
+  byId('updatesPushButton').addEventListener('click', startClientUpdateJob);
+  byId('updatesSelectAll').addEventListener('change', () => {
+    const checked = byId('updatesSelectAll').checked;
+    document.querySelectorAll('.updates-row-checkbox').forEach(checkbox => { checkbox.checked = checked; });
+    updateUpdatesSelectionState();
+  });
+  document.addEventListener('change', event => {
+    if (event.target.classList.contains('updates-row-checkbox')) {
+      updateUpdatesSelectionState();
+    }
+  });
   byId('pkgSaveButton').addEventListener('click', savePackageConfig);
   byId('pkgDownloadButton').addEventListener('click', () => {
     const status = state.packageStatus;
@@ -2222,7 +2325,7 @@
   byId('themeToggle').addEventListener('click', toggleTheme);
   updateThemeToggle();
   if (state.view === 'package') loadPackageStatus();
-  if (state.view === 'updates') loadClientUpdates();
+  if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); }
   if (state.view === 'general') loadGeneralSettings();
   if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
   if (state.view === 'licenses') loadLicenses();

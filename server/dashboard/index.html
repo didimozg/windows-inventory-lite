@@ -431,6 +431,22 @@
         </section>
 
         <section id="updatesView" class="install-panel hidden" aria-label="Client updates">
+          <div class="settings-block">
+            <h2 class="settings-block-title">WinRM credentials</h2>
+            <p class="cert-hint">Leave both fields blank to use the server service's own identity (the same account WinRM client actions already require). Fill them in only if a separate account is needed to reach update targets.</p>
+            <div class="pkg-grid client-update-grid">
+              <label class="pkg-token-field">
+                Client update username
+                <input id="updatesUsername" type="text" autocomplete="username" placeholder="DOMAIN\svc-account">
+              </label>
+              <label class="pkg-token-field">
+                Client update password
+                <input id="updatesPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current one">
+              </label>
+              <button id="updatesSaveCredentialsButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="updatesCredentialsMessage" class="pkg-message hidden"></div>
+          </div>
           <p id="updatesPackageStatus" class="pkg-status">Loading client update status...</p>
           <div class="table-wrap">
             <table>
@@ -447,6 +463,8 @@
               <tbody id="updatesBody"></tbody>
             </table>
           </div>
+          <button id="updatesPushButton" class="primary-button" type="button" disabled>Update selected</button>
+          <div id="updatesStatus" class="install-status empty">No update job started.</div>
         </section>
 
         <section id="installView" class="install-panel hidden" aria-label="Remote client actions">

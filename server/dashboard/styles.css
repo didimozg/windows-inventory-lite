@@ -1118,6 +1118,10 @@ th.sort-desc::after {
   grid-template-columns: minmax(180px, 1fr) minmax(280px, 2fr) auto;
 }
 
+.client-update-grid {
+  grid-template-columns: minmax(200px, 1fr) minmax(200px, 1fr) auto;
+}
+
 .settings-block {
   padding-bottom: 18px;
   margin-bottom: 18px;
