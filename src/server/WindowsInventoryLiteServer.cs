@@ -122,6 +122,13 @@ namespace WindowsInventoryLite
         // deployment; not rotated or size-capped.
         public bool DebugLogEnabled;
         public string DebugLogPath;
+        // Optional, off by default - dashboard-configured only (no
+        // Install-Server.ps1 CLI flag by design, see the plan's Global
+        // Constraints). Used as a fallback WinRM credential for Client
+        // Auto-Update pushes when the service's own identity can't reach a
+        // target; see docs/superpowers/specs/2026-07-17-client-auto-update-design.md.
+        public string ClientUpdateUsername;
+        public string ClientUpdatePassword;
 
         public static ServerOptions Parse(string[] args)
         {
@@ -411,6 +418,14 @@ namespace WindowsInventoryLite
                     // Decrypts a DPAPI-protected value (see SecretProtector.cs);
                     // a legacy/hand-edited plaintext value is used as-is.
                     options.AdPassword = SecretProtector.Unprotect(GetConfigString(config, "AdPassword"));
+                }
+                if (String.IsNullOrEmpty(options.ClientUpdateUsername))
+                {
+                    options.ClientUpdateUsername = GetConfigString(config, "ClientUpdateUsername");
+                }
+                if (String.IsNullOrEmpty(options.ClientUpdatePassword))
+                {
+                    options.ClientUpdatePassword = SecretProtector.Unprotect(GetConfigString(config, "ClientUpdatePassword"));
                 }
                 if (!options.DebugLogEnabled)
                 {
@@ -920,6 +935,14 @@ namespace WindowsInventoryLite
                     else if (request.Method == "GET" && request.Path == "/api/v1/client-updates")
                     {
                         SendClientUpdates(stream);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/client-updates/credentials")
+                    {
+                        SendClientUpdateCredentialsStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/client-updates/credentials")
+                    {
+                        ConfigureClientUpdateCredentials(stream, request);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/client-package")
                     {
@@ -3228,6 +3251,49 @@ namespace WindowsInventoryLite
             SendJson(stream, serializer.Serialize(result));
         }
 
+        private void SendClientUpdateCredentialsStatus(Stream stream)
+        {
+            bool configured = !String.IsNullOrEmpty(options.ClientUpdateUsername) && !String.IsNullOrEmpty(options.ClientUpdatePassword);
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["configured"] = configured;
+            result["username"] = String.IsNullOrEmpty(options.ClientUpdateUsername) ? null : options.ClientUpdateUsername;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void ConfigureClientUpdateCredentials(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string username = payload.ContainsKey("username") ? Convert.ToString(payload["username"]) : options.ClientUpdateUsername;
+            // Blank/omitted password means "keep the existing one" - the
+            // dashboard never pre-fills a password field with the real
+            // stored value, matching the AD credentials save endpoint.
+            string password = payload.ContainsKey("password") && !String.IsNullOrEmpty(Convert.ToString(payload["password"]))
+                ? Convert.ToString(payload["password"])
+                : options.ClientUpdatePassword;
+
+            options.ClientUpdateUsername = username;
+            options.ClientUpdatePassword = password;
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["ClientUpdateUsername"] = username ?? "";
+            updates["ClientUpdatePassword"] = password ?? "";
+            SaveServerConfigValues(updates);
+
+            SendClientUpdateCredentialsStatus(stream);
+        }
+
         // Doubles as first-time setup and password rotation. Bootstrapping without
         // a current-password check is reachable by anyone on the network while
         // Basic Auth is unconfigured, but at that point the whole dashboard is
@@ -3309,7 +3375,7 @@ namespace WindowsInventoryLite
         // ConfigureCertificate here and Install-Server.ps1's own import
         // step), so there is nothing to encrypt for it.
         private static readonly HashSet<string> EncryptedConfigKeys = new HashSet<string>(
-            new[] { "AdPassword", "WebPassword", "Token" },
+            new[] { "AdPassword", "WebPassword", "Token", "ClientUpdatePassword" },
             StringComparer.Ordinal);
 
         private void SaveServerConfigValues(Dictionary<string, string> updates)
