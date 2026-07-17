@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-17
+
+### Added
+
+- `Install-Wizard.ps1` - an interactive console menu covering all install/uninstall actions (server, local client, remote client via WinRM, and their uninstalls), for administrators unfamiliar with the project's flag-based scripts. Supports `-WhatIf` to preview the resolved command before running anything.
+- `Uninstall-Server.ps1` - previously only client-side uninstall scripts existed; this adds the missing server-side counterpart. Preserves inventory data and configuration by default; `-RemoveData` opts into full removal.
+
 ## [0.12.0] - 2026-07-16
 
 ### Added

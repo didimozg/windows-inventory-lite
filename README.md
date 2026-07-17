@@ -115,6 +115,12 @@ If the `.cmd` startup wrapper lives in SYSVOL and the PowerShell script plus cli
 
 After the server is installed, the server URL, ingestion token, and reporting interval in `Install-ClientGpo.cmd` can be updated from the dashboard `Client package` tab without rebuilding. The tab also generates a ZIP download of the complete package.
 
+## Interactive Install Wizard
+
+For a first-time setup, run `src/Install-Wizard.ps1` with no parameters for a menu-driven walkthrough of installing or removing the server, a local client, or clients on remote machines via WinRM - it asks one question at a time and shows the exact command it's about to run before doing anything. Everyone else can keep using the flag-based scripts below directly; the wizard only calls them, it doesn't replace them.
+
+Use `-WhatIf` to walk through the questions and see the resolved command without actually running anything.
+
 ## Server Installation
 
 Install the server from an elevated PowerShell session:
@@ -419,6 +425,13 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 | `-Force` | `off` | Reinstall the client even if the version already matches. |
 | `-KeepRemotePackage` | `off` | Do not delete the temporary package folder from the remote host after deployment. |
 
+### Uninstall-Server.ps1
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `-ConfigPath` | `—` | Server configuration file path to read installed paths from. Default: `C:\ProgramData\WindowsInventoryLite\server-config.json`. |
+| `-RemoveData` | `off` | Also remove inventory data (`DataPath`) and the configuration file. Without this switch, both are preserved so a reinstall picks up the previous settings. Cannot be undone. |
+
 ### Uninstall-Client.ps1
 
 | Parameter | Default | Description |
@@ -536,6 +549,14 @@ Remove the client service and local client files:
 ```powershell
 .\src\Uninstall-Client.ps1
 ```
+
+Remove the server service and its files (inventory data and configuration are preserved unless `-RemoveData` is passed):
+
+```powershell
+.\src\Uninstall-Server.ps1
+```
+
+For remote client uninstalls, see [Uninstall-ClientWinRM.ps1](#uninstall-clientwinrmps1). All three uninstall scripts are also reachable from `src/Install-Wizard.ps1` (see [Interactive Install Wizard](#interactive-install-wizard)).
 
 ## Project Layout
 
