@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-16
+
+### Added
+
+- The Clients and Software inventory tables are now paginated, with page size adapting live to the browser window's height. The Hardware CPU/Storage/RAM tables are paginated with a fixed page size.
+- The Inventory summary tiles (client count, activation counts, stale count) moved to the top of the Inventory section and are more compact.
+- Swapped the `Collected`/`AD Description` column order in the Clients table.
+
 ## [0.11.0] - 2026-07-16
 
 ### Added
