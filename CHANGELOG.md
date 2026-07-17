@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-17
+
+### Added
+
+- Dashboard `Client updates` tab (Installation section): shows which reporting clients are running a version other than the current client package, with a WinRM push to update selected clients. Windows 7/8/8.1 targets are listed but not selectable, since WinRM is unreliable against them. An optional dedicated WinRM credential can be saved as a fallback to the service's own identity, encrypted at rest the same way as other stored secrets.
+
 ## [0.15.1] - 2026-07-17
 
 ### Security

@@ -12,6 +12,7 @@
 - The license inventory catalog (`licenses.json`) with admin-entered Name, Version, License, and Comment fields.
 - The certificate history log (`_certificates/certificate-history.json`) recording every uploaded certificate and the risks found at upload time.
 - Cached Active Directory computer descriptions (adDescription field on each report), and AD credentials when explicit AD credentials (rather than the service identity) are configured.
+- Client Auto-Update credentials (`ClientUpdateUsername`/`ClientUpdatePassword`), when a dedicated WinRM account is configured on the `Client updates` page instead of relying on the service identity.
 
 ## Trust Boundaries
 
@@ -37,6 +38,7 @@
 - POST body to `POST /api/v1/server/settings` (staleHours, useHttps, port, enableHttp, httpsPort, acknowledgeRisks fields) that changes the stale threshold and independently starts, stops, or moves the HTTP and HTTPS listeners using the currently configured certificate.
 - POST/PUT bodies to `/api/v1/licenses` (name, version, license, comment, computers fields) written to `licenses.json` and rendered back into the dashboard.
 - POST body to `POST /api/v1/server/admin-password` (newUsername, currentPassword, newPassword) that sets up or rotates the dashboard's Basic Auth username and password. `currentPassword` is required only when Basic Auth is already configured.
+- POST body to `POST /api/v1/client-updates/credentials` (username, password) that saves the optional WinRM credential fallback used by Client Auto-Update pushes. No current-password check (unlike admin-password) - any authenticated dashboard user can already trigger a WinRM push via `Client actions` with arbitrary typed credentials, so this endpoint grants no capability the dashboard didn't already have.
 - The computer name embedded in a client's inventory report, when AD sync is enabled: used to build an LDAP search filter (see AdLookupService.LookupComputerDescription), escaped per RFC 4515 before use.
 
 ## Required Invariants
@@ -112,3 +114,4 @@
 - Do not disable HTTP until HTTPS has been verified reachable from an actual client, not just accepted by the settings endpoint. Keep local server access (RDP, console) available for the recovery procedure in case a certificate degrades after HTTP is off.
 - Monitor certificate expiry independently of this application if HTTP is disabled in production; there is no built-in alerting for an approaching expiry date.
 - Prefer the service account identity over explicit AD credentials when the service already runs under a domain account (which WinRM client actions already require) - it needs no additional secret in server-config.json.
+- The same identity-first preference applies to Client Auto-Update: only configure `ClientUpdateUsername`/`ClientUpdatePassword` on the `Client updates` page if the service identity genuinely cannot reach update targets.
