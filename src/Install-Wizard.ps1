@@ -58,14 +58,17 @@ function Read-WizardAnswer {
 
 # Walks a flow's question-spec array (each entry: Name/Prompt/Type, plus
 # optional Default/Mandatory/Choices) and returns a parameter hashtable
-# ready to splat at the target script. Types: String, SecureString, Int,
-# StringArray (comma-separated), ValidateSet (shows Choices, falls back to
-# Default with a warning on an invalid answer rather than re-prompting -
-# acceptable since every ValidateSet question in this plan has a safe
-# default), Switch (its own y/N sub-prompt, never inherits -Default from
-# the spec). Skips adding a key when the answer is empty-and-optional or
-# equals the displayed default - lets the target script's own default
-# apply rather than redundantly passing an identical value.
+# ready to splat at the target script. Types: String, SecureString,
+# Int (falls back to Default with a warning on a non-numeric answer rather
+# than throwing or re-prompting - safe since no Int question in this plan
+# is Mandatory), StringArray (comma-separated), ValidateSet (shows Choices,
+# falls back to Default with a warning on an invalid answer rather than
+# re-prompting - acceptable since every ValidateSet question in this plan
+# has a safe default), Switch (its own y/N sub-prompt, never inherits
+# -Default from the spec). Skips adding a key when the answer is
+# empty-and-optional or equals the displayed default - lets the target
+# script's own default apply rather than redundantly passing an identical
+# value.
 function Read-WizardAnswers {
     param(
         [Parameter(Mandatory = $true)]
@@ -101,8 +104,17 @@ function Read-WizardAnswers {
             continue
         }
 
+        if ($question.Type -eq 'Int') {
+            $intValue = 0
+            if (-not [int]::TryParse($answer, [ref]$intValue)) {
+                Write-Host 'Invalid number. Using default.' -ForegroundColor Yellow
+                continue
+            }
+            $params[$question.Name] = $intValue
+            continue
+        }
+
         $params[$question.Name] = switch ($question.Type) {
-            'Int' { [int]$answer }
             'StringArray' { @($answer -split ',\s*') }
             default { $answer }
         }
