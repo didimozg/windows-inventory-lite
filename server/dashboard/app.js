@@ -1900,7 +1900,13 @@
   // whether anything changed.
   function computeClientsFingerprint(clients) {
     return clients
-      .map(c => (c.computerName || '') + '|' + (c.collectedAt || c.sourceUpdatedAt || ''))
+      // Both timestamps, not collectedAt || sourceUpdatedAt - a client
+      // that already has a collectedAt from its last real report never
+      // falls through to sourceUpdatedAt via ||, so an AD-sync-only
+      // update (which advances sourceUpdatedAt but not collectedAt - see
+      // ApplyAdSyncFields server-side) would otherwise never change the
+      // fingerprint and the poll would silently skip it.
+      .map(c => (c.computerName || '') + '|' + (c.collectedAt || '') + '|' + (c.sourceUpdatedAt || ''))
       .sort()
       .join(';');
   }
