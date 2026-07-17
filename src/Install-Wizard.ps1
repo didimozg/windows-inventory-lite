@@ -193,11 +193,26 @@ function Invoke-WizardAction {
     & $ScriptPath @Params
 }
 
+$installClientQuestions = @(
+    @{ Name = 'ServerUrl'; Prompt = 'Server URL (e.g. https://server.domain.local/api/v1/inventory)'; Type = 'String'; Mandatory = $true }
+    @{ Name = 'ServerSharePath'; Prompt = 'Server share path for client updates (leave blank to skip)'; Type = 'String'; Mandatory = $false }
+    @{ Name = 'Token'; Prompt = 'Inventory ingestion token (leave blank if the server has none configured)'; Type = 'SecureString'; Mandatory = $false }
+    @{ Name = 'IntervalHours'; Prompt = 'Collection interval in hours'; Type = 'Int'; Default = '6'; Mandatory = $false }
+    @{ Name = 'InstallPath'; Prompt = 'Client install path (leave blank for default)'; Type = 'String'; Mandatory = $false }
+    @{ Name = 'NoRun'; Prompt = 'Skip starting the service immediately after install'; Type = 'Switch' }
+)
+
 $uninstallClientQuestions = @(
     @{ Name = 'InstallPath'; Prompt = 'Client install path (leave blank for default)'; Type = 'String'; Mandatory = $false }
 )
 
 $flows = [ordered]@{
+    '2' = @{
+        Label        = 'Install client (local)'
+        ScriptName   = 'Install-Client.ps1'
+        Questions    = $installClientQuestions
+        SecretParams = @('Token')
+    }
     '5' = @{
         Label        = 'Uninstall client (local)'
         ScriptName   = 'Uninstall-Client.ps1'
