@@ -251,8 +251,19 @@ $installClientWinRMQuestions = @(
     @{ Name = 'Force'; Prompt = 'Overwrite an already-installed client on the target machines'; Type = 'Switch' }
 )
 
+$uninstallServerQuestions = @(
+    @{ Name = 'RemoveData'; Prompt = 'Remove inventory data too (server-data and server-config.json - cannot be undone)'; Type = 'Switch' }
+)
+
 $uninstallClientQuestions = @(
     @{ Name = 'InstallPath'; Prompt = 'Client install path (leave blank for default)'; Type = 'String'; Mandatory = $false }
+)
+
+$uninstallClientWinRMQuestions = @(
+    @{ Name = 'ComputerName'; Prompt = 'Target computer names (comma-separated)'; Type = 'StringArray'; Mandatory = $true }
+    @{ Name = 'CredentialUsername'; Prompt = 'Credential username (leave blank to use current user context)'; Type = 'String'; Mandatory = $false }
+    @{ Name = 'CredentialPassword'; Prompt = 'Credential password (leave blank to use current user context)'; Type = 'SecureString'; Mandatory = $false }
+    @{ Name = 'AddToTrustedHosts'; Prompt = 'Add target computers to WinRM TrustedHosts (needed for non-domain-joined or workgroup targets)'; Type = 'Switch' }
 )
 
 $flows = [ordered]@{
@@ -274,11 +285,23 @@ $flows = [ordered]@{
         Questions    = $installClientWinRMQuestions
         SecretParams = @('Token', 'CredentialPassword')
     }
+    '4' = @{
+        Label        = 'Uninstall server'
+        ScriptName   = 'Uninstall-Server.ps1'
+        Questions    = $uninstallServerQuestions
+        SecretParams = @()
+    }
     '5' = @{
         Label        = 'Uninstall client (local)'
         ScriptName   = 'Uninstall-Client.ps1'
         Questions    = $uninstallClientQuestions
         SecretParams = @()
+    }
+    '6' = @{
+        Label        = 'Uninstall client (remote, WinRM)'
+        ScriptName   = 'Uninstall-ClientWinRM.ps1'
+        Questions    = $uninstallClientWinRMQuestions
+        SecretParams = @('CredentialPassword')
     }
 }
 
