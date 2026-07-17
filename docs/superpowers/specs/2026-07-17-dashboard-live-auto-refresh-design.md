@@ -32,9 +32,24 @@ Two approaches were considered:
 
 ## Mechanism: poll loop
 
+**Correction found during plan research (2026-07-17):** the original design compared the endpoint's `generatedAt` field between polls to detect "did anything change." Reading the server's actual `BuildClientIndex()` shows `generatedAt` is set to `DateTime.UtcNow` on every call — it is the time the HTTP response was built, not the time the underlying data last changed. It differs on literally every poll regardless of whether any client actually reported new data, which would have made the "skip if unchanged" check a no-op (always "changed") and defeated the point of comparing it. Fixing this on the server (deriving `generatedAt` from the max of all reports' actual timestamps) would be a real, reasonable improvement, but is server-side C# and out of this design's explicit scope; instead, the dashboard computes its own lightweight fingerprint of the client data it already receives, entirely client-side.
+
 ```javascript
-let lastGeneratedAt = null;
+let lastClientsFingerprint = null;
 let pollTimer = null;
+
+// A cheap "did anything meaningful change" signal: each client's name and
+// most recent report timestamp, sorted for a stable order regardless of
+// how the server orders its response. Deliberately not a full JSON diff
+// of every field (software lists, hardware specs, etc.) - a new/removed
+// client or an updated report timestamp is what "new data arrived" means
+// here, and that's cheap to compute on every poll tick.
+function computeClientsFingerprint(clients) {
+  return clients
+    .map(c => (c.computerName || '') + '|' + (c.collectedAt || c.sourceUpdatedAt || ''))
+    .sort()
+    .join(';');
+}
 
 function pollForUpdates() {
   fetch('/api/v1/clients', { cache: 'no-store' })
@@ -43,8 +58,9 @@ function pollForUpdates() {
       return response.json();
     })
     .then(data => {
-      if (data.generatedAt === lastGeneratedAt) return; // nothing changed, skip re-render entirely
-      lastGeneratedAt = data.generatedAt;
+      const fingerprint = computeClientsFingerprint(data.clients || []);
+      if (fingerprint === lastClientsFingerprint) return; // nothing changed, skip re-render entirely
+      lastClientsFingerprint = fingerprint;
       state.clients = data.clients || [];
       state.staleHours = data.staleHours || 48;
       byId('generatedAt').textContent = `Generated: ${formatDateTime(data.generatedAt)}`;
@@ -58,6 +74,9 @@ function pollForUpdates() {
       // retries. Only the initial page-load fetch shows an error banner.
     });
 }
+```
+
+One side effect worth naming: the visible "Generated: ..." text now only updates when the fingerprint actually changes, not on every successful poll. Given `generatedAt`'s real meaning is "server request time" rather than "data time" (see the correction above), only advancing this label when real new data arrived is arguably more useful to an admin than the current behavior (which doesn't exist yet - today it never updates after page load at all), not a regression.
 
 function startPolling() {
   if (pollTimer) return;
