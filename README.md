@@ -119,6 +119,8 @@ After the server is installed, the server URL, ingestion token, and reporting in
 
 For a first-time setup, run `src/Install-Wizard.ps1` with no parameters for a menu-driven walkthrough of installing or removing the server, a local client, or clients on remote machines via WinRM - it asks one question at a time and shows the exact command it's about to run before doing anything. Everyone else can keep using the flag-based scripts below directly; the wizard only calls them, it doesn't replace them.
 
+If a server is already installed, choosing "Install server" offers a "just refresh" option that skips every question and reapplies the current saved settings as-is (useful after pulling a new build) - pick "Full reconfigure" instead to change any setting.
+
 Use `-WhatIf` to walk through the questions and see the resolved command without actually running anything.
 
 ## Server Installation

@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-17
+
+### Fixed
+
+- `Install-Client.ps1` and `Install-Server.ps1` now rebuild `build\*.exe` fresh every run when using the default (not caller-supplied) executable path, instead of only building when the file was entirely missing. A stale binary left over from an earlier session was previously reused silently, with no version-mismatch warning - found via live testing of `Install-Wizard.ps1`'s "Install client (local)" flow.
+- Fixed a resulting double build of the client executables in `Install-Server.ps1`, since `Build-Server.ps1` already refreshes them as a side effect of building the server.
+
+### Added
+
+- `Install-Wizard.ps1`'s "Install server" flow now detects an existing installation and offers a "just refresh" option that skips all questions and reapplies the current saved settings as-is, instead of requiring every question to be re-answered on a re-run.
+
 ## [0.13.0] - 2026-07-17
 
 ### Added
