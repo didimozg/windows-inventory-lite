@@ -5,7 +5,9 @@ Date: 2026-07-17
 
 ## Purpose
 
-`windows-inventory-lite` is administered entirely through flag-based PowerShell scripts: `Install-Server.ps1` (31 parameters covering network, HTTPS/certificate, Basic Auth, AD sync, logging), `Install-Client.ps1` (6 parameters), `Install-ClientWinRM.ps1` (10 parameters, remote deployment to multiple machines), and `Uninstall-Client.ps1`/`Uninstall-ClientWinRM.ps1`. This is workable for someone who already knows the project, but not for "any person unfamiliar with the project," as originally requested. This design adds an interactive console wizard that walks a first-time administrator through installing or removing any part of the system without needing to already know which script or which flags to use.
+`windows-inventory-lite` is administered entirely through flag-based PowerShell scripts: `Install-Server.ps1` (33 parameters covering network, HTTPS/certificate, Basic Auth, AD sync, logging), `Install-Client.ps1` (6 parameters), `Install-ClientWinRM.ps1` (12 parameters, remote deployment to multiple machines), and `Uninstall-Client.ps1`/`Uninstall-ClientWinRM.ps1`.
+
+**Correction made during plan research (2026-07-17):** the parameter counts above were recounted precisely while writing the implementation plan (33 and 12, not the 31 and 10 quoted during brainstorming) — a manual miscount during the initial exploration pass, not a change in the underlying scripts. Corrected here for accuracy; does not change any design decision. This is workable for someone who already knows the project, but not for "any person unfamiliar with the project," as originally requested. This design adds an interactive console wizard that walks a first-time administrator through installing or removing any part of the system without needing to already know which script or which flags to use.
 
 ## Scope
 
