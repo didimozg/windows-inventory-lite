@@ -2,6 +2,7 @@
   const inventoryViews = ['clients', 'software', 'hardware'];
   const state = {
     clients: [], view: getInitialView(), installJobId: null, installPollTimer: null, installJobs: [],
+    updateJobId: null, updatePollTimer: null,
     packageStatus: null,
     clientUpdates: null,
     certificateStatus: null, certificateHistory: [],
@@ -598,7 +599,7 @@
       });
   }
 
-  function pollInstallJob(jobId, statusElementId = 'installStatus', onComplete = loadInstallHistory) {
+  function pollInstallJob(jobId, statusElementId = 'installStatus', onComplete = loadInstallHistory, timerKey = 'installPollTimer') {
     fetch(`/api/v1/client-install/${encodeURIComponent(jobId)}`, { cache: 'no-store' })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -606,9 +607,9 @@
       })
       .then(job => {
         renderInstallJob(job, statusElementId);
-        if (job.status === 'completed' && state.installPollTimer) {
-          window.clearInterval(state.installPollTimer);
-          state.installPollTimer = null;
+        if (job.status === 'completed' && state[timerKey]) {
+          window.clearInterval(state[timerKey]);
+          state[timerKey] = null;
           onComplete();
         }
       })
@@ -824,8 +825,8 @@
       .then(data => {
         state.updateJobId = data.jobId;
         if (state.updatePollTimer) window.clearInterval(state.updatePollTimer);
-        pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates());
-        state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates()), 3000);
+        pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer');
+        state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer'), 3000);
       })
       .catch(error => {
         byId('updatesStatus').textContent = `Failed to start update job: ${error.message}`;
