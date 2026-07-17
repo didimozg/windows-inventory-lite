@@ -917,6 +917,10 @@ namespace WindowsInventoryLite
                     {
                         SendClientInstallJob(stream, request);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/client-updates")
+                    {
+                        SendClientUpdates(stream);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/client-package")
                     {
                         SendClientPackageStatus(stream);
@@ -1966,7 +1970,7 @@ namespace WindowsInventoryLite
             SendText(stream, fallback, contentType, 200);
         }
 
-        private string BuildClientIndex()
+        private ArrayList LoadClientReports()
         {
             ArrayList clients = new ArrayList();
             JavaScriptSerializer serializer = CreateJsonSerializer();
@@ -1985,6 +1989,14 @@ namespace WindowsInventoryLite
                 {
                 }
             }
+
+            return clients;
+        }
+
+        private string BuildClientIndex()
+        {
+            ArrayList clients = LoadClientReports();
+            JavaScriptSerializer serializer = CreateJsonSerializer();
 
             Dictionary<string, object> index = new Dictionary<string, object>();
             index["schemaVersion"] = "1.0";
@@ -2236,6 +2248,79 @@ namespace WindowsInventoryLite
                 DateTime rightDate = ParseUtcDate(GetStringValue(right, "createdAt"), DateTime.MinValue);
                 return rightDate.CompareTo(leftDate);
             }
+        }
+
+        private void SendClientUpdates(Stream stream)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> result = new Dictionary<string, object>();
+
+            string net35Version = null;
+            string net40Version = null;
+            if (Directory.Exists(options.ClientPackagePath))
+            {
+                string net35Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net35.exe");
+                string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
+                net35Version = File.Exists(net35Path) ? GetExeVersion(net35Path) : null;
+                net40Version = File.Exists(net40Path) ? GetExeVersion(net40Path) : null;
+            }
+
+            result["net35Version"] = net35Version;
+            result["net40Version"] = net40Version;
+
+            // No package built at all yet - there is nothing a push could
+            // actually deploy, so classifying every client as "outdated"
+            // here would be misleading rather than informative.
+            if (net35Version == null && net40Version == null)
+            {
+                result["packageAvailable"] = false;
+                result["updates"] = new ArrayList();
+                result["eligibleCount"] = 0;
+                result["blockedCount"] = 0;
+                SendJson(stream, serializer.Serialize(result));
+                return;
+            }
+
+            result["packageAvailable"] = true;
+            ArrayList updates = new ArrayList();
+            int eligibleCount = 0;
+            int blockedCount = 0;
+
+            foreach (Dictionary<string, object> client in LoadClientReports())
+            {
+                string clientVersion = GetStringValue(client, "clientVersion");
+                if (IsClientVersionCurrent(clientVersion, net35Version, net40Version))
+                {
+                    continue;
+                }
+
+                Dictionary<string, object> os = client.ContainsKey("os") ? client["os"] as Dictionary<string, object> : null;
+                string osCaption = GetStringValue(os, "caption");
+                bool eligible = IsWinRmEligibleOs(osCaption);
+
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["computerName"] = GetStringValue(client, "computerName");
+                entry["domain"] = GetStringValue(client, "domain");
+                entry["clientVersion"] = clientVersion;
+                entry["osCaption"] = osCaption;
+                entry["collectedAt"] = GetStringValue(client, "collectedAt");
+                entry["eligible"] = eligible;
+                updates.Add(entry);
+
+                if (eligible)
+                {
+                    eligibleCount++;
+                }
+                else
+                {
+                    blockedCount++;
+                }
+            }
+
+            result["updates"] = updates;
+            result["eligibleCount"] = eligibleCount;
+            result["blockedCount"] = blockedCount;
+            SendJson(stream, serializer.Serialize(result));
         }
 
         private void SendClientPackageStatus(Stream stream)
