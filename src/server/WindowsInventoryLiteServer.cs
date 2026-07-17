@@ -20,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.16.1";
+        internal const string ProductVersion = "0.16.2";
 
         private static int Main(string[] args)
         {
@@ -2151,9 +2151,16 @@ namespace WindowsInventoryLite
         // in app.js), so this is a backstop against a future unescaped sink,
         // not the primary defense. style-src needs 'unsafe-inline' for the
         // one legitimate case (bar-chart width) that sets a real inline
-        // style="..." attribute through innerHTML.
+        // style="..." attribute through innerHTML. The one sha256 source
+        // allows index.html's inline theme-restore <script> (reads
+        // localStorage before styles.css loads, so a saved dark preference
+        // doesn't flash light first) - it was silently CSP-blocked without
+        // this, breaking theme persistence across reloads. If that inline
+        // script's content ever changes, this hash must be recomputed to
+        // match (the browser's own CSP-violation console message reports
+        // the exact hash it expected - the fastest way to get a fresh one).
         private const string ContentSecurityPolicy =
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+            "default-src 'self'; script-src 'self' 'sha256-rqltRpQDffCU3nbpQC/zdbFn0/Eb4PSGrbmQ8EbS3q4='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
         private static void SendText(Stream stream, string text, string contentType, int statusCode)
         {

@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-07-17
+
+### Fixed
+
+- Dark theme reset to light on every page reload. Root cause: the `Content-Security-Policy` header added in 0.15.1 set `script-src 'self'` with no `'unsafe-inline'` or hash, which silently blocked `index.html`'s inline theme-restore `<script>` (reads `localStorage` before `styles.css` loads, to avoid a flash of the wrong theme on load). The script never ran, so the page always fell back to the OS's `prefers-color-scheme`, ignoring the saved preference - `toggleTheme()` itself still worked and still saved to `localStorage` correctly, only the on-load restore was broken. Fixed by adding that script's exact `sha256` hash to `script-src`, allowing only this one specific, unchanging inline script rather than a blanket `'unsafe-inline'` that would have reopened the original XSS backstop the CSP was added for.
+
 ## [0.16.1] - 2026-07-17
 
 ### Changed
