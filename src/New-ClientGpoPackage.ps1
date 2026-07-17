@@ -34,6 +34,25 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+# ServerUrl/Token/PackageSharePath land on a `set` line in the generated
+# .cmd with no surrounding quotes (ServerUrl, PackageSharePath) or with
+# quotes an embedded " can break out of (Token). A value containing &, |,
+# <, >, ^, ", or a line break turns Install-ClientGpo.cmd into an
+# attacker-controlled script that a GPO computer startup script later runs
+# as SYSTEM on every deployed client.
+function Test-BatchSafeValue {
+    param([string]$Value, [string]$FieldName)
+    if ([string]::IsNullOrEmpty($Value)) { return }
+    $unsafeChars = [char[]]('"', '&', '|', '<', '>', '^', "`r", "`n")
+    if ($Value.IndexOfAny($unsafeChars) -ge 0) {
+        throw "$FieldName contains a character that is not allowed here (double quote, &, |, <, >, ^, or a line break)."
+    }
+}
+
+Test-BatchSafeValue -Value $ServerUrl -FieldName 'ServerUrl'
+Test-BatchSafeValue -Value $Token -FieldName 'Token'
+Test-BatchSafeValue -Value $PackageSharePath -FieldName 'PackageSharePath'
+
 $projectRoot = Split-Path -Parent $PSScriptRoot
 if (-not $OutputPath) {
     $OutputPath = Join-Path -Path $projectRoot -ChildPath 'dist\gpo-client'

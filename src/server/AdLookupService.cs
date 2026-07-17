@@ -138,7 +138,7 @@ namespace WindowsInventoryLite
                     + "' using " + identity + ": " + result.Status;
                 if (errorDetail != null)
                 {
-                    message += " (" + errorDetail + ")";
+                    message += " (" + DebugLogger.SanitizeForLog(errorDetail) + ")";
                 }
                 if (result.Status == "error")
                 {

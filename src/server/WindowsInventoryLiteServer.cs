@@ -6,8 +6,10 @@ using System.IO;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.AccessControl;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
+using System.Security.Principal;
 using System.ServiceProcess;
 using System.Text;
 using System.Threading;
@@ -18,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.15.0";
+        internal const string ProductVersion = "0.15.1";
 
         private static int Main(string[] args)
         {
@@ -881,6 +883,8 @@ namespace WindowsInventoryLite
                     }
 
                     RequestContext request = ReadRequest(stream);
+                    IPEndPoint remoteEndPoint = client.Client.RemoteEndPoint as IPEndPoint;
+                    request.RemoteAddress = remoteEndPoint != null ? remoteEndPoint.Address : IPAddress.None;
                     if (request.Method == "POST" && request.Path == "/api/v1/inventory")
                     {
                         ReceiveInventory(stream, request);
@@ -1041,7 +1045,7 @@ namespace WindowsInventoryLite
         private void ReceiveInventory(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (!String.IsNullOrEmpty(options.Token) && token != options.Token)
+            if (!String.IsNullOrEmpty(options.Token) && !FixedTimeEquals(token, options.Token))
             {
                 DebugLogger.Log(options, "Client", "Rejected inventory report: invalid or missing token");
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -1883,7 +1887,15 @@ namespace WindowsInventoryLite
         {
             if (String.IsNullOrEmpty(options.WebUsername) && String.IsNullOrEmpty(options.WebPassword))
             {
-                return true;
+                // Every route reaching this check - dashboard, settings,
+                // certificate import, WinRM client install/uninstall running
+                // as the service account, initial admin-password setup -
+                // would otherwise be reachable by anyone who can reach the
+                // port while Basic Auth is unconfigured. Restrict to the
+                // local machine until an administrator sets WebUsername/
+                // WebPassword. POST /api/v1/inventory is unaffected: it is
+                // dispatched before this check and gated by its own Token.
+                return request.RemoteAddress != null && IPAddress.IsLoopback(request.RemoteAddress);
             }
 
             string authorization = request.Headers.ContainsKey("authorization") ? request.Headers["authorization"] : null;
@@ -2099,6 +2111,15 @@ namespace WindowsInventoryLite
             stream.Write(body, 0, body.Length);
         }
 
+        // script-src has no 'unsafe-inline' - the dashboard's ~20 innerHTML
+        // sinks are consistently escaped (see escapeHtml/escapeHtmlOrEmpty
+        // in app.js), so this is a backstop against a future unescaped sink,
+        // not the primary defense. style-src needs 'unsafe-inline' for the
+        // one legitimate case (bar-chart width) that sets a real inline
+        // style="..." attribute through innerHTML.
+        private const string ContentSecurityPolicy =
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+
         private static void SendText(Stream stream, string text, string contentType, int statusCode)
         {
             byte[] body = Encoding.UTF8.GetBytes(text);
@@ -2108,6 +2129,7 @@ namespace WindowsInventoryLite
                 "\r\nContent-Length: " + body.Length +
                 "\r\nX-Content-Type-Options: nosniff" +
                 "\r\nX-Frame-Options: DENY" +
+                "\r\nContent-Security-Policy: " + ContentSecurityPolicy +
                 "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
@@ -2164,6 +2186,7 @@ namespace WindowsInventoryLite
             public string Path;
             public Dictionary<string, string> Headers;
             public string Body;
+            public IPAddress RemoteAddress;
         }
 
         private sealed class InstallJob
@@ -2308,8 +2331,18 @@ namespace WindowsInventoryLite
                 return;
             }
 
+            string[] cmdLines;
+            try
+            {
+                cmdLines = GenerateCmdLines(serverUrl, token, intervalHours, packageSharePath);
+            }
+            catch (ArgumentException ex)
+            {
+                SendText(stream, "{\"error\":\"" + ex.Message.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
             string cmdPath = Path.Combine(options.ClientPackagePath, "Install-ClientGpo.cmd");
-            string[] cmdLines = GenerateCmdLines(serverUrl, token, intervalHours, packageSharePath);
             File.WriteAllLines(cmdPath, cmdLines, Encoding.ASCII);
 
             string deployInBin = Path.Combine(Path.GetDirectoryName(options.WinRmInstallerPath), "Deploy-ClientGpo.ps1");
@@ -3227,6 +3260,33 @@ namespace WindowsInventoryLite
 
             string json = serializer.Serialize(config);
             File.WriteAllText(options.ConfigPath, json, new UTF8Encoding(false));
+            ApplyRestrictedConfigAcl(options.ConfigPath);
+        }
+
+        // Mirrors Install-Server.ps1's Set-RestrictedFileAcl: restricts
+        // server-config.json to Administrators + SYSTEM only. This file can
+        // hold DPAPI-LocalMachine-protected secrets (AdPassword/WebPassword/
+        // Token, see SecretProtector.cs) which ANY local process can decrypt
+        // - the file's DACL is the only real confidentiality boundary for
+        // them. Reapplied on every write, not just at install time, so the
+        // file can never drift back to an inherited (broader) ACL if it is
+        // ever deleted and recreated by the running service.
+        private void ApplyRestrictedConfigAcl(string path)
+        {
+            try
+            {
+                SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                FileSecurity acl = File.GetAccessControl(path);
+                acl.SetAccessRuleProtection(true, false);
+                acl.AddAccessRule(new FileSystemAccessRule(adminSid, FileSystemRights.FullControl, AccessControlType.Allow));
+                acl.AddAccessRule(new FileSystemAccessRule(systemSid, FileSystemRights.FullControl, AccessControlType.Allow));
+                File.SetAccessControl(path, acl);
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Config", "Could not restrict server-config.json permissions: " + DebugLogger.SanitizeForLog(ex.Message));
+            }
         }
 
         // License inventory is an admin-entered catalog (name/version/license/comment),
@@ -3535,8 +3595,31 @@ namespace WindowsInventoryLite
             return settings;
         }
 
+        // Batch files treat &, |, <, >, ^ and an unbalanced " as live command
+        // separators/redirection - serverUrl and packageSharePath land on a
+        // SET line with no surrounding quotes at all, and token's quotes can
+        // be broken out of with an embedded ". A value containing any of
+        // these (or a line break, which injects a whole extra statement)
+        // turns Install-ClientGpo.cmd into an attacker-controlled script that
+        // a GPO computer startup script later runs as SYSTEM on every
+        // deployed client. % is handled separately via doubling, not
+        // rejected here, since it's expected in URLs/tokens.
+        private static readonly char[] BatchUnsafeChars = { '"', '&', '|', '<', '>', '^', '\r', '\n' };
+
+        private static void ValidateBatchSafe(string value, string fieldName)
+        {
+            if (!String.IsNullOrEmpty(value) && value.IndexOfAny(BatchUnsafeChars) >= 0)
+            {
+                throw new ArgumentException(fieldName + " contains a character that is not allowed here (\", &, |, <, >, ^, or a line break).");
+            }
+        }
+
         private static string[] GenerateCmdLines(string serverUrl, string token, int intervalHours, string packageSharePath)
         {
+            ValidateBatchSafe(serverUrl, "serverUrl");
+            ValidateBatchSafe(token, "token");
+            ValidateBatchSafe(packageSharePath, "packageSharePath");
+
             string escapedUrl = serverUrl.Replace("%", "%%");
             string packageRoot = String.IsNullOrEmpty(packageSharePath)
                 ? "%~dp0"
@@ -3641,7 +3724,7 @@ namespace WindowsInventoryLite
 
         private static void SendBytes(Stream stream, byte[] data, string contentType, string filename)
         {
-            string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Disposition: attachment; filename=\"" + filename + "\"\r\nContent-Length: " + data.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nConnection: close\r\n\r\n";
+            string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Disposition: attachment; filename=\"" + filename + "\"\r\nContent-Length: " + data.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
             stream.Write(data, 0, data.Length);
@@ -3688,6 +3771,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "SanitizeFileName escapes a reserved Windows device name", TestSanitizeFileNameReservedDeviceName);
             allPassed &= SelfTestCheck(output, "SanitizeFileName leaves a normal computer name untouched", TestSanitizeFileNameNormalName);
             allPassed &= SelfTestCheck(output, "FixedTimeEquals matches identical strings and rejects everything else", TestFixedTimeEquals);
+            allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized restricts to loopback while Basic Auth is unconfigured", TestIsWebRequestAuthorizedRestrictsToLoopbackWhenUnconfigured);
             allPassed &= SelfTestCheck(output, "TryParsePortFromPrefix extracts the port from a ListenPrefix URL", TestTryParsePortFromPrefix);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper escapes RFC 4515 special characters", TestLdapFilterEscapeSpecialChars);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper leaves a normal computer name untouched", TestLdapFilterEscapeNormalName);
@@ -3701,6 +3785,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "SecretProtector.Unprotect passes through a legacy plaintext value", TestSecretProtectorLegacyPlaintext);
             allPassed &= SelfTestCheck(output, "NeedsMigration flags a plaintext value", TestNeedsMigrationPlaintextValue);
             allPassed &= SelfTestCheck(output, "NeedsMigration does not flag an already-encrypted or empty value", TestNeedsMigrationAlreadyEncryptedOrEmpty);
+            allPassed &= SelfTestCheck(output, "GenerateCmdLines rejects serverUrl/token/packageSharePath containing batch-unsafe characters", TestGenerateCmdLinesRejectsUnsafeCharacters);
             allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' default package root", TestParseCmdSettingsDefaultPackageRoot);
             allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' custom package share path", TestParseCmdSettingsCustomPackageSharePath);
             return allPassed;
@@ -3941,6 +4026,50 @@ namespace WindowsInventoryLite
             return null;
         }
 
+        private static string TestIsWebRequestAuthorizedRestrictsToLoopbackWhenUnconfigured()
+        {
+            ServerOptions options = new ServerOptions();
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext loopbackRequest = new RequestContext();
+            loopbackRequest.Headers = new Dictionary<string, string>();
+            loopbackRequest.RemoteAddress = IPAddress.Loopback;
+            if (!server.IsWebRequestAuthorized(loopbackRequest))
+            {
+                return "expected a loopback request to be authorized while Basic Auth is unconfigured";
+            }
+
+            RequestContext remoteRequest = new RequestContext();
+            remoteRequest.Headers = new Dictionary<string, string>();
+            remoteRequest.RemoteAddress = IPAddress.Parse("192.168.1.50");
+            if (server.IsWebRequestAuthorized(remoteRequest))
+            {
+                return "expected a non-loopback request to be rejected while Basic Auth is unconfigured";
+            }
+
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+
+            RequestContext remoteWithoutAuth = new RequestContext();
+            remoteWithoutAuth.Headers = new Dictionary<string, string>();
+            remoteWithoutAuth.RemoteAddress = IPAddress.Parse("192.168.1.50");
+            if (server.IsWebRequestAuthorized(remoteWithoutAuth))
+            {
+                return "expected a non-loopback request with no Authorization header to be rejected once Basic Auth is configured";
+            }
+
+            RequestContext remoteWithAuth = new RequestContext();
+            remoteWithAuth.Headers = new Dictionary<string, string>();
+            remoteWithAuth.Headers["authorization"] = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("admin:secret"));
+            remoteWithAuth.RemoteAddress = IPAddress.Parse("192.168.1.50");
+            if (!server.IsWebRequestAuthorized(remoteWithAuth))
+            {
+                return "expected a non-loopback request with correct Basic Auth credentials to be authorized once Basic Auth is configured";
+            }
+
+            return null;
+        }
+
         private static string TestTryParsePortFromPrefix()
         {
             int port;
@@ -4116,6 +4245,42 @@ namespace WindowsInventoryLite
             if (NeedsMigration(""))
             {
                 return "expected an empty value to not need migration";
+            }
+            return null;
+        }
+
+        private static string TestGenerateCmdLinesRejectsUnsafeCharacters()
+        {
+            string[] unsafeValues = { "http://x \" & calc.exe & rem \"", "tok\"&calc.exe&rem\"", "\\\\share & calc.exe", "line1\nline2" };
+            foreach (string unsafeValue in unsafeValues)
+            {
+                try
+                {
+                    GenerateCmdLines(unsafeValue, null, 6, null);
+                    return "expected serverUrl '" + unsafeValue + "' to be rejected, but GenerateCmdLines accepted it";
+                }
+                catch (ArgumentException)
+                {
+                    // expected
+                }
+                try
+                {
+                    GenerateCmdLines("https://server/api/v1/inventory", unsafeValue, 6, null);
+                    return "expected token '" + unsafeValue + "' to be rejected, but GenerateCmdLines accepted it";
+                }
+                catch (ArgumentException)
+                {
+                    // expected
+                }
+                try
+                {
+                    GenerateCmdLines("https://server/api/v1/inventory", null, 6, unsafeValue);
+                    return "expected packageSharePath '" + unsafeValue + "' to be rejected, but GenerateCmdLines accepted it";
+                }
+                catch (ArgumentException)
+                {
+                    // expected
+                }
             }
             return null;
         }

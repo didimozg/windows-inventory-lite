@@ -60,10 +60,10 @@ function Read-WizardAnswer {
 # optional Default/Mandatory/Choices) and returns a parameter hashtable
 # ready to splat at the target script. Types: String, SecureString,
 # Int (falls back to Default with a warning on a non-numeric answer rather
-# than throwing or re-prompting - safe since no Int question in this plan
+# than throwing or re-prompting - safe since no Int question defined below
 # is Mandatory), StringArray (comma-separated), ValidateSet (shows Choices,
 # falls back to Default with a warning on an invalid answer rather than
-# re-prompting - acceptable since every ValidateSet question in this plan
+# re-prompting - acceptable since every ValidateSet question defined below
 # has a safe default), Switch (its own y/N sub-prompt, never inherits
 # -Default from the spec). Skips adding a key when the answer is
 # empty-and-optional or equals the displayed default - lets the target

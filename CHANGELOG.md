@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-07-17
+
+### Security
+
+- Fixed a command-injection vulnerability in `Install-ClientGpo.cmd` generation (`GenerateCmdLines` in the server, mirrored in `New-ClientGpoPackage.ps1`): `serverUrl` and `packageSharePath` were written to the `.cmd` file with no surrounding quotes, and `token`'s quoting could be broken out of with an embedded `"`. A value containing `&`, `|`, `<`, `>`, `^`, `"`, or a line break turned the generated script into an attacker-controlled command that a GPO computer startup script later runs as SYSTEM on every deployed client. Both the server's `client-package/configure` endpoint and the standalone script now reject any of these characters in `serverUrl`, `token`, or `packageSharePath` before generating the file.
+- The inventory ingestion token (`X-Inventory-Token`) is now compared with the project's existing constant-time comparison (`FixedTimeEquals`), matching how `WebPassword` and the admin password are already compared, instead of a plain `!=` that could leak the token byte-by-byte via response timing.
+- AD lookup error messages written to the Event Log and debug log are now passed through the existing log-injection sanitizer (`SanitizeForLog`), closing the one field that bypassed it.
+- While Basic Auth is unconfigured, the entire management API (dashboard, settings, certificate import, WinRM client actions, initial admin-password setup) now only accepts requests from the local machine, instead of being reachable by anyone who can reach the port. `POST /api/v1/inventory` is unaffected, since it is already gated by its own Token. Pass `-WebUsername`/`-WebPassword` to `Install-Server.ps1` at install time, or configure Basic Auth from the server console, to manage the server remotely right away.
+- `server-config.json`'s restrictive ACL (Administrators + SYSTEM only) is now reapplied on every write by the server itself, not just at install time, so it cannot drift back to a broader inherited ACL if the file is ever deleted and recreated while the service is running.
+- The dashboard now sends a `Content-Security-Policy` header on every response, as a backstop against a future unescaped rendering sink.
+
 ## [0.15.0] - 2026-07-17
 
 ### Added

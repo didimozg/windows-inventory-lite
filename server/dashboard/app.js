@@ -20,7 +20,7 @@
     // visible (see computeLiveRowsPerPage/recalculateActivePagination).
     // hwCpu/hwDisk/hwRam are fixed (see HW_PAGE_SIZE) - the three Hardware
     // sub-tables render stacked in one view and are rarely large enough to
-    // need viewport-adaptive sizing (see this plan's Global Constraints).
+    // need viewport-adaptive sizing.
     pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20 },
     // Prefixed keys ('client:'/'software:'/'hw:' + id) so the three
     // separate data-*-details attribute namespaces can't collide in one
@@ -1866,9 +1866,8 @@
 
   // Re-measures and, if it changed, applies a corrected live page size for
   // whichever table is now visible. Only Clients/Software are viewport-
-  // adaptive (see this plan's Global Constraints for why Hardware's three
-  // sub-tables use a fixed size instead); this function is a no-op for
-  // every other view.
+  // adaptive (Hardware's three sub-tables use a fixed size instead, see
+  // HW_PAGE_SIZE above); this function is a no-op for every other view.
   function recalculateActivePagination() {
     if (state.view === 'clients') {
       const size = computeLiveRowsPerPage('inventoryBody');
@@ -2046,9 +2045,9 @@
   // rows get replaced outside the full render() pipeline - e.g. a
   // standalone renderTable(state.clients) triggered by the Clients pager's
   // Prev/Next or by recalculateActivePagination's live-resize re-render.
-  // Binding listeners on the buttons themselves (as bindDetails() used to)
-  // requires re-binding after every innerHTML replacement; delegation needs
-  // binding exactly once, here, regardless of how the table DOM changes.
+  // Binding listeners on the buttons themselves would require re-binding
+  // after every innerHTML replacement; delegation needs binding exactly
+  // once, here, regardless of how the table DOM changes.
   document.addEventListener('click', e => {
     const th = e.target.closest('th[data-sort-key]');
     if (th) {
