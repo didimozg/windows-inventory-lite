@@ -94,11 +94,17 @@ $serviceName = 'WindowsInventoryLiteClient'
 $buildScript = Join-Path -Path $PSScriptRoot -ChildPath 'Build-Client.ps1'
 
 if (-not $ClientExecutablePath) {
+    # No explicit path was given, so this is the project's own build output
+    # (not a caller-supplied binary) - rebuild it fresh every run, the same
+    # way New-ClientGpoPackage.ps1 already does for its default paths. An
+    # existence-only check let a stale build\WindowsInventoryLiteClient.exe
+    # from an earlier session get installed silently, with no version
+    # mismatch warning like the dashboard's package view has.
     $projectRoot = Split-Path -Parent $PSScriptRoot
     $ClientExecutablePath = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteClient.exe'
+    & $buildScript -OutputPath $ClientExecutablePath
 }
-
-if (-not (Test-Path -LiteralPath $ClientExecutablePath)) {
+elseif (-not (Test-Path -LiteralPath $ClientExecutablePath)) {
     & $buildScript -OutputPath $ClientExecutablePath
 }
 

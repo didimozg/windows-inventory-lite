@@ -93,4 +93,30 @@ Describe 'Windows Inventory Lite Install Wizard' {
         $resolved | Should -Not -Match 'super-secret-value'
         $resolved | Should -Match "ListenPrefix 'http://\+:8080/'"
     }
+
+    It 'Read-WizardServerConfig returns null (not a throw) for a missing config file' {
+        Read-WizardServerConfig -Path 'C:\this-path-does-not-exist-installer-wizard-test\server-config.json' | Should -BeNullOrEmpty
+    }
+
+    It 'Test-InstallServerRefreshOnly returns false when no config file exists (asks all questions, as before)' {
+        Test-InstallServerRefreshOnly -ConfigPath 'C:\this-path-does-not-exist-installer-wizard-test\server-config.json' | Should -Be $false
+    }
+
+    It 'Test-InstallServerRefreshOnly returns true when a config exists and the user picks the default (just refresh)' {
+        $tempConfigPath = Join-Path -Path $TestDrive -ChildPath 'server-config.json'
+        Set-Content -LiteralPath $tempConfigPath -Value '{"ListenPrefix":"http://+:8080/"}' -Encoding UTF8
+
+        Mock Read-WizardAnswer { return $null }
+
+        Test-InstallServerRefreshOnly -ConfigPath $tempConfigPath | Should -Be $true
+    }
+
+    It 'Test-InstallServerRefreshOnly returns false when a config exists and the user explicitly picks full reconfigure' {
+        $tempConfigPath = Join-Path -Path $TestDrive -ChildPath 'server-config.json'
+        Set-Content -LiteralPath $tempConfigPath -Value '{"ListenPrefix":"http://+:8080/"}' -Encoding UTF8
+
+        Mock Read-WizardAnswer { return '2' }
+
+        Test-InstallServerRefreshOnly -ConfigPath $tempConfigPath | Should -Be $false
+    }
 }

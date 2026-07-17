@@ -636,28 +636,48 @@ if (-not $PSBoundParameters.ContainsKey('InstallLogRetentionDays')) {
     }
 }
 
+# For all three of these: no explicit path means this is the project's own
+# build output (not a caller-supplied binary), so rebuild fresh every run -
+# the same pattern New-ClientGpoPackage.ps1 already uses for its default
+# paths. An existence-only check let a stale build\*.exe from an earlier
+# session get deployed silently. A caller-supplied path is left as-is
+# unless literally missing, since passing one explicitly means "use this
+# binary", not "rebuild it".
+# Build-Server.ps1 already rebuilds both client targets at their own
+# default build\ paths as an unconditional side effect (see its own
+# comment) - tracked here so the ClientNet35/40ExecutablePath blocks below
+# don't immediately redo that same work a second time whenever it just ran.
+$serverBuildInvoked = $false
 if (-not $ServerExecutablePath) {
     $projectRoot = Split-Path -Parent $PSScriptRoot
     $ServerExecutablePath = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteServer.exe'
-}
-
-if (-not (Test-Path -LiteralPath $ServerExecutablePath)) {
     & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Server.ps1') -OutputPath $ServerExecutablePath
+    $serverBuildInvoked = $true
+}
+elseif (-not (Test-Path -LiteralPath $ServerExecutablePath)) {
+    & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Server.ps1') -OutputPath $ServerExecutablePath
+    $serverBuildInvoked = $true
 }
 
 if (-not $ClientNet35ExecutablePath) {
     $projectRoot = Split-Path -Parent $PSScriptRoot
     $ClientNet35ExecutablePath = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteClient-net35.exe'
+    if (-not $serverBuildInvoked) {
+        & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Client.ps1') -OutputPath $ClientNet35ExecutablePath -TargetFramework Net35
+    }
 }
-if (-not (Test-Path -LiteralPath $ClientNet35ExecutablePath)) {
+elseif (-not (Test-Path -LiteralPath $ClientNet35ExecutablePath)) {
     & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Client.ps1') -OutputPath $ClientNet35ExecutablePath -TargetFramework Net35
 }
 
 if (-not $ClientNet40ExecutablePath) {
     $projectRoot = Split-Path -Parent $PSScriptRoot
     $ClientNet40ExecutablePath = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteClient-net40.exe'
+    if (-not $serverBuildInvoked) {
+        & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Client.ps1') -OutputPath $ClientNet40ExecutablePath -TargetFramework Net40
+    }
 }
-if (-not (Test-Path -LiteralPath $ClientNet40ExecutablePath)) {
+elseif (-not (Test-Path -LiteralPath $ClientNet40ExecutablePath)) {
     & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Client.ps1') -OutputPath $ClientNet40ExecutablePath -TargetFramework Net40
 }
 

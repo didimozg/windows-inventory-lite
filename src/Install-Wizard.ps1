@@ -193,6 +193,70 @@ function Invoke-WizardAction {
     & $ScriptPath @Params
 }
 
+# Duplicated from Install-Server.ps1's own Read-ServerConfig (this project
+# doesn't share a module between scripts - see e.g. Uninstall-Server.ps1's
+# identical copy) so the wizard can detect whether a server is already
+# installed. Only used for detection (does a config file exist at all) -
+# not for reading individual settings out of it, since Install-Server.ps1
+# itself already reloads every setting from this same file whenever a
+# parameter is left unspecified, which is exactly what "just refresh, no
+# questions" below relies on.
+function Read-WizardServerConfig {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+
+    try {
+        Add-Type -AssemblyName System.Web.Extensions -ErrorAction SilentlyContinue
+        $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        $text = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+        $config = $serializer.DeserializeObject($text)
+        if ($config) {
+            return $config
+        }
+    }
+    catch {
+        Write-Warning "Failed to read server config: $($_.Exception.Message)"
+    }
+
+    return $null
+}
+
+# Detects an existing server install (via the default server-config.json
+# location) and, if found, asks whether to just refresh (reapply the
+# current settings, no questions asked) or fully reconfigure. Returns
+# $true when the caller should skip the question sequence entirely and
+# pass Install-Server.ps1 an empty params hashtable - relies on the same
+# behavior every other blank/omitted wizard answer already relies on:
+# leaving a parameter unspecified makes Install-Server.ps1 reload its
+# last-saved value, so an empty hashtable is a genuine "no change" reapply,
+# not a reset to the wizard's own hardcoded defaults. Detection only
+# checks the default config path (the same one Uninstall-Server.ps1 falls
+# back to) - a server installed at a custom -ConfigPath won't be detected,
+# same limitation as every other path-override this wizard doesn't ask
+# about, and simply behaves as if no install exists (asks all 22
+# questions, as before).
+function Test-InstallServerRefreshOnly {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ConfigPath
+    )
+
+    $existingConfig = Read-WizardServerConfig -Path $ConfigPath
+    if (-not $existingConfig) {
+        return $false
+    }
+
+    Write-Host ''
+    Write-Host "An existing server installation was detected ($ConfigPath)."
+    Write-Host '1. Just refresh (recommended) - reapply current settings, no questions asked'
+    Write-Host '2. Full reconfigure - re-answer every question from scratch'
+    $updateChoice = Read-WizardAnswer -Prompt 'Choice' -Default '1'
+    return ($updateChoice -ne '2')
+}
+
 $installClientQuestions = @(
     @{ Name = 'ServerUrl'; Prompt = 'Server URL (e.g. https://server.domain.local/api/v1/inventory)'; Type = 'String'; Mandatory = $true }
     @{ Name = 'ServerSharePath'; Prompt = 'Server share path for client updates (leave blank to skip)'; Type = 'String'; Mandatory = $false }
@@ -332,7 +396,18 @@ if ($MyInvocation.InvocationName -ne '.') {
         }
 
         $scriptPath = Join-Path -Path $PSScriptRoot -ChildPath $flow.ScriptName
-        $params = Read-WizardAnswers -Questions $flow.Questions
+
+        # Only the "Install server" flow has an existing-install detection
+        # step - see Test-InstallServerRefreshOnly for why "just refresh"
+        # means an empty params hashtable rather than a shorter question
+        # list.
+        $skipQuestions = $false
+        if ($choice -eq '1') {
+            $defaultConfigPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\server-config.json'
+            $skipQuestions = Test-InstallServerRefreshOnly -ConfigPath $defaultConfigPath
+        }
+
+        $params = if ($skipQuestions) { @{} } else { Read-WizardAnswers -Questions $flow.Questions }
         Invoke-WizardAction -ScriptPath $scriptPath -ScriptName $flow.ScriptName -Params $params -SecretParams $flow.SecretParams
     }
 }
