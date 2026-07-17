@@ -3,6 +3,7 @@
   const state = {
     clients: [], view: getInitialView(), installJobId: null, installPollTimer: null, installJobs: [],
     packageStatus: null,
+    clientUpdates: null,
     certificateStatus: null, certificateHistory: [],
     staleHours: 48,
     licenses: [], editingLicenseId: null, licenseFormComputers: [],
@@ -73,6 +74,7 @@
     if (hash === 'hardware') return 'hardware';
     if (hash === 'client-actions' || hash === 'actions' || hash === 'install') return 'install';
     if (hash === 'client-package' || hash === 'package') return 'package';
+    if (hash === 'client-updates' || hash === 'updates') return 'updates';
     if (hash === 'general') return 'general';
     if (hash === 'certificate') return 'certificate';
     if (hash === 'licenses') return 'licenses';
@@ -82,7 +84,7 @@
 
   function setView(view) {
     state.view = view;
-    const hash = view === 'install' ? 'client-actions' : view === 'package' ? 'client-package' : view === 'admin' ? 'admin-password' : view;
+    const hash = view === 'install' ? 'client-actions' : view === 'package' ? 'client-package' : view === 'updates' ? 'client-updates' : view === 'admin' ? 'admin-password' : view;
     if (window.location.hash.replace(/^#/, '') !== hash) {
       window.location.hash = hash;
       return;
@@ -90,6 +92,7 @@
     render();
     if (view === 'install') loadInstallHistory();
     if (view === 'package') loadPackageStatus();
+    if (view === 'updates') loadClientUpdates();
     if (view === 'general') loadGeneralSettings();
     if (view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (view === 'licenses') loadLicenses();
@@ -671,6 +674,74 @@
       .finally(() => {
         byId('installButton').disabled = false;
       });
+  }
+
+  function loadClientUpdates() {
+    fetch('/api/v1/client-updates', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.clientUpdates = data;
+        renderClientUpdates(data);
+      })
+      .catch(error => {
+        byId('updatesPackageStatus').textContent = `Client update status unavailable: ${error.message}`;
+      });
+  }
+
+  function formatAvailableVersion(data) {
+    if (data.net35Version && data.net40Version && data.net35Version !== data.net40Version) {
+      return `net35 v${escapeHtml(data.net35Version)} / net40 v${escapeHtml(data.net40Version)}`;
+    }
+    const version = data.net35Version || data.net40Version;
+    return version ? `v${escapeHtml(version)}` : 'unknown';
+  }
+
+  function renderClientUpdates(data) {
+    if (!data.packageAvailable) {
+      byId('updatesPackageStatus').textContent = 'No client package is available yet - build or deploy one on the Client package tab first.';
+      byId('updatesBody').innerHTML = '';
+      updateUpdatesBadge(0);
+      return;
+    }
+
+    const updates = data.updates || [];
+    byId('updatesPackageStatus').textContent = `Current client package: ${formatAvailableVersion(data)}. ${data.eligibleCount} eligible for WinRM push, ${data.blockedCount} blocked by OS.`;
+
+    if (updates.length === 0) {
+      byId('updatesBody').innerHTML = '<tr><td colspan="6" class="empty">Every reporting client is up to date.</td></tr>';
+      updateUpdatesBadge(0);
+      return;
+    }
+
+    const rows = updates.map(update => {
+      const checkbox = update.eligible
+        ? `<input type="checkbox" class="updates-row-checkbox" data-computer-name="${escapeHtml(update.computerName)}">`
+        : `<input type="checkbox" disabled title="WinRM is not supported on ${escapeHtml(update.osCaption || 'this OS')} - update via GPO or locally instead">`;
+      return `<tr class="${update.eligible ? '' : 'muted-row'}">
+        <td>${escapeHtml(update.computerName)}</td>
+        <td>${escapeHtml(update.domain)}</td>
+        <td>${escapeHtml(update.clientVersion || 'Unknown')}</td>
+        <td>${formatAvailableVersion(data)}</td>
+        <td>${escapeHtml(formatDateTime(update.collectedAt))}</td>
+        <td>${checkbox}</td>
+      </tr>`;
+    });
+
+    byId('updatesBody').innerHTML = rows.join('');
+    updateUpdatesBadge(data.eligibleCount);
+  }
+
+  function updateUpdatesBadge(eligibleCount) {
+    const badge = byId('updatesBadge');
+    if (eligibleCount > 0) {
+      badge.textContent = String(eligibleCount);
+      badge.classList.remove('hidden');
+    } else {
+      badge.classList.add('hidden');
+    }
   }
 
   function loadPackageStatus() {
@@ -1842,6 +1913,7 @@
     byId('hardwareView').classList.toggle('hidden', state.view !== 'hardware');
     byId('installView').classList.toggle('hidden', state.view !== 'install');
     byId('packageView').classList.toggle('hidden', state.view !== 'package');
+    byId('updatesView').classList.toggle('hidden', state.view !== 'updates');
     byId('generalView').classList.toggle('hidden', state.view !== 'general');
     byId('generalStatusView').classList.toggle('hidden', state.view !== 'general');
     byId('certificateView').classList.toggle('hidden', state.view !== 'certificate');
@@ -1853,6 +1925,7 @@
     byId('hardwareTab').classList.toggle('active', state.view === 'hardware');
     byId('installTab').classList.toggle('active', state.view === 'install');
     byId('packageTab').classList.toggle('active', state.view === 'package');
+    byId('updatesTab').classList.toggle('active', state.view === 'updates');
     byId('generalTab').classList.toggle('active', state.view === 'general');
     byId('certificateTab').classList.toggle('active', state.view === 'certificate');
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
@@ -2028,6 +2101,7 @@
     render();
     if (state.view === 'install') loadInstallHistory();
     if (state.view === 'package') loadPackageStatus();
+    if (state.view === 'updates') loadClientUpdates();
     if (state.view === 'general') loadGeneralSettings();
     if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (state.view === 'licenses') loadLicenses();
@@ -2105,6 +2179,7 @@
     }
   });
   byId('packageTab').addEventListener('click', () => setView('package'));
+  byId('updatesTab').addEventListener('click', () => setView('updates'));
   byId('pkgSaveButton').addEventListener('click', savePackageConfig);
   byId('pkgDownloadButton').addEventListener('click', () => {
     const status = state.packageStatus;
@@ -2147,6 +2222,7 @@
   byId('themeToggle').addEventListener('click', toggleTheme);
   updateThemeToggle();
   if (state.view === 'package') loadPackageStatus();
+  if (state.view === 'updates') loadClientUpdates();
   if (state.view === 'general') loadGeneralSettings();
   if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
   if (state.view === 'licenses') loadLicenses();

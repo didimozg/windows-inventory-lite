@@ -84,6 +84,11 @@
             <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="4" width="15" height="3.5" rx="0.8"/><path d="M3.5 7.5 v8 h13 v-8"/><line x1="8" y1="10.5" x2="12" y2="10.5"/></svg>
             Client package
           </button>
+          <button id="updatesTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 a7 7 0 1 1 -6.3 4"/><path d="M3 3 v4 h4"/></svg>
+            Client updates
+            <span id="updatesBadge" class="nav-badge hidden">0</span>
+          </button>
         </div>
         <div class="nav-group">
           <div class="nav-group-title">Settings</div>
@@ -423,6 +428,25 @@
           </div>
           <p class="cert-hint">By default the GPO startup script (<code>Install-ClientGpo.cmd</code>) looks for the client files in its own folder. Set this only when the script and the client files are deployed to different locations (for example, the script runs from SYSVOL but the client executables live on a separate file share) - an UNC path such as <code>\\server\share\gpo-client</code>.</p>
           <div id="pkgMessage" class="pkg-message hidden"></div>
+        </section>
+
+        <section id="updatesView" class="install-panel hidden" aria-label="Client updates">
+          <p id="updatesPackageStatus" class="pkg-status">Loading client update status...</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Computer</th>
+                  <th>Domain</th>
+                  <th>Current version</th>
+                  <th>Available version</th>
+                  <th>Last collected</th>
+                  <th><input id="updatesSelectAll" type="checkbox" title="Select all eligible"></th>
+                </tr>
+              </thead>
+              <tbody id="updatesBody"></tbody>
+            </table>
+          </div>
         </section>
 
         <section id="installView" class="install-panel hidden" aria-label="Remote client actions">

@@ -290,6 +290,17 @@ body {
   font-weight: 650;
 }
 
+.nav-badge {
+  margin-left: auto;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
 /* A dotted "spine" running down the section list, echoing the connector
    lines in the app's own logo (an org-chart of nodes) instead of a plain
    solid divider - the sidebar's own section list is, structurally, the
