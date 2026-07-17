@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-07-17
+
+### Changed
+
+- `Client updates` no longer disables Windows 7/8/8.1 targets - every outdated client can now be selected for a WinRM push, since WinRM reliability on those OS versions was a client-side issue that has since been fixed. The `eligible`/`blocked` split is gone from `GET /api/v1/client-updates`, replaced by a flat `updates` list and a single `outdatedCount`.
+
+### Fixed
+
+- `Install-Client.ps1` and `Collect-WindowsInventoryLite.ps1` (the two client-side scripts meant to run directly on a client machine, not just build/deploy from a server) used `$PSScriptRoot`, which is unset for a top-level script under Windows PowerShell 2.0 - it only started working outside modules in PS 3.0. Both scripts declared `#requires -Version 2.0` but would fail immediately on a real PS 2.0 host. Fixed by resolving the script's own path via `$MyInvocation.MyCommand.Path` instead, which works correctly back to PS 2.0. Server-side scripts (`Install-Server.ps1`, `Install-Wizard.ps1`, `New-ClientGpoPackage.ps1`, `Build-Server.ps1`, `Build-Client.ps1`) keep using `$PSScriptRoot` unchanged - they run on the server/build machine, which this project now assumes is PowerShell 5.1+.
+
 ## [0.16.0] - 2026-07-17
 
 ### Added

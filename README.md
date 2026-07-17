@@ -313,9 +313,7 @@ Off by default on both ends. Meant to be switched on for the duration of a troub
 
 ## Client Auto-Update
 
-The dashboard `Client updates` tab (under Installation) shows which reporting clients are running a version other than the client package currently on the server, and lets an administrator push an update to them over WinRM with one click - reusing the same install pipeline as `Client actions`.
-
-WinRM is unreliable against Windows 7, 8, and 8.1 targets in some environments. Outdated clients on those OS versions are still listed (so nothing is silently hidden), but their row is disabled and cannot be selected for a push - update them via GPO or locally instead.
+The dashboard `Client updates` tab (under Installation) shows which reporting clients are running a version other than the client package currently on the server, and lets an administrator push an update to any of them over WinRM with one click - reusing the same install pipeline as `Client actions`.
 
 By default, an update push uses the server service's own identity, the same WinRM prerequisite `Client actions` already documents. If that identity cannot reach update targets, an optional dedicated WinRM account can be saved on the `Client updates` page itself (`Client update username` / `Client update password`) - the password is encrypted at rest the same way as `WebPassword`/`AdPassword`/`Token`. There is no `Install-Server.ps1` flag for these credentials; they are dashboard-only.
 

@@ -710,7 +710,7 @@
     }
 
     const updates = data.updates || [];
-    byId('updatesPackageStatus').textContent = `Current client package: ${formatAvailableVersion(data)}. ${data.eligibleCount} eligible for WinRM push, ${data.blockedCount} blocked by OS.`;
+    byId('updatesPackageStatus').textContent = `Current client package: ${formatAvailableVersion(data)}. ${data.outdatedCount} outdated.`;
 
     if (updates.length === 0) {
       byId('updatesBody').innerHTML = '<tr><td colspan="6" class="empty">Every reporting client is up to date.</td></tr>';
@@ -718,28 +718,23 @@
       return;
     }
 
-    const rows = updates.map(update => {
-      const checkbox = update.eligible
-        ? `<input type="checkbox" class="updates-row-checkbox" data-computer-name="${escapeHtml(update.computerName)}">`
-        : `<input type="checkbox" disabled title="WinRM is not supported on ${escapeHtml(update.osCaption || 'this OS')} - update via GPO or locally instead">`;
-      return `<tr class="${update.eligible ? '' : 'muted-row'}">
+    const rows = updates.map(update => `<tr>
         <td>${escapeHtml(update.computerName)}</td>
         <td>${escapeHtml(update.domain)}</td>
         <td>${escapeHtml(update.clientVersion || 'Unknown')}</td>
         <td>${formatAvailableVersion(data)}</td>
         <td>${escapeHtml(formatDateTime(update.collectedAt))}</td>
-        <td>${checkbox}</td>
-      </tr>`;
-    });
+        <td><input type="checkbox" class="updates-row-checkbox" data-computer-name="${escapeHtml(update.computerName)}"></td>
+      </tr>`);
 
     byId('updatesBody').innerHTML = rows.join('');
-    updateUpdatesBadge(data.eligibleCount);
+    updateUpdatesBadge(data.outdatedCount);
   }
 
-  function updateUpdatesBadge(eligibleCount) {
+  function updateUpdatesBadge(outdatedCount) {
     const badge = byId('updatesBadge');
-    if (eligibleCount > 0) {
-      badge.textContent = String(eligibleCount);
+    if (outdatedCount > 0) {
+      badge.textContent = String(outdatedCount);
       badge.classList.remove('hidden');
     } else {
       badge.classList.add('hidden');

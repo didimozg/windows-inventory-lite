@@ -20,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.16.0";
+        internal const string ProductVersion = "0.16.1";
 
         private static int Main(string[] args)
         {
@@ -2298,16 +2298,13 @@ namespace WindowsInventoryLite
             {
                 result["packageAvailable"] = false;
                 result["updates"] = new ArrayList();
-                result["eligibleCount"] = 0;
-                result["blockedCount"] = 0;
+                result["outdatedCount"] = 0;
                 SendJson(stream, serializer.Serialize(result));
                 return;
             }
 
             result["packageAvailable"] = true;
             ArrayList updates = new ArrayList();
-            int eligibleCount = 0;
-            int blockedCount = 0;
 
             foreach (Dictionary<string, object> client in LoadClientReports())
             {
@@ -2317,32 +2314,16 @@ namespace WindowsInventoryLite
                     continue;
                 }
 
-                Dictionary<string, object> os = client.ContainsKey("os") ? client["os"] as Dictionary<string, object> : null;
-                string osCaption = GetStringValue(os, "caption");
-                bool eligible = IsWinRmEligibleOs(osCaption);
-
                 Dictionary<string, object> entry = new Dictionary<string, object>();
                 entry["computerName"] = GetStringValue(client, "computerName");
                 entry["domain"] = GetStringValue(client, "domain");
                 entry["clientVersion"] = clientVersion;
-                entry["osCaption"] = osCaption;
                 entry["collectedAt"] = GetStringValue(client, "collectedAt");
-                entry["eligible"] = eligible;
                 updates.Add(entry);
-
-                if (eligible)
-                {
-                    eligibleCount++;
-                }
-                else
-                {
-                    blockedCount++;
-                }
             }
 
             result["updates"] = updates;
-            result["eligibleCount"] = eligibleCount;
-            result["blockedCount"] = blockedCount;
+            result["outdatedCount"] = updates.Count;
             SendJson(stream, serializer.Serialize(result));
         }
 
@@ -3705,22 +3686,6 @@ namespace WindowsInventoryLite
             }
         }
 
-        // Blocklist, not allowlist: WinRM is unreliable against Windows
-        // 7/8/8.1 in this project's own test environment. "Windows 8" also
-        // matches "Windows 8.1" as a substring, so one check covers both.
-        // Windows Server and any other caption (including a blank/unknown
-        // one) stays eligible by default - this only excludes known-bad
-        // targets, it does not require enumerating every valid OS caption.
-        private static bool IsWinRmEligibleOs(string osCaption)
-        {
-            if (String.IsNullOrEmpty(osCaption))
-            {
-                return true;
-            }
-            return osCaption.IndexOf("Windows 7", StringComparison.OrdinalIgnoreCase) < 0
-                && osCaption.IndexOf("Windows 8", StringComparison.OrdinalIgnoreCase) < 0;
-        }
-
         // The client does not report which framework (net35/net40) it was
         // built with, so a client is considered current if its reported
         // version matches EITHER package currently on disk - this never
@@ -3979,8 +3944,6 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "NeedsMigration flags a plaintext value", TestNeedsMigrationPlaintextValue);
             allPassed &= SelfTestCheck(output, "NeedsMigration does not flag an already-encrypted or empty value", TestNeedsMigrationAlreadyEncryptedOrEmpty);
             allPassed &= SelfTestCheck(output, "GenerateCmdLines rejects serverUrl/token/packageSharePath containing batch-unsafe characters", TestGenerateCmdLinesRejectsUnsafeCharacters);
-            allPassed &= SelfTestCheck(output, "IsWinRmEligibleOs blocks Windows 7/8/8.1", TestIsWinRmEligibleOsBlocksKnownBadVersions);
-            allPassed &= SelfTestCheck(output, "IsWinRmEligibleOs allows Windows 10/11/Server and unknown captions", TestIsWinRmEligibleOsAllowsOthers);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent matches either package version", TestIsClientVersionCurrentMatchesEitherPackage);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent is outdated when it matches neither package", TestIsClientVersionCurrentOutdatedWhenMatchesNeither);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent treats an empty clientVersion as outdated", TestIsClientVersionCurrentTreatsEmptyAsOutdated);
@@ -4479,32 +4442,6 @@ namespace WindowsInventoryLite
                 catch (ArgumentException)
                 {
                     // expected
-                }
-            }
-            return null;
-        }
-
-        private static string TestIsWinRmEligibleOsBlocksKnownBadVersions()
-        {
-            string[] blocked = { "Microsoft Windows 7 Professional", "Microsoft Windows 7 Ultimate", "Microsoft Windows 8 Pro", "Microsoft Windows 8.1 Enterprise" };
-            foreach (string caption in blocked)
-            {
-                if (IsWinRmEligibleOs(caption))
-                {
-                    return "expected '" + caption + "' to be ineligible for WinRM";
-                }
-            }
-            return null;
-        }
-
-        private static string TestIsWinRmEligibleOsAllowsOthers()
-        {
-            string[] allowed = { "Microsoft Windows 10 Pro", "Microsoft Windows 11 Enterprise", "Microsoft Windows Server 2019 Datacenter", "", null };
-            foreach (string caption in allowed)
-            {
-                if (!IsWinRmEligibleOs(caption))
-                {
-                    return "expected '" + (caption ?? "(null)") + "' to be eligible for WinRM";
                 }
             }
             return null;

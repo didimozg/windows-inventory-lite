@@ -32,6 +32,12 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+# $PSScriptRoot is unset for a top-level script (not a module) on Windows
+# PowerShell 2.0 - it only started working outside modules in PS 3.0. This
+# script installs the client and runs on client machines, which this
+# project still supports at the PS 2.0 floor, so it resolves its own path
+# the PS 2.0-safe way instead.
+$ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 function Invoke-ServiceControl {
     param(
@@ -91,7 +97,7 @@ if (-not $InstallPath) {
 }
 
 $serviceName = 'WindowsInventoryLiteClient'
-$buildScript = Join-Path -Path $PSScriptRoot -ChildPath 'Build-Client.ps1'
+$buildScript = Join-Path -Path $ScriptRoot -ChildPath 'Build-Client.ps1'
 
 if (-not $ClientExecutablePath) {
     # No explicit path was given, so this is the project's own build output
@@ -100,7 +106,7 @@ if (-not $ClientExecutablePath) {
     # existence-only check let a stale build\WindowsInventoryLiteClient.exe
     # from an earlier session get installed silently, with no version
     # mismatch warning like the dashboard's package view has.
-    $projectRoot = Split-Path -Parent $PSScriptRoot
+    $projectRoot = Split-Path -Parent $ScriptRoot
     $ClientExecutablePath = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteClient.exe'
     & $buildScript -OutputPath $ClientExecutablePath
 }
