@@ -3554,6 +3554,48 @@ namespace WindowsInventoryLite
             }
         }
 
+        // Blocklist, not allowlist: WinRM is unreliable against Windows
+        // 7/8/8.1 in this project's own test environment. "Windows 8" also
+        // matches "Windows 8.1" as a substring, so one check covers both.
+        // Windows Server and any other caption (including a blank/unknown
+        // one) stays eligible by default - this only excludes known-bad
+        // targets, it does not require enumerating every valid OS caption.
+        private static bool IsWinRmEligibleOs(string osCaption)
+        {
+            if (String.IsNullOrEmpty(osCaption))
+            {
+                return true;
+            }
+            return osCaption.IndexOf("Windows 7", StringComparison.OrdinalIgnoreCase) < 0
+                && osCaption.IndexOf("Windows 8", StringComparison.OrdinalIgnoreCase) < 0;
+        }
+
+        // The client does not report which framework (net35/net40) it was
+        // built with, so a client is considered current if its reported
+        // version matches EITHER package currently on disk - this never
+        // flags a genuinely current client as outdated. A client with no
+        // reported version (old report predating the clientVersion field)
+        // is treated as outdated, not skipped, since it clearly isn't
+        // running anything current. A missing package (null) never counts
+        // as a match, so a client can't accidentally appear current just
+        // because one of the two package builds was never produced.
+        private static bool IsClientVersionCurrent(string clientVersion, string net35Version, string net40Version)
+        {
+            if (String.IsNullOrEmpty(clientVersion))
+            {
+                return false;
+            }
+            if (net35Version != null && String.Equals(clientVersion, net35Version, StringComparison.Ordinal))
+            {
+                return true;
+            }
+            if (net40Version != null && String.Equals(clientVersion, net40Version, StringComparison.Ordinal))
+            {
+                return true;
+            }
+            return false;
+        }
+
         private static Dictionary<string, string> ParseCmdSettings(string cmdPath)
         {
             Dictionary<string, string> settings = new Dictionary<string, string>();
@@ -3786,6 +3828,12 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "NeedsMigration flags a plaintext value", TestNeedsMigrationPlaintextValue);
             allPassed &= SelfTestCheck(output, "NeedsMigration does not flag an already-encrypted or empty value", TestNeedsMigrationAlreadyEncryptedOrEmpty);
             allPassed &= SelfTestCheck(output, "GenerateCmdLines rejects serverUrl/token/packageSharePath containing batch-unsafe characters", TestGenerateCmdLinesRejectsUnsafeCharacters);
+            allPassed &= SelfTestCheck(output, "IsWinRmEligibleOs blocks Windows 7/8/8.1", TestIsWinRmEligibleOsBlocksKnownBadVersions);
+            allPassed &= SelfTestCheck(output, "IsWinRmEligibleOs allows Windows 10/11/Server and unknown captions", TestIsWinRmEligibleOsAllowsOthers);
+            allPassed &= SelfTestCheck(output, "IsClientVersionCurrent matches either package version", TestIsClientVersionCurrentMatchesEitherPackage);
+            allPassed &= SelfTestCheck(output, "IsClientVersionCurrent is outdated when it matches neither package", TestIsClientVersionCurrentOutdatedWhenMatchesNeither);
+            allPassed &= SelfTestCheck(output, "IsClientVersionCurrent treats an empty clientVersion as outdated", TestIsClientVersionCurrentTreatsEmptyAsOutdated);
+            allPassed &= SelfTestCheck(output, "IsClientVersionCurrent ignores a missing package instead of false-matching it", TestIsClientVersionCurrentIgnoresMissingPackage);
             allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' default package root", TestParseCmdSettingsDefaultPackageRoot);
             allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' custom package share path", TestParseCmdSettingsCustomPackageSharePath);
             return allPassed;
@@ -4281,6 +4329,80 @@ namespace WindowsInventoryLite
                 {
                     // expected
                 }
+            }
+            return null;
+        }
+
+        private static string TestIsWinRmEligibleOsBlocksKnownBadVersions()
+        {
+            string[] blocked = { "Microsoft Windows 7 Professional", "Microsoft Windows 7 Ultimate", "Microsoft Windows 8 Pro", "Microsoft Windows 8.1 Enterprise" };
+            foreach (string caption in blocked)
+            {
+                if (IsWinRmEligibleOs(caption))
+                {
+                    return "expected '" + caption + "' to be ineligible for WinRM";
+                }
+            }
+            return null;
+        }
+
+        private static string TestIsWinRmEligibleOsAllowsOthers()
+        {
+            string[] allowed = { "Microsoft Windows 10 Pro", "Microsoft Windows 11 Enterprise", "Microsoft Windows Server 2019 Datacenter", "", null };
+            foreach (string caption in allowed)
+            {
+                if (!IsWinRmEligibleOs(caption))
+                {
+                    return "expected '" + (caption ?? "(null)") + "' to be eligible for WinRM";
+                }
+            }
+            return null;
+        }
+
+        private static string TestIsClientVersionCurrentMatchesEitherPackage()
+        {
+            if (!IsClientVersionCurrent("0.15.1", "0.15.1", "0.16.0"))
+            {
+                return "expected a version matching net35Version to be current";
+            }
+            if (!IsClientVersionCurrent("0.16.0", "0.15.1", "0.16.0"))
+            {
+                return "expected a version matching net40Version to be current";
+            }
+            return null;
+        }
+
+        private static string TestIsClientVersionCurrentOutdatedWhenMatchesNeither()
+        {
+            if (IsClientVersionCurrent("0.14.0", "0.15.1", "0.16.0"))
+            {
+                return "expected a version matching neither package to be outdated";
+            }
+            return null;
+        }
+
+        private static string TestIsClientVersionCurrentTreatsEmptyAsOutdated()
+        {
+            if (IsClientVersionCurrent("", "0.15.1", "0.16.0"))
+            {
+                return "expected an empty clientVersion to be outdated";
+            }
+            if (IsClientVersionCurrent(null, "0.15.1", "0.16.0"))
+            {
+                return "expected a null clientVersion to be outdated";
+            }
+            return null;
+        }
+
+        private static string TestIsClientVersionCurrentIgnoresMissingPackage()
+        {
+            if (IsClientVersionCurrent("0.15.1", null, "0.16.0"))
+            {
+                return "expected a version that would have matched a missing net35 package to be outdated, not current";
+            }
+            if (!IsClientVersionCurrent("0.16.0", null, "0.16.0"))
+            {
+                return "expected a version matching the only present package (net40) to be current";
             }
             return null;
         }
