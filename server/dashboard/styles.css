@@ -1113,14 +1113,16 @@ th.sort-desc::after {
   grid-template-columns: minmax(180px, 1fr) minmax(280px, 2fr) auto;
 }
 
-/* Without this, grid auto-flow packs "Domain" into the same row as "Use
-   service account identity"/"AD username" once those two fields become
-   visible (checkbox unchecked) - straddling two unrelated field groups
-   across one row. Spanning the full row keeps "Enable AD sync/Sync
-   mode/Sync interval" as one row and "Use service account identity/AD
-   username/AD password" as the next, matching how they're grouped. */
-.general-ad-domain-field {
-  grid-column: 1 / -1;
+/* Domain/identity/username/password are credential-shaped fields that
+   don't fit the wide multi-column .general-grid above them - forcing them
+   into extra grid tracks packed unrelated fields into the same row (e.g.
+   "Domain" beside "AD username"). A single narrow column, capped so a
+   domain name or account string doesn't stretch edge-to-edge, reads as one
+   deliberate group instead of a grid searching for content to fill. */
+.ad-identity-panel {
+  grid-template-columns: 1fr;
+  max-width: 420px;
+  margin-top: 12px;
 }
 
 .client-update-grid {

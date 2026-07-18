@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.16.10] - 2026-07-18
+
+### Changed
+
+- Reworked the Active Directory settings layout: "Domain", "Use service account identity", "AD username", and "AD password" moved out of the wide multi-column `general-grid` into their own single-column panel capped at 420px, instead of stretching a domain/account field edge-to-edge or packing it into a row with unrelated fields. "Enable AD sync", "Sync mode", and "Sync interval" stay in the original row layout above it. Verified with Playwright against a local console-mode instance, light and dark theme.
+
 ## [0.16.9] - 2026-07-18
 
 ### Fixed
