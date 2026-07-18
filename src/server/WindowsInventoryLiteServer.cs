@@ -530,6 +530,8 @@ namespace WindowsInventoryLite
         private volatile X509Certificate2 serverCertificate;
         private readonly object adSyncTimerLock = new object();
         private Timer adSyncTimer;
+        private readonly object clientUpdateScheduleTimerLock = new object();
+        private Timer clientUpdateScheduleTimer;
         private readonly object reportFileLock = new object();
 
         public InventoryServer(ServerOptions options)
@@ -565,6 +567,8 @@ namespace WindowsInventoryLite
             }
 
             ReconfigureAdSyncTimer();
+            ResetMissedOnceSchedule();
+            ReconfigureClientUpdateScheduleTimer();
 
             if (!httpSlot.Running && !httpsSlot.Running)
             {
@@ -613,6 +617,14 @@ namespace WindowsInventoryLite
                 {
                     adSyncTimer.Dispose();
                     adSyncTimer = null;
+                }
+            }
+            lock (clientUpdateScheduleTimerLock)
+            {
+                if (clientUpdateScheduleTimer != null)
+                {
+                    clientUpdateScheduleTimer.Dispose();
+                    clientUpdateScheduleTimer = null;
                 }
             }
             StopSlot(httpSlot);
@@ -722,6 +734,196 @@ namespace WindowsInventoryLite
                     // over the rest of the fleet.
                 }
             }
+        }
+
+        // Polls every 60 seconds rather than mirroring ShouldSyncAd's
+        // "interval IS the due time" Timer pattern - "once" mode needs to
+        // fire close to an arbitrary target time (could be any minute of the
+        // day), not just on hour boundaries, so a coarse once-per-interval
+        // Timer can't represent it. A 60-second poll costs nothing (the tick
+        // handler no-ops immediately when the schedule isn't due) and keeps
+        // both "once" and "interval" modes on one simple mechanism instead of
+        // two different Timer shapes. Called after every schedule config
+        // change (Task 3's ConfigureClientUpdateSchedule) and once at
+        // startup, so a mode switch takes effect without a service restart -
+        // same pattern as ReconfigureAdSyncTimer above.
+        private void ReconfigureClientUpdateScheduleTimer()
+        {
+            lock (clientUpdateScheduleTimerLock)
+            {
+                if (clientUpdateScheduleTimer != null)
+                {
+                    clientUpdateScheduleTimer.Dispose();
+                    clientUpdateScheduleTimer = null;
+                }
+                if (options.ClientUpdateScheduleMode != "off")
+                {
+                    TimeSpan pollInterval = TimeSpan.FromSeconds(60);
+                    clientUpdateScheduleTimer = new Timer(RunClientUpdateScheduleTick, null, TimeSpan.Zero, pollInterval);
+                }
+            }
+        }
+
+        // One poll tick: checks whether the configured schedule is due and,
+        // if so, starts a push against every currently-outdated client - then
+        // updates and persists the schedule's own bookkeeping (mode/last-run)
+        // so the next tick doesn't fire the same event again.
+        private void RunClientUpdateScheduleTick(object state)
+        {
+            string mode = options.ClientUpdateScheduleMode;
+            if (mode == "off")
+            {
+                return;
+            }
+
+            DateTime? onceAtUtc = ParseUtcOrNull(options.ClientUpdateScheduleOnceAtUtc);
+            DateTime? lastRunUtc = ParseUtcOrNull(options.ClientUpdateScheduleLastRunUtc);
+            if (!ShouldRunClientUpdateSchedule(DateTime.UtcNow, mode, onceAtUtc, lastRunUtc, options.ClientUpdateScheduleIntervalHours))
+            {
+                return;
+            }
+
+            StartScheduledClientUpdatePush();
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            if (mode == "once")
+            {
+                options.ClientUpdateScheduleMode = "off";
+                options.ClientUpdateScheduleOnceAtUtc = "";
+                updates["ClientUpdateScheduleMode"] = "off";
+                updates["ClientUpdateScheduleOnceAtUtc"] = "";
+                SaveServerConfigValues(updates);
+                ReconfigureClientUpdateScheduleTimer();
+            }
+            else
+            {
+                options.ClientUpdateScheduleLastRunUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                updates["ClientUpdateScheduleLastRunUtc"] = options.ClientUpdateScheduleLastRunUtc;
+                SaveServerConfigValues(updates);
+            }
+        }
+
+        private static DateTime? ParseUtcOrNull(string value)
+        {
+            if (String.IsNullOrEmpty(value))
+            {
+                return null;
+            }
+            DateTime parsed;
+            if (DateTime.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out parsed))
+            {
+                return parsed.ToUniversalTime();
+            }
+            return null;
+        }
+
+        // Builds and starts an install job against every currently-outdated
+        // client, exactly as if an admin had checked every row on the Client
+        // updates page and clicked "Update selected" - reuses the same
+        // outdated-detection logic as SendClientUpdates and the same
+        // ResolveUpdateCredentials fallback chain a blank-fields manual push
+        // uses. No-ops quietly (no job started) if there's no built client
+        // package, no outdated clients, or no known server URL to hand the
+        // client - there's no user present to show an error to, and this
+        // feature deliberately has no separate notification mechanism (see
+        // the design spec's Out of Scope section).
+        private void StartScheduledClientUpdatePush()
+        {
+            string net35Version = null;
+            string net40Version = null;
+            if (Directory.Exists(options.ClientPackagePath))
+            {
+                string net35Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net35.exe");
+                string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
+                net35Version = File.Exists(net35Path) ? GetExeVersion(net35Path) : null;
+                net40Version = File.Exists(net40Path) ? GetExeVersion(net40Path) : null;
+            }
+            if (net35Version == null && net40Version == null)
+            {
+                return;
+            }
+
+            ArrayList targets = new ArrayList();
+            foreach (Dictionary<string, object> client in LoadClientReports())
+            {
+                string clientVersion = GetStringValue(client, "clientVersion");
+                if (IsClientVersionCurrent(clientVersion, net35Version, net40Version))
+                {
+                    continue;
+                }
+                string computerName = GetStringValue(client, "computerName");
+                if (!String.IsNullOrEmpty(computerName))
+                {
+                    targets.Add(computerName);
+                }
+            }
+            if (targets.Count == 0)
+            {
+                return;
+            }
+
+            // The same URL an already-deployed client is configured to
+            // report to - there is no browser/admin present to type one, so
+            // this is the one already-known-correct value to reuse (a
+            // manual push's own pre-filled Server URL field is derived from
+            // the browser's own address, which isn't available here either).
+            string cmdPath = Path.Combine(options.ClientPackagePath, "Install-ClientGpo.cmd");
+            Dictionary<string, string> cmdSettings = ParseCmdSettings(cmdPath);
+            string serverUrl = cmdSettings.ContainsKey("serverUrl") ? cmdSettings["serverUrl"] : null;
+            if (String.IsNullOrEmpty(serverUrl))
+            {
+                return;
+            }
+
+            string username = "";
+            string password = "";
+            ResolveUpdateCredentials(ref username, ref password, true, options.ClientUpdateUsername, options.ClientUpdatePassword);
+
+            InstallJob job = new InstallJob();
+            job.Id = Guid.NewGuid().ToString("N");
+            job.Action = "install";
+            job.Status = "queued";
+            job.CreatedAtUtc = DateTime.UtcNow;
+            job.Targets = targets;
+            job.Results = new ArrayList();
+            job.ServerUrl = serverUrl;
+            job.Username = username;
+            job.Password = password;
+            job.Force = false;
+            job.AddToTrustedHosts = false;
+            job.RetentionDays = options.InstallLogRetentionDays;
+
+            lock (installJobsLock)
+            {
+                installJobs[job.Id] = job;
+                SaveInstallJob(job);
+            }
+            ThreadPool.QueueUserWorkItem(RunClientActionJob, job);
+        }
+
+        // Called once at startup, before the timer is armed - if the service
+        // was stopped through a "once" schedule's target time, that moment
+        // is gone and silently cleared rather than fired late (per the
+        // design spec: a missed one-time push is not worth surprising an
+        // admin with an unexpected WinRM push right as the service starts).
+        private void ResetMissedOnceSchedule()
+        {
+            if (options.ClientUpdateScheduleMode != "once")
+            {
+                return;
+            }
+            DateTime? onceAtUtc = ParseUtcOrNull(options.ClientUpdateScheduleOnceAtUtc);
+            if (!onceAtUtc.HasValue || DateTime.UtcNow < onceAtUtc.Value)
+            {
+                return;
+            }
+
+            options.ClientUpdateScheduleMode = "off";
+            options.ClientUpdateScheduleOnceAtUtc = "";
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["ClientUpdateScheduleMode"] = "off";
+            updates["ClientUpdateScheduleOnceAtUtc"] = "";
+            SaveServerConfigValues(updates);
         }
 
         private sealed class ListenerSlot
