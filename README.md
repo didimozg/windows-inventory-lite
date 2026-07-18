@@ -317,6 +317,8 @@ The dashboard `Client updates` tab (under Installation) shows which reporting cl
 
 By default, an update push uses the server service's own identity, the same WinRM prerequisite `Client actions` already documents. If that identity cannot reach update targets, an optional dedicated WinRM account can be saved on the `Client updates` page itself (`Client update username` / `Client update password`) - the password is encrypted at rest the same way as `WebPassword`/`AdPassword`/`Token`. There is no `Install-Server.ps1` flag for these credentials; they are dashboard-only.
 
+A "Schedule" section on the same page lets an administrator configure an automatic push instead of clicking "Update selected" by hand - either once at a specific date and time, or repeating every N hours. A scheduled push always targets whichever clients are outdated at the moment it fires, using the saved WinRM account (or the server's own service identity if none is saved) - there is no user present to type credentials for an unattended run.
+
 ## Dashboard Usage
 
 Navigation is a tree sidebar with five sections, pinned in place while the page content scrolls:
