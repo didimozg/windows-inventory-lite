@@ -2162,6 +2162,24 @@
       .catch(() => {
         // Silent - see function comment above.
       });
+
+    // Separate fetch, badge-only: the sidebar "Client updates" count should
+    // stay live even when the Client updates tab itself isn't open. A full
+    // loadClientUpdates()/renderClientUpdates() call is deliberately NOT used
+    // here - it rebuilds #updatesBody's row checkboxes, which would silently
+    // clear an in-progress selection if the user has this tab open and rows
+    // checked when a poll tick lands.
+    fetch('/api/v1/client-updates', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        updateUpdatesBadge(data.packageAvailable ? data.outdatedCount : 0);
+      })
+      .catch(() => {
+        // Silent - matches the clients-poll fetch above.
+      });
   }
 
   function startPolling() {

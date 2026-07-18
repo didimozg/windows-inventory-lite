@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.16.8] - 2026-07-18
+
+### Added
+
+- Both compiled executables now carry a proper Win32 version resource (Explorer's Properties > Details tab previously showed `0.0.0.0` and blank product info for both exes) - product name, description, and file/product version are now populated, sourced from each executable's own `Program.ProductVersion` constant so they can't drift out of sync with what the app reports at runtime.
+
+### Fixed
+
+- The sidebar "Client updates" badge count never refreshed on its own - it only updated on page load or when the Client updates tab was opened, unlike the rest of the dashboard's 30-second live auto-refresh (v0.15.0). `pollForUpdates()` now also polls `GET /api/v1/client-updates` on every tick and updates the badge, without touching the tab's own table/checkboxes (a full re-render there would have silently cleared an in-progress selection if the tab happened to be open when a poll landed).
+
 ## [0.16.7] - 2026-07-18
 
 ### Fixed
