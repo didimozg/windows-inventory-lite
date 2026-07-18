@@ -1113,6 +1113,26 @@ th.sort-desc::after {
   grid-template-columns: minmax(180px, 1fr) minmax(280px, 2fr) auto;
 }
 
+/* Same narrow single-column treatment as .ad-identity-panel below, for the
+   "Enable AD sync" / "Sync mode" / "Sync interval" group - keeps this
+   settings block reading as two small stacked panels instead of one wide
+   grid with mixed-purpose fields side by side. */
+.ad-sync-panel {
+  grid-template-columns: 1fr;
+  max-width: 420px;
+}
+
+/* "Sync interval" only means anything for the "Periodic timer" sync mode
+   (hidden otherwise via app.js's updateAdSyncIntervalField) - putting it
+   beside "Sync mode" instead of below keeps the two related fields
+   together instead of interval popping in and shifting everything below
+   it down a row. */
+.ad-sync-mode-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
 /* Domain/identity/username/password are credential-shaped fields that
    don't fit the wide multi-column .general-grid above them - forcing them
    into extra grid tracks packed unrelated fields into the same row (e.g.
@@ -1314,7 +1334,8 @@ th.sort-desc::after {
   .pkg-grid,
   .license-grid,
   .admin-password-grid,
-  .general-grid {
+  .general-grid,
+  .ad-sync-mode-row {
     grid-template-columns: 1fr;
   }
 }

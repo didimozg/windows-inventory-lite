@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.16.11] - 2026-07-18
+
+### Changed
+
+- "Sync mode" moved out of the old wide top row into the same fixed-width panel as "Enable AD sync" (420px, matching the identity panel below it). "Sync interval (hours)" is now hidden entirely when Sync mode is "On inventory report" (it has no effect in that mode) and appears next to "Sync mode" only when "Periodic timer" is selected. Verified with Playwright, both sync modes.
+
 ## [0.16.10] - 2026-07-18
 
 ### Changed

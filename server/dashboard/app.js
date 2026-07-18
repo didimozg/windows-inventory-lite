@@ -1142,6 +1142,11 @@
     });
   }
 
+  function updateAdSyncIntervalField() {
+    const isTimerMode = byId('generalAdSyncMode').value === 'timer';
+    byId('generalAdSyncIntervalField').classList.toggle('hidden', !isTimerMode);
+  }
+
   function loadGeneralSettings() {
     fetch('/api/v1/server/settings', { cache: 'no-store' })
       .then(response => {
@@ -1172,6 +1177,7 @@
         byId('generalAdSyncEnabled').checked = !!data.adSyncEnabled;
         byId('generalAdSyncMode').value = data.adSyncMode || 'on-report';
         byId('generalAdSyncIntervalHours').value = data.adSyncIntervalHours || 24;
+        updateAdSyncIntervalField();
         byId('generalAdDomain').value = data.adDomain || '';
         byId('generalAdUseServiceIdentity').checked = data.adUseServiceIdentity !== false;
         byId('generalAdUsername').value = data.adUsername || '';
@@ -2361,6 +2367,7 @@
   byId('generalTab').addEventListener('click', () => setView('general'));
   byId('generalSaveButton').addEventListener('click', () => saveGeneralSettings(false));
   byId('generalAdUseServiceIdentity').addEventListener('change', updateAdIdentityFields);
+  byId('generalAdSyncMode').addEventListener('change', updateAdSyncIntervalField);
   byId('certificateTab').addEventListener('click', () => setView('certificate'));
   byId('certUploadButton').addEventListener('click', uploadCertificate);
   byId('certDeleteButton').addEventListener('click', deleteCertificate);

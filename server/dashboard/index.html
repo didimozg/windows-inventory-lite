@@ -208,22 +208,24 @@
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Active Directory</h2>
-            <div class="pkg-grid general-grid">
+            <div class="pkg-grid ad-sync-panel">
               <label class="check-label">
                 <input id="generalAdSyncEnabled" type="checkbox">
                 Enable AD sync
               </label>
-              <label class="pkg-token-field">
-                Sync mode
-                <select id="generalAdSyncMode">
-                  <option value="on-report">On inventory report</option>
-                  <option value="timer">Periodic timer</option>
-                </select>
-              </label>
-              <label class="pkg-token-field">
-                Sync interval (hours)
-                <input id="generalAdSyncIntervalHours" type="number" min="1" max="8760" value="24">
-              </label>
+              <div class="ad-sync-mode-row">
+                <label class="pkg-token-field">
+                  Sync mode
+                  <select id="generalAdSyncMode">
+                    <option value="on-report">On inventory report</option>
+                    <option value="timer">Periodic timer</option>
+                  </select>
+                </label>
+                <label id="generalAdSyncIntervalField" class="pkg-token-field hidden">
+                  Sync interval (hours)
+                  <input id="generalAdSyncIntervalHours" type="number" min="1" max="8760" value="24">
+                </label>
+              </div>
             </div>
             <div class="pkg-grid ad-identity-panel">
               <label class="pkg-token-field">
