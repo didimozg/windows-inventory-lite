@@ -742,13 +742,24 @@
   }
 
   function loadClientUpdateCredentials() {
+    // The username/password push fields are never pre-filled from the saved
+    // account: a form that looks empty but silently carries a stale
+    // username (with a genuinely blank password) would send a mismatched
+    // credential pair to WinRM instead of either the saved pair or the
+    // service identity. This hint is display-only.
+    const hint = byId('updatesSavedAccountHint');
     fetch('/api/v1/client-updates/credentials', { cache: 'no-store' })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
       })
       .then(data => {
-        if (data.username) byId('updatesUsername').value = data.username;
+        if (data.username) {
+          hint.textContent = `Saved account: ${data.username}`;
+          hint.classList.remove('hidden');
+        } else {
+          hint.classList.add('hidden');
+        }
       })
       .catch(() => {});
   }
@@ -784,6 +795,37 @@
       });
   }
 
+  function clearClientUpdateCredentials() {
+    const messageElement = byId('updatesCredentialsMessage');
+
+    byId('updatesClearCredentialsButton').disabled = true;
+    fetch('/api/v1/client-updates/credentials', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clear: true })
+    })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(() => {
+        byId('updatesUsername').value = '';
+        byId('updatesPassword').value = '';
+        byId('updatesSavedAccountHint').classList.add('hidden');
+        messageElement.classList.remove('hidden', 'error');
+        messageElement.textContent = 'Saved credentials deleted.';
+      })
+      .catch(error => {
+        messageElement.classList.remove('hidden');
+        messageElement.classList.add('error');
+        messageElement.textContent = `Failed to delete: ${error.message}`;
+      })
+      .finally(() => {
+        byId('updatesClearCredentialsButton').disabled = false;
+      });
+  }
+
   function updateUpdatesSelectionState() {
     const checkboxes = Array.from(document.querySelectorAll('.updates-row-checkbox'));
     const anyChecked = checkboxes.some(checkbox => checkbox.checked);
@@ -795,13 +837,14 @@
       .map(checkbox => checkbox.dataset.computerName);
     if (targets.length === 0) return;
 
-    // updatesPassword is almost always empty here: saveClientUpdateCredentials
-    // clears it right after a successful save (the real value is never sent
-    // back from the server), and loadClientUpdateCredentials never pre-fills
-    // it either. useSavedCredentials: true below tells the server "if both
-    // fields are blank, use the saved account instead of the service
-    // identity" - typing a fresh username+password here still overrides that
-    // for this one push, matching Client actions' per-action behavior.
+    // Both fields are normally empty here: loadClientUpdateCredentials only
+    // ever shows the saved username as a read-only hint, never into these
+    // inputs (a pre-filled username paired with an always-blank password
+    // would send a mismatched credential pair to WinRM). useSavedCredentials:
+    // true below tells the server "if both fields are blank, use the saved
+    // account instead of the service identity" - typing a fresh
+    // username+password here still overrides that for this one push,
+    // matching Client actions' per-action behavior.
     const username = byId('updatesUsername').value.trim();
     const password = byId('updatesPassword').value;
     // #installServerUrl is populated once, unconditionally, on page load
@@ -2275,6 +2318,7 @@
   byId('packageTab').addEventListener('click', () => setView('package'));
   byId('updatesTab').addEventListener('click', () => setView('updates'));
   byId('updatesSaveCredentialsButton').addEventListener('click', saveClientUpdateCredentials);
+  byId('updatesClearCredentialsButton').addEventListener('click', clearClientUpdateCredentials);
   byId('updatesPushButton').addEventListener('click', startClientUpdateJob);
   byId('updatesSelectAll').addEventListener('change', () => {
     const checked = byId('updatesSelectAll').checked;

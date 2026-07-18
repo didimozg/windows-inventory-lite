@@ -433,7 +433,8 @@
         <section id="updatesView" class="install-panel hidden" aria-label="Client updates">
           <div class="settings-block">
             <h2 class="settings-block-title">WinRM credentials</h2>
-            <p class="cert-hint">Leave both fields blank to use the server service's own identity (the same account WinRM client actions already require). Fill them in only if a separate account is needed to reach update targets.</p>
+            <p class="cert-hint">Leave both fields blank when pushing an update to use the saved account below, or the server service's own identity if nothing is saved (the same account WinRM client actions already require). Fill them in to override with a different account for this push only.</p>
+            <p id="updatesSavedAccountHint" class="cert-hint hidden"></p>
             <div class="pkg-grid client-update-grid">
               <label class="pkg-token-field">
                 Client update username
@@ -444,6 +445,7 @@
                 <input id="updatesPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current one">
               </label>
               <button id="updatesSaveCredentialsButton" class="primary-button" type="button">Save</button>
+              <button id="updatesClearCredentialsButton" class="export-button" type="button">Delete saved credentials</button>
             </div>
             <div id="updatesCredentialsMessage" class="pkg-message hidden"></div>
           </div>

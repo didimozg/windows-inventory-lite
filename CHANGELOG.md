@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.16.6] - 2026-07-18
+
+### Fixed
+
+- `Client updates` auto-filled the saved username into the push form's `Client update username` field on every page load, while the password field is never pre-filled by design. A push made with an untouched, "empty-looking" form therefore sent a real username paired with a genuinely blank password straight to WinRM instead of triggering the 0.16.3 saved-account fallback (which only substitutes when *both* fields are blank) - producing "Access denied" even though the saved account itself was reachable and correct, confirmed live against `KLG-WSW8-007`. The saved account is now shown as a read-only "Saved account: ..." hint instead of being written into the input, so leaving the form untouched submits two genuinely blank fields.
+
+### Added
+
+- `Client updates` has a "Delete saved credentials" button to clear the saved WinRM account, useful when re-testing the fallback-to-service-identity path without having to overwrite the saved fields with blanks by hand.
+
 ## [0.16.5] - 2026-07-18
 
 ### Fixed

@@ -20,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.16.5";
+        internal const string ProductVersion = "0.16.6";
 
         private static int Main(string[] args)
         {
@@ -3265,13 +3265,24 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            string username = payload.ContainsKey("username") ? Convert.ToString(payload["username"]) : options.ClientUpdateUsername;
-            // Blank/omitted password means "keep the existing one" - the
-            // dashboard never pre-fills a password field with the real
-            // stored value, matching the AD credentials save endpoint.
-            string password = payload.ContainsKey("password") && !String.IsNullOrEmpty(Convert.ToString(payload["password"]))
-                ? Convert.ToString(payload["password"])
-                : options.ClientUpdatePassword;
+            bool clear = payload.ContainsKey("clear") && Convert.ToBoolean(payload["clear"]);
+            string username;
+            string password;
+            if (clear)
+            {
+                username = "";
+                password = "";
+            }
+            else
+            {
+                username = payload.ContainsKey("username") ? Convert.ToString(payload["username"]) : options.ClientUpdateUsername;
+                // Blank/omitted password means "keep the existing one" - the
+                // dashboard never pre-fills a password field with the real
+                // stored value, matching the AD credentials save endpoint.
+                password = payload.ContainsKey("password") && !String.IsNullOrEmpty(Convert.ToString(payload["password"]))
+                    ? Convert.ToString(payload["password"])
+                    : options.ClientUpdatePassword;
+            }
 
             options.ClientUpdateUsername = username;
             options.ClientUpdatePassword = password;
