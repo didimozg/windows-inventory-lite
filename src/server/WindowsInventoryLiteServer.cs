@@ -20,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.16.2";
+        internal const string ProductVersion = "0.16.3";
 
         private static int Main(string[] args)
         {
@@ -1332,6 +1332,8 @@ namespace WindowsInventoryLite
             string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
             string username = Convert.ToString(payload.ContainsKey("username") ? payload["username"] : "");
             string password = Convert.ToString(payload.ContainsKey("password") ? payload["password"] : "");
+            bool useSavedCredentials = payload.ContainsKey("useSavedCredentials") && Convert.ToBoolean(payload["useSavedCredentials"]);
+            ResolveUpdateCredentials(ref username, ref password, useSavedCredentials, options.ClientUpdateUsername, options.ClientUpdatePassword);
             bool force = payload.ContainsKey("force") && Convert.ToBoolean(payload["force"]);
             bool addToTrustedHosts = payload.ContainsKey("addToTrustedHosts") && Convert.ToBoolean(payload["addToTrustedHosts"]);
             int retentionDays = options.InstallLogRetentionDays;
@@ -3719,6 +3721,28 @@ namespace WindowsInventoryLite
             return false;
         }
 
+        // Client updates sends useSavedCredentials=true (Client actions never
+        // does - its own per-action fields have no persisted counterpart) to
+        // signal that blank username/password should fall back to the saved
+        // ClientUpdateUsername/ClientUpdatePassword instead of silently
+        // running under the service's own identity. A typed per-push value
+        // always wins over the saved one, matching this feature's original
+        // design: per-push override, then the saved account, then the
+        // service identity. Without this, the saved credentials were stored
+        // correctly but never actually reached a push - the dashboard's
+        // password field is cleared right after a successful Save (so the
+        // password can't be echoed back), and the push read straight from
+        // that same now-empty field, so it silently fell back to the
+        // service identity on every push after the first Save.
+        private static void ResolveUpdateCredentials(ref string username, ref string password, bool useSavedCredentials, string savedUsername, string savedPassword)
+        {
+            if (useSavedCredentials && String.IsNullOrEmpty(username) && String.IsNullOrEmpty(password))
+            {
+                username = savedUsername ?? "";
+                password = savedPassword ?? "";
+            }
+        }
+
         private static Dictionary<string, string> ParseCmdSettings(string cmdPath)
         {
             Dictionary<string, string> settings = new Dictionary<string, string>();
@@ -3955,6 +3979,10 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent is outdated when it matches neither package", TestIsClientVersionCurrentOutdatedWhenMatchesNeither);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent treats an empty clientVersion as outdated", TestIsClientVersionCurrentTreatsEmptyAsOutdated);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent ignores a missing package instead of false-matching it", TestIsClientVersionCurrentIgnoresMissingPackage);
+            allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials falls back to the saved account when blank", TestResolveUpdateCredentialsFallsBackToSavedWhenBlank);
+            allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials prefers a typed per-push override over the saved account", TestResolveUpdateCredentialsPrefersTypedOverride);
+            allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials is a no-op for Client actions (useSavedCredentials=false)", TestResolveUpdateCredentialsIgnoredWhenFlagIsFalse);
+            allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials falls through to the service identity when nothing is saved", TestResolveUpdateCredentialsFallsThroughWhenNothingSaved);
             allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' default package root", TestParseCmdSettingsDefaultPackageRoot);
             allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' custom package share path", TestParseCmdSettingsCustomPackageSharePath);
             return allPassed;
@@ -4498,6 +4526,54 @@ namespace WindowsInventoryLite
             if (!IsClientVersionCurrent("0.16.0", null, "0.16.0"))
             {
                 return "expected a version matching the only present package (net40) to be current";
+            }
+            return null;
+        }
+
+        private static string TestResolveUpdateCredentialsFallsBackToSavedWhenBlank()
+        {
+            string username = "";
+            string password = "";
+            ResolveUpdateCredentials(ref username, ref password, true, "CORP\\svc-update", "saved-secret");
+            if (username != "CORP\\svc-update" || password != "saved-secret")
+            {
+                return "expected blank credentials with useSavedCredentials=true to resolve to the saved account, got username='" + username + "' password='" + password + "'";
+            }
+            return null;
+        }
+
+        private static string TestResolveUpdateCredentialsPrefersTypedOverride()
+        {
+            string username = "DOMAIN\\typed-admin";
+            string password = "typed-secret";
+            ResolveUpdateCredentials(ref username, ref password, true, "CORP\\svc-update", "saved-secret");
+            if (username != "DOMAIN\\typed-admin" || password != "typed-secret")
+            {
+                return "expected a typed per-push override to win over the saved account even when useSavedCredentials=true, got username='" + username + "' password='" + password + "'";
+            }
+            return null;
+        }
+
+        private static string TestResolveUpdateCredentialsIgnoredWhenFlagIsFalse()
+        {
+            string username = "";
+            string password = "";
+            ResolveUpdateCredentials(ref username, ref password, false, "CORP\\svc-update", "saved-secret");
+            if (username != "" || password != "")
+            {
+                return "expected Client actions (useSavedCredentials=false) to never fall back to the Client updates saved account, got username='" + username + "' password='" + password + "'";
+            }
+            return null;
+        }
+
+        private static string TestResolveUpdateCredentialsFallsThroughWhenNothingSaved()
+        {
+            string username = "";
+            string password = "";
+            ResolveUpdateCredentials(ref username, ref password, true, null, null);
+            if (username != "" || password != "")
+            {
+                return "expected blank credentials with no saved account configured to stay blank (falls through to the service identity), got username='" + username + "' password='" + password + "'";
             }
             return null;
         }

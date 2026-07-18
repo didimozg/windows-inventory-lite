@@ -795,6 +795,13 @@
       .map(checkbox => checkbox.dataset.computerName);
     if (targets.length === 0) return;
 
+    // updatesPassword is almost always empty here: saveClientUpdateCredentials
+    // clears it right after a successful save (the real value is never sent
+    // back from the server), and loadClientUpdateCredentials never pre-fills
+    // it either. useSavedCredentials: true below tells the server "if both
+    // fields are blank, use the saved account instead of the service
+    // identity" - typing a fresh username+password here still overrides that
+    // for this one push, matching Client actions' per-action behavior.
     const username = byId('updatesUsername').value.trim();
     const password = byId('updatesPassword').value;
     // #installServerUrl is populated once, unconditionally, on page load
@@ -811,7 +818,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets: targets.join('\n'), serverUrl, username, password, force: false, addToTrustedHosts: false, retentionDays: 30 })
+      body: JSON.stringify({ targets: targets.join('\n'), serverUrl, username, password, force: false, addToTrustedHosts: false, retentionDays: 30, useSavedCredentials: true })
     })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);

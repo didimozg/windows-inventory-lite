@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.16.3] - 2026-07-18
+
+### Fixed
+
+- `Client updates`' saved WinRM credentials (`Client update username`/`Client update password`) were stored correctly but never actually used by a push. The dashboard's password field is cleared right after a successful Save (the real value is never sent back to the browser), and `Update selected` read straight from that same now-empty field - so every push after the first Save silently ran under the server's own service identity instead of the saved account, with no error until that identity turned out to lack rights on a target ("Access denied" from WinRM, reported live against a real Windows 8 target that a manually-supplied credential could reach fine). Fixed by having the dashboard send a `useSavedCredentials` flag with the push request; the server now falls back to the saved account when both the request's username and password are blank, still letting a freshly-typed per-push override take priority, and leaving `Client actions` (which never sends the flag) completely unaffected.
+
 ## [0.16.2] - 2026-07-17
 
 ### Fixed
