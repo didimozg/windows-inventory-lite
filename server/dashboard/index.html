@@ -453,6 +453,31 @@
             </div>
             <div id="updatesCredentialsMessage" class="pkg-message hidden"></div>
           </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Schedule</h2>
+            <p class="cert-hint">Automatically pushes to whichever clients are outdated when the schedule fires - the same targets "Update selected" would reach if every outdated row were checked. Uses the saved WinRM account above, or the server's own service identity if nothing is saved.</p>
+            <p id="updatesScheduleCredentialWarning" class="cert-hint hidden">No saved WinRM account above - scheduled pushes will use the server's own service identity.</p>
+            <div class="pkg-grid client-update-schedule-panel">
+              <label class="pkg-token-field">
+                Schedule
+                <select id="updatesScheduleMode">
+                  <option value="off">Off</option>
+                  <option value="once">Run once</option>
+                  <option value="interval">Every N hours</option>
+                </select>
+              </label>
+              <label id="updatesScheduleOnceField" class="pkg-token-field hidden">
+                Run at
+                <input id="updatesScheduleOnceAt" type="datetime-local">
+              </label>
+              <label id="updatesScheduleIntervalField" class="pkg-token-field hidden">
+                Every (hours)
+                <input id="updatesScheduleIntervalHours" type="number" min="1" max="8760" value="24">
+              </label>
+              <button id="updatesScheduleSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="updatesScheduleMessage" class="pkg-message hidden"></div>
+          </div>
           <p id="updatesPackageStatus" class="pkg-status">Loading client update status...</p>
           <div class="table-wrap">
             <table>

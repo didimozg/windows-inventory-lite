@@ -1149,6 +1149,14 @@ th.sort-desc::after {
   grid-template-columns: minmax(200px, 1fr) minmax(200px, 1fr) auto;
 }
 
+/* Same narrow single-column treatment as .ad-sync-panel/.ad-identity-panel -
+   the schedule's mode dropdown and its one conditional field read as a
+   small deliberate group, not stretched across the page. */
+.client-update-schedule-panel {
+  grid-template-columns: 1fr;
+  max-width: 420px;
+}
+
 .settings-block {
   padding-bottom: 18px;
   margin-bottom: 18px;

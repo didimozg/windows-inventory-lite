@@ -1147,6 +1147,81 @@
     byId('generalAdSyncIntervalField').classList.toggle('hidden', !isTimerMode);
   }
 
+  function updateScheduleFieldVisibility() {
+    const mode = byId('updatesScheduleMode').value;
+    byId('updatesScheduleOnceField').classList.toggle('hidden', mode !== 'once');
+    byId('updatesScheduleIntervalField').classList.toggle('hidden', mode !== 'interval');
+  }
+
+  // datetime-local inputs work in the browser's local time with no
+  // timezone in the string - Date's own constructor/toISOString correctly
+  // round-trip that local-time string against the server's UTC storage, so
+  // no manual timezone math is needed here.
+  function toDatetimeLocalValue(date) {
+    const pad = n => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+
+  function loadClientUpdateSchedule() {
+    fetch('/api/v1/client-updates/schedule', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('updatesScheduleMode').value = data.mode || 'off';
+        byId('updatesScheduleOnceAt').value = data.onceAtUtc ? toDatetimeLocalValue(new Date(data.onceAtUtc)) : '';
+        byId('updatesScheduleIntervalHours').value = data.intervalHours || 24;
+        byId('updatesScheduleCredentialWarning').classList.toggle('hidden', !!data.hasSavedCredentials);
+        updateScheduleFieldVisibility();
+      })
+      .catch(() => {});
+  }
+
+  function saveClientUpdateSchedule() {
+    const mode = byId('updatesScheduleMode').value;
+    const messageElement = byId('updatesScheduleMessage');
+    const body = { mode };
+
+    if (mode === 'once') {
+      const localValue = byId('updatesScheduleOnceAt').value;
+      if (!localValue) {
+        messageElement.classList.remove('hidden');
+        messageElement.classList.add('error');
+        messageElement.textContent = 'Pick a date and time first.';
+        return;
+      }
+      body.onceAtUtc = new Date(localValue).toISOString();
+    } else if (mode === 'interval') {
+      body.intervalHours = Number.parseInt(byId('updatesScheduleIntervalHours').value, 10) || 24;
+    }
+
+    byId('updatesScheduleSaveButton').disabled = true;
+    fetch('/api/v1/client-updates/schedule', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(() => {
+        messageElement.classList.remove('hidden', 'error');
+        messageElement.textContent = 'Saved.';
+        loadClientUpdateSchedule();
+      })
+      .catch(error => {
+        messageElement.classList.remove('hidden');
+        messageElement.classList.add('error');
+        messageElement.textContent = `Failed to save: ${error.message}`;
+      })
+      .finally(() => {
+        byId('updatesScheduleSaveButton').disabled = false;
+      });
+  }
+
   function loadGeneralSettings() {
     fetch('/api/v1/server/settings', { cache: 'no-store' })
       .then(response => {
@@ -2268,7 +2343,7 @@
     render();
     if (state.view === 'install') loadInstallHistory();
     if (state.view === 'package') loadPackageStatus();
-    if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); }
+    if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
     if (state.view === 'general') loadGeneralSettings();
     if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (state.view === 'licenses') loadLicenses();
@@ -2368,6 +2443,8 @@
   byId('generalSaveButton').addEventListener('click', () => saveGeneralSettings(false));
   byId('generalAdUseServiceIdentity').addEventListener('change', updateAdIdentityFields);
   byId('generalAdSyncMode').addEventListener('change', updateAdSyncIntervalField);
+  byId('updatesScheduleMode').addEventListener('change', updateScheduleFieldVisibility);
+  byId('updatesScheduleSaveButton').addEventListener('click', saveClientUpdateSchedule);
   byId('certificateTab').addEventListener('click', () => setView('certificate'));
   byId('certUploadButton').addEventListener('click', uploadCertificate);
   byId('certDeleteButton').addEventListener('click', deleteCertificate);
@@ -2390,7 +2467,7 @@
   byId('themeToggle').addEventListener('click', toggleTheme);
   updateThemeToggle();
   if (state.view === 'package') loadPackageStatus();
-  if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); }
+  if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
   if (state.view === 'general') loadGeneralSettings();
   if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
   if (state.view === 'licenses') loadLicenses();
