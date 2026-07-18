@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.16.7] - 2026-07-18
+
+### Fixed
+
+- `Client updates`' "Save" button cleared the password field after a successful save but left the username field exactly as typed, so clicking "Update selected" right after "Save" without retyping anything reproduced the identical mismatched-credential-pair bug fixed in 0.16.6 (real username paired with a blank password sent straight to WinRM), just triggered by the save action instead of a page load. Confirmed live: `klg-wsw8-004` failed with "Access denied" after this exact save-then-push sequence. `saveClientUpdateCredentials` now clears both fields on success and refreshes the read-only "Saved account" hint, so the push form always returns to genuinely blank after a save.
+
 ## [0.16.6] - 2026-07-18
 
 ### Fixed

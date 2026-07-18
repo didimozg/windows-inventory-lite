@@ -781,9 +781,16 @@
         return response.json();
       })
       .then(() => {
+        // Clear both fields, not just password: leaving the typed username
+        // behind paired with the just-cleared password reproduces the exact
+        // mismatched-pair bug fixed in 0.16.6 (real login + blank password
+        // sent straight to WinRM) the moment "Update selected" is clicked
+        // right after "Save" without retyping anything.
+        byId('updatesUsername').value = '';
         byId('updatesPassword').value = '';
         messageElement.classList.remove('hidden', 'error');
         messageElement.textContent = 'Saved.';
+        loadClientUpdateCredentials();
       })
       .catch(error => {
         messageElement.classList.remove('hidden');
