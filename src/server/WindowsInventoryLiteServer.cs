@@ -3640,9 +3640,11 @@ namespace WindowsInventoryLite
             if (mode != "interval")
             {
                 // Switching away from interval mode clears its "last run"
-                // clock - re-enabling interval mode later starts counting
-                // fresh instead of firing immediately off a stale timestamp
-                // from a previous, unrelated stretch of interval mode.
+                // clock - re-enabling interval mode later starts fresh (the
+                // first tick fires right away, since ShouldRunClientUpdateSchedule
+                // treats a blank last-run as due) instead of computing the
+                // wait against a stale timestamp left over from a previous,
+                // unrelated stretch of interval mode.
                 options.ClientUpdateScheduleLastRunUtc = "";
             }
 
