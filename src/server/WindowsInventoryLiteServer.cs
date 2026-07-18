@@ -770,36 +770,55 @@ namespace WindowsInventoryLite
         // so the next tick doesn't fire the same event again.
         private void RunClientUpdateScheduleTick(object state)
         {
-            string mode = options.ClientUpdateScheduleMode;
-            if (mode == "off")
+            // An unhandled exception thrown from a System.Threading.Timer
+            // callback runs on a ThreadPool thread and tears down the whole
+            // service process on .NET Framework. Unlike a manual push, this
+            // path has no HandleClient try/catch above it, so a transient
+            // failure here (DataPath briefly unreachable, a report or config
+            // file locked by antivirus mid-read/write, disk pressure) must
+            // skip this tick and let the next 60-second poll retry, exactly
+            // as RunAdSyncSweep swallows per-sweep failures rather than crash
+            // the server. The push and its bookkeeping mutate options in
+            // memory before persisting, so a save that throws after a push
+            // starts still leaves the in-memory state that stops the next
+            // tick from re-firing the same event within this process.
+            try
             {
-                return;
-            }
+                string mode = options.ClientUpdateScheduleMode;
+                if (mode == "off")
+                {
+                    return;
+                }
 
-            DateTime? onceAtUtc = ParseUtcOrNull(options.ClientUpdateScheduleOnceAtUtc);
-            DateTime? lastRunUtc = ParseUtcOrNull(options.ClientUpdateScheduleLastRunUtc);
-            if (!ShouldRunClientUpdateSchedule(DateTime.UtcNow, mode, onceAtUtc, lastRunUtc, options.ClientUpdateScheduleIntervalHours))
-            {
-                return;
-            }
+                DateTime? onceAtUtc = ParseUtcOrNull(options.ClientUpdateScheduleOnceAtUtc);
+                DateTime? lastRunUtc = ParseUtcOrNull(options.ClientUpdateScheduleLastRunUtc);
+                if (!ShouldRunClientUpdateSchedule(DateTime.UtcNow, mode, onceAtUtc, lastRunUtc, options.ClientUpdateScheduleIntervalHours))
+                {
+                    return;
+                }
 
-            StartScheduledClientUpdatePush();
+                StartScheduledClientUpdatePush();
 
-            Dictionary<string, string> updates = new Dictionary<string, string>();
-            if (mode == "once")
-            {
-                options.ClientUpdateScheduleMode = "off";
-                options.ClientUpdateScheduleOnceAtUtc = "";
-                updates["ClientUpdateScheduleMode"] = "off";
-                updates["ClientUpdateScheduleOnceAtUtc"] = "";
-                SaveServerConfigValues(updates);
-                ReconfigureClientUpdateScheduleTimer();
+                Dictionary<string, string> updates = new Dictionary<string, string>();
+                if (mode == "once")
+                {
+                    options.ClientUpdateScheduleMode = "off";
+                    options.ClientUpdateScheduleOnceAtUtc = "";
+                    updates["ClientUpdateScheduleMode"] = "off";
+                    updates["ClientUpdateScheduleOnceAtUtc"] = "";
+                    SaveServerConfigValues(updates);
+                    ReconfigureClientUpdateScheduleTimer();
+                }
+                else
+                {
+                    options.ClientUpdateScheduleLastRunUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                    updates["ClientUpdateScheduleLastRunUtc"] = options.ClientUpdateScheduleLastRunUtc;
+                    SaveServerConfigValues(updates);
+                }
             }
-            else
+            catch (Exception ex)
             {
-                options.ClientUpdateScheduleLastRunUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                updates["ClientUpdateScheduleLastRunUtc"] = options.ClientUpdateScheduleLastRunUtc;
-                SaveServerConfigValues(updates);
+                DebugLogger.Log(options, "Error", "Client update schedule tick failed: " + ex);
             }
         }
 
