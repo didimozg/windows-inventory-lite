@@ -1186,6 +1186,14 @@ namespace WindowsInventoryLite
                     {
                         ConfigureClientUpdateCredentials(stream, request);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/client-updates/schedule")
+                    {
+                        SendClientUpdateScheduleStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/client-updates/schedule")
+                    {
+                        ConfigureClientUpdateSchedule(stream, request);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/client-package")
                     {
                         SendClientPackageStatus(stream);
@@ -3549,6 +3557,86 @@ namespace WindowsInventoryLite
             SaveServerConfigValues(updates);
 
             SendClientUpdateCredentialsStatus(stream);
+        }
+
+        private void SendClientUpdateScheduleStatus(Stream stream)
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["mode"] = options.ClientUpdateScheduleMode;
+            result["onceAtUtc"] = String.IsNullOrEmpty(options.ClientUpdateScheduleOnceAtUtc) ? null : options.ClientUpdateScheduleOnceAtUtc;
+            result["intervalHours"] = options.ClientUpdateScheduleIntervalHours;
+            result["lastRunUtc"] = String.IsNullOrEmpty(options.ClientUpdateScheduleLastRunUtc) ? null : options.ClientUpdateScheduleLastRunUtc;
+            result["hasSavedCredentials"] = !String.IsNullOrEmpty(options.ClientUpdateUsername) && !String.IsNullOrEmpty(options.ClientUpdatePassword);
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void ConfigureClientUpdateSchedule(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string mode = payload.ContainsKey("mode") ? Convert.ToString(payload["mode"]) : "off";
+            if (mode != "off" && mode != "once" && mode != "interval")
+            {
+                SendText(stream, "{\"error\":\"mode must be 'off', 'once', or 'interval'\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string onceAtUtc = "";
+            if (mode == "once")
+            {
+                string onceAtRaw = payload.ContainsKey("onceAtUtc") ? Convert.ToString(payload["onceAtUtc"]) : "";
+                DateTime parsedOnceAt;
+                if (String.IsNullOrEmpty(onceAtRaw) || !DateTime.TryParse(onceAtRaw, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out parsedOnceAt))
+                {
+                    SendText(stream, "{\"error\":\"onceAtUtc is required and must be a valid date/time for mode 'once'\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                onceAtUtc = parsedOnceAt.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+            }
+
+            int intervalHours = options.ClientUpdateScheduleIntervalHours;
+            if (mode == "interval")
+            {
+                if (!payload.ContainsKey("intervalHours") || !Int32.TryParse(Convert.ToString(payload["intervalHours"]), out intervalHours) || intervalHours < 1 || intervalHours > 8760)
+                {
+                    SendText(stream, "{\"error\":\"intervalHours must be between 1 and 8760 for mode 'interval'\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
+
+            options.ClientUpdateScheduleMode = mode;
+            options.ClientUpdateScheduleOnceAtUtc = onceAtUtc;
+            options.ClientUpdateScheduleIntervalHours = intervalHours;
+            if (mode != "interval")
+            {
+                // Switching away from interval mode clears its "last run"
+                // clock - re-enabling interval mode later starts counting
+                // fresh instead of firing immediately off a stale timestamp
+                // from a previous, unrelated stretch of interval mode.
+                options.ClientUpdateScheduleLastRunUtc = "";
+            }
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["ClientUpdateScheduleMode"] = options.ClientUpdateScheduleMode;
+            updates["ClientUpdateScheduleOnceAtUtc"] = options.ClientUpdateScheduleOnceAtUtc ?? "";
+            updates["ClientUpdateScheduleIntervalHours"] = options.ClientUpdateScheduleIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            updates["ClientUpdateScheduleLastRunUtc"] = options.ClientUpdateScheduleLastRunUtc ?? "";
+            SaveServerConfigValues(updates);
+
+            ReconfigureClientUpdateScheduleTimer();
+
+            SendClientUpdateScheduleStatus(stream);
         }
 
         // Doubles as first-time setup and password rotation. Bootstrapping without
