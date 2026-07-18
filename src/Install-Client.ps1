@@ -59,6 +59,46 @@ function Invoke-ServiceControl {
     return $output
 }
 
+# sc.exe create's binPath= value must itself contain embedded double quotes
+# (around the exe path, since it can contain spaces) - passing that as one
+# element of a PowerShell array via "& sc.exe @Arguments" does not reliably
+# preserve those embedded quotes in the raw command line sc.exe receives on
+# every PowerShell engine. Confirmed live (Windows PowerShell 4.0, a real
+# Windows 8 target, via Deploy-ClientGpo.ps1's identical pattern): the
+# array-splat form silently corrupts the command line and sc.exe returns
+# exit code 1639 (invalid command line), printing its own usage text
+# instead of a specific error - every other Invoke-ServiceControl call
+# (query/stop/delete/description/start) has no embedded quotes in its
+# arguments and is unaffected, so only "create" gets this separate path.
+# Building the full command as one string and invoking through cmd.exe /c,
+# with the embedded quotes backslash-escaped the way cmd.exe's own parser
+# expects, was confirmed to produce the correct command line on the same
+# real target that failed with the array form.
+function Invoke-ServiceCreate {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ServiceName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BinPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DisplayName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FailureMessage
+    )
+
+    $escapedBinPath = $BinPath.Replace('"', '\"')
+    $commandLine = 'sc.exe create ' + $ServiceName + ' binPath= "' + $escapedBinPath + '" start= auto DisplayName= "' + $DisplayName + '"'
+    $output = cmd.exe /c $commandLine 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw ($FailureMessage + " sc.exe exit code: $LASTEXITCODE. Output: " + (($output | Out-String).Trim()))
+    }
+
+    return $output
+}
+
 function Wait-FileRelease {
     param(
         [Parameter(Mandatory = $true)]
@@ -150,7 +190,7 @@ if ($Token) {
     $serviceCommand += ' --token "' + (ConvertTo-ServiceArgValue $Token) + '"'
 }
 
-Invoke-ServiceControl -Arguments @('create', $serviceName, 'binPath=', $serviceCommand, 'start=', 'auto', 'DisplayName=', 'Windows Inventory Lite') -FailureMessage "Failed to create service. Run PowerShell as Administrator." | Out-Null
+Invoke-ServiceCreate -ServiceName $serviceName -BinPath $serviceCommand -DisplayName 'Windows Inventory Lite' -FailureMessage "Failed to create service. Run PowerShell as Administrator." | Out-Null
 Invoke-ServiceControl -Arguments @('description', $serviceName, "Collects Windows, Office, activation, and software inventory for Windows Inventory Lite. Version $clientVersion.") -FailureMessage "Failed to set service description." | Out-Null
 Write-Host "Service created: $serviceName"
 Write-Host "Client version: $clientVersion"

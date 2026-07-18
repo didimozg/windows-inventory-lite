@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.16.4] - 2026-07-18
+
+### Fixed
+
+- Service creation (`Install-Client.ps1`, `Install-Server.ps1`, and `Deploy-ClientGpo.ps1`, the script a GPO/WinRM push runs on the target) failed with `sc.exe exit code: 1639` ("invalid command line", `sc.exe` printing its own usage text instead of a specific error) on at least Windows PowerShell 4.0. Root cause, confirmed live on a real Windows 8 target: `sc.exe create`'s `binPath=` value must itself contain embedded double quotes around the executable path, and passing that as one element of a PowerShell array via `& sc.exe @Arguments` does not reliably preserve those embedded quotes in the command line `sc.exe` actually receives - some PowerShell engines corrupt it, breaking the argument apart. Verified two ways on the affected machine: the array form reproduced the exact failure in isolation (no WinRM involved), and building the same command as one string with the quotes backslash-escaped and invoking through `cmd.exe /c` succeeded. All three scripts' `create` call now goes through this `cmd.exe /c` form; every other `sc.exe` call (query/stop/delete/description/start) has no embedded quotes in its arguments and was unaffected, so those are unchanged.
+
 ## [0.16.3] - 2026-07-18
 
 ### Fixed
