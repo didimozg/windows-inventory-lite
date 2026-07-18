@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.16.9] - 2026-07-18
+
+### Fixed
+
+- The Active Directory settings grid (`general-grid`, 3 columns) packed "Domain" into the same row as "Use service account identity"/"AD username" once the identity checkbox was unchecked and those two extra fields became visible - straddling two unrelated field groups across one row. "Domain" now spans the full row, keeping "Enable AD sync/Sync mode/Sync interval" as one row and "Use service account identity/AD username/AD password" as the next.
+- `Client package`'s "outdated" warning (`net35VersionMismatch`/`net40VersionMismatch`) compared the packaged client's version against the *server's* own version - a check that only made sense back when both tracked one shared project version. Now that the client version is decoupled from the server version (see the versioning note above), this comparison is permanently meaningless and would have permanently flagged every correctly-built package as outdated. Removed the check, the warning UI, and the download confirmation prompt it drove; `Install-Server.ps1`'s existing unconditional rebuild-and-copy of the client package on every run (0.14.0) is what actually keeps this package fresh.
+
 ## [0.16.8] - 2026-07-18
 
 ### Added

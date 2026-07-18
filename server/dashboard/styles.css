@@ -1048,11 +1048,6 @@ th.sort-desc::after {
   color: var(--muted);
 }
 
-.pkg-status-warning {
-  color: var(--usb-text);
-  font-weight: 600;
-}
-
 .pkg-grid {
   display: grid;
   grid-template-columns: minmax(240px, 2fr) minmax(160px, 1fr) 110px auto;
@@ -1116,6 +1111,16 @@ th.sort-desc::after {
 
 .general-grid {
   grid-template-columns: minmax(180px, 1fr) minmax(280px, 2fr) auto;
+}
+
+/* Without this, grid auto-flow packs "Domain" into the same row as "Use
+   service account identity"/"AD username" once those two fields become
+   visible (checkbox unchecked) - straddling two unrelated field groups
+   across one row. Spanning the full row keeps "Enable AD sync/Sync
+   mode/Sync interval" as one row and "Use service account identity/AD
+   username/AD password" as the next, matching how they're grouped. */
+.general-ad-domain-field {
+  grid-column: 1 / -1;
 }
 
 .client-update-grid {

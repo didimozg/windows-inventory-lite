@@ -20,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.16.8";
+        internal const string ProductVersion = "0.16.9";
 
         private static int Main(string[] args)
         {
@@ -2358,15 +2358,6 @@ namespace WindowsInventoryLite
                 result["net40Version"] = net40Version;
                 result["deployScriptPresent"] = File.Exists(deployPath);
                 result["cmdPresent"] = File.Exists(cmdPath);
-                // Lets the dashboard flag a client package that predates the
-                // server's own build - the exact "Install client reports
-                // 0.1.0 while the server is on 0.8.x" gap that once made
-                // every code fix look like it hadn't taken effect, because
-                // the deployed package was never rebuilt after the source
-                // changed.
-                result["serverVersion"] = Program.ProductVersion;
-                result["net35VersionMismatch"] = net35Version != null && net35Version != Program.ProductVersion;
-                result["net40VersionMismatch"] = net40Version != null && net40Version != Program.ProductVersion;
 
                 Dictionary<string, string> cmdSettings = ParseCmdSettings(cmdPath);
                 result["cmdServerUrl"] = cmdSettings.ContainsKey("serverUrl") ? (object)cmdSettings["serverUrl"] : null;
@@ -2386,9 +2377,6 @@ namespace WindowsInventoryLite
                 result["cmdIntervalHours"] = "6";
                 result["cmdToken"] = null;
                 result["cmdPackageSharePath"] = null;
-                result["serverVersion"] = Program.ProductVersion;
-                result["net35VersionMismatch"] = false;
-                result["net40VersionMismatch"] = false;
             }
 
             SendJson(stream, serializer.Serialize(result));
