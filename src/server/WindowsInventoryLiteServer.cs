@@ -129,6 +129,17 @@ namespace WindowsInventoryLite
         // target; see docs/superpowers/specs/2026-07-17-client-auto-update-design.md.
         public string ClientUpdateUsername;
         public string ClientUpdatePassword;
+        // Off by default - dashboard-configured only, same reasoning as
+        // ClientUpdateUsername/Password above. See
+        // docs/superpowers/specs/2026-07-18-client-update-schedule-design.md.
+        // Mode is "off", "once", or "interval" - never more than one active,
+        // same as AdSyncMode above. OnceAtUtc/LastRunUtc are ISO
+        // "yyyy-MM-ddTHH:mm:ssZ" strings (or "") rather than DateTime,
+        // matching how every other timestamp in this class is stored.
+        public string ClientUpdateScheduleMode;
+        public string ClientUpdateScheduleOnceAtUtc;
+        public int ClientUpdateScheduleIntervalHours;
+        public string ClientUpdateScheduleLastRunUtc;
 
         public static ServerOptions Parse(string[] args)
         {
@@ -147,6 +158,10 @@ namespace WindowsInventoryLite
             options.AdSyncMode = "on-report";
             options.AdSyncIntervalHours = 24;
             options.AdUseServiceIdentity = true;
+            options.ClientUpdateScheduleMode = "off";
+            options.ClientUpdateScheduleOnceAtUtc = "";
+            options.ClientUpdateScheduleIntervalHours = 24;
+            options.ClientUpdateScheduleLastRunUtc = "";
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -426,6 +441,31 @@ namespace WindowsInventoryLite
                 if (String.IsNullOrEmpty(options.ClientUpdatePassword))
                 {
                     options.ClientUpdatePassword = SecretProtector.Unprotect(GetConfigString(config, "ClientUpdatePassword"));
+                }
+                if (options.ClientUpdateScheduleMode == "off")
+                {
+                    string scheduleModeText = GetConfigString(config, "ClientUpdateScheduleMode");
+                    if (scheduleModeText == "off" || scheduleModeText == "once" || scheduleModeText == "interval")
+                    {
+                        options.ClientUpdateScheduleMode = scheduleModeText;
+                    }
+                }
+                if (String.IsNullOrEmpty(options.ClientUpdateScheduleOnceAtUtc))
+                {
+                    options.ClientUpdateScheduleOnceAtUtc = GetConfigString(config, "ClientUpdateScheduleOnceAtUtc") ?? "";
+                }
+                if (options.ClientUpdateScheduleIntervalHours == 24)
+                {
+                    string scheduleIntervalText = GetConfigString(config, "ClientUpdateScheduleIntervalHours");
+                    int scheduleIntervalFromConfig;
+                    if (!String.IsNullOrEmpty(scheduleIntervalText) && Int32.TryParse(scheduleIntervalText, out scheduleIntervalFromConfig) && scheduleIntervalFromConfig > 0 && scheduleIntervalFromConfig <= 8760)
+                    {
+                        options.ClientUpdateScheduleIntervalHours = scheduleIntervalFromConfig;
+                    }
+                }
+                if (String.IsNullOrEmpty(options.ClientUpdateScheduleLastRunUtc))
+                {
+                    options.ClientUpdateScheduleLastRunUtc = GetConfigString(config, "ClientUpdateScheduleLastRunUtc") ?? "";
                 }
                 if (!options.DebugLogEnabled)
                 {
@@ -1139,6 +1179,32 @@ namespace WindowsInventoryLite
                 return true;
             }
             return (DateTime.UtcNow - lastSyncedUtc.Value).TotalHours >= intervalHours;
+        }
+
+        // Pure decision function for the Client Update schedule timer (Task 2
+        // calls this on every tick) - no I/O, so it's directly self-testable.
+        // "once" fires exactly once when nowUtc reaches onceAtUtc; the caller
+        // is responsible for resetting mode back to "off" afterward (this
+        // function only answers "is it due right now", it doesn't mutate
+        // anything). "interval" fires immediately if there's no previous run
+        // recorded, then every intervalHours after the last scheduled run -
+        // manual pushes never touch lastRunUtc, only a schedule-triggered run
+        // does (see RunClientUpdateScheduleTick in Task 2).
+        internal static bool ShouldRunClientUpdateSchedule(DateTime nowUtc, string mode, DateTime? onceAtUtc, DateTime? lastRunUtc, int intervalHours)
+        {
+            if (mode == "once")
+            {
+                return onceAtUtc.HasValue && nowUtc >= onceAtUtc.Value;
+            }
+            if (mode == "interval")
+            {
+                if (!lastRunUtc.HasValue)
+                {
+                    return true;
+                }
+                return nowUtc >= lastRunUtc.Value.AddHours(Math.Max(1, intervalHours));
+            }
+            return false;
         }
 
         // Returns true when a raw config value is still plaintext and
@@ -3966,6 +4032,12 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ShouldSyncAd returns true with no previous timestamp", TestShouldSyncAdNoPreviousTimestamp);
             allPassed &= SelfTestCheck(output, "ShouldSyncAd returns true for a stale timestamp", TestShouldSyncAdStaleTimestamp);
             allPassed &= SelfTestCheck(output, "ShouldSyncAd returns false for a fresh timestamp", TestShouldSyncAdFreshTimestamp);
+            allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule is never due in 'off' mode", TestShouldRunClientUpdateScheduleOffMode);
+            allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'once' is not due before the target time", TestShouldRunClientUpdateScheduleOnceNotYetDue);
+            allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'once' is due after the target time", TestShouldRunClientUpdateScheduleOnceDue);
+            allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'once' is never due with no target time set", TestShouldRunClientUpdateScheduleOnceMissingTarget);
+            allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'interval' is due immediately with no previous run", TestShouldRunClientUpdateScheduleIntervalNoPreviousRun);
+            allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'interval' respects the interval window", TestShouldRunClientUpdateScheduleIntervalDueAndNotDue);
             allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath defaults under DataPath when unset", TestDebugLoggerResolvePathDefault);
             allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath honors an explicit DebugLogPath", TestDebugLoggerResolvePathOverride);
             allPassed &= SelfTestCheck(output, "DebugLogger.SanitizeForLog escapes embedded CR/LF", TestDebugLoggerSanitizeForLog);
@@ -4334,6 +4406,74 @@ namespace WindowsInventoryLite
             if (InventoryServer.ShouldSyncAd(fresh, 24))
             {
                 return "expected false when the previous sync is within the interval";
+            }
+            return null;
+        }
+
+        private static string TestShouldRunClientUpdateScheduleOffMode()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            if (InventoryServer.ShouldRunClientUpdateSchedule(now, "off", now.AddHours(-1), now.AddHours(-1), 24))
+            {
+                return "expected mode 'off' to never be due, regardless of onceAtUtc/lastRunUtc values";
+            }
+            return null;
+        }
+
+        private static string TestShouldRunClientUpdateScheduleOnceNotYetDue()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            DateTime future = now.AddHours(1);
+            if (InventoryServer.ShouldRunClientUpdateSchedule(now, "once", future, null, 24))
+            {
+                return "expected mode 'once' with a future onceAtUtc to not be due yet";
+            }
+            return null;
+        }
+
+        private static string TestShouldRunClientUpdateScheduleOnceDue()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            DateTime past = now.AddMinutes(-1);
+            if (!InventoryServer.ShouldRunClientUpdateSchedule(now, "once", past, null, 24))
+            {
+                return "expected mode 'once' with a past onceAtUtc to be due";
+            }
+            return null;
+        }
+
+        private static string TestShouldRunClientUpdateScheduleOnceMissingTarget()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            if (InventoryServer.ShouldRunClientUpdateSchedule(now, "once", null, null, 24))
+            {
+                return "expected mode 'once' with no onceAtUtc value to never be due";
+            }
+            return null;
+        }
+
+        private static string TestShouldRunClientUpdateScheduleIntervalNoPreviousRun()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            if (!InventoryServer.ShouldRunClientUpdateSchedule(now, "interval", null, null, 24))
+            {
+                return "expected mode 'interval' with no previous run to be due immediately";
+            }
+            return null;
+        }
+
+        private static string TestShouldRunClientUpdateScheduleIntervalDueAndNotDue()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            DateTime stale = now.AddHours(-25);
+            DateTime fresh = now.AddHours(-1);
+            if (!InventoryServer.ShouldRunClientUpdateSchedule(now, "interval", null, stale, 24))
+            {
+                return "expected mode 'interval' to be due when lastRunUtc is older than intervalHours";
+            }
+            if (InventoryServer.ShouldRunClientUpdateSchedule(now, "interval", null, fresh, 24))
+            {
+                return "expected mode 'interval' to not be due when lastRunUtc is within intervalHours";
             }
             return null;
         }
