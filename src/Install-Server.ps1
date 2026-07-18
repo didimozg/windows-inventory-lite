@@ -800,6 +800,19 @@ else {
     # populated by a separate, easy-to-forget packaging step.
     Copy-Item -LiteralPath $ClientNet35ExecutablePath -Destination $clientNet35PackagePath -Force
     Copy-Item -LiteralPath $ClientNet40ExecutablePath -Destination $clientNet40PackagePath -Force
+    # Same staleness gap, one file over: ClientPackagePath\Deploy-ClientGpo.ps1
+    # is what every WinRM push (Client actions AND Client updates, both routed
+    # through options.ClientPackagePath server-side) actually deploys to
+    # targets - a "Just refresh" server reinstall left it untouched forever,
+    # silently re-deploying whatever version of this script existed the one
+    # time -ClientServerUrl or -ClientPackageSourcePath happened to be used.
+    # Confirmed live: this is exactly how the sc.exe 1639 fix kept failing to
+    # reach a real target even after the source fix was pushed and the
+    # server's own exe was rebuilt.
+    if (Test-Path -LiteralPath $deployScriptSource) {
+        $clientDeployScriptPackagePath = Join-Path -Path $ClientPackagePath -ChildPath 'Deploy-ClientGpo.ps1'
+        Copy-Item -LiteralPath $deployScriptSource -Destination $clientDeployScriptPackagePath -Force
+    }
 }
 
 $clientNet35Version = $null

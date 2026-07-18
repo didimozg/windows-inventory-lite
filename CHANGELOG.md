@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.16.5] - 2026-07-18
+
+### Fixed
+
+- `Install-Server.ps1 -ClientPackagePath\Deploy-ClientGpo.ps1` (the script every WinRM push - both `Client actions` and `Client updates` - actually deploys to targets, since the server always sources it from `ClientPackagePath`) was never refreshed by a plain "Just refresh" server reinstall, only by the rarer `-ClientServerUrl`/`-ClientPackageSourcePath` paths. The two client executables in `ClientPackagePath` were already kept current on every run (fixed in 0.14.0), but `Deploy-ClientGpo.ps1` was missed - meaning a server upgrade that only bumped the exe silently left every future WinRM push deploying whatever version of that script happened to exist the last time a full package request was made, including the pre-0.16.4 version with the `sc.exe` 1639 bug this session's testing had just fixed at the source. Now copied unconditionally alongside the two executables on every server install/reinstall.
+
 ## [0.16.4] - 2026-07-18
 
 ### Fixed
