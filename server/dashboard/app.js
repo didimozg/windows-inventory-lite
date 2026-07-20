@@ -644,7 +644,8 @@
         const computers = data.computers || [];
         const warnings = data.warnings || [];
         if (computers.length === 0) {
-          showSavedMessage(messageElement, 'No computers found for the configured scope.', false);
+          const lines = ['No computers found for the configured scope.', ...warnings];
+          showSavedMessage(messageElement, lines.join('\n'), false);
           return;
         }
 

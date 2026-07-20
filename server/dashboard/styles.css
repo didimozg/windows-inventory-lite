@@ -1102,6 +1102,11 @@ th.sort-desc::after {
   border: 1px solid var(--success-border);
   color: var(--success-text);
   font-size: 13px;
+  /* Every other .pkg-message caller is single-line; AD Computer Import's
+     "Loaded N computer(s)..." plus per-OU warnings joins multiple lines
+     with \n - without this, normal white-space collapses them into one
+     run-on line instead of stacking. */
+  white-space: pre-line;
 }
 
 .pkg-message.error {
