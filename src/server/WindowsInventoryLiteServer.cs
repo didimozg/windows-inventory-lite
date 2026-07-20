@@ -3431,7 +3431,9 @@ namespace WindowsInventoryLite
                 string detail = result.Warnings.Count > 0
                     ? String.Join(" ", (string[])result.Warnings.ToArray(typeof(string)))
                     : "Active Directory could not be reached.";
-                SendText(stream, "{\"error\":\"" + detail.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 500);
+                Dictionary<string, object> errorResponse = new Dictionary<string, object>();
+                errorResponse["error"] = detail;
+                SendText(stream, CreateJsonSerializer().Serialize(errorResponse), "application/json; charset=utf-8", 500);
                 return;
             }
 
