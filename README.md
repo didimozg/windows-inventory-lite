@@ -301,6 +301,14 @@ By default the server authenticates to AD using its own Windows Service identity
 
 If a computer's name has no matching AD computer object, the column shows "Not found in AD"; if AD itself was unreachable at sync time, it shows "AD unreachable" and the next report/sweep retries rather than waiting out the full sync interval.
 
+## AD Computer Import
+
+On the `Client actions` tab, "Load from AD" pulls a list of computer names directly from Active Directory and fills the Targets field with it, replacing whatever was there - a faster starting point than typing names by hand before a WinRM install/uninstall push.
+
+It searches whichever Organizational Units are configured in Settings > General's Active Directory panel ("Organizational Units (DN, one per line)" - one Distinguished Name per line, e.g. `OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru`), including everything nested under each one. Leave the list empty to search the whole domain instead. It uses the same AD Domain/credentials already configured for AD Description Sync above - there is nothing new to set up if that's already configured.
+
+The result is the raw computer list for the configured scope - it is not filtered by whether a computer has ever reported inventory, so trim it by hand afterward if a particular push (e.g. an uninstall) only makes sense for a subset. If one configured OU can't be searched (a typo, a deleted OU), it's skipped and reported as a warning; the rest still load normally.
+
 ## Diagnostics
 
 Both the server and the client can write an optional debug log - a plain-text file capturing AD lookups, client-server report traffic, and unhandled errors, independent of the Windows Event Log (which needs its event source registered and won't always be reachable, especially right after a fresh install).

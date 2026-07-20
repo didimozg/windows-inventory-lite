@@ -40,6 +40,7 @@
 - POST body to `POST /api/v1/server/admin-password` (newUsername, currentPassword, newPassword) that sets up or rotates the dashboard's Basic Auth username and password. `currentPassword` is required only when Basic Auth is already configured.
 - POST body to `POST /api/v1/client-updates/credentials` (username, password) that saves the optional WinRM credential fallback used by Client Auto-Update pushes. No current-password check (unlike admin-password) - any authenticated dashboard user can already trigger a WinRM push via `Client actions` with arbitrary typed credentials, so this endpoint grants no capability the dashboard didn't already have.
 - The computer name embedded in a client's inventory report, when AD sync is enabled: used to build an LDAP search filter (see AdLookupService.LookupComputerDescription), escaped per RFC 4515 before use.
+- The Organizational Unit list (`AdComputerImportOUs`) configured via `POST /api/v1/server/settings`, used to build LDAP directory paths (`LDAP://<OU DN>`) for AD Computer Import (see AdLookupService.SearchComputers) - admin-configured only, not derived from any client-reported or otherwise attacker-influenceable data, so it is not run through `LdapFilterEscaper`. That escaping targets search-filter clauses, not directory paths, and is applied to the one input in this list that IS attacker-influenceable: the client-reported computer name in the entry above.
 
 ## Required Invariants
 
