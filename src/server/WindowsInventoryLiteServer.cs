@@ -1282,6 +1282,10 @@ namespace WindowsInventoryLite
                     {
                         ConfigureServerSettings(stream, request);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/ad/computers")
+                    {
+                        SendAdComputers(stream);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/server/admin-password")
                     {
                         SendAdminPasswordStatus(stream);
@@ -3417,6 +3421,27 @@ namespace WindowsInventoryLite
             SendJson(stream, "{\"status\":\"deleted\"}");
         }
 
+        private void SendAdComputers(Stream stream)
+        {
+            ArrayList organizationalUnits = ParseAdComputerImportOUs(options.AdComputerImportOUs);
+            AdLookupService.AdComputerSearchResult result = AdLookupService.SearchComputers(organizationalUnits, options);
+
+            if (result.AllAttemptsFailed)
+            {
+                string detail = result.Warnings.Count > 0
+                    ? String.Join(" ", (string[])result.Warnings.ToArray(typeof(string)))
+                    : "Active Directory could not be reached.";
+                SendText(stream, "{\"error\":\"" + detail.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 500);
+                return;
+            }
+
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["computers"] = result.Computers;
+            response["warnings"] = result.Warnings;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(response));
+        }
+
         private void SendServerSettings(Stream stream)
         {
             Dictionary<string, object> result = BuildCertificateStatusPayload();
@@ -3434,6 +3459,7 @@ namespace WindowsInventoryLite
             // returned by this endpoint, matching how WebPassword is never
             // echoed back either.
             result["adUsername"] = options.AdUseServiceIdentity ? null : options.AdUsername;
+            result["adComputerImportOUs"] = options.AdComputerImportOUs;
             result["debugLogEnabled"] = options.DebugLogEnabled;
             result["debugLogPath"] = DebugLogger.ResolvePath(options);
             JavaScriptSerializer serializer = CreateJsonSerializer();
@@ -3613,7 +3639,8 @@ namespace WindowsInventoryLite
             }
 
             if (payload.ContainsKey("adSyncEnabled") || payload.ContainsKey("adSyncMode") || payload.ContainsKey("adSyncIntervalHours")
-                || payload.ContainsKey("adDomain") || payload.ContainsKey("adUseServiceIdentity") || payload.ContainsKey("adUsername") || payload.ContainsKey("adPassword"))
+                || payload.ContainsKey("adDomain") || payload.ContainsKey("adUseServiceIdentity") || payload.ContainsKey("adUsername") || payload.ContainsKey("adPassword")
+                || payload.ContainsKey("adComputerImportOUs"))
             {
                 bool adSyncEnabled = payload.ContainsKey("adSyncEnabled") ? Convert.ToBoolean(payload["adSyncEnabled"]) : options.AdSyncEnabled;
 
@@ -3659,6 +3686,7 @@ namespace WindowsInventoryLite
                 options.AdUseServiceIdentity = adUseServiceIdentity;
                 options.AdUsername = adUsername;
                 options.AdPassword = adPassword;
+                options.AdComputerImportOUs = payload.ContainsKey("adComputerImportOUs") ? Convert.ToString(payload["adComputerImportOUs"]) : options.AdComputerImportOUs;
                 ReconfigureAdSyncTimer();
 
                 updates["AdSyncEnabled"] = options.AdSyncEnabled ? "true" : "false";
@@ -3668,6 +3696,7 @@ namespace WindowsInventoryLite
                 updates["AdUseServiceIdentity"] = options.AdUseServiceIdentity ? "true" : "false";
                 updates["AdUsername"] = options.AdUsername ?? "";
                 updates["AdPassword"] = options.AdPassword ?? "";
+                updates["AdComputerImportOUs"] = options.AdComputerImportOUs ?? "";
             }
 
             if (payload.ContainsKey("debugLogEnabled"))
