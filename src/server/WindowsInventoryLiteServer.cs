@@ -20,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.17.2";
+        internal const string ProductVersion = "0.17.3";
 
         private static int Main(string[] args)
         {
@@ -517,6 +517,14 @@ namespace WindowsInventoryLite
         private readonly ServerOptions options;
         private readonly object installJobsLock = new object();
         private readonly Dictionary<string, InstallJob> installJobs = new Dictionary<string, InstallJob>();
+        // Lets an open dashboard tab notice a server-initiated (scheduled)
+        // push exists at all - a scheduled push never goes through any HTTP
+        // request the browser makes, so without this the browser has no way
+        // to learn a new job.Id exists to poll. Not used for jobs started
+        // from either "Client actions" or "Client updates" (both already
+        // know their own job.Id locally, from the response of the request
+        // that created them) - only the schedule timer sets this.
+        private volatile string lastScheduledUpdateJobId;
         private readonly object licensesLock = new object();
         private readonly object certificateHistoryLock = new object();
         private readonly object listenerRestartLock = new object();
@@ -925,6 +933,7 @@ namespace WindowsInventoryLite
                 installJobs[job.Id] = job;
                 SaveInstallJob(job);
             }
+            lastScheduledUpdateJobId = job.Id;
             ThreadPool.QueueUserWorkItem(RunClientActionJob, job);
         }
 
@@ -1804,6 +1813,19 @@ namespace WindowsInventoryLite
                 SaveInstallJob(job);
             }
 
+            // Used only to patch a target's stored report after a
+            // successful install below (see PatchClientReportVersionAfterInstall) -
+            // computed once per job, not per-target.
+            string net35Version = null;
+            string net40Version = null;
+            if (job.Action != "uninstall" && Directory.Exists(options.ClientPackagePath))
+            {
+                string net35Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net35.exe");
+                string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
+                net35Version = File.Exists(net35Path) ? GetExeVersion(net35Path) : null;
+                net40Version = File.Exists(net40Path) ? GetExeVersion(net40Path) : null;
+            }
+
             foreach (string target in job.Targets)
             {
                 Dictionary<string, object> result = job.Action == "uninstall"
@@ -1814,6 +1836,11 @@ namespace WindowsInventoryLite
                     job.Results.Add(result);
                     SaveInstallJob(job);
                 }
+
+                if (job.Action != "uninstall" && GetStringValue(result, "status") == "completed")
+                {
+                    PatchClientReportVersionAfterInstall(target, net35Version, net40Version);
+                }
             }
 
             job.CompletedAtUtc = DateTime.UtcNow;
@@ -1823,6 +1850,52 @@ namespace WindowsInventoryLite
                 SaveInstallJob(job);
             }
             CleanupInstallJobLogs();
+        }
+
+        // A successful install push only becomes visible to
+        // LoadClientReports() - and therefore to the outdated-clients list
+        // both the dashboard and the update schedule read - once that
+        // client's own next inventory report arrives. Until then it still
+        // reads as outdated, so an interval-mode schedule shorter than the
+        // client's own reporting interval can redundantly re-push to a
+        // machine it just finished updating. Patching the stored report's
+        // clientVersion immediately after a successful push closes that
+        // gap; the client's own next report just confirms the same version
+        // once it arrives. A missing report file (this target has never
+        // reported at all yet) is left alone - nothing to patch.
+        private void PatchClientReportVersionAfterInstall(string computerName, string net35Version, string net40Version)
+        {
+            string installedVersion = net35Version ?? net40Version;
+            if (String.IsNullOrEmpty(installedVersion))
+            {
+                return;
+            }
+
+            string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+
+            lock (reportFileLock)
+            {
+                if (!File.Exists(path))
+                {
+                    return;
+                }
+                Dictionary<string, object> report;
+                try
+                {
+                    report = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                }
+                catch
+                {
+                    return;
+                }
+                if (report == null)
+                {
+                    return;
+                }
+                report["clientVersion"] = installedVersion;
+                File.WriteAllText(path, serializer.Serialize(report), new UTF8Encoding(false));
+            }
         }
 
         // Credentials are never embedded in the command line (see
@@ -2631,6 +2704,11 @@ namespace WindowsInventoryLite
 
             result["net35Version"] = net35Version;
             result["net40Version"] = net40Version;
+            // Lets an open dashboard tab notice a schedule-triggered push it
+            // never requested itself - see lastScheduledUpdateJobId's own
+            // comment. Null until the first scheduled push of this service
+            // run.
+            result["lastScheduledJobId"] = lastScheduledUpdateJobId;
 
             // No package built at all yet - there is nothing a push could
             // actually deploy, so classifying every client as "outdated"
@@ -4453,6 +4531,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'once' is never due with no target time set", TestShouldRunClientUpdateScheduleOnceMissingTarget);
             allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'interval' is due immediately with no previous run", TestShouldRunClientUpdateScheduleIntervalNoPreviousRun);
             allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'interval' respects the interval window", TestShouldRunClientUpdateScheduleIntervalDueAndNotDue);
+            allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall updates a target's stored clientVersion", TestPatchClientReportVersionAfterInstallUpdatesVersion);
+            allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall is a no-op when the target has no stored report yet", TestPatchClientReportVersionAfterInstallMissingReport);
             allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath defaults under DataPath when unset", TestDebugLoggerResolvePathDefault);
             allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath honors an explicit DebugLogPath", TestDebugLoggerResolvePathOverride);
             allPassed &= SelfTestCheck(output, "DebugLogger.SanitizeForLog escapes embedded CR/LF", TestDebugLoggerSanitizeForLog);
@@ -4891,6 +4971,64 @@ namespace WindowsInventoryLite
                 return "expected mode 'interval' to not be due when lastRunUtc is within intervalHours";
             }
             return null;
+        }
+
+        private static string TestPatchClientReportVersionAfterInstallUpdatesVersion()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                string computerName = "PATCH-TEST-01";
+                string reportPath = Path.Combine(dataPath, computerName + ".json");
+                File.WriteAllText(reportPath, "{\"computerName\":\"PATCH-TEST-01\",\"clientVersion\":\"0.1.0\"}", new UTF8Encoding(false));
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+                server.PatchClientReportVersionAfterInstall(computerName, "0.2.0", null);
+
+                JavaScriptSerializer serializer = CreateJsonSerializer();
+                Dictionary<string, object> report = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(reportPath, Encoding.UTF8));
+                if (GetStringValue(report, "clientVersion") != "0.2.0")
+                {
+                    return "expected clientVersion to be patched to '0.2.0', got '" + GetStringValue(report, "clientVersion") + "'";
+                }
+                if (GetStringValue(report, "computerName") != "PATCH-TEST-01")
+                {
+                    return "expected the rest of the report to survive the patch untouched";
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(dataPath, true);
+            }
+        }
+
+        private static string TestPatchClientReportVersionAfterInstallMissingReport()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+                // A target that has never reported at all yet - should not
+                // throw and should not create a new file out of nowhere.
+                server.PatchClientReportVersionAfterInstall("NEVER-REPORTED-01", "0.2.0", null);
+
+                if (Directory.GetFiles(dataPath, "*.json").Length != 0)
+                {
+                    return "expected no report file to be created for a target with no existing report";
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(dataPath, true);
+            }
         }
 
         private static string TestDebugLoggerResolvePathDefault()

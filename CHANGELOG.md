@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.17.3] - 2026-07-20
+
+### Fixed
+
+- The sidebar "Client updates" badge stayed blank on a fresh page load until the first 30s poll tick, a tab visibility change, or the user opening Client updates directly - the initial page-load sequence never fetched `GET /api/v1/client-updates`, only `pollForUpdates()`'s own recurring tick did. Added the same badge-only fetch to the initial load.
+- In the `Client updates` outdated-clients table, a target only dropped out once the *entire* push job finished, even though `job.results` already grows one entry per target as each one completes (targets are pushed sequentially, one result appended and saved at a time). A machine now drops out of the table as soon as its own result comes back successful, without waiting on the rest of the batch. A failed target is left in the table - it's still outdated.
+- The `Client updates` table never refreshed after a schedule-triggered push, even with the tab open and watching - a scheduled push runs entirely server-side (the timer calls into the push logic directly, no HTTP request from any browser involved), so no open tab had any way to learn a new job existed. The server now tracks the most recent schedule-triggered job's ID and exposes it on `GET /api/v1/client-updates`; an open dashboard tab notices when this ID changes and starts live-polling that job the same way it does for a push it started itself.
+- Every settings panel's "Saved."/"Settings saved."/similar confirmation message stayed visible forever once shown, across all six Save actions (WinRM credentials, Client Update Schedule, Client package, General settings, Admin password, plus the "Saved credentials deleted." message) - none of them ever hid it again except on the next save. Extracted the shared `showSavedMessage` helper: a success message now auto-hides after 30s (tracking its own pending timer so repeated saves don't stack them); error messages are left alone, as before.
+- Interval-mode schedule pushes could redundantly re-push to a machine they had just finished updating: a successful push only becomes visible to the outdated-clients calculation once that client's own next inventory report arrives, so a schedule interval shorter than the client's own reporting interval kept re-selecting it as still outdated. A successful install push now patches the target's stored report version immediately, closing the gap - the client's own next report just confirms the same version once it arrives.
+
 ## [0.17.2] - 2026-07-20
 
 ### Security

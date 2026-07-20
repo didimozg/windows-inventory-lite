@@ -3,6 +3,10 @@
   const state = {
     clients: [], view: getInitialView(), installJobId: null, installPollTimer: null, installJobs: [],
     updateJobId: null, updatePollTimer: null,
+    // Baselined from the first client-updates poll response, then compared
+    // on every later one - lets an open dashboard tab pick up a scheduled
+    // (server-initiated) push it never itself requested. null until baselined.
+    knownScheduledJobId: undefined,
     packageStatus: null,
     clientUpdates: null,
     certificateStatus: null, certificateHistory: [],
@@ -599,7 +603,7 @@
       });
   }
 
-  function pollInstallJob(jobId, statusElementId = 'installStatus', onComplete = loadInstallHistory, timerKey = 'installPollTimer') {
+  function pollInstallJob(jobId, statusElementId = 'installStatus', onComplete = loadInstallHistory, timerKey = 'installPollTimer', onProgress = null) {
     fetch(`/api/v1/client-install/${encodeURIComponent(jobId)}`, { cache: 'no-store' })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -607,6 +611,7 @@
       })
       .then(job => {
         renderInstallJob(job, statusElementId);
+        if (onProgress) onProgress(job);
         if (job.status === 'completed' && state[timerKey]) {
           window.clearInterval(state[timerKey]);
           state[timerKey] = null;
@@ -731,6 +736,31 @@
     updateUpdatesBadge(data.outdatedCount);
   }
 
+  // Shared by the initial page-load badge fetch and pollForUpdates()'s own
+  // badge fetch. A scheduled push runs entirely server-side (the timer
+  // calls StartScheduledClientUpdatePush directly, no HTTP request from
+  // any browser involved) - lastScheduledJobId is how an open dashboard
+  // tab learns that happened at all. Only reacts if the Client updates tab
+  // is the active view and no other update push is already being polled
+  // (a manually-started push in progress takes priority - never hijack it).
+  function handleClientUpdatesSummary(data) {
+    updateUpdatesBadge(data.packageAvailable ? data.outdatedCount : 0);
+
+    const scheduledJobId = data.lastScheduledJobId || null;
+    if (state.knownScheduledJobId === undefined) {
+      state.knownScheduledJobId = scheduledJobId;
+      return;
+    }
+    if (scheduledJobId && scheduledJobId !== state.knownScheduledJobId) {
+      state.knownScheduledJobId = scheduledJobId;
+      if (state.view === 'updates' && !state.updatePollTimer) {
+        state.updateJobId = scheduledJobId;
+        pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', pruneCompletedUpdateTargets);
+        state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', pruneCompletedUpdateTargets), 3000);
+      }
+    }
+  }
+
   function updateUpdatesBadge(outdatedCount) {
     const badge = byId('updatesBadge');
     if (outdatedCount > 0) {
@@ -738,6 +768,29 @@
       badge.classList.remove('hidden');
     } else {
       badge.classList.add('hidden');
+    }
+  }
+
+  // Every settings panel's "Save" success message used to stay visible
+  // forever once shown - only a subsequent save action overwrote it. Error
+  // messages are left alone (they should stay until the underlying problem
+  // is addressed); a success message auto-hides after 30s. Tracks its own
+  // pending timer per element so repeated saves don't stack timers.
+  const savedMessageTimers = new WeakMap();
+
+  function showSavedMessage(el, msg, isError) {
+    const existingTimer = savedMessageTimers.get(el);
+    if (existingTimer) {
+      window.clearTimeout(existingTimer);
+      savedMessageTimers.delete(el);
+    }
+    el.textContent = msg;
+    el.className = 'pkg-message' + (isError ? ' error' : '');
+    if (!isError) {
+      savedMessageTimers.set(el, window.setTimeout(() => {
+        el.classList.add('hidden');
+        savedMessageTimers.delete(el);
+      }, 30000));
     }
   }
 
@@ -788,14 +841,11 @@
         // right after "Save" without retyping anything.
         byId('updatesUsername').value = '';
         byId('updatesPassword').value = '';
-        messageElement.classList.remove('hidden', 'error');
-        messageElement.textContent = 'Saved.';
+        showSavedMessage(messageElement, 'Saved.', false);
         loadClientUpdateCredentials();
       })
       .catch(error => {
-        messageElement.classList.remove('hidden');
-        messageElement.classList.add('error');
-        messageElement.textContent = `Failed to save: ${error.message}`;
+        showSavedMessage(messageElement, `Failed to save: ${error.message}`, true);
       })
       .finally(() => {
         byId('updatesSaveCredentialsButton').disabled = false;
@@ -820,17 +870,40 @@
         byId('updatesUsername').value = '';
         byId('updatesPassword').value = '';
         byId('updatesSavedAccountHint').classList.add('hidden');
-        messageElement.classList.remove('hidden', 'error');
-        messageElement.textContent = 'Saved credentials deleted.';
+        showSavedMessage(messageElement, 'Saved credentials deleted.', false);
       })
       .catch(error => {
-        messageElement.classList.remove('hidden');
-        messageElement.classList.add('error');
-        messageElement.textContent = `Failed to delete: ${error.message}`;
+        showSavedMessage(messageElement, `Failed to delete: ${error.message}`, true);
       })
       .finally(() => {
         byId('updatesClearCredentialsButton').disabled = false;
       });
+  }
+
+  // pollInstallJob's onComplete only fires once the whole job finishes -
+  // for a batch push to many machines, the outdated-clients table
+  // (#updatesBody) previously stayed unchanged until every target was
+  // done, even though job.results already grows one entry per target as
+  // each one finishes (RunClientActionJob appends and saves after each
+  // target, run sequentially). This removes a target's row as soon as
+  // ITS OWN result shows up as a success, without waiting for the batch.
+  // A failed target is deliberately left in the table - it's still
+  // outdated and may need a retry.
+  function pruneCompletedUpdateTargets(job) {
+    const results = job.results || [];
+    const completedTargets = new Set(results.filter(result => result.status === 'completed').map(result => result.target));
+    if (completedTargets.size === 0) return;
+
+    document.querySelectorAll('.updates-row-checkbox').forEach(checkbox => {
+      if (completedTargets.has(checkbox.dataset.computerName)) {
+        checkbox.closest('tr').remove();
+      }
+    });
+    updateUpdatesSelectionState();
+
+    if (!document.querySelector('.updates-row-checkbox')) {
+      byId('updatesBody').innerHTML = '<tr><td colspan="6" class="empty">Every reporting client is up to date.</td></tr>';
+    }
   }
 
   function updateUpdatesSelectionState() {
@@ -877,8 +950,8 @@
       .then(data => {
         state.updateJobId = data.jobId;
         if (state.updatePollTimer) window.clearInterval(state.updatePollTimer);
-        pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer');
-        state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer'), 3000);
+        pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', pruneCompletedUpdateTargets);
+        state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', pruneCompletedUpdateTargets), 3000);
       })
       .catch(error => {
         byId('updatesStatus').textContent = `Failed to start update job: ${error.message}`;
@@ -958,9 +1031,7 @@
   }
 
   function showPkgMessage(msg, isError) {
-    const el = byId('pkgMessage');
-    el.textContent = msg;
-    el.className = 'pkg-message' + (isError ? ' error' : '');
+    showSavedMessage(byId('pkgMessage'), msg, isError);
   }
 
   function loadCertificateStatus() {
@@ -1186,9 +1257,7 @@
     if (mode === 'once') {
       const localValue = byId('updatesScheduleOnceAt').value;
       if (!localValue) {
-        messageElement.classList.remove('hidden');
-        messageElement.classList.add('error');
-        messageElement.textContent = 'Pick a date and time first.';
+        showSavedMessage(messageElement, 'Pick a date and time first.', true);
         return;
       }
       body.onceAtUtc = new Date(localValue).toISOString();
@@ -1208,14 +1277,11 @@
         return response.json();
       })
       .then(() => {
-        messageElement.classList.remove('hidden', 'error');
-        messageElement.textContent = 'Saved.';
+        showSavedMessage(messageElement, 'Saved.', false);
         loadClientUpdateSchedule();
       })
       .catch(error => {
-        messageElement.classList.remove('hidden');
-        messageElement.classList.add('error');
-        messageElement.textContent = `Failed to save: ${error.message}`;
+        showSavedMessage(messageElement, `Failed to save: ${error.message}`, true);
       })
       .finally(() => {
         byId('updatesScheduleSaveButton').disabled = false;
@@ -1301,9 +1367,7 @@
   }
 
   function showGeneralMessage(msg, isError) {
-    const el = byId('generalMessage');
-    el.textContent = msg;
-    el.className = 'pkg-message' + (isError ? ' error' : '');
+    showSavedMessage(byId('generalMessage'), msg, isError);
   }
 
   function saveGeneralSettings(acknowledgeRisks, confirmedDisruption) {
@@ -1379,9 +1443,7 @@
   }
 
   function showAdminPasswordMessage(msg, isError) {
-    const el = byId('adminPasswordMessage');
-    el.textContent = msg;
-    el.className = 'pkg-message' + (isError ? ' error' : '');
+    showSavedMessage(byId('adminPasswordMessage'), msg, isError);
   }
 
   function loadAdminPasswordStatus() {
@@ -2250,15 +2312,14 @@
     // loadClientUpdates()/renderClientUpdates() call is deliberately NOT used
     // here - it rebuilds #updatesBody's row checkboxes, which would silently
     // clear an in-progress selection if the user has this tab open and rows
-    // checked when a poll tick lands.
+    // checked when a poll tick lands. handleClientUpdatesSummary also picks
+    // up a scheduled push the browser never itself requested.
     fetch('/api/v1/client-updates', { cache: 'no-store' })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
       })
-      .then(data => {
-        updateUpdatesBadge(data.packageAvailable ? data.outdatedCount : 0);
-      })
+      .then(handleClientUpdatesSummary)
       .catch(() => {
         // Silent - matches the clients-poll fetch above.
       });
@@ -2307,6 +2368,21 @@
       // first successful poll recovers automatically instead of leaving
       // the user stuck on the error message until they manually reload.
       startPolling();
+    });
+
+  // Same badge-only fetch pollForUpdates() does on every tick, run once
+  // immediately on page load - otherwise the sidebar badge stays blank
+  // until the first 30s poll tick, a tab visibility change, or the user
+  // opening Client updates directly (which populates it as a side effect).
+  // Also baselines state.knownScheduledJobId (see handleClientUpdatesSummary).
+  fetch('/api/v1/client-updates', { cache: 'no-store' })
+    .then(response => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    })
+    .then(handleClientUpdatesSummary)
+    .catch(() => {
+      // Silent - matches pollForUpdates()'s badge fetch.
     });
 
   loadLicenses();
