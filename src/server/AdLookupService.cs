@@ -1,4 +1,6 @@
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.DirectoryServices;
 using System.DirectoryServices.ActiveDirectory;
 using System.Text;
@@ -160,6 +162,142 @@ namespace WindowsInventoryLite
             catch { }
 
             return result;
+        }
+
+        internal sealed class AdComputerSearchResult
+        {
+            public ArrayList Computers = new ArrayList();
+            public ArrayList Warnings = new ArrayList();
+            // True once every attempted search (the whole domain, or each
+            // configured OU) has failed - the one case SendAdComputers
+            // treats as a total failure (500) instead of a partial,
+            // warning-carrying success (200).
+            public bool AllAttemptsFailed;
+        }
+
+        internal static AdComputerSearchResult SearchComputers(ArrayList organizationalUnits, ServerOptions options)
+        {
+            AdComputerSearchResult result = new AdComputerSearchResult();
+            Dictionary<string, bool> seen = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            int attempted = 0;
+            int failed = 0;
+
+            if (organizationalUnits.Count == 0)
+            {
+                attempted++;
+                if (!SearchOneRoot(null, options, seen, result.Computers, result.Warnings))
+                {
+                    failed++;
+                }
+            }
+            else
+            {
+                foreach (string ou in organizationalUnits)
+                {
+                    attempted++;
+                    if (!SearchOneRoot(ou, options, seen, result.Computers, result.Warnings))
+                    {
+                        failed++;
+                    }
+                }
+            }
+
+            result.Computers.Sort(StringComparer.OrdinalIgnoreCase);
+            result.AllAttemptsFailed = failed == attempted;
+            return result;
+        }
+
+        // Searches AD for computer objects under one root (an OU's DN, or
+        // the whole domain when organizationalUnitDn is null) and adds any
+        // found computer names into computers/seen (case-insensitive
+        // dedup). Returns false (and appends one warning) if the search
+        // itself failed - a bad/deleted OU DN, or AD being entirely
+        // unreachable for the whole-domain case. Mirrors
+        // LookupComputerDescription's own credential/domain-resolution and
+        // debug-log conventions above.
+        private static bool SearchOneRoot(string organizationalUnitDn, ServerOptions options, Dictionary<string, bool> seen, ArrayList computers, ArrayList warnings)
+        {
+            DirectoryEntry entry = null;
+            DirectorySearcher searcher = null;
+            string domain = null;
+            string errorDetail = null;
+            string status = "ok";
+            int foundCount = 0;
+            try
+            {
+                domain = !String.IsNullOrEmpty(options.AdDomain)
+                    ? options.AdDomain
+                    : Domain.GetComputerDomain().Name;
+                string ldapPath = organizationalUnitDn != null
+                    ? "LDAP://" + organizationalUnitDn
+                    : "LDAP://" + domain;
+
+                entry = options.AdUseServiceIdentity
+                    ? new DirectoryEntry(ldapPath)
+                    : new DirectoryEntry(ldapPath, options.AdUsername, options.AdPassword);
+
+                searcher = new DirectorySearcher(entry);
+                searcher.Filter = "(objectCategory=computer)";
+                searcher.PropertiesToLoad.Add("cn");
+                searcher.SearchScope = SearchScope.Subtree;
+                searcher.PageSize = 1000;
+                searcher.ClientTimeout = TimeSpan.FromSeconds(LdapTimeoutSeconds);
+
+                using (SearchResultCollection foundResults = searcher.FindAll())
+                {
+                    foreach (SearchResult found in foundResults)
+                    {
+                        if (found.Properties["cn"].Count == 0)
+                        {
+                            continue;
+                        }
+                        string name = Convert.ToString(found.Properties["cn"][0]);
+                        if (String.IsNullOrEmpty(name) || seen.ContainsKey(name))
+                        {
+                            continue;
+                        }
+                        seen[name] = true;
+                        computers.Add(name);
+                        foundCount++;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                status = "error";
+                errorDetail = ex.Message;
+            }
+            finally
+            {
+                if (searcher != null) searcher.Dispose();
+                if (entry != null) entry.Dispose();
+            }
+
+            string rootDescription = organizationalUnitDn ?? "(whole domain)";
+            try
+            {
+                string identity = options.AdUseServiceIdentity
+                    ? "service identity"
+                    : "explicit account '" + DebugLogger.SanitizeForLog(options.AdUsername) + "'";
+                string message = "AD computer search for '" + DebugLogger.SanitizeForLog(rootDescription) + "' in domain '" + (domain ?? "(unresolved)")
+                    + "' using " + identity + ": " + status + " (" + foundCount + " found)";
+                if (errorDetail != null)
+                {
+                    message += " (" + DebugLogger.SanitizeForLog(errorDetail) + ")";
+                }
+                DebugLogger.Log(options, "AD", message);
+            }
+            catch { }
+
+            if (status == "error")
+            {
+                string warning = organizationalUnitDn != null
+                    ? "OU '" + organizationalUnitDn + "' could not be searched (" + errorDetail + ") - skipped."
+                    : "The whole domain could not be searched (" + errorDetail + ").";
+                warnings.Add(warning);
+                return false;
+            }
+            return true;
         }
     }
 }

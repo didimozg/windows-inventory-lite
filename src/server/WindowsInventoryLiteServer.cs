@@ -116,6 +116,13 @@ namespace WindowsInventoryLite
         public bool AdUseServiceIdentity;
         public string AdUsername;
         public string AdPassword;
+        // Newline-separated list of OU Distinguished Names for the AD
+        // Computer Import feature ("Load from AD" on Client actions) - see
+        // docs/superpowers/specs/2026-07-20-ad-computer-import-design.md.
+        // Empty means "search the whole domain." Not a secret - stored as
+        // plain text, same as AdDomain. Dashboard-only, no Install-Server.ps1
+        // CLI flag, same reasoning as ClientUpdateUsername below.
+        public string AdComputerImportOUs;
         // Off by default - a plain-text file capturing AD lookups,
         // inventory-report traffic, and unhandled server errors. See
         // DebugLogger.cs. Only meant for troubleshooting a specific
@@ -433,6 +440,10 @@ namespace WindowsInventoryLite
                     // Decrypts a DPAPI-protected value (see SecretProtector.cs);
                     // a legacy/hand-edited plaintext value is used as-is.
                     options.AdPassword = SecretProtector.Unprotect(GetConfigString(config, "AdPassword"));
+                }
+                if (String.IsNullOrEmpty(options.AdComputerImportOUs))
+                {
+                    options.AdComputerImportOUs = GetConfigString(config, "AdComputerImportOUs");
                 }
                 if (String.IsNullOrEmpty(options.ClientUpdateUsername))
                 {
