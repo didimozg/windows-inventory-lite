@@ -1323,6 +1323,7 @@
         byId('generalAdUseServiceIdentity').checked = data.adUseServiceIdentity !== false;
         byId('generalAdUsername').value = data.adUsername || '';
         byId('generalAdPassword').value = '';
+        byId('generalAdComputerImportOUs').value = data.adComputerImportOUs || '';
         updateAdIdentityFields();
         byId('generalDebugLogEnabled').checked = !!data.debugLogEnabled;
         byId('generalDebugLogPath').textContent = data.debugLogPath || '-';
@@ -1406,6 +1407,7 @@
         adUseServiceIdentity: byId('generalAdUseServiceIdentity').checked,
         adUsername: byId('generalAdUsername').value.trim(),
         adPassword: byId('generalAdPassword').value,
+        adComputerImportOUs: byId('generalAdComputerImportOUs').value,
         debugLogEnabled: byId('generalDebugLogEnabled').checked
       })
     })

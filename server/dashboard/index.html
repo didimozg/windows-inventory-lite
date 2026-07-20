@@ -244,6 +244,10 @@
                 AD password
                 <input id="generalAdPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current password">
               </label>
+              <label class="pkg-token-field">
+                Organizational Units (DN, one per line)
+                <textarea id="generalAdComputerImportOUs" rows="3" placeholder="OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru"></textarea>
+              </label>
             </div>
             <p class="cert-hint">Shows each computer's Active Directory description next to its inventory record, read-only. Reading the description attribute is allowed to any authenticated domain user by default AD ACLs, so the service account identity usually needs no special AD delegation.</p>
           </div>
