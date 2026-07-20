@@ -632,6 +632,34 @@
     byId('installButton').textContent = isInstall ? 'Install client' : 'Uninstall client';
   }
 
+  function loadTargetsFromAd() {
+    const messageElement = byId('installAdMessage');
+    byId('installLoadAdButton').disabled = true;
+
+    fetch('/api/v1/ad/computers', { cache: 'no-store' })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'AD search failed');
+
+        const computers = data.computers || [];
+        const warnings = data.warnings || [];
+        if (computers.length === 0) {
+          showSavedMessage(messageElement, 'No computers found for the configured scope.', false);
+          return;
+        }
+
+        byId('installTargets').value = computers.join('\n');
+        const lines = [`Loaded ${computers.length} computer(s) from AD.`, ...warnings];
+        showSavedMessage(messageElement, lines.join('\n'), false);
+      })
+      .catch(error => {
+        showSavedMessage(messageElement, `Failed to load from AD: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('installLoadAdButton').disabled = false;
+      });
+  }
+
   function startClientActionJob() {
     const action = byId('clientAction').value;
     const targets = byId('installTargets').value.trim();
@@ -2432,6 +2460,7 @@
   byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
   byId('clientAction').addEventListener('change', updateClientActionUi);
   byId('installButton').addEventListener('click', startClientActionJob);
+  byId('installLoadAdButton').addEventListener('click', loadTargetsFromAd);
   byId('exportClientsBtn').addEventListener('click', exportClients);
   byId('exportSoftwareBtn').addEventListener('click', exportSoftware);
   byId('exportCpuBtn').addEventListener('click', exportHardwareCpu);

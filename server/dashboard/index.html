@@ -515,10 +515,16 @@
                 <option value="uninstall">Uninstall client</option>
               </select>
             </label>
-            <label class="install-targets-field">
-              Targets
-              <textarea id="installTargets" rows="4" placeholder="PC-001&#10;PC-002&#10;192.0.2.10&#10;192.0.2.20-192.0.2.30"></textarea>
-            </label>
+            <div class="install-targets-field">
+              <label>
+                Targets
+                <textarea id="installTargets" rows="4" placeholder="PC-001&#10;PC-002&#10;192.0.2.10&#10;192.0.2.20-192.0.2.30"></textarea>
+              </label>
+              <div class="pkg-buttons">
+                <button id="installLoadAdButton" class="export-button" type="button">Load from AD</button>
+              </div>
+              <div id="installAdMessage" class="pkg-message hidden"></div>
+            </div>
             <label class="install-server-field install-only">
               Server URL
               <input id="installServerUrl" type="text" value="">
