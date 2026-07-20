@@ -225,12 +225,30 @@ namespace WindowsInventoryLite
             int foundCount = 0;
             try
             {
-                domain = !String.IsNullOrEmpty(options.AdDomain)
-                    ? options.AdDomain
-                    : Domain.GetComputerDomain().Name;
-                string ldapPath = organizationalUnitDn != null
-                    ? "LDAP://" + organizationalUnitDn
-                    : "LDAP://" + domain;
+                string ldapPath;
+                if (organizationalUnitDn != null)
+                {
+                    ldapPath = "LDAP://" + organizationalUnitDn;
+                    // Domain.GetComputerDomain() is not needed to build this
+                    // path - it's only used below for the debug-log message,
+                    // which already falls back to "(unresolved)" when domain
+                    // is null. Skipping it here matters because this method
+                    // runs once per configured OU (SearchComputers loops over
+                    // the whole AdComputerImportOUs list): calling the DC
+                    // locator on every iteration turns one slow lookup (30+
+                    // seconds observed when no DC can be located) into N of
+                    // them for an N-entry OU list, with no timeout bounding
+                    // that call the way ClientTimeout bounds the search
+                    // itself.
+                    domain = !String.IsNullOrEmpty(options.AdDomain) ? options.AdDomain : null;
+                }
+                else
+                {
+                    domain = !String.IsNullOrEmpty(options.AdDomain)
+                        ? options.AdDomain
+                        : Domain.GetComputerDomain().Name;
+                    ldapPath = "LDAP://" + domain;
+                }
 
                 entry = options.AdUseServiceIdentity
                     ? new DirectoryEntry(ldapPath)
