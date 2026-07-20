@@ -2174,6 +2174,30 @@ namespace WindowsInventoryLite
             return fallback;
         }
 
+        // One OU Distinguished Name per line - not reused with
+        // ExpandInstallTargets' comma/semicolon/space splitting below, since
+        // a DN's own RDN components are themselves comma-separated
+        // (e.g. "OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru") and
+        // would be shredded by that splitter.
+        private static ArrayList ParseAdComputerImportOUs(string raw)
+        {
+            ArrayList result = new ArrayList();
+            if (String.IsNullOrEmpty(raw))
+            {
+                return result;
+            }
+            string[] lines = raw.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (string line in lines)
+            {
+                string trimmed = line.Trim();
+                if (trimmed.Length > 0)
+                {
+                    result.Add(trimmed);
+                }
+            }
+            return result;
+        }
+
         private static ArrayList ExpandInstallTargets(string input)
         {
             ArrayList targets = new ArrayList();
@@ -4512,6 +4536,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ExpandInstallTarget expands a full IPv4 range", TestExpandInstallTargetFullRange);
             allPassed &= SelfTestCheck(output, "ExpandInstallTarget passes through a single hostname", TestExpandInstallTargetHostname);
             allPassed &= SelfTestCheck(output, "ExpandInstallTargets de-duplicates and splits on separators", TestExpandInstallTargetsDedup);
+            allPassed &= SelfTestCheck(output, "ParseAdComputerImportOUs splits on newlines only, not commas", TestParseAdComputerImportOUsSplitsOnNewlinesOnly);
+            allPassed &= SelfTestCheck(output, "ParseAdComputerImportOUs treats blank input as an empty OU list", TestParseAdComputerImportOUsEmptyMeansWholeDomain);
             allPassed &= SelfTestCheck(output, "BuildZip produces a structurally valid archive", TestBuildZipStructure);
             allPassed &= SelfTestCheck(output, "NormalizeThumbprint strips separators and uppercases", TestNormalizeThumbprint);
             allPassed &= SelfTestCheck(output, "ExtractLicenseId strips the route prefix and query string", TestExtractLicenseIdWithQuery);
@@ -4646,6 +4672,27 @@ namespace WindowsInventoryLite
             ArrayList result = ExpandInstallTargets("host1, host1;host2\nhost1");
             string[] expected = new string[] { "host1", "host2" };
             return CompareStringLists(expected, result);
+        }
+
+        private static string TestParseAdComputerImportOUsSplitsOnNewlinesOnly()
+        {
+            ArrayList result = ParseAdComputerImportOUs("OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru\r\n\r\nOU=Servers,DC=spb,DC=cccb,DC=ru\n  \nOU=Third,DC=x,DC=y  ");
+            string[] expected = new string[] {
+                "OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru",
+                "OU=Servers,DC=spb,DC=cccb,DC=ru",
+                "OU=Third,DC=x,DC=y"
+            };
+            return CompareStringLists(expected, result);
+        }
+
+        private static string TestParseAdComputerImportOUsEmptyMeansWholeDomain()
+        {
+            ArrayList result = ParseAdComputerImportOUs("   ");
+            if (result.Count != 0)
+            {
+                return "expected a blank/whitespace-only input to produce zero OUs, got " + result.Count;
+            }
+            return null;
         }
 
         private static string CompareStringLists(string[] expected, ArrayList actual)
