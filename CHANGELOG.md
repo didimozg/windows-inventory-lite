@@ -6,6 +6,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.17.2] - 2026-07-20
+
+### Security
+
+- `SaveServerConfigValues` read-modify-wrote `server-config.json` (which holds DPAPI-encrypted secrets) with no lock. With the new Client Update Schedule's two unattended background timers plus every HTTP-driven settings save, concurrent writers could interleave and silently lose an update. Now serialized behind a dedicated lock and written atomically (temp file + `File.Replace`/`File.Move`) instead of a direct in-place `File.WriteAllText`.
+- `-CredentialPassword` on `Install-ClientWinRM.ps1`/`Uninstall-ClientWinRM.ps1` was a plaintext `[string]` parameter, visible in local process listings and left in PowerShell history for as long as the session is kept. Changed to `[System.Security.SecureString]`; the production dashboard-driven path was already unaffected (it builds `-Credential` directly), this only hardens manual/standalone invocation. `README.md`/`README_RU.md` updated to match.
+- Fixed an XSS regression: `cpu.cores`/`speedMhz` (Hardware tab and Clients table) and `capacityMb`/`ramTotalMb` (RAM module list, Clients table) were interpolated straight into `innerHTML` instead of being coerced through `Number(x) || 0` like every other numeric field on the dashboard.
+- Eight config-mutating endpoints (`ConfigureServerSettings`, `ConfigureClientUpdateCredentials`, `ConfigureClientUpdateSchedule`, `ChangeAdminPassword`, `CreateLicense`, `UpdateLicense`, `StartClientAction`, `ConfigureClientPackage`) accepted a missing/malformed JSON body without a null check, several of them proceeding to dereference the resulting `null` payload. All eight now reject with `400` on an empty or unparseable body instead of failing further downstream.
+- `ConfigureClientPackage`'s `intervalHours` silently clamped out-of-range input (e.g. `999` became `24`) instead of rejecting it - a caller had no way to tell the value it sent was not the value that got saved. Now rejects out-of-range/non-numeric input with `400`, matching this API's reject-don't-clamp convention elsewhere.
+- `ChangeAdminPassword` returned a bare `{"status":"ok"}` instead of echoing the resource's own GET-status shape, the only config POST on this API that didn't. Now calls `SendAdminPasswordStatus` like every sibling endpoint.
+
+### Changed
+
+- WinRM credentials panel and Schedule panel: Save buttons wrapped in `.pkg-buttons` for layout consistency with the rest of the dashboard's button groups; "Delete saved credentials" switched from `.export-button` to `.danger-button-ghost` to match this dashboard's destructive-action styling convention.
+- Added a baseline `:focus-visible` outline so keyboard navigation has visible focus indication across the dashboard (previously relied entirely on browser defaults).
+- Clients table rows for stale clients (no report within the expected interval) now carry a `STALE` badge, matching the existing badge pattern used for USB devices.
+
+All of the above were found by two review passes (server/PowerShell/dashboard-client security review, and frontend/API design consistency review) requested against the full codebase, plus additional gaps found during independent verification of the reviewers' findings. Verified via the C# self-test suite (45/45), the Pester suite (18/18), and live Playwright/HTTP checks against a local console-mode instance.
+
 ## [0.17.1] - 2026-07-18
 
 ### Security

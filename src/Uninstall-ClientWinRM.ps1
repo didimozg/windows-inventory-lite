@@ -17,9 +17,14 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$CredentialUsername,
 
+    # SecureString, not [string] - a plaintext password parameter is visible
+    # to any local process listing (Get-Process/Win32_Process/Task Manager)
+    # and lands in this session's PowerShell history for as long as it's
+    # kept. The production dashboard-driven path never uses this parameter
+    # anyway (it passes -Credential directly, built from stdin); this is
+    # only for manual/standalone invocation.
     [Parameter()]
-    [ValidateNotNullOrEmpty()]
-    [string]$CredentialPassword,
+    [System.Security.SecureString]$CredentialPassword,
 
     [Parameter()]
     [switch]$AddToTrustedHosts
@@ -32,8 +37,7 @@ $serviceName = 'WindowsInventoryLiteClient'
 $hadFailure = $false
 
 if (-not $Credential -and $CredentialUsername -and $CredentialPassword) {
-    $securePassword = ConvertTo-SecureString -String $CredentialPassword -AsPlainText -Force
-    $Credential = New-Object System.Management.Automation.PSCredential($CredentialUsername, $securePassword)
+    $Credential = New-Object System.Management.Automation.PSCredential($CredentialUsername, $CredentialPassword)
 }
 
 function New-InventorySession {

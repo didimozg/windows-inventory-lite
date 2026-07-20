@@ -448,8 +448,10 @@
                 Client update password
                 <input id="updatesPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current one">
               </label>
-              <button id="updatesSaveCredentialsButton" class="primary-button" type="button">Save</button>
-              <button id="updatesClearCredentialsButton" class="export-button" type="button">Delete saved credentials</button>
+              <div class="pkg-buttons">
+                <button id="updatesSaveCredentialsButton" class="primary-button" type="button">Save</button>
+                <button id="updatesClearCredentialsButton" class="danger-button-ghost" type="button">Delete saved credentials</button>
+              </div>
             </div>
             <div id="updatesCredentialsMessage" class="pkg-message hidden"></div>
           </div>
@@ -474,7 +476,9 @@
                 Every (hours)
                 <input id="updatesScheduleIntervalHours" type="number" min="1" max="8760" value="24">
               </label>
-              <button id="updatesScheduleSaveButton" class="primary-button" type="button">Save</button>
+              <div class="pkg-buttons">
+                <button id="updatesScheduleSaveButton" class="primary-button" type="button">Save</button>
+              </div>
             </div>
             <div id="updatesScheduleMessage" class="pkg-message hidden"></div>
           </div>

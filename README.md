@@ -432,7 +432,7 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 | `-RemotePackagePath` | `C:\ProgramData\WindowsInventoryLite\WinRMDeploy` | Temporary folder on the remote host for the package. |
 | `-Credential` | `—` | PSCredential for WinRM authentication. Optional. |
 | `-CredentialUsername` | `—` | WinRM username as a plain string. Used if `-Credential` is not provided. |
-| `-CredentialPassword` | `—` | WinRM password as a plain string. Used if `-Credential` is not provided. |
+| `-CredentialPassword` | `—` | WinRM password as a `SecureString`. Used if `-Credential` is not provided. |
 | `-AddToTrustedHosts` | `off` | Add target computers to WinRM TrustedHosts before connecting. |
 | `-Force` | `off` | Reinstall the client even if the version already matches. |
 | `-KeepRemotePackage` | `off` | Do not delete the temporary package folder from the remote host after deployment. |
@@ -458,7 +458,7 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 | `-InstallPath` | `C:\ProgramData\WindowsInventoryLite` | Installation folder to remove on remote hosts. |
 | `-Credential` | `—` | PSCredential for WinRM authentication. Optional. |
 | `-CredentialUsername` | `—` | WinRM username as a plain string. Used if `-Credential` is not provided. |
-| `-CredentialPassword` | `—` | WinRM password as a plain string. Used if `-Credential` is not provided. |
+| `-CredentialPassword` | `—` | WinRM password as a `SecureString`. Used if `-Credential` is not provided. |
 | `-AddToTrustedHosts` | `off` | Add target computers to WinRM TrustedHosts before connecting. |
 
 ### New-ClientGpoPackage.ps1

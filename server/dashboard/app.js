@@ -1929,9 +1929,9 @@
   function formatRamModules(modules) {
     if (!modules || modules.length === 0) return null;
     return modules.map(m => {
-      const cap = m.capacityMb >= 1024 ? `${Math.round(m.capacityMb / 1024)} GB` : `${m.capacityMb} MB`;
+      const cap = m.capacityMb >= 1024 ? `${Math.round(m.capacityMb / 1024)} GB` : `${Number(m.capacityMb) || 0} MB`;
       const mfr = m.manufacturer ? ` ${escapeHtml(m.manufacturer)}` : '';
-      const spd = m.speedMhz ? ` ${m.speedMhz} MHz` : '';
+      const spd = m.speedMhz ? ` ${Number(m.speedMhz) || 0} MHz` : '';
       return `${cap}${mfr}${spd}`;
     }).join(', ');
   }
@@ -1943,7 +1943,9 @@
     const { items: pageItems, page, totalPages } = paginate(filtered, state.page.clients, state.pageSize.clients);
     state.page.clients = page;
     const rows = pageItems.map(client => {
-      const staleClass = isStale(client) ? ' stale' : '';
+      const stale = isStale(client);
+      const staleClass = stale ? ' stale' : '';
+      const staleBadge = stale ? ' <span class="usb-badge">STALE</span>' : '';
       const os = client.os || {};
       const office = client.office || {};
       const activation = client.activation || {};
@@ -1963,10 +1965,10 @@
 
       const cpu = client.cpu || {};
       const cpuText = cpu.name
-        ? `${escapeHtml(cpu.name)}${cpu.cores ? `, ${cpu.cores} cores` : ''}${cpu.clockMhz ? `, ${(cpu.clockMhz / 1000).toFixed(2)} GHz` : ''}`
+        ? `${escapeHtml(cpu.name)}${cpu.cores ? `, ${Number(cpu.cores) || 0} cores` : ''}${cpu.clockMhz ? `, ${(cpu.clockMhz / 1000).toFixed(2)} GHz` : ''}`
         : 'Unknown';
       const ramGb = client.ramTotalMb
-        ? (client.ramTotalMb >= 1024 ? `${Math.round(client.ramTotalMb / 1024)} GB` : `${client.ramTotalMb} MB`)
+        ? (client.ramTotalMb >= 1024 ? `${Math.round(client.ramTotalMb / 1024)} GB` : `${Number(client.ramTotalMb) || 0} MB`)
         : 'Unknown';
       const ramModulesSummary = formatRamModules(client.ramModules);
       const disksSummary = (client.disks || []).map(d => {
@@ -1979,7 +1981,7 @@
       const detailsHidden = state.expandedDetails.has('client:' + clientId) ? '' : 'hidden';
 
       return `<tr class="${staleClass}">
-        <td><button class="link-button" type="button" data-client="${clientId}">${escapeHtml(client.computerName)}</button>${usbBadge}<small>${escapeHtml(client.domain)}</small>${ipAddresses ? `<small class="mono">${escapeHtml(ipAddresses)}</small>` : ''}</td>
+        <td><button class="link-button" type="button" data-client="${clientId}">${escapeHtml(client.computerName)}</button>${usbBadge}${staleBadge}<small>${escapeHtml(client.domain)}</small>${ipAddresses ? `<small class="mono">${escapeHtml(ipAddresses)}</small>` : ''}</td>
         <td>${escapeHtml(client.clientVersion)}</td>
         <td>${escapeHtml(os.caption)}<small class="mono">${escapeHtml(os.version)} build ${escapeHtml(os.buildNumber)}</small></td>
         <td>${escapeHtml(office.name)}<small>${escapeHtml(office.version)}</small></td>
@@ -2067,7 +2069,7 @@
         const clock = g.clockMhz ? `${(g.clockMhz / 1000).toFixed(2)} GHz` : 'Unknown';
         return `<tr>
           <td><button class="link-button" type="button" data-hw="${id}">${escapeHtml(g.name)}</button></td>
-          <td class="hw-num">${g.cores != null ? g.cores : 'Unknown'}</td>
+          <td class="hw-num">${g.cores != null ? (Number(g.cores) || 0) : 'Unknown'}</td>
           <td class="hw-num">${escapeHtml(clock)}</td>
           <td class="hw-num">${g.clients.length}</td>
         </tr>

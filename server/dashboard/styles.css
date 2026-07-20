@@ -102,6 +102,16 @@
   box-sizing: border-box;
 }
 
+/* Baseline keyboard-focus affordance - this file has a pervasive :hover
+   accent system (nav, buttons, sortable headers, chips) but nothing for
+   keyboard-only navigation, which otherwise falls back to whatever the
+   browser's own default outline looks like (often invisible against a
+   dark theme). One rule covers every focusable element consistently. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 body {
   margin: 0;
   /* Inter/Roboto first per the design spec; this app ships with no web

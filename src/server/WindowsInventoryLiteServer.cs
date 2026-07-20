@@ -20,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.17.1";
+        internal const string ProductVersion = "0.17.2";
 
         private static int Main(string[] args)
         {
@@ -533,6 +533,14 @@ namespace WindowsInventoryLite
         private readonly object clientUpdateScheduleTimerLock = new object();
         private Timer clientUpdateScheduleTimer;
         private readonly object reportFileLock = new object();
+        // server-config.json holds the DPAPI-encrypted secrets (AdPassword/
+        // WebPassword/Token/ClientUpdatePassword) and is now written by more
+        // than one unattended background path (the AD sync and Client Update
+        // schedule timers) in addition to every operator-driven settings
+        // save - without this lock, two writers reading-modifying-writing
+        // the same file can silently drop each other's change (a lost
+        // update), found during a security review of the schedule feature.
+        private readonly object configFileLock = new object();
 
         public InventoryServer(ServerOptions options)
         {
@@ -1622,7 +1630,20 @@ namespace WindowsInventoryLite
         private void StartClientAction(Stream stream, RequestContext request, string action)
         {
             JavaScriptSerializer serializer = CreateJsonSerializer();
-            Dictionary<string, object> payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
             string targetText = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "");
             string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
             string username = Convert.ToString(payload.ContainsKey("username") ? payload["username"] : "");
@@ -2702,7 +2723,20 @@ namespace WindowsInventoryLite
             }
 
             JavaScriptSerializer serializer = CreateJsonSerializer();
-            Dictionary<string, object> payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
             string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
             string token = Convert.ToString(payload.ContainsKey("token") ? payload["token"] : "");
             // Only when the GPO startup script and the package files (client
@@ -2712,15 +2746,20 @@ namespace WindowsInventoryLite
             // .cmd itself runs from" (%~dp0), which is correct whenever
             // both are copied to the same place.
             string packageSharePath = Convert.ToString(payload.ContainsKey("packageSharePath") ? payload["packageSharePath"] : "");
+            // Reject out-of-range like every other numeric-range field on
+            // this API (staleHours, adSyncIntervalHours, schedule
+            // intervalHours, port, httpsPort) instead of silently clamping -
+            // a caller sending 100 here should see why the value it asked
+            // for wasn't used, not get a silently different one back.
             int intervalHours = 6;
             if (payload.ContainsKey("intervalHours"))
             {
-                int parsed;
-                if (Int32.TryParse(Convert.ToString(payload["intervalHours"]), out parsed))
-                    intervalHours = parsed;
+                if (!Int32.TryParse(Convert.ToString(payload["intervalHours"]), out intervalHours) || intervalHours < 1 || intervalHours > 24)
+                {
+                    SendText(stream, "{\"error\":\"intervalHours must be between 1 and 24\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
             }
-            if (intervalHours < 1) intervalHours = 1;
-            if (intervalHours > 24) intervalHours = 24;
 
             if (String.IsNullOrEmpty(serverUrl))
             {
@@ -3294,6 +3333,10 @@ namespace WindowsInventoryLite
             try
             {
                 payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
             }
             catch
             {
@@ -3557,6 +3600,10 @@ namespace WindowsInventoryLite
             try
             {
                 payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
             }
             catch
             {
@@ -3613,6 +3660,10 @@ namespace WindowsInventoryLite
             try
             {
                 payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
             }
             catch
             {
@@ -3690,6 +3741,10 @@ namespace WindowsInventoryLite
             try
             {
                 payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
             }
             catch
             {
@@ -3745,7 +3800,11 @@ namespace WindowsInventoryLite
             }
             catch { }
 
-            SendJson(stream, "{\"status\":\"ok\"}");
+            // Echoes the fresh GET-shaped status, matching every other
+            // config POST on this API (settings, certificate, client-update
+            // credentials/schedule) - a bare {"status":"ok"} was the one
+            // outlier.
+            SendAdminPasswordStatus(stream);
         }
 
         // AdPassword, WebPassword, and Token are encrypted at rest (DPAPI,
@@ -3767,33 +3826,54 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            JavaScriptSerializer serializer = CreateJsonSerializer();
-            Dictionary<string, object> config;
-            if (File.Exists(options.ConfigPath))
+            // The whole read-modify-write is inside configFileLock so two
+            // writers (an operator's HTTP save and a background timer tick,
+            // or two timers) can't interleave and silently drop each
+            // other's change - see the lock's own declaration comment.
+            lock (configFileLock)
             {
-                try
+                JavaScriptSerializer serializer = CreateJsonSerializer();
+                Dictionary<string, object> config;
+                if (File.Exists(options.ConfigPath))
                 {
-                    string existing = File.ReadAllText(options.ConfigPath, Encoding.UTF8);
-                    config = serializer.Deserialize<Dictionary<string, object>>(existing) ?? new Dictionary<string, object>();
+                    try
+                    {
+                        string existing = File.ReadAllText(options.ConfigPath, Encoding.UTF8);
+                        config = serializer.Deserialize<Dictionary<string, object>>(existing) ?? new Dictionary<string, object>();
+                    }
+                    catch
+                    {
+                        config = new Dictionary<string, object>();
+                    }
                 }
-                catch
+                else
                 {
                     config = new Dictionary<string, object>();
                 }
-            }
-            else
-            {
-                config = new Dictionary<string, object>();
-            }
 
-            foreach (KeyValuePair<string, string> pair in updates)
-            {
-                config[pair.Key] = EncryptedConfigKeys.Contains(pair.Key) ? SecretProtector.Protect(pair.Value, options) : pair.Value;
-            }
+                foreach (KeyValuePair<string, string> pair in updates)
+                {
+                    config[pair.Key] = EncryptedConfigKeys.Contains(pair.Key) ? SecretProtector.Protect(pair.Value, options) : pair.Value;
+                }
 
-            string json = serializer.Serialize(config);
-            File.WriteAllText(options.ConfigPath, json, new UTF8Encoding(false));
-            ApplyRestrictedConfigAcl(options.ConfigPath);
+                string json = serializer.Serialize(config);
+                // Write to a temp file then swap it into place, instead of
+                // File.WriteAllText directly on the real path - this file
+                // holds the auth credential and encrypted secrets, so a
+                // process crash or a concurrent reader must never be able to
+                // observe a truncated/partial write.
+                string tempPath = options.ConfigPath + ".tmp";
+                File.WriteAllText(tempPath, json, new UTF8Encoding(false));
+                if (File.Exists(options.ConfigPath))
+                {
+                    File.Replace(tempPath, options.ConfigPath, null);
+                }
+                else
+                {
+                    File.Move(tempPath, options.ConfigPath);
+                }
+                ApplyRestrictedConfigAcl(options.ConfigPath);
+            }
         }
 
         // Mirrors Install-Server.ps1's Set-RestrictedFileAcl: restricts
@@ -3941,6 +4021,10 @@ namespace WindowsInventoryLite
             try
             {
                 payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
             }
             catch
             {
@@ -3985,6 +4069,10 @@ namespace WindowsInventoryLite
             try
             {
                 payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
             }
             catch
             {
