@@ -29,6 +29,26 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+# ServerUrl/Token end up embedded in the sc.exe command line Invoke-ServiceCreate
+# builds below and runs via cmd.exe /c - the surrounding double quotes do NOT
+# protect &, |, <, >, ^ from being parsed as live cmd.exe operators (a well-known
+# cmd.exe quoting quirk), so an unvalidated value here is a command-injection
+# path to code execution as whatever identity is creating this service (often
+# the calling server's own privileged WinRM/service account). Reject the same
+# characters New-ClientGpoPackage.ps1's Test-BatchSafeValue already rejects for
+# the GPO .cmd generation path - this script is the other place those same
+# values eventually land.
+function Test-BatchSafeValue {
+    param([string]$Value, [string]$FieldName)
+    if ([string]::IsNullOrEmpty($Value)) { return }
+    $unsafeChars = [char[]]('"', '&', '|', '<', '>', '^', "`r", "`n")
+    if ($Value.IndexOfAny($unsafeChars) -ge 0) {
+        throw "$FieldName contains a character that is not allowed here (double quote, &, |, <, >, ^, or a line break)."
+    }
+}
+Test-BatchSafeValue -Value $ServerUrl -FieldName 'ServerUrl'
+Test-BatchSafeValue -Value $Token -FieldName 'Token'
+
 $ServiceName = 'WindowsInventoryLiteClient'
 $ScriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $ScriptDirectory) {

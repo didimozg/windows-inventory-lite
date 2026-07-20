@@ -161,6 +161,28 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+# DataPath/ContentPath/ClientPackagePath/ConfigPath end up embedded in the
+# sc.exe command line Invoke-ServiceCreate builds below and runs via cmd.exe
+# /c - the surrounding double quotes do NOT protect &, |, <, >, ^ from being
+# parsed as live cmd.exe operators (a well-known cmd.exe quoting quirk), so
+# an unvalidated value here is a command-injection path to code execution.
+# These are admin-supplied install-time paths (lower reachability than the
+# WinRM push path fixed server-side), but reject the same characters
+# New-ClientGpoPackage.ps1's Test-BatchSafeValue already rejects for the GPO
+# .cmd generation path, for consistency and defense-in-depth.
+function Test-BatchSafeValue {
+    param([string]$Value, [string]$FieldName)
+    if ([string]::IsNullOrEmpty($Value)) { return }
+    $unsafeChars = [char[]]('"', '&', '|', '<', '>', '^', "`r", "`n")
+    if ($Value.IndexOfAny($unsafeChars) -ge 0) {
+        throw "$FieldName contains a character that is not allowed here (double quote, &, |, <, >, ^, or a line break)."
+    }
+}
+Test-BatchSafeValue -Value $DataPath -FieldName 'DataPath'
+Test-BatchSafeValue -Value $ContentPath -FieldName 'ContentPath'
+Test-BatchSafeValue -Value $ClientPackagePath -FieldName 'ClientPackagePath'
+Test-BatchSafeValue -Value $ConfigPath -FieldName 'ConfigPath'
+
 function Invoke-ServiceControl {
     param(
         [Parameter(Mandatory = $true)]

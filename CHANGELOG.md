@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.17.1] - 2026-07-18
+
+### Security
+
+- **Critical: command injection via `serverUrl` on the WinRM push path (`POST /api/v1/client-install`), leading to remote code execution on target machines.** `Deploy-ClientGpo.ps1`'s `sc.exe create` command line (introduced by the `0.16.4` quoting fix, which switched service creation to `cmd.exe /c` for a different bug) escaped only `"` before embedding `ServerUrl`/`Token`, but `cmd.exe`'s `&`/`|`/`<`/`>`/`^` are not neutralized by surrounding double quotes - a well-known quirk, confirmed by direct reproduction against the real code path. `Client actions`' `serverUrl` field reached this sink completely unvalidated (the `0.15.1` metacharacter guard only covered the separate GPO-`.cmd`-generation path), and with no credential supplied the resulting WinRM session runs as the server's own service identity - a dashboard user could push an install with a crafted `serverUrl` and run arbitrary commands, as that privileged identity, on every target machine. Fixed by rejecting the same unsafe characters at the server's entry point (`StartClientAction`) and, for defense-in-depth, at the `sc.exe` sink itself in `Deploy-ClientGpo.ps1`, `Install-Client.ps1`, and `Install-Server.ps1`. Confirmed the fix blocks the exact reproduced payload and does not reject a legitimate URL, verified live against a running instance. Found via a dedicated security review of the PowerShell scripts.
+
 ## [0.17.0] - 2026-07-18
 
 ### Added

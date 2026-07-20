@@ -32,6 +32,26 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+
+# ServerUrl/Token/ServerSharePath end up embedded in the sc.exe command line
+# Invoke-ServiceCreate builds below and runs via cmd.exe /c - the surrounding
+# double quotes do NOT protect &, |, <, >, ^ from being parsed as live cmd.exe
+# operators (a well-known cmd.exe quoting quirk), so an unvalidated value here
+# is a command-injection path to code execution. Reject the same characters
+# New-ClientGpoPackage.ps1's Test-BatchSafeValue already rejects for the GPO
+# .cmd generation path.
+function Test-BatchSafeValue {
+    param([string]$Value, [string]$FieldName)
+    if ([string]::IsNullOrEmpty($Value)) { return }
+    $unsafeChars = [char[]]('"', '&', '|', '<', '>', '^', "`r", "`n")
+    if ($Value.IndexOfAny($unsafeChars) -ge 0) {
+        throw "$FieldName contains a character that is not allowed here (double quote, &, |, <, >, ^, or a line break)."
+    }
+}
+Test-BatchSafeValue -Value $ServerUrl -FieldName 'ServerUrl'
+Test-BatchSafeValue -Value $Token -FieldName 'Token'
+Test-BatchSafeValue -Value $ServerSharePath -FieldName 'ServerSharePath'
+
 # $PSScriptRoot is unset for a top-level script (not a module) on Windows
 # PowerShell 2.0 - it only started working outside modules in PS 3.0. This
 # script installs the client and runs on client machines, which this

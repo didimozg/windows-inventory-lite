@@ -20,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.17.0";
+        internal const string ProductVersion = "0.17.1";
 
         private static int Main(string[] args)
         {
@@ -1648,6 +1648,22 @@ namespace WindowsInventoryLite
             if (action == "install" && String.IsNullOrEmpty(serverUrl))
             {
                 SendText(stream, "{\"error\":\"serverUrl is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            // serverUrl flows unmodified through Install-ClientWinRM.ps1 into
+            // Deploy-ClientGpo.ps1's cmd.exe-based service-creation step on the
+            // TARGET machine (Invoke-ServiceCreate) - the same batch-metacharacter
+            // injection GenerateCmdLines already rejects for the GPO package path
+            // below is otherwise reachable here too, and this path can run as the
+            // service's own privileged identity when no credential is supplied.
+            try
+            {
+                ValidateBatchSafe(serverUrl, "serverUrl");
+            }
+            catch (ArgumentException ex)
+            {
+                SendText(stream, "{\"error\":\"" + ex.Message.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
                 return;
             }
 
