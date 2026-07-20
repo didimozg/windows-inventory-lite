@@ -20,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.17.3";
+        internal const string ProductVersion = "0.17.4";
 
         private static int Main(string[] args)
         {
@@ -934,6 +934,7 @@ namespace WindowsInventoryLite
                 SaveInstallJob(job);
             }
             lastScheduledUpdateJobId = job.Id;
+            DebugLogger.Log(options, "Schedule", "Scheduled client update push started: job '" + job.Id + "', mode '" + options.ClientUpdateScheduleMode + "', " + targets.Count + " target(s).");
             ThreadPool.QueueUserWorkItem(RunClientActionJob, job);
         }
 

@@ -4,14 +4,16 @@ using System.Text;
 
 namespace WindowsInventoryLite
 {
-    // Optional, off-by-default plain-text log file. Captures three
-    // categories useful for diagnosing a live deployment without needing
-    // to reproduce the issue locally: AD lookups ("AD"), inventory-report
-    // traffic between client and server ("Client"), and unhandled server
-    // errors ("Error"). A no-op when disabled, so it costs nothing in the
-    // default configuration. Not rotated or size-capped - meant to be
-    // switched on for the duration of a troubleshooting session, not left
-    // running indefinitely.
+    // Optional, off-by-default plain-text log file. Captures categories
+    // useful for diagnosing a live deployment without needing to reproduce
+    // the issue locally: AD lookups ("AD"), inventory-report traffic
+    // between client and server ("Client"), a scheduled client-update
+    // push actually starting ("Schedule" - a tick that finds nothing due
+    // stays silent, only a real push against real targets logs), and
+    // unhandled server errors ("Error"). A no-op when disabled, so it
+    // costs nothing in the default configuration. Not rotated or
+    // size-capped - meant to be switched on for the duration of a
+    // troubleshooting session, not left running indefinitely.
     internal static class DebugLogger
     {
         private static readonly object writeLock = new object();
