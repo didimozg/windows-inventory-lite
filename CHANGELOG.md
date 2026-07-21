@@ -6,13 +6,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
-## [0.21.1] - 2026-07-21
-
-### Fixed
-
-- CSV export (`Clients` tab) always showed "Not found in AD"/"AD unreachable" for a client whose `adSyncStatus` was set that way the last time AD Description Sync ran, even after Sync was turned off and the Description manually edited - the table itself already ignored `adSyncStatus` once sync was off, but the export didn't. The export now checks `adDescriptionSyncEnabled` the same way the table does, so a manually-set Description shows correctly in the export once sync is off.
-- `README_RU.md`: fixed reversed word order ("identity AD" -> "AD identity") in the two `Client actions`/`Client updates` paragraphs describing the "Use global AD settings" checkbox requirement.
-
 ## [0.21.0] - 2026-07-21
 
 ### Added
@@ -23,6 +16,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - `Client actions`' existing "Use global AD settings" checkbox now depends on "Configure AD identity" specifically rather than the old single AD-sync flag - no behavior change for existing users (the flag it depends on is the one that kept its meaning across the split).
+
+### Fixed
+
+- CSV export (`Clients` tab) always showed "Not found in AD"/"AD unreachable" for a client whose `adSyncStatus` was set that way the last time AD Description Sync ran, even after Sync was turned off and the Description manually edited - the table itself already ignored `adSyncStatus` once sync was off, but the export didn't. The export now checks `adDescriptionSyncEnabled` the same way the table does, so a manually-set Description shows correctly in the export once sync is off.
+- `README_RU.md`: fixed reversed word order ("identity AD" -> "AD identity") in the two `Client actions`/`Client updates` paragraphs describing the "Use global AD settings" checkbox requirement.
 
 ## [0.20.2] - 2026-07-21
 
