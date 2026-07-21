@@ -1243,9 +1243,9 @@ th.sort-desc::after {
 }
 
 /* Same narrow single-column treatment as .ad-identity-panel below, for the
-   "Enable AD sync" / "Sync mode" / "Sync interval" group - keeps this
-   settings block reading as two small stacked panels instead of one wide
-   grid with mixed-purpose fields side by side. */
+   "Sync Description from AD" / "Sync mode" / "Sync interval" group - keeps
+   this settings block reading as two small stacked panels instead of one
+   wide grid with mixed-purpose fields side by side. */
 .ad-sync-panel {
   grid-template-columns: 1fr;
   max-width: 420px;

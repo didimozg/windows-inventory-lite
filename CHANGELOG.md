@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.21.2] - 2026-07-21
+
+### Fixed
+
+- **Data loss**: a manually-set Description (entered while AD Description Sync is off) was silently overwritten the next time that client submitted an inventory report - the client's own report never carries an `adDescription` field (only AD sync or a manual edit ever write it), so the report-ingestion write path replaced the whole stored record with one that had lost it. Found by a pre-merge whole-codebase review, not by any single task's own review during the original 0.21.0 feature. `ComputeAdSyncFields` now carries the previous `adDescription`/`adSyncStatus`/`adSyncedAt` forward on every report while sync is off, matching the same carry-forward behavior sync already used for the "not due yet" case. Two new self-tests cover this exact scenario.
+- Comment accuracy pass across the whole codebase ahead of merging to `home`: removed 11 dangling references to internal AI-development planning documents/task numbers (`docs/superpowers/...`, `(Task N)`) that a reader outside this repo's own development history has no way to resolve; corrected one comment left over from the `AdSyncEnabled`/`AdDescriptionSyncEnabled` split that still described the old single-flag meaning; added missing explanations for two previously-uncommented magic numbers (a fixed ZIP timestamp constant, and an undocumented `.254` vs `.255` inconsistency between `ExpandInstallTarget`'s two input forms - the inconsistency itself is pre-existing and intentionally left as-is, only now documented); removed disabled, unexplained dead code (`Deploy-ClientGpo.ps1`'s commented-out central-log fragments); corrected the Install Wizard's AD question, which still asked to "Enable Active Directory description sync" when `-AdSyncEnabled` now configures AD identity, not Description sync specifically.
+- README.md/README_RU.md: added the `Client package` tab's package-share-path capability to four descriptions that had omitted it in both languages; documented the new WinRM friendly-error-message behavior; removed a hardcoded version reference in README_RU.md.
+
 ## [0.21.1] - 2026-07-21
 
 ### Fixed

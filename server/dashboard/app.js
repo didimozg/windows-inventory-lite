@@ -147,8 +147,8 @@
   // adSyncStatus ('not-found'/'error') is deliberately ignored here - once
   // sync is off, those statuses are frozen leftovers from whenever sync
   // last ran and are no longer meaningful. data-last-saved-value lets
-  // saveClientDescription (Step 6) detect a no-op blur/Enter and skip the
-  // network request.
+  // saveClientDescription detect a no-op blur/Enter and skip the network
+  // request.
   function formatDescriptionEditor(client, clientId) {
     const value = escapeHtml(client.adDescription || '');
     return `<input type="text" class="description-edit-input" data-description-client="${clientId}" data-computer-name="${escapeHtml(client.computerName)}" data-last-saved-value="${value}" value="${value}" maxlength="1024">`;

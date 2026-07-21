@@ -284,8 +284,12 @@ $installServerQuestions = @(
     @{ Name = 'WebPassword'; Prompt = 'Dashboard password'; Type = 'SecureString'; Mandatory = $false }
     @{ Name = 'Token'; Prompt = 'Inventory ingestion token (leave blank to auto-generate)'; Type = 'SecureString'; Mandatory = $false }
 
-    # Active Directory description sync
-    @{ Name = 'AdSyncEnabled'; Prompt = 'Enable Active Directory description sync'; Type = 'Switch' }
+    # Active Directory identity - configures the domain/credentials used by
+    # Client actions, Client updates, and AD Computer Import. Description
+    # sync itself is a separate, dashboard-only toggle (Sync Description
+    # from AD) that isn't exposed here - on a fresh install it simply
+    # inherits whatever this switch is set to.
+    @{ Name = 'AdSyncEnabled'; Prompt = 'Configure AD User (domain/credentials for Client actions, Client updates, and AD Computer Import)'; Type = 'Switch' }
     @{ Name = 'AdSyncMode'; Prompt = 'AD sync mode'; Type = 'ValidateSet'; Choices = @('on-report', 'timer'); Default = 'on-report'; Mandatory = $false }
     @{ Name = 'AdSyncIntervalHours'; Prompt = 'AD sync interval in hours (only used for timer mode)'; Type = 'Int'; Default = '24'; Mandatory = $false }
     @{ Name = 'AdDomain'; Prompt = 'AD domain (leave blank to use the service account identity)'; Type = 'String'; Mandatory = $false }

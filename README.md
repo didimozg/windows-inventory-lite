@@ -27,7 +27,7 @@ The client and server are small self-contained C# services that run on .NET Fram
 - The dashboard displays server version and client agent version.
 - Operators can delete stale or unwanted host records from the dashboard.
 - Operators can install, update, or uninstall clients from the dashboard through WinRM.
-- The Client package tab shows the deployed client exe versions and current CMD settings, lets operators reconfigure the server URL, ingestion token, and reporting interval, and provides a ZIP download of the complete GPO package.
+- The Client package tab shows the deployed client exe versions and current CMD settings, lets operators reconfigure the server URL, ingestion token, reporting interval, and package share path, and provides a ZIP download of the complete GPO package.
 - HTTPS is a first-class option: bind a certificate at install time by thumbprint or by importing a PFX, or import a new PFX later from the dashboard Certificate tab. Enabling or disabling HTTPS itself is a separate step on the Settings > General page, and every certificate import is checked for common risks (expired, missing private key, no SAN, weak key) and kept in a certificate history log.
 - HTTP and HTTPS run as two independent listeners on two independent ports (defaults 8080 and 8443), each start/stop/rebind independently of the other. HTTP can be turned off entirely once HTTPS is confirmed working; the server refuses that change unless HTTPS is genuinely active, so the settings page can never lock itself out.
 - The stale threshold (default 48 hours) is configurable on Settings > General instead of fixed in code.
@@ -113,7 +113,7 @@ If the `.cmd` startup wrapper lives in SYSVOL and the PowerShell script plus cli
     -PackageSharePath '\\fileserver.example.local\software\windows-inventory-lite'
 ```
 
-After the server is installed, the server URL, ingestion token, and reporting interval in `Install-ClientGpo.cmd` can be updated from the dashboard `Client package` tab without rebuilding. The tab also generates a ZIP download of the complete package.
+After the server is installed, the server URL, ingestion token, reporting interval, and package share path in `Install-ClientGpo.cmd` can be updated from the dashboard `Client package` tab without rebuilding. The tab also generates a ZIP download of the complete package.
 
 ## Interactive Install Wizard
 
@@ -218,7 +218,7 @@ Build the client package before installing or updating the server:
 
 `Install-Server.ps1` copies `.\dist\gpo-client` to `C:\ProgramData\WindowsInventoryLite\client-package` when the folder exists. You can also pass `-ClientPackageSourcePath` and `-ClientPackagePath`.
 
-After installation, the dashboard `Client package` tab can reconfigure the server URL, ingestion token, and reporting interval in `Install-ClientGpo.cmd` without running a new build.
+After installation, the dashboard `Client package` tab can reconfigure the server URL, ingestion token, reporting interval, and package share path in `Install-ClientGpo.cmd` without running a new build.
 
 If the server service runs as LocalSystem, WinRM installation to remote computers usually fails. Run the service under a domain account with the required local administrator rights, or use a managed service account with equivalent permissions.
 Do not send WinRM passwords through the dashboard over plain HTTP outside a trusted management network.
@@ -232,6 +232,8 @@ The server stores WinRM job logs in `DataPath\_client-install-jobs`. The retenti
 ```
 
 Change it later from Settings > General ("Client action log retention (days)", under Inventory) - it applies to every install/update/uninstall job, current and future, not just the one just installed with. Saved logs contain the action, targets, status, command output, errors, timestamps, and the WinRM username. Passwords are not written to log files.
+
+A connection failure is reported as one of two short messages - the computer's name could not be resolved, or WinRM itself is not reachable on that computer - with the original error text still appended, instead of the raw OS-localized exception text.
 
 Instead of typing WinRM credentials for a push, check "Use global AD settings" on the `Client actions` tab to reuse the AD Domain/credentials already configured under "Configure AD User" (Settings > General > Active Directory) - the server's own service identity if "Use service account identity" is checked there, or the saved AD account otherwise. This requires AD identity to actually be configured, and a saved username/password when not using the service identity - the push is rejected with a clear error otherwise.
 
@@ -367,7 +369,7 @@ The dashboard polls the server every 30 seconds and updates in place: new or cha
 - `Hardware`: three grouped tables. CPUs groups machines by processor model. Storage groups machines by disk model, type, and size. RAM groups by total memory and module count. Click any row to expand the list of machines with that configuration. USB storage rows are highlighted.
 - `Licenses`: a manually maintained catalog with Name, Version, License, Comment, Computers, Edit, and Delete columns. Name and Version can be picked from software already seen in inventory reports or typed freely. Version, License, and Comment stay blank when not set, instead of showing a placeholder. Click the Name to expand the linked computers; add computers by typing a name and pressing Enter, or let it auto-fill by selecting a Name that matches installed software. Edit and Delete are separate, distinctly colored buttons.
 - `Client actions`: WinRM actions for installing, updating, or uninstalling the client on a single host, a list of hosts, or an IPv4 range.
-- `Client package`: shows deployed client exe versions and the current CMD settings. Lets you update the server URL, ingestion token, and reporting interval, and download the complete GPO package as a ZIP.
+- `Client package`: shows deployed client exe versions and the current CMD settings. Lets you update the server URL, ingestion token, reporting interval, and package share path, and download the complete GPO package as a ZIP.
 - `General`: three blocks. Inventory holds the stale threshold (hours). Network holds the HTTP port and an Enable HTTP switch. HTTPS holds the HTTPS port and an Enable HTTPS switch. Turning HTTPS on re-checks the configured certificate for risks and asks for confirmation if any are found. Changing a port or disabling HTTP disconnects the current browser session; the page warns before applying either change (see [HTTPS Setup](#https-setup)).
 - `Certificate`: shows the active certificate (subject, expiry) and its risks if any, lets you upload a PFX to stage it as the configured certificate, delete the installed certificate from the machine store, and shows the certificate history log with a per-entry delete. It does not toggle HTTPS — that's on `General`.
 - `Change admin password`: rotates the dashboard's Basic Auth password, or performs the initial setup if none is configured yet (no current password required in that case). Rotating an existing password still requires the current one.

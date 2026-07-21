@@ -20,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.21.1";
+        internal const string ProductVersion = "0.21.2";
 
         private static int Main(string[] args)
         {
@@ -115,8 +115,7 @@ namespace WindowsInventoryLite
         // Import"): this flag alone gates the periodic AD -> adDescription
         // write path (RunAdSyncSweep, ComputeAdSyncFields). Turning it off
         // makes the Clients table's Description column manually editable
-        // without losing AD credentials elsewhere. See
-        // docs/superpowers/specs/2026-07-21-ad-editable-description-design.md.
+        // without losing AD credentials elsewhere.
         public bool AdDescriptionSyncEnabled;
         public string AdSyncMode;
         public int AdSyncIntervalHours;
@@ -125,8 +124,7 @@ namespace WindowsInventoryLite
         public string AdUsername;
         public string AdPassword;
         // Newline-separated list of OU Distinguished Names for the AD
-        // Computer Import feature ("Load from AD" on Client actions) - see
-        // docs/superpowers/specs/2026-07-20-ad-computer-import-design.md.
+        // Computer Import feature ("Load from AD" on Client actions).
         // Empty means "search the whole domain." Not a secret - stored as
         // plain text, same as AdDomain. Dashboard-only, no Install-Server.ps1
         // CLI flag, same reasoning as ClientUpdateUsername below.
@@ -137,16 +135,14 @@ namespace WindowsInventoryLite
         // deployment; not rotated or size-capped.
         public bool DebugLogEnabled;
         public string DebugLogPath;
-        // Optional, off by default - dashboard-configured only (no
-        // Install-Server.ps1 CLI flag by design, see the plan's Global
-        // Constraints). Used as a fallback WinRM credential for Client
-        // Auto-Update pushes when the service's own identity can't reach a
-        // target; see docs/superpowers/specs/2026-07-17-client-auto-update-design.md.
+        // Optional, off by default - dashboard-configured only, no
+        // Install-Server.ps1 CLI flag by design. Used as a fallback WinRM
+        // credential for Client Auto-Update pushes when the service's own
+        // identity can't reach a target.
         public string ClientUpdateUsername;
         public string ClientUpdatePassword;
         // Off by default - dashboard-configured only, same reasoning as
-        // ClientUpdateUsername/Password above. See
-        // docs/superpowers/specs/2026-07-18-client-update-schedule-design.md.
+        // ClientUpdateUsername/Password above.
         // Mode is "off", "once", or "interval" - never more than one active,
         // same as AdSyncMode above. OnceAtUtc/LastRunUtc are ISO
         // "yyyy-MM-ddTHH:mm:ssZ" strings (or "") rather than DateTime,
@@ -731,7 +727,7 @@ namespace WindowsInventoryLite
         // One tick of the "timer" sync mode: walks every saved report and
         // refreshes AD data for whichever ones are due, independent of
         // whether that computer has reported inventory recently - the "on
-        // inventory report" mode (Task 3) only ever touches a computer's AD
+        // inventory report" mode only ever touches a computer's AD
         // fields when that computer itself POSTs a new report, so a machine
         // that's stopped reporting but still exists in AD would otherwise
         // never refresh.
@@ -808,8 +804,8 @@ namespace WindowsInventoryLite
         // handler no-ops immediately when the schedule isn't due) and keeps
         // both "once" and "interval" modes on one simple mechanism instead of
         // two different Timer shapes. Called after every schedule config
-        // change (Task 3's ConfigureClientUpdateSchedule) and once at
-        // startup, so a mode switch takes effect without a service restart -
+        // change (ConfigureClientUpdateSchedule) and once at startup, so a
+        // mode switch takes effect without a service restart -
         // same pattern as ReconfigureAdSyncTimer above.
         private void ReconfigureClientUpdateScheduleTimer()
         {
@@ -908,8 +904,9 @@ namespace WindowsInventoryLite
         // uses. No-ops quietly (no job started) if there's no built client
         // package, no outdated clients, or no known server URL to hand the
         // client - there's no user present to show an error to, and this
-        // feature deliberately has no separate notification mechanism (see
-        // the design spec's Out of Scope section).
+        // feature deliberately has no separate notification mechanism
+        // (e.g. email/webhook on failure) - an admin checks push results
+        // the same way as any other job, via the Client updates page.
         private void StartScheduledClientUpdatePush()
         {
             string net35Version = null;
@@ -1484,15 +1481,15 @@ namespace WindowsInventoryLite
             return (DateTime.UtcNow - lastSyncedUtc.Value).TotalHours >= intervalHours;
         }
 
-        // Pure decision function for the Client Update schedule timer (Task 2
-        // calls this on every tick) - no I/O, so it's directly self-testable.
-        // "once" fires exactly once when nowUtc reaches onceAtUtc; the caller
-        // is responsible for resetting mode back to "off" afterward (this
-        // function only answers "is it due right now", it doesn't mutate
-        // anything). "interval" fires immediately if there's no previous run
-        // recorded, then every intervalHours after the last scheduled run -
-        // manual pushes never touch lastRunUtc, only a schedule-triggered run
-        // does (see RunClientUpdateScheduleTick in Task 2).
+        // Pure decision function for the Client Update schedule timer
+        // (RunClientUpdateScheduleTick calls this on every tick) - no I/O,
+        // so it's directly self-testable. "once" fires exactly once when
+        // nowUtc reaches onceAtUtc; the caller is responsible for resetting
+        // mode back to "off" afterward (this function only answers "is it
+        // due right now", it doesn't mutate anything). "interval" fires
+        // immediately if there's no previous run recorded, then every
+        // intervalHours after the last scheduled run - manual pushes never
+        // touch lastRunUtc, only a schedule-triggered run does.
         internal static bool ShouldRunClientUpdateSchedule(DateTime nowUtc, string mode, DateTime? onceAtUtc, DateTime? lastRunUtc, int intervalHours)
         {
             if (mode == "once")
@@ -1520,7 +1517,7 @@ namespace WindowsInventoryLite
             return !String.IsNullOrEmpty(rawValue) && !rawValue.StartsWith("dpapi:", StringComparison.Ordinal);
         }
 
-        // Detects any of the 3 encrypted secrets (see EncryptedConfigKeys)
+        // Detects any of the encrypted secrets (see EncryptedConfigKeys)
         // still stored as plaintext in server-config.json and re-encrypts
         // them in a single batched rewrite. Runs once per service start,
         // as the very first action inside Start() - cheap (one small JSON
@@ -1602,6 +1599,23 @@ namespace WindowsInventoryLite
             AdSyncFields fields = new AdSyncFields();
             if (!options.AdDescriptionSyncEnabled)
             {
+                // Sync is off, but a manually-edited Description (set via
+                // PUT /api/v1/clients/{name}/description while sync is off)
+                // must still survive this client's next inventory report -
+                // the report body the client sends never carries
+                // adDescription itself (only AD sync or a manual edit ever
+                // write that field), so without this carry-forward,
+                // HandleInventory's File.WriteAllText would overwrite the
+                // whole record with a version that has no adDescription at
+                // all, silently wiping a manual edit within one reporting
+                // interval.
+                if (previous != null)
+                {
+                    fields.Applicable = true;
+                    fields.Description = previous.ContainsKey("adDescription") ? previous["adDescription"] : null;
+                    fields.Status = previous.ContainsKey("adSyncStatus") ? previous["adSyncStatus"] : null;
+                    fields.SyncedAt = previous.ContainsKey("adSyncedAt") ? previous["adSyncedAt"] : null;
+                }
                 return fields;
             }
             fields.Applicable = true;
@@ -1698,8 +1712,8 @@ namespace WindowsInventoryLite
         // not just by the dashboard hiding the edit control, since the UI
         // is not a security boundary. Writes the same adDescription field
         // AD Description Sync itself writes; adSyncStatus/adSyncedAt are
-        // untouched. See
-        // docs/superpowers/specs/2026-07-21-ad-editable-description-design.md.
+        // untouched here (ComputeAdSyncFields carries them forward
+        // separately on the next inventory report).
         private void UpdateClientDescription(Stream stream, RequestContext request)
         {
             const string prefix = "/api/v1/clients/";
@@ -2389,6 +2403,10 @@ namespace WindowsInventoryLite
                     string[] leftParts = left.Split('.');
                     int start;
                     int end;
+                    // Capped at .254, not .255 - .255 is the broadcast address on a
+                    // /24. (The dotted full-range form below has no equivalent cap;
+                    // not reconciled since this predates this comment and changing
+                    // it would be a behavior change, not a documentation fix.)
                     if (leftParts.Length == 4 && Int32.TryParse(leftParts[3], out start) && Int32.TryParse(right, out end) && end >= start && end <= 254)
                     {
                         string prefix = leftParts[0] + "." + leftParts[1] + "." + leftParts[2] + ".";
@@ -4665,6 +4683,11 @@ namespace WindowsInventoryLite
             return lines.ToArray();
         }
 
+        // 0x4a21 (used for both the local file header and the matching
+        // central directory entry below) is a fixed DOS date/time stamp -
+        // no real per-file timestamp is tracked or needed for this
+        // download, so every entry gets the same placeholder value rather
+        // than computing one. 20 is the ZIP version-needed-to-extract.
         private static byte[] BuildZip(List<string> names, List<byte[]> contents)
         {
             MemoryStream ms = new MemoryStream();
@@ -4826,6 +4849,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' custom package share path", TestParseCmdSettingsCustomPackageSharePath);
             allPassed &= SelfTestCheck(output, "ResolveAdDescriptionSyncEnabled uses the explicit config value when present", TestResolveAdDescriptionSyncEnabledUsesExplicitConfigValue);
             allPassed &= SelfTestCheck(output, "ResolveAdDescriptionSyncEnabled migrates from AdSyncEnabled when the config key is absent", TestResolveAdDescriptionSyncEnabledMigratesFromAdSyncEnabledWhenUnset);
+            allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
+            allPassed &= SelfTestCheck(output, "ComputeAdSyncFields is a no-op for a brand-new computer with sync disabled", TestComputeAdSyncFieldsNoOpForNewComputerWhenSyncDisabled);
             return allPassed;
         }
 
@@ -5657,6 +5682,43 @@ namespace WindowsInventoryLite
             if (result2 != false)
             {
                 return "expected a missing config value to inherit adSyncEnabledResolved=false, got " + result2;
+            }
+            return null;
+        }
+
+        private static string TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled()
+        {
+            ServerOptions options = new ServerOptions();
+            options.AdDescriptionSyncEnabled = false;
+            InventoryServer server = new InventoryServer(options);
+
+            Dictionary<string, object> previous = new Dictionary<string, object>();
+            previous["adDescription"] = "Manually set description";
+            previous["adSyncStatus"] = "ok";
+            previous["adSyncedAt"] = "2026-07-20T10:00:00Z";
+
+            AdSyncFields fields = server.ComputeAdSyncFields("CARRY-FORWARD-TEST", previous);
+            if (!fields.Applicable)
+            {
+                return "expected Applicable=true so the manual Description gets written back, got false";
+            }
+            if (Convert.ToString(fields.Description) != "Manually set description")
+            {
+                return "expected the previous adDescription to be carried forward unchanged, got '" + Convert.ToString(fields.Description) + "'";
+            }
+            return null;
+        }
+
+        private static string TestComputeAdSyncFieldsNoOpForNewComputerWhenSyncDisabled()
+        {
+            ServerOptions options = new ServerOptions();
+            options.AdDescriptionSyncEnabled = false;
+            InventoryServer server = new InventoryServer(options);
+
+            AdSyncFields fields = server.ComputeAdSyncFields("BRAND-NEW-TEST", null);
+            if (fields.Applicable)
+            {
+                return "expected Applicable=false for a brand-new computer (nothing to carry forward), got true";
             }
             return null;
         }

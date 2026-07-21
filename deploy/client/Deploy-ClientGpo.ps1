@@ -55,7 +55,6 @@ if (-not $ScriptDirectory) {
     $ScriptDirectory = (Get-Location).Path
 }
 $LogPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\Logs\gpo-deploy.log'
-# $CentralLogPath = Join-Path -Path (Join-Path -Path $ScriptDirectory -ChildPath 'Logs') -ChildPath ($env:COMPUTERNAME + '.log')
 
 function Write-DeployLog {
     param([string]$Message)
@@ -67,15 +66,6 @@ function Write-DeployLog {
 
     $line = '{0} {1}' -f (Get-Date).ToString('s'), $Message
     Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
-    # try {
-    #     $centralDirectory = Split-Path -Parent $CentralLogPath
-    #     if (-not (Test-Path -LiteralPath $centralDirectory)) {
-    #         New-Item -Path $centralDirectory -ItemType Directory -Force | Out-Null
-    #     }
-    #     Add-Content -LiteralPath $CentralLogPath -Value $line -Encoding UTF8
-    # }
-    # catch {
-    # }
     Write-Host $line
 }
 
@@ -313,7 +303,6 @@ $needsInstall = $Force -or (-not $serviceExists) -or ($packageVersion -ne $insta
 Write-DeployLog "Package version: $packageVersion"
 Write-DeployLog "Installed version: $installedVersion"
 Write-DeployLog "Package client path: $PackageClientPath"
-# Write-DeployLog "Central log path: $CentralLogPath"
 
 if (-not $needsInstall) {
     Write-DeployLog "Client service is already current."
