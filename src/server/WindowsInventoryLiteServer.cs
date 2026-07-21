@@ -110,6 +110,14 @@ namespace WindowsInventoryLite
         // with a server that isn't domain-joined, are unaffected. See
         // AdLookupService.cs and InventoryServer.ComputeAdSyncFields.
         public bool AdSyncEnabled;
+        // Independent of AdSyncEnabled (which now means "AD identity is
+        // configured for use by Client actions/Client updates/AD Computer
+        // Import"): this flag alone gates the periodic AD -> adDescription
+        // write path (RunAdSyncSweep, ComputeAdSyncFields). Turning it off
+        // makes the Clients table's Description column manually editable
+        // without losing AD credentials elsewhere. See
+        // docs/superpowers/specs/2026-07-21-ad-editable-description-design.md.
+        public bool AdDescriptionSyncEnabled;
         public string AdSyncMode;
         public int AdSyncIntervalHours;
         public string AdDomain;
@@ -411,6 +419,11 @@ namespace WindowsInventoryLite
                     string adSyncEnabledText = GetConfigString(config, "AdSyncEnabled");
                     options.AdSyncEnabled = String.Equals(adSyncEnabledText, "true", StringComparison.OrdinalIgnoreCase);
                 }
+                if (!options.AdDescriptionSyncEnabled)
+                {
+                    string adDescriptionSyncEnabledText = GetConfigString(config, "AdDescriptionSyncEnabled");
+                    options.AdDescriptionSyncEnabled = ResolveAdDescriptionSyncEnabled(adDescriptionSyncEnabledText, options.AdSyncEnabled);
+                }
                 if (options.AdSyncMode == "on-report")
                 {
                     string adSyncModeText = GetConfigString(config, "AdSyncMode");
@@ -529,6 +542,21 @@ namespace WindowsInventoryLite
             }
             string value = Convert.ToString(config[key]);
             return String.IsNullOrEmpty(value) ? null : value;
+        }
+
+        // Migration for upgrades from before AdDescriptionSyncEnabled
+        // existed: if the config file has no explicit value for it yet,
+        // the deployment keeps whatever behavior AdSyncEnabled (now "AD
+        // identity is configured") already gave it, so an existing AD
+        // Description Sync setup keeps running after the upgrade with no
+        // admin action required. Pure - no I/O, self-tested directly.
+        internal static bool ResolveAdDescriptionSyncEnabled(string configValueText, bool adSyncEnabledResolved)
+        {
+            if (!String.IsNullOrEmpty(configValueText))
+            {
+                return String.Equals(configValueText, "true", StringComparison.OrdinalIgnoreCase);
+            }
+            return adSyncEnabledResolved;
         }
     }
 
@@ -682,7 +710,7 @@ namespace WindowsInventoryLite
                     adSyncTimer.Dispose();
                     adSyncTimer = null;
                 }
-                if (options.AdSyncEnabled && options.AdSyncMode == "timer")
+                if (options.AdDescriptionSyncEnabled && options.AdSyncMode == "timer")
                 {
                     // Due time is Zero, not `interval` - the first sweep
                     // runs almost immediately after enabling/reconfiguring
@@ -709,7 +737,7 @@ namespace WindowsInventoryLite
         // never refresh.
         private void RunAdSyncSweep(object state)
         {
-            if (!options.AdSyncEnabled || options.AdSyncMode != "timer")
+            if (!options.AdDescriptionSyncEnabled || options.AdSyncMode != "timer")
             {
                 return;
             }
@@ -1568,7 +1596,7 @@ namespace WindowsInventoryLite
         private AdSyncFields ComputeAdSyncFields(string computerName, Dictionary<string, object> previous)
         {
             AdSyncFields fields = new AdSyncFields();
-            if (!options.AdSyncEnabled)
+            if (!options.AdDescriptionSyncEnabled)
             {
                 return fields;
             }
@@ -3468,6 +3496,7 @@ namespace WindowsInventoryLite
             result["enableHttp"] = options.EnableHttp;
             result["httpsPort"] = options.HttpsPort;
             result["adSyncEnabled"] = options.AdSyncEnabled;
+            result["adDescriptionSyncEnabled"] = options.AdDescriptionSyncEnabled;
             result["adSyncMode"] = options.AdSyncMode;
             result["adSyncIntervalHours"] = options.AdSyncIntervalHours;
             result["adDomain"] = options.AdDomain;
@@ -3669,11 +3698,12 @@ namespace WindowsInventoryLite
                 updates["EnableHttp"] = options.EnableHttp ? "true" : "false";
             }
 
-            if (payload.ContainsKey("adSyncEnabled") || payload.ContainsKey("adSyncMode") || payload.ContainsKey("adSyncIntervalHours")
+            if (payload.ContainsKey("adSyncEnabled") || payload.ContainsKey("adDescriptionSyncEnabled") || payload.ContainsKey("adSyncMode") || payload.ContainsKey("adSyncIntervalHours")
                 || payload.ContainsKey("adDomain") || payload.ContainsKey("adUseServiceIdentity") || payload.ContainsKey("adUsername") || payload.ContainsKey("adPassword")
                 || payload.ContainsKey("adComputerImportOUs"))
             {
                 bool adSyncEnabled = payload.ContainsKey("adSyncEnabled") ? Convert.ToBoolean(payload["adSyncEnabled"]) : options.AdSyncEnabled;
+                bool adDescriptionSyncEnabled = payload.ContainsKey("adDescriptionSyncEnabled") ? Convert.ToBoolean(payload["adDescriptionSyncEnabled"]) : options.AdDescriptionSyncEnabled;
 
                 string adSyncMode = payload.ContainsKey("adSyncMode") ? Convert.ToString(payload["adSyncMode"]) : options.AdSyncMode;
                 if (adSyncMode != "on-report" && adSyncMode != "timer")
@@ -3711,6 +3741,7 @@ namespace WindowsInventoryLite
                 }
 
                 options.AdSyncEnabled = adSyncEnabled;
+                options.AdDescriptionSyncEnabled = adDescriptionSyncEnabled;
                 options.AdSyncMode = adSyncMode;
                 options.AdSyncIntervalHours = adSyncIntervalHours;
                 options.AdDomain = adDomain;
@@ -3721,6 +3752,7 @@ namespace WindowsInventoryLite
                 ReconfigureAdSyncTimer();
 
                 updates["AdSyncEnabled"] = options.AdSyncEnabled ? "true" : "false";
+                updates["AdDescriptionSyncEnabled"] = options.AdDescriptionSyncEnabled ? "true" : "false";
                 updates["AdSyncMode"] = options.AdSyncMode;
                 updates["AdSyncIntervalHours"] = options.AdSyncIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 updates["AdDomain"] = options.AdDomain ?? "";
@@ -4694,6 +4726,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "TryResolveAdSyncCredentials rejects when the saved AD account is incomplete", TestTryResolveAdSyncCredentialsRejectsWhenSavedAccountIncomplete);
             allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' default package root", TestParseCmdSettingsDefaultPackageRoot);
             allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' custom package share path", TestParseCmdSettingsCustomPackageSharePath);
+            allPassed &= SelfTestCheck(output, "ResolveAdDescriptionSyncEnabled uses the explicit config value when present", TestResolveAdDescriptionSyncEnabledUsesExplicitConfigValue);
+            allPassed &= SelfTestCheck(output, "ResolveAdDescriptionSyncEnabled migrates from AdSyncEnabled when the config key is absent", TestResolveAdDescriptionSyncEnabledMigratesFromAdSyncEnabledWhenUnset);
             return allPassed;
         }
 
@@ -5495,6 +5529,36 @@ namespace WindowsInventoryLite
             if (ok || String.IsNullOrEmpty(error))
             {
                 return "expected useAdCredentials=true with AdUseServiceIdentity=false and a blank saved password to be rejected, got ok=" + ok + " error='" + error + "'";
+            }
+            return null;
+        }
+
+        private static string TestResolveAdDescriptionSyncEnabledUsesExplicitConfigValue()
+        {
+            bool result = ServerOptions.ResolveAdDescriptionSyncEnabled("false", true);
+            if (result != false)
+            {
+                return "expected an explicit 'false' config value to win over adSyncEnabledResolved=true, got " + result;
+            }
+            bool result2 = ServerOptions.ResolveAdDescriptionSyncEnabled("true", false);
+            if (result2 != true)
+            {
+                return "expected an explicit 'true' config value to win over adSyncEnabledResolved=false, got " + result2;
+            }
+            return null;
+        }
+
+        private static string TestResolveAdDescriptionSyncEnabledMigratesFromAdSyncEnabledWhenUnset()
+        {
+            bool result = ServerOptions.ResolveAdDescriptionSyncEnabled(null, true);
+            if (result != true)
+            {
+                return "expected a missing config value to inherit adSyncEnabledResolved=true, got " + result;
+            }
+            bool result2 = ServerOptions.ResolveAdDescriptionSyncEnabled(null, false);
+            if (result2 != false)
+            {
+                return "expected a missing config value to inherit adSyncEnabledResolved=false, got " + result2;
             }
             return null;
         }
