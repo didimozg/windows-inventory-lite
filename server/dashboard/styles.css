@@ -698,19 +698,26 @@ select {
 .install-targets-field {
   grid-column: 1 / span 2;
   grid-row: 1 / span 2;
+  /* Fixed, not just capped: this cell spans grid-row 1/span 2, the same
+     two auto-sized rows as Action/Server URL/WinRM user/password. A
+     max-height on the textarea alone still lets the ITEM'S OWN box grow
+     up to that max as the user drags its resize handle, and the grid
+     keeps recomputing the shared row tracks as it goes - so the other
+     fields still shift while dragging, even bounded. A hard height on
+     this grid item itself removes it from that negotiation completely:
+     the grid always sees one constant size here, never anything the
+     user does inside it. Content past this height scrolls internally. */
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 320px;
+  overflow-y: auto;
 }
 
 .install-targets-field textarea {
   min-height: 116px;
-  /* Capped, not unbounded: .install-targets-field spans grid-row 1/span 2,
-     the same two auto-sized rows as Action/Server URL/WinRM user/password.
-     Dragging the native resize handle past this grows those shared row
-     tracks along with it, which the grid distributes unevenly between the
-     two rows - the other fields end up spread apart with large gaps
-     instead of staying compact. Overflow scrolls internally instead. */
-  max-height: 400px;
+  max-height: 500px;
   resize: vertical;
-  overflow-y: auto;
 }
 
 .install-action-field {
