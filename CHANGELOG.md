@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.19.1] - 2026-07-21
+
+### Fixed
+
+- The `0.19.0` textarea `max-height` fix wasn't enough - `.install-targets-field` (the grid cell containing Targets, spanning the same two rows as Action/Server URL/WinRM user/password) still grew along with the bounded textarea, so dragging it still shifted the other fields. Gave the cell itself a fixed 320px height, fully decoupled from its content - dragging Targets now never moves anything else, content past 320px just scrolls internally.
+
 ## [0.19.0] - 2026-07-21
 
 ### Added
