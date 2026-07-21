@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.19.0] - 2026-07-21
+
+### Added
+
+- `Client actions`' AD import gained a second button, "Load PC without client from AD", alongside the renamed "Load all PC from AD" (was "Load from AD"): pulls the same AD scope but filters out any computer that already has a reporting client (compared against the `Clients` tab's own list), for finding fresh install targets without manually excluding already-covered machines.
+
+### Changed
+
+- "Load from AD" (now "Load all PC from AD") switched from the quiet `.export-button` style to `.primary-button` - it was reading as too easy to miss next to the Targets field.
+- The Targets textarea's manual resize handle is now capped (`max-height: 400px`, scrolls internally past that) instead of unbounded - dragging it taller previously inflated the shared grid row it sits in alongside Action/Server URL/WinRM user/password, scattering them apart from each other.
+
 ## [0.18.0] - 2026-07-20
 
 ### Added

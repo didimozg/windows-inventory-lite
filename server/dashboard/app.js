@@ -632,32 +632,53 @@
     byId('installButton').textContent = isInstall ? 'Install client' : 'Uninstall client';
   }
 
-  function loadTargetsFromAd() {
+  // onlyMissing=false: every AD computer in the configured scope.
+  // onlyMissing=true: the same AD list, filtered (client-side, against the
+  // already-loaded state.clients) down to computers with no reporting
+  // client yet - no new server endpoint needed, both buttons share the
+  // exact same GET /api/v1/ad/computers call and its warnings/error
+  // handling.
+  function loadTargetsFromAd(onlyMissing) {
     const messageElement = byId('installAdMessage');
-    byId('installLoadAdButton').disabled = true;
+    byId('installLoadAdAllButton').disabled = true;
+    byId('installLoadAdMissingButton').disabled = true;
 
     fetch('/api/v1/ad/computers', { cache: 'no-store' })
       .then(response => response.json().then(data => ({ ok: response.ok, data })))
       .then(({ ok, data }) => {
         if (!ok) throw new Error(data.error || 'AD search failed');
 
-        const computers = data.computers || [];
+        let computers = data.computers || [];
         const warnings = data.warnings || [];
+        const totalFound = computers.length;
+
+        if (onlyMissing) {
+          const known = new Set((state.clients || []).map(c => (c.computerName || '').toLowerCase()));
+          computers = computers.filter(name => !known.has(name.toLowerCase()));
+        }
+
         if (computers.length === 0) {
-          const lines = ['No computers found for the configured scope.', ...warnings];
+          const noneMessage = onlyMissing && totalFound > 0
+            ? 'Every computer in the configured scope already has a reporting client.'
+            : 'No computers found for the configured scope.';
+          const lines = [noneMessage, ...warnings];
           showSavedMessage(messageElement, lines.join('\n'), false);
           return;
         }
 
         byId('installTargets').value = computers.join('\n');
-        const lines = [`Loaded ${computers.length} computer(s) from AD.`, ...warnings];
+        const loadedMessage = onlyMissing
+          ? `Loaded ${computers.length} computer(s) without a reporting client (${totalFound} total in scope).`
+          : `Loaded ${computers.length} computer(s) from AD.`;
+        const lines = [loadedMessage, ...warnings];
         showSavedMessage(messageElement, lines.join('\n'), false);
       })
       .catch(error => {
         showSavedMessage(messageElement, `Failed to load from AD: ${error.message}`, true);
       })
       .finally(() => {
-        byId('installLoadAdButton').disabled = false;
+        byId('installLoadAdAllButton').disabled = false;
+        byId('installLoadAdMissingButton').disabled = false;
       });
   }
 
@@ -2461,7 +2482,8 @@
   byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
   byId('clientAction').addEventListener('change', updateClientActionUi);
   byId('installButton').addEventListener('click', startClientActionJob);
-  byId('installLoadAdButton').addEventListener('click', loadTargetsFromAd);
+  byId('installLoadAdAllButton').addEventListener('click', () => loadTargetsFromAd(false));
+  byId('installLoadAdMissingButton').addEventListener('click', () => loadTargetsFromAd(true));
   byId('exportClientsBtn').addEventListener('click', exportClients);
   byId('exportSoftwareBtn').addEventListener('click', exportSoftware);
   byId('exportCpuBtn').addEventListener('click', exportHardwareCpu);
