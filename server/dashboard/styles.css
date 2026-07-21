@@ -698,20 +698,33 @@ select {
 .install-targets-field {
   grid-column: 1 / span 2;
   grid-row: 1 / span 2;
-  /* Fixed, not just capped: this cell spans grid-row 1/span 2, the same
-     two auto-sized rows as Action/Server URL/WinRM user/password. A
-     max-height on the textarea alone still lets the ITEM'S OWN box grow
-     up to that max as the user drags its resize handle, and the grid
-     keeps recomputing the shared row tracks as it goes - so the other
-     fields still shift while dragging, even bounded. A hard height on
-     this grid item itself removes it from that negotiation completely:
-     the grid always sees one constant size here, never anything the
-     user does inside it. Content past this height scrolls internally. */
   display: flex;
   flex-direction: column;
   gap: 10px;
-  height: 320px;
+}
+
+.install-targets-textarea-wrap {
+  /* Fixed, not content-driven: this cell's grid-row 1/span 2 is shared
+     with Action/Server URL/WinRM user/password. A max-height on the
+     textarea alone still let the ITEM'S OWN box grow up to that max as
+     the user dragged its resize handle, and the grid kept recomputing
+     the shared row tracks as it went - so the other fields still shifted
+     while dragging, even bounded. A hard height here removes this wrap
+     from that negotiation completely: the grid always sees one constant
+     size, never anything the user does inside the textarea. The Load
+     from AD buttons and the message area live OUTSIDE this wrap (in
+     .install-targets-field's normal flow below it) specifically so they
+     stay visible and in place too, instead of scrolling away with the
+     textarea when it's dragged past this height. */
+  height: 260px;
   overflow-y: auto;
+}
+
+.install-targets-textarea-wrap label {
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 6px;
 }
 
 .install-targets-field textarea {
@@ -720,23 +733,44 @@ select {
   resize: vertical;
 }
 
+/* Action/Server URL/WinRM user/password used to be four independent
+   .install-grid items individually placed across rows 1-2 (the same rows
+   .install-targets-field spans) - each one negotiating its own row's
+   auto-sized height against Targets' much taller content left them
+   inconsistently distributed between row 1 and row 2 depending on which
+   fields were visible (e.g. hiding Server URL in Uninstall mode changed
+   how the leftover height split between the two rows, bunching WinRM
+   user/password at different heights between Install and Uninstall).
+   Bundling all four into one nested grid, placed as a single item
+   spanning the same grid-row: 1 / span 2, means the outer grid only ever
+   compares ONE height (this whole block's) against Targets' - never a
+   per-row tug-of-war between five independent items. */
+.install-right-fields {
+  grid-column: 3 / span 2;
+  grid-row: 1 / span 2;
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(140px, 0.6fr);
+  gap: 12px;
+  align-self: start;
+}
+
 .install-action-field {
-  grid-column: 3;
+  grid-column: 1;
   grid-row: 1;
 }
 
 .install-server-field {
-  grid-column: 4;
+  grid-column: 2;
   grid-row: 1;
 }
 
 .install-user-field {
-  grid-column: 3;
+  grid-column: 1;
   grid-row: 2;
 }
 
 .install-password-field {
-  grid-column: 4;
+  grid-column: 2;
   grid-row: 2;
 }
 

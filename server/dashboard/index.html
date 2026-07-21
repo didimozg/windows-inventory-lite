@@ -508,36 +508,40 @@
 
         <section id="installView" class="install-panel hidden" aria-label="Remote client actions">
           <div class="install-grid">
-            <label class="install-action-field">
-              Action
-              <select id="clientAction">
-                <option value="install">Install client</option>
-                <option value="uninstall">Uninstall client</option>
-              </select>
-            </label>
             <div class="install-targets-field">
-              <label>
-                Targets
-                <textarea id="installTargets" rows="4" placeholder="PC-001&#10;PC-002&#10;192.0.2.10&#10;192.0.2.20-192.0.2.30"></textarea>
-              </label>
+              <div class="install-targets-textarea-wrap">
+                <label>
+                  Targets
+                  <textarea id="installTargets" rows="4" placeholder="PC-001&#10;PC-002&#10;192.0.2.10&#10;192.0.2.20-192.0.2.30"></textarea>
+                </label>
+              </div>
               <div class="pkg-buttons">
                 <button id="installLoadAdAllButton" class="primary-button" type="button">Load all PC from AD</button>
                 <button id="installLoadAdMissingButton" class="primary-button" type="button">Load PC without client from AD</button>
               </div>
               <div id="installAdMessage" class="pkg-message hidden"></div>
             </div>
-            <label class="install-server-field install-only">
-              Server URL
-              <input id="installServerUrl" type="text" value="">
-            </label>
-            <label class="install-user-field">
-              WinRM user
-              <input id="installUsername" type="text" autocomplete="username" placeholder="DOMAIN\User">
-            </label>
-            <label class="install-password-field">
-              WinRM password
-              <input id="installPassword" type="password" autocomplete="current-password">
-            </label>
+            <div class="install-right-fields">
+              <label class="install-action-field">
+                Action
+                <select id="clientAction">
+                  <option value="install">Install client</option>
+                  <option value="uninstall">Uninstall client</option>
+                </select>
+              </label>
+              <label class="install-server-field install-only">
+                Server URL
+                <input id="installServerUrl" type="text" value="">
+              </label>
+              <label class="install-user-field">
+                WinRM user
+                <input id="installUsername" type="text" autocomplete="username" placeholder="DOMAIN\User">
+              </label>
+              <label class="install-password-field">
+                WinRM password
+                <input id="installPassword" type="password" autocomplete="current-password">
+              </label>
+            </div>
             <label class="check-label install-force-field install-only">
               <input id="installForce" type="checkbox">
               Force reinstall

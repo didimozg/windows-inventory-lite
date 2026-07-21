@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.19.2] - 2026-07-21
+
+### Fixed
+
+- Growing the Targets textarea still made the "Load from AD" buttons scroll out of view (they lived inside the same fixed-height, scrollable wrap as the textarea). Moved them - and the result/warning message area - outside that wrap, into `.install-targets-field`'s normal flow, so they always stay visible and in place regardless of how tall Targets is dragged.
+- Action/Server URL/WinRM user/password sat at inconsistent heights depending on which fields were visible (e.g. Install vs Uninstall mode changed how the leftover row height split between them, since each field independently negotiated its own row against the much taller Targets field). Bundled all four into one `.install-right-fields` sub-grid, placed as a single item spanning the same rows Targets does - the outer grid now only ever compares one block's height against Targets', not four independent fields', so they stay pinned together at a consistent top-aligned position in both modes.
+
 ## [0.19.1] - 2026-07-21
 
 ### Fixed
