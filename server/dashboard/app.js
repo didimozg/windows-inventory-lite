@@ -142,6 +142,18 @@
     return '';
   }
 
+  // Editable Description cell, used instead of formatAdDescription's
+  // read-only text whenever state.adDescriptionSyncEnabled is false.
+  // adSyncStatus ('not-found'/'error') is deliberately ignored here - once
+  // sync is off, those statuses are frozen leftovers from whenever sync
+  // last ran and are no longer meaningful. data-last-saved-value lets
+  // saveClientDescription (Step 6) detect a no-op blur/Enter and skip the
+  // network request.
+  function formatDescriptionEditor(client, clientId) {
+    const value = escapeHtml(client.adDescription || '');
+    return `<input type="text" class="description-edit-input" data-description-client="${clientId}" data-computer-name="${escapeHtml(client.computerName)}" data-last-saved-value="${value}" value="${value}" maxlength="1024">`;
+  }
+
   function formatDateTime(value) {
     if (!value) return 'Unknown';
     const date = new Date(value);
@@ -856,6 +868,40 @@
         savedMessageTimers.delete(el);
       }, 30000));
     }
+  }
+
+  // Saves an inline Description edit. Only fires on an actual change
+  // (skips a no-op save when a field loses focus unmodified). Reverts the
+  // input to the last known-good value on failure, since a stale client-
+  // side value (e.g. after AD Description Sync was re-enabled in another
+  // tab between render and save) would otherwise silently diverge from
+  // what the server actually has.
+  function saveClientDescription(input) {
+    const computerName = input.dataset.computerName;
+    const newValue = input.value;
+    if (newValue === input.dataset.lastSavedValue) return;
+
+    input.disabled = true;
+    fetch(`/api/v1/clients/${encodeURIComponent(computerName)}/description`, {
+      method: 'PUT',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description: newValue })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        input.dataset.lastSavedValue = data.description;
+        const client = (state.clients || []).find(c => c.computerName === computerName);
+        if (client) client.adDescription = data.description;
+      })
+      .catch(error => {
+        input.value = input.dataset.lastSavedValue || '';
+        window.alert(`Failed to save description: ${error.message}`);
+      })
+      .finally(() => {
+        input.disabled = false;
+      });
   }
 
   function loadClientUpdateCredentials() {
@@ -2071,11 +2117,16 @@
   }
 
   function renderTable(clients) {
+    const activeElement = document.activeElement;
+    const editingClientId = activeElement && activeElement.matches('.description-edit-input') ? activeElement.dataset.descriptionClient : null;
+    const editingValue = editingClientId ? activeElement.value : null;
+    const editingSelectionStart = editingClientId ? activeElement.selectionStart : null;
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.clients;
     const filtered = applySort(clients.filter(client => clientMatches(client, query)), c => clientSortValue(c, sortKey), sortDir);
     const { items: pageItems, page, totalPages } = paginate(filtered, state.page.clients, state.pageSize.clients);
     state.page.clients = page;
+    byId('descriptionColumnHeader').textContent = state.adDescriptionSyncEnabled ? 'AD Description' : 'Description';
     const rows = pageItems.map(client => {
       const stale = isStale(client);
       const staleClass = stale ? ' stale' : '';
@@ -2122,7 +2173,7 @@
         <td>${activationBadge(windowsActivation.activated, 'Windows')}</td>
         <td>${activationBadge(officeActivation.activated, 'Office')}</td>
         <td>${softwareCount}</td>
-        <td>${formatAdDescription(client)}</td>
+        <td>${state.adDescriptionSyncEnabled ? formatAdDescription(client) : formatDescriptionEditor(client, clientId)}</td>
         <td>${escapeHtml(formatDateTime(client.collectedAt || client.sourceUpdatedAt))}</td>
         <td><button class="danger-button-ghost" type="button" data-delete-client="${escapeHtml(client.computerName)}">Delete</button></td>
       </tr>
@@ -2145,8 +2196,31 @@
     });
 
     byId('inventoryBody').innerHTML = rows.join('') || '<tr><td colspan="10" class="empty">No matching inventory records.</td></tr>';
+    if (editingClientId) {
+      const restoredInput = document.querySelector(`.description-edit-input[data-description-client="${editingClientId}"]`);
+      if (restoredInput) {
+        restoredInput.value = editingValue;
+        restoredInput.focus();
+        restoredInput.setSelectionRange(editingSelectionStart, editingSelectionStart);
+      }
+    }
     renderPager('clientsPager', 'clients', page, totalPages, () => renderTable(state.clients));
   }
+
+  document.addEventListener('keydown', event => {
+    if (!event.target.matches('.description-edit-input')) return;
+    if (event.key === 'Enter') {
+      event.target.blur();
+    } else if (event.key === 'Escape') {
+      event.target.value = event.target.dataset.lastSavedValue || '';
+      event.target.blur();
+    }
+  });
+
+  document.addEventListener('blur', event => {
+    if (!event.target.matches || !event.target.matches('.description-edit-input')) return;
+    saveClientDescription(event.target);
+  }, true);
 
   function renderSoftwareTable(clients) {
     const query = byId('searchInput').value.trim();
