@@ -1381,6 +1381,8 @@
           hint.classList.add('hidden');
         }
         byId('generalAdSyncEnabled').checked = !!data.adSyncEnabled;
+        byId('generalAdDescriptionSyncEnabled').checked = !!data.adDescriptionSyncEnabled;
+        state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
         byId('generalAdSyncMode').value = data.adSyncMode || 'on-report';
         byId('generalAdSyncIntervalHours').value = data.adSyncIntervalHours || 24;
         updateAdSyncIntervalField();
@@ -1467,6 +1469,7 @@
       body: JSON.stringify({
         staleHours, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, acknowledgeRisks: !!acknowledgeRisks,
         adSyncEnabled: byId('generalAdSyncEnabled').checked,
+        adDescriptionSyncEnabled: byId('generalAdDescriptionSyncEnabled').checked,
         adSyncMode: byId('generalAdSyncMode').value,
         adSyncIntervalHours: Number.parseInt(byId('generalAdSyncIntervalHours').value, 10) || 24,
         adDomain: byId('generalAdDomain').value.trim(),
@@ -1496,6 +1499,7 @@
         state.staleHours = data.staleHours || 48;
         state.generalLoadedPort = data.port || 8080;
         state.generalLoadedEnableHttp = data.enableHttp !== false;
+        state.adDescriptionSyncEnabled = byId('generalAdDescriptionSyncEnabled').checked;
         renderSummary(state.clients);
         renderDashboardTiles();
         renderConnectionStatus(data);
