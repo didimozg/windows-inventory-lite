@@ -2615,6 +2615,7 @@ namespace WindowsInventoryLite
             index["generatedAt"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
             index["clientCount"] = clients.Count;
             index["staleHours"] = options.StaleHours;
+            index["adDescriptionSyncEnabled"] = options.AdDescriptionSyncEnabled;
             index["clients"] = clients;
             return serializer.Serialize(index);
         }

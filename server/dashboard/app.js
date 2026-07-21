@@ -2444,6 +2444,7 @@
         lastClientsFingerprint = fingerprint;
         state.clients = data.clients || [];
         state.staleHours = data.staleHours || 48;
+        state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
         byId('generatedAt').textContent = `Generated: ${formatDateTime(data.generatedAt)}`;
         byId('serverVersionBadge').textContent = `Server: v${text(data.serverVersion)}`;
         render();
@@ -2499,6 +2500,7 @@
     .then(data => {
       state.clients = data.clients || [];
       state.staleHours = data.staleHours || 48;
+      state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
       lastClientsFingerprint = computeClientsFingerprint(state.clients);
       byId('generatedAt').textContent = `Generated: ${formatDateTime(data.generatedAt)}`;
       byId('serverVersionBadge').textContent = `Server: v${text(data.serverVersion)}`;
