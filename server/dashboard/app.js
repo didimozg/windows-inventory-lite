@@ -592,9 +592,6 @@
       })
       .then(data => {
         state.installJobs = data.jobs || [];
-        if (data.defaultRetentionDays && byId('installRetentionDays')) {
-          byId('installRetentionDays').value = data.defaultRetentionDays;
-        }
         renderInstallHistory();
       })
       .catch(error => {
@@ -690,7 +687,6 @@
     const password = byId('installPassword').value;
     const force = byId('installForce').checked;
     const addToTrustedHosts = byId('installTrustedHosts').checked;
-    const retentionDays = Number.parseInt(byId('installRetentionDays').value, 10) || 30;
     if (!targets) {
       window.alert('Enter at least one target.');
       return;
@@ -713,7 +709,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets, serverUrl, username, password, force, addToTrustedHosts, retentionDays })
+      body: JSON.stringify({ targets, serverUrl, username, password, force, addToTrustedHosts })
     })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -991,7 +987,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets: targets.join('\n'), serverUrl, username, password, force: false, addToTrustedHosts: false, retentionDays: 30, useSavedCredentials: true })
+      body: JSON.stringify({ targets: targets.join('\n'), serverUrl, username, password, force: false, addToTrustedHosts: false, useSavedCredentials: true })
     })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1346,6 +1342,7 @@
       })
       .then(data => {
         byId('generalStaleHours').value = data.staleHours || 48;
+        byId('generalInstallLogRetentionDays').value = data.installLogRetentionDays || 30;
         byId('generalPort').value = data.port || 8080;
         byId('generalEnableHttp').checked = data.enableHttp !== false;
         byId('generalHttpsPort').value = data.httpsPort || 8443;
@@ -1423,6 +1420,7 @@
 
   function saveGeneralSettings(acknowledgeRisks, confirmedDisruption) {
     const staleHours = Number.parseInt(byId('generalStaleHours').value, 10) || 48;
+    const installLogRetentionDays = Number.parseInt(byId('generalInstallLogRetentionDays').value, 10) || 30;
     const port = Number.parseInt(byId('generalPort').value, 10) || 8080;
     const enableHttp = byId('generalEnableHttp').checked;
     const httpsPort = Number.parseInt(byId('generalHttpsPort').value, 10) || 8443;
@@ -1449,7 +1447,7 @@
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        staleHours, port, enableHttp, httpsPort, useHttps, acknowledgeRisks: !!acknowledgeRisks,
+        staleHours, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, acknowledgeRisks: !!acknowledgeRisks,
         adSyncEnabled: byId('generalAdSyncEnabled').checked,
         adSyncMode: byId('generalAdSyncMode').value,
         adSyncIntervalHours: Number.parseInt(byId('generalAdSyncIntervalHours').value, 10) || 24,

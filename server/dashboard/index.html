@@ -176,7 +176,12 @@
                 Stale threshold (hours)
                 <input id="generalStaleHours" type="number" min="1" max="8760" value="48">
               </label>
+              <label class="pkg-token-field">
+                Client action log retention (days)
+                <input id="generalInstallLogRetentionDays" type="number" min="1" max="3650" value="30">
+              </label>
             </div>
+            <p class="cert-hint">How long Client actions/Client updates push job logs (Installation &gt; Client actions) are kept before being cleaned up automatically.</p>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Network</h2>
@@ -541,20 +546,16 @@
                 WinRM password
                 <input id="installPassword" type="password" autocomplete="current-password">
               </label>
+              <label class="check-label install-force-field install-only">
+                <input id="installForce" type="checkbox">
+                Force reinstall
+              </label>
+              <label class="check-label install-trusted-field">
+                <input id="installTrustedHosts" type="checkbox">
+                Add to TrustedHosts
+              </label>
+              <button id="installButton" class="primary-button install-submit-field" type="button">Install client</button>
             </div>
-            <label class="check-label install-force-field install-only">
-              <input id="installForce" type="checkbox">
-              Force reinstall
-            </label>
-            <label class="check-label install-trusted-field">
-              <input id="installTrustedHosts" type="checkbox">
-              Add to TrustedHosts
-            </label>
-            <label class="install-retention-field">
-              Log retention days
-              <input id="installRetentionDays" type="number" min="1" max="3650" value="30">
-            </label>
-            <button id="installButton" class="primary-button" type="button">Install client</button>
           </div>
           <div id="installStatus" class="install-status empty">No install job started.</div>
           <div id="installHistory" class="install-history empty">No saved client action logs.</div>

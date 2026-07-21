@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.19.3] - 2026-07-21
+
+### Fixed
+
+- The Targets textarea wrap and the textarea itself both showed a scrollbar for the same overflowing text (a classic CSS Grid/Flexbox "implicit minimum size" issue - a resizable descendant's content-driven intrinsic size can override an explicit `1fr`/percentage sizing intent unless `min-height: 0` says otherwise). Now only the textarea's own scrollbar shows.
+
+### Changed
+
+- "Log retention days" moved out of the `Client actions` form into Settings > General ("Client action log retention (days)", in the Inventory block) as a real global setting, persisted across restarts - every install/uninstall/update push now uses it, instead of re-typing a value (that silently reset to 30 on every page load) on each push.
+- Force reinstall/Add to TrustedHosts/Install client moved from their own row at the bottom of the panel into the same block as Action/Server URL/WinRM user/password, right below them - the whole set of install controls now reads as one cluster next to Action instead of split across two separate areas of the page.
+
 ## [0.19.2] - 2026-07-21
 
 ### Fixed

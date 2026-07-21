@@ -20,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.19.2";
+        internal const string ProductVersion = "0.19.3";
 
         private static int Main(string[] args)
         {
@@ -360,6 +360,15 @@ namespace WindowsInventoryLite
                     if (!String.IsNullOrEmpty(staleHoursText) && Int32.TryParse(staleHoursText, out staleHoursFromConfig) && staleHoursFromConfig > 0)
                     {
                         options.StaleHours = staleHoursFromConfig;
+                    }
+                }
+                if (options.InstallLogRetentionDays == 30)
+                {
+                    string retentionDaysText = GetConfigString(config, "InstallLogRetentionDays");
+                    int retentionDaysFromConfig;
+                    if (!String.IsNullOrEmpty(retentionDaysText) && Int32.TryParse(retentionDaysText, out retentionDaysFromConfig) && retentionDaysFromConfig >= 1 && retentionDaysFromConfig <= 3650)
+                    {
+                        options.InstallLogRetentionDays = retentionDaysFromConfig;
                     }
                 }
                 // Deliberately NOT gated behind "no --prefix was passed" the way
@@ -3462,6 +3471,7 @@ namespace WindowsInventoryLite
             // echoed back either.
             result["adUsername"] = options.AdUseServiceIdentity ? null : options.AdUsername;
             result["adComputerImportOUs"] = options.AdComputerImportOUs;
+            result["installLogRetentionDays"] = options.InstallLogRetentionDays;
             result["debugLogEnabled"] = options.DebugLogEnabled;
             result["debugLogPath"] = DebugLogger.ResolvePath(options);
             JavaScriptSerializer serializer = CreateJsonSerializer();
@@ -3498,6 +3508,18 @@ namespace WindowsInventoryLite
                 }
                 options.StaleHours = staleHours;
                 updates["StaleHours"] = staleHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("installLogRetentionDays"))
+            {
+                int installLogRetentionDays;
+                if (!Int32.TryParse(Convert.ToString(payload["installLogRetentionDays"]), out installLogRetentionDays) || installLogRetentionDays < 1 || installLogRetentionDays > 3650)
+                {
+                    SendText(stream, "{\"error\":\"installLogRetentionDays must be between 1 and 3650\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.InstallLogRetentionDays = installLogRetentionDays;
+                updates["InstallLogRetentionDays"] = installLogRetentionDays.ToString(System.Globalization.CultureInfo.InvariantCulture);
             }
 
             // HTTP and HTTPS are validated together, not field-by-field, because

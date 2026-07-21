@@ -722,15 +722,28 @@ select {
 
 .install-targets-textarea-wrap label {
   height: 100%;
+  min-height: 0;
   display: grid;
   grid-template-rows: auto 1fr;
   gap: 6px;
 }
 
 .install-targets-field textarea {
-  min-height: 116px;
+  min-height: 0;
   max-height: 500px;
   resize: vertical;
+  /* Without this, a grid/flex item's *implicit* minimum size defaults to
+     its content's intrinsic size - for a textarea, browsers can factor in
+     everything typed into it, not just this element's own box. That let
+     the textarea (and the label/wrap around it) grow to fit all of the
+     typed content instead of clipping to the wrap's fixed 260px, so BOTH
+     the textarea's own native scrollbar and the wrap's overflow-y:auto
+     scrollbar appeared at once for the same overflowing text. min-height:
+     0 here (replacing the earlier explicit 116px floor, no longer needed
+     now that the wrap already guarantees a sane minimum via its own fixed
+     height) lets the grid track's 1fr actually win, so only the
+     textarea's own scrollbar shows.
+  */
 }
 
 /* Action/Server URL/WinRM user/password used to be four independent
@@ -774,6 +787,10 @@ select {
   grid-row: 2;
 }
 
+/* Force reinstall/Add to TrustedHosts/Install client used to sit in the
+   outer grid's row 3, far below Action - moved into .install-right-fields
+   itself (rows 3-4) so the whole set of install controls reads as one
+   cluster next to Action, instead of split across two grid areas. */
 .install-force-field {
   grid-column: 1;
   grid-row: 3;
@@ -784,15 +801,10 @@ select {
   grid-row: 3;
 }
 
-.install-retention-field {
-  grid-column: 3;
-  grid-row: 3;
-}
-
-.install-grid .primary-button {
-  grid-column: 4;
-  grid-row: 3;
-  align-self: end;
+.install-submit-field {
+  grid-column: 1 / span 2;
+  grid-row: 4;
+  justify-self: end;
 }
 
 .check-label {
