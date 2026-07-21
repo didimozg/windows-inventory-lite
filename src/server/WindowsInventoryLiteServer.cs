@@ -20,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.19.3";
+        internal const string ProductVersion = "0.20.0";
 
         private static int Main(string[] args)
         {
@@ -1684,6 +1684,13 @@ namespace WindowsInventoryLite
             string password = Convert.ToString(payload.ContainsKey("password") ? payload["password"] : "");
             bool useSavedCredentials = payload.ContainsKey("useSavedCredentials") && Convert.ToBoolean(payload["useSavedCredentials"]);
             ResolveUpdateCredentials(ref username, ref password, useSavedCredentials, options.ClientUpdateUsername, options.ClientUpdatePassword);
+            bool useAdCredentials = payload.ContainsKey("useAdCredentials") && Convert.ToBoolean(payload["useAdCredentials"]);
+            string adCredentialError;
+            if (!TryResolveAdSyncCredentials(useAdCredentials, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref username, ref password, out adCredentialError))
+            {
+                SendText(stream, "{\"error\":\"" + adCredentialError.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
             bool force = payload.ContainsKey("force") && Convert.ToBoolean(payload["force"]);
             bool addToTrustedHosts = payload.ContainsKey("addToTrustedHosts") && Convert.ToBoolean(payload["addToTrustedHosts"]);
             int retentionDays = options.InstallLogRetentionDays;
@@ -4390,6 +4397,46 @@ namespace WindowsInventoryLite
             }
         }
 
+        // "Use global AD settings" on Client actions: substitutes the AD sync
+        // credentials already configured in Settings > General > Active
+        // Directory (the same ones AdLookupService uses) for this push -
+        // either the server's own service identity (blank username/password,
+        // the same as leaving both fields empty already means to
+        // RunClientInstallTarget/RunClientUninstallTarget) or the saved
+        // explicit AD account. Requires AD sync to actually be enabled and,
+        // when not using the service identity, requires a saved username AND
+        // password - returns false (leaving username/password untouched) and
+        // sets errorMessage when either requirement isn't met, so the caller
+        // rejects the request with a clear reason instead of silently
+        // proceeding with the wrong identity or empty credentials.
+        private static bool TryResolveAdSyncCredentials(bool useAdCredentials, bool adSyncEnabled, bool adUseServiceIdentity, string adUsername, string adPassword, ref string username, ref string password, out string errorMessage)
+        {
+            errorMessage = null;
+            if (!useAdCredentials)
+            {
+                return true;
+            }
+            if (!adSyncEnabled)
+            {
+                errorMessage = "Enable AD sync in Settings > General > Active Directory first.";
+                return false;
+            }
+            if (adUseServiceIdentity)
+            {
+                username = "";
+                password = "";
+                return true;
+            }
+            if (String.IsNullOrEmpty(adUsername) || String.IsNullOrEmpty(adPassword))
+            {
+                errorMessage = "No AD username/password is saved in Settings > General > Active Directory.";
+                return false;
+            }
+            username = adUsername;
+            password = adPassword;
+            return true;
+        }
+
         private static Dictionary<string, string> ParseCmdSettings(string cmdPath)
         {
             Dictionary<string, string> settings = new Dictionary<string, string>();
@@ -4640,6 +4687,11 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials prefers a typed per-push override over the saved account", TestResolveUpdateCredentialsPrefersTypedOverride);
             allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials is a no-op for Client actions (useSavedCredentials=false)", TestResolveUpdateCredentialsIgnoredWhenFlagIsFalse);
             allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials falls through to the service identity when nothing is saved", TestResolveUpdateCredentialsFallsThroughWhenNothingSaved);
+            allPassed &= SelfTestCheck(output, "TryResolveAdSyncCredentials is a no-op when useAdCredentials=false", TestTryResolveAdSyncCredentialsIgnoredWhenFlagIsFalse);
+            allPassed &= SelfTestCheck(output, "TryResolveAdSyncCredentials rejects when AD sync is disabled", TestTryResolveAdSyncCredentialsRejectsWhenAdSyncDisabled);
+            allPassed &= SelfTestCheck(output, "TryResolveAdSyncCredentials resolves to the service identity when configured", TestTryResolveAdSyncCredentialsUsesServiceIdentityWhenConfigured);
+            allPassed &= SelfTestCheck(output, "TryResolveAdSyncCredentials resolves to the saved AD account when not using the service identity", TestTryResolveAdSyncCredentialsUsesSavedAccountWhenNotServiceIdentity);
+            allPassed &= SelfTestCheck(output, "TryResolveAdSyncCredentials rejects when the saved AD account is incomplete", TestTryResolveAdSyncCredentialsRejectsWhenSavedAccountIncomplete);
             allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' default package root", TestParseCmdSettingsDefaultPackageRoot);
             allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' custom package share path", TestParseCmdSettingsCustomPackageSharePath);
             return allPassed;
@@ -5378,6 +5430,71 @@ namespace WindowsInventoryLite
             if (username != "" || password != "")
             {
                 return "expected blank credentials with no saved account configured to stay blank (falls through to the service identity), got username='" + username + "' password='" + password + "'";
+            }
+            return null;
+        }
+
+        private static string TestTryResolveAdSyncCredentialsIgnoredWhenFlagIsFalse()
+        {
+            string username = "typed-user";
+            string password = "typed-pass";
+            string error;
+            bool ok = TryResolveAdSyncCredentials(false, true, true, "CORP\\ad-admin", "ad-secret", ref username, ref password, out error);
+            if (!ok || error != null || username != "typed-user" || password != "typed-pass")
+            {
+                return "expected useAdCredentials=false to leave typed credentials untouched, got ok=" + ok + " error='" + error + "' username='" + username + "' password='" + password + "'";
+            }
+            return null;
+        }
+
+        private static string TestTryResolveAdSyncCredentialsRejectsWhenAdSyncDisabled()
+        {
+            string username = "";
+            string password = "";
+            string error;
+            bool ok = TryResolveAdSyncCredentials(true, false, true, "CORP\\ad-admin", "ad-secret", ref username, ref password, out error);
+            if (ok || String.IsNullOrEmpty(error))
+            {
+                return "expected useAdCredentials=true with AD sync disabled to be rejected with an error message, got ok=" + ok + " error='" + error + "'";
+            }
+            return null;
+        }
+
+        private static string TestTryResolveAdSyncCredentialsUsesServiceIdentityWhenConfigured()
+        {
+            string username = "";
+            string password = "";
+            string error;
+            bool ok = TryResolveAdSyncCredentials(true, true, true, "CORP\\ad-admin", "ad-secret", ref username, ref password, out error);
+            if (!ok || error != null || username != "" || password != "")
+            {
+                return "expected AdUseServiceIdentity=true to resolve to blank username/password (service identity), got ok=" + ok + " error='" + error + "' username='" + username + "' password='" + password + "'";
+            }
+            return null;
+        }
+
+        private static string TestTryResolveAdSyncCredentialsUsesSavedAccountWhenNotServiceIdentity()
+        {
+            string username = "";
+            string password = "";
+            string error;
+            bool ok = TryResolveAdSyncCredentials(true, true, false, "CORP\\ad-admin", "ad-secret", ref username, ref password, out error);
+            if (!ok || error != null || username != "CORP\\ad-admin" || password != "ad-secret")
+            {
+                return "expected AdUseServiceIdentity=false to resolve to the saved AD username/password, got ok=" + ok + " error='" + error + "' username='" + username + "' password='" + password + "'";
+            }
+            return null;
+        }
+
+        private static string TestTryResolveAdSyncCredentialsRejectsWhenSavedAccountIncomplete()
+        {
+            string username = "";
+            string password = "";
+            string error;
+            bool ok = TryResolveAdSyncCredentials(true, true, false, "CORP\\ad-admin", "", ref username, ref password, out error);
+            if (ok || String.IsNullOrEmpty(error))
+            {
+                return "expected useAdCredentials=true with AdUseServiceIdentity=false and a blank saved password to be rejected, got ok=" + ok + " error='" + error + "'";
             }
             return null;
         }

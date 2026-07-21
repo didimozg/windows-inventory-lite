@@ -629,6 +629,16 @@
     byId('installButton').textContent = isInstall ? 'Install client' : 'Uninstall client';
   }
 
+  // "Use global AD settings" substitutes the typed WinRM user/password
+  // with the AD sync credentials already configured in Settings > General
+  // (server identity, or the saved AD account) - the fields are disabled
+  // while it's checked since whatever's typed in them would be ignored.
+  function updateInstallCredentialFieldsUi() {
+    const useAd = byId('installUseAdCredentials').checked;
+    byId('installUsername').disabled = useAd;
+    byId('installPassword').disabled = useAd;
+  }
+
   // onlyMissing=false: every AD computer in the configured scope.
   // onlyMissing=true: the same AD list, filtered (client-side, against the
   // already-loaded state.clients) down to computers with no reporting
@@ -683,8 +693,9 @@
     const action = byId('clientAction').value;
     const targets = byId('installTargets').value.trim();
     const serverUrl = byId('installServerUrl').value.trim();
-    const username = byId('installUsername').value.trim();
-    const password = byId('installPassword').value;
+    const useAdCredentials = byId('installUseAdCredentials').checked;
+    const username = useAdCredentials ? '' : byId('installUsername').value.trim();
+    const password = useAdCredentials ? '' : byId('installPassword').value;
     const force = byId('installForce').checked;
     const addToTrustedHosts = byId('installTrustedHosts').checked;
     if (!targets) {
@@ -709,11 +720,12 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets, serverUrl, username, password, force, addToTrustedHosts })
+      body: JSON.stringify({ targets, serverUrl, username, password, force, addToTrustedHosts, useAdCredentials })
     })
-      .then(response => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json();
+      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
+      .then(({ ok, status, data }) => {
+        if (!ok) throw new Error(data.error || `HTTP ${status}`);
+        return data;
       })
       .then(data => {
         state.installJobId = data.jobId;
@@ -2479,6 +2491,7 @@
   });
   byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
   byId('clientAction').addEventListener('change', updateClientActionUi);
+  byId('installUseAdCredentials').addEventListener('change', updateInstallCredentialFieldsUi);
   byId('installButton').addEventListener('click', startClientActionJob);
   byId('installLoadAdAllButton').addEventListener('click', () => loadTargetsFromAd(false));
   byId('installLoadAdMissingButton').addEventListener('click', () => loadTargetsFromAd(true));

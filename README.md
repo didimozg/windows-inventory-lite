@@ -223,7 +223,7 @@ After installation, the dashboard `Client package` tab can reconfigure the serve
 If the server service runs as LocalSystem, WinRM installation to remote computers usually fails. Run the service under a domain account with the required local administrator rights, or use a managed service account with equivalent permissions.
 Do not send WinRM passwords through the dashboard over plain HTTP outside a trusted management network.
 
-The server stores WinRM job logs in `DataPath\_client-install-jobs`. The default retention period is 30 days. Set a different default during server installation:
+The server stores WinRM job logs in `DataPath\_client-install-jobs`. The retention period is 30 days by default - set the initial value during server installation:
 
 ```powershell
 .\src\Install-Server.ps1 `
@@ -231,7 +231,9 @@ The server stores WinRM job logs in `DataPath\_client-install-jobs`. The default
     -InstallLogRetentionDays 60
 ```
 
-The `Client actions` tab also lets you set the retention period for a specific job. Saved logs contain the action, targets, status, command output, errors, timestamps, and the WinRM username. Passwords are not written to log files.
+Change it later from Settings > General ("Client action log retention (days)", under Inventory) - it applies to every install/update/uninstall job, current and future, not just the one just installed with. Saved logs contain the action, targets, status, command output, errors, timestamps, and the WinRM username. Passwords are not written to log files.
+
+Instead of typing WinRM credentials for a push, check "Use global AD settings" on the `Client actions` tab to reuse the AD Domain/credentials already configured for AD Description Sync (Settings > General > Active Directory) - the server's own service identity if "Use service account identity" is checked there, or the saved AD account otherwise. This requires AD sync to actually be enabled, and a saved username/password when not using the service identity - the push is rejected with a clear error otherwise.
 
 ## HTTPS Setup
 

@@ -789,21 +789,26 @@ select {
 
 /* Force reinstall/Add to TrustedHosts/Install client used to sit in the
    outer grid's row 3, far below Action - moved into .install-right-fields
-   itself (rows 3-4) so the whole set of install controls reads as one
+   itself (rows 4-5) so the whole set of install controls reads as one
    cluster next to Action, instead of split across two grid areas. */
+.install-use-ad-field {
+  grid-column: 1 / span 2;
+  grid-row: 3;
+}
+
 .install-force-field {
   grid-column: 1;
-  grid-row: 3;
+  grid-row: 4;
 }
 
 .install-trusted-field {
   grid-column: 2;
-  grid-row: 3;
+  grid-row: 4;
 }
 
 .install-submit-field {
   grid-column: 1 / span 2;
-  grid-row: 4;
+  grid-row: 5;
   justify-self: end;
 }
 
