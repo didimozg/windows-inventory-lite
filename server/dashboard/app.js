@@ -444,7 +444,7 @@
           (c.software || []).length, formatDateTime(c.collectedAt || c.sourceUpdatedAt),
           isStale(c) ? 'Yes' : 'No', cpu.name || '', ramText, disksText,
           c.hasUsbStorage ? 'Yes' : 'No',
-          c.adSyncStatus === 'not-found' ? 'Not found in AD' : c.adSyncStatus === 'error' ? 'AD unreachable' : (c.adDescription || '')
+          state.adDescriptionSyncEnabled ? (c.adSyncStatus === 'not-found' ? 'Not found in AD' : c.adSyncStatus === 'error' ? 'AD unreachable' : (c.adDescription || '')) : (c.adDescription || '')
         ];
       })
     );
