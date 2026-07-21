@@ -682,6 +682,22 @@ tr.stale td {
   font-size: 13px;
 }
 
+/* Client updates' "Use global AD settings" checkbox sits outside
+   .install-grid (it's a standalone label in a .settings-block, not a grid
+   item), so it never picked up the muted/13px treatment its Client actions
+   counterpart gets from .install-grid label above - it rendered at the
+   page's normal text size/color instead, standing out from every other
+   checkbox nearby. Matches that treatment explicitly here instead.
+   .check-label.updates-use-ad-field (not just .updates-use-ad-field) is
+   needed for specificity - .check-label's own color:var(--text) rule
+   (styles.css, further below) has the same one-class specificity and
+   comes later in the file, so it would otherwise win on the color
+   property alone even though font-size still applied correctly. */
+.check-label.updates-use-ad-field {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 textarea,
 input[type="text"],
 input[type="password"],
@@ -1062,6 +1078,13 @@ tr.usb-row td {
   flex-shrink: 0;
 }
 
+.ram-modules-grid {
+  display: grid;
+  grid-template-columns: repeat(2, auto);
+  gap: 2px 16px;
+  margin-top: 2px;
+}
+
 th.sortable {
   cursor: pointer;
   user-select: none;
@@ -1174,6 +1197,15 @@ th.sort-desc::after {
   gap: 8px;
   flex-wrap: nowrap;
   align-items: end;
+}
+
+/* Every other .pkg-buttons sits at the END of its form (Save/Upload/
+   Download), so it never needs bottom spacing of its own. The Certificate
+   view's Delete button is the one place a .pkg-buttons block sits BEFORE a
+   field grid instead - without a gap it read as crowding the Certificate
+   file field right below it. */
+#certificateView > .pkg-buttons {
+  margin-bottom: 16px;
 }
 
 .pkg-message {

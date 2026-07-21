@@ -215,10 +215,6 @@
             <h2 class="settings-block-title">Active Directory</h2>
             <div class="pkg-grid ad-sync-panel">
               <label class="check-label">
-                <input id="generalAdSyncEnabled" type="checkbox">
-                Configure AD identity
-              </label>
-              <label class="check-label">
                 <input id="generalAdDescriptionSyncEnabled" type="checkbox">
                 Sync Description from AD
               </label>
@@ -237,6 +233,10 @@
               </div>
             </div>
             <div class="pkg-grid ad-identity-panel">
+              <label class="check-label">
+                <input id="generalAdSyncEnabled" type="checkbox">
+                Configure AD User
+              </label>
               <label class="pkg-token-field">
                 Domain
                 <input id="generalAdDomain" type="text" placeholder="leave blank to use the server's own domain">
@@ -258,7 +258,7 @@
                 <textarea id="generalAdComputerImportOUs" rows="3" placeholder="OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru"></textarea>
               </label>
             </div>
-            <p class="cert-hint">"Configure AD identity" makes the domain/credentials below available to Client actions, Client updates, and AD Computer Import. "Sync Description from AD" additionally writes each computer's Active Directory description into its inventory record, read-only in the Clients table while it's on. Turn it off to edit Description manually instead - re-enabling it later overwrites any manual edits on the next sync. Reading the description attribute is allowed to any authenticated domain user by default AD ACLs, so the service account identity usually needs no special AD delegation.</p>
+            <p class="cert-hint">"Configure AD User" makes the domain/credentials below available to Client actions, Client updates, and AD Computer Import. "Sync Description from AD" additionally writes each computer's Active Directory description into its inventory record, read-only in the Clients table while it's on. Turn it off to edit Description manually instead - re-enabling it later overwrites any manual edits on the next sync. Reading the description attribute is allowed to any authenticated domain user by default AD ACLs, so the service account identity usually needs no special AD delegation.</p>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Diagnostics</h2>
@@ -452,7 +452,7 @@
             <h2 class="settings-block-title">WinRM credentials</h2>
             <p class="cert-hint">Leave both fields blank when pushing an update to use the saved account below, or the server service's own identity if nothing is saved (the same account WinRM client actions already require). Fill them in to override with a different account for this push only.</p>
             <p id="updatesSavedAccountHint" class="cert-hint hidden"></p>
-            <label class="check-label">
+            <label class="check-label updates-use-ad-field">
               <input id="updatesUseAdCredentials" type="checkbox">
               Use global AD settings (Settings &gt; General &gt; Active Directory)
             </label>

@@ -83,6 +83,37 @@ if (-not $Credential -and $CredentialUsername -and $CredentialPassword) {
     $Credential = New-Object System.Management.Automation.PSCredential($CredentialUsername, $CredentialPassword)
 }
 
+# WinRM connection failures throw System.Management.Automation.Remoting.
+# PSRemotingTransportException with the OS's own localized message text
+# (Russian on a Russian-locale target, English on an English one, etc.) -
+# unreadable to an admin whose own console is a different language, and a
+# wall of internal WS-Management troubleshooting text either way. Classify
+# by the exception TYPE and its .ErrorCode (a stable, documented WSMan
+# HRESULT, not locale text) instead of matching on the message string.
+# Only -2144108103 (name resolution failure) is mapped with real
+# confidence here - every other PSRemotingTransportException falls into
+# one shared "WinRM unreachable" bucket, which covers the connection-
+# refused/timeout/service-not-configured case from real fleet reports but
+# is not itself split further, since verifying additional specific codes
+# needs a real failing WinRM target this dev machine doesn't have. The
+# original message is always appended, so misclassifying a less-common
+# code never hides the real detail - it only adds a friendlier headline.
+function Get-FriendlyConnectionError {
+    param([System.Exception]$Exception)
+
+    if ($Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException]) {
+        if ($Exception.ErrorCode -eq -2144108103) {
+            $friendly = 'Computer unreachable - could not resolve its name. Try again later.'
+        }
+        else {
+            $friendly = 'WinRM service is not reachable on this computer - check that WinRM is configured and running (winrm quickconfig), and that the computer is online.'
+        }
+        return "$friendly (original error: $($Exception.Message))"
+    }
+
+    return $Exception.Message
+}
+
 function New-InventorySession {
     param([string]$TargetComputer)
 
@@ -285,7 +316,7 @@ foreach ($computer in $ComputerName) {
     }
     catch {
         $hadFailure = $true
-        Write-Error ("Failed to install client on {0}: {1}" -f $computer, $_.Exception.Message)
+        Write-Error ("Failed to install client on {0}: {1}" -f $computer, (Get-FriendlyConnectionError -Exception $_.Exception))
     }
     finally {
         if ($session) {

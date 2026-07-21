@@ -2139,14 +2139,21 @@
     renderBarChart('dashStorageChart', getStorageTypeBreakdown(clients));
   }
 
-  function formatRamModules(modules) {
+  // Each module renders as its own grid cell (2 columns) instead of one
+  // long comma-joined line - hard to read for machines with 4+ sticks.
+  // Matches the same "one item per line" direction already used for
+  // disksSummary a few lines below, just laid out in a 2-up grid since RAM
+  // module strings are short and a fleet with many sticks would otherwise
+  // need many full-width lines.
+  function formatRamModulesHtml(modules) {
     if (!modules || modules.length === 0) return null;
-    return modules.map(m => {
+    const items = modules.map(m => {
       const cap = m.capacityMb >= 1024 ? `${Math.round(m.capacityMb / 1024)} GB` : `${Number(m.capacityMb) || 0} MB`;
       const mfr = m.manufacturer ? ` ${escapeHtml(m.manufacturer)}` : '';
       const spd = m.speedMhz ? ` ${Number(m.speedMhz) || 0} MHz` : '';
-      return `${cap}${mfr}${spd}`;
-    }).join(', ');
+      return `<span>${cap}${mfr}${spd}</span>`;
+    });
+    return `<span class="ram-modules-grid">${items.join('')}</span>`;
   }
 
   function renderTable(clients) {
@@ -2188,7 +2195,7 @@
       const ramGb = client.ramTotalMb
         ? (client.ramTotalMb >= 1024 ? `${Math.round(client.ramTotalMb / 1024)} GB` : `${Number(client.ramTotalMb) || 0} MB`)
         : 'Unknown';
-      const ramModulesSummary = formatRamModules(client.ramModules);
+      const ramModulesHtml = formatRamModulesHtml(client.ramModules);
       const disksSummary = (client.disks || []).map(d => {
         const size = d.sizeGb ? ` ${d.sizeGb} GB` : '';
         const badge = d.usb ? ' <span class="usb-badge">USB</span>' : '';
@@ -2215,7 +2222,7 @@
           <div class="details">
             <div class="hw-summary">
               <div><strong>CPU</strong><span>${cpuText}</span></div>
-              <div><strong>RAM</strong><span>${ramGb}${ramModulesSummary ? ` &mdash; ${ramModulesSummary}` : ''}</span></div>
+              <div><strong>RAM</strong><span>${ramGb}${ramModulesHtml ? `<br>${ramModulesHtml}` : ''}</span></div>
               <div><strong>Storage</strong><span>${disksSummary}</span></div>
             </div>
             <h2>${escapeHtml(client.computerName)} software</h2>

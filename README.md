@@ -233,7 +233,7 @@ The server stores WinRM job logs in `DataPath\_client-install-jobs`. The retenti
 
 Change it later from Settings > General ("Client action log retention (days)", under Inventory) - it applies to every install/update/uninstall job, current and future, not just the one just installed with. Saved logs contain the action, targets, status, command output, errors, timestamps, and the WinRM username. Passwords are not written to log files.
 
-Instead of typing WinRM credentials for a push, check "Use global AD settings" on the `Client actions` tab to reuse the AD Domain/credentials already configured under "Configure AD identity" (Settings > General > Active Directory) - the server's own service identity if "Use service account identity" is checked there, or the saved AD account otherwise. This requires AD identity to actually be configured, and a saved username/password when not using the service identity - the push is rejected with a clear error otherwise.
+Instead of typing WinRM credentials for a push, check "Use global AD settings" on the `Client actions` tab to reuse the AD Domain/credentials already configured under "Configure AD User" (Settings > General > Active Directory) - the server's own service identity if "Use service account identity" is checked there, or the saved AD account otherwise. This requires AD identity to actually be configured, and a saved username/password when not using the service identity - the push is rejected with a clear error otherwise.
 
 ## HTTPS Setup
 
@@ -288,7 +288,7 @@ Either path only restores HTTP — it does not touch the stored certificate or t
 
 Optional and off by default. Settings > General's "Active Directory" block splits AD integration into two independent checkboxes:
 
-- **Configure AD identity** - makes the AD domain/credentials below available to `Client actions`, `Client updates`, and AD Computer Import (see below). On its own, it does not touch inventory data.
+- **Configure AD User** - makes the AD domain/credentials below available to `Client actions`, `Client updates`, and AD Computer Import (see below). On its own, it does not touch inventory data.
 - **Sync Description from AD** - looks up each reporting computer's Active Directory `description` attribute and writes it into the `Clients` table's Description column. While this is on, the column is read-only and its header reads "AD Description". Turn it off and the header switches to plain "Description", and the column becomes editable directly in the dashboard - a manual value stays in place until sync is turned back on, at which point the next refresh overwrites it with AD's value again.
 
 Enable AD identity at install time with:
@@ -315,7 +315,7 @@ On the `Client actions` tab, two buttons pull a list of computer names directly 
 - **Load all PC from AD** - every computer in the configured scope.
 - **Load PC without client from AD** - the same scope, filtered down to computers that don't have a reporting client yet (compared against the computers already visible on the `Clients` tab) - useful for finding fresh install targets without manually excluding machines that already have the client.
 
-Both search whichever Organizational Units are configured in Settings > General's Active Directory panel ("Organizational Units (DN, one per line)" - one Distinguished Name per line, e.g. `OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru`), including everything nested under each one. Leave the list empty to search the whole domain instead. Both use the same AD Domain/credentials already configured under "Configure AD identity" above - there is nothing new to set up if that's already configured.
+Both search whichever Organizational Units are configured in Settings > General's Active Directory panel ("Organizational Units (DN, one per line)" - one Distinguished Name per line, e.g. `OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru`), including everything nested under each one. Leave the list empty to search the whole domain instead. Both use the same AD Domain/credentials already configured under "Configure AD User" above - there is nothing new to set up if that's already configured.
 
 "Load all PC from AD" returns the raw computer list for the configured scope, unfiltered by report status - trim it by hand afterward if a particular push (e.g. an uninstall) only makes sense for a subset. If one configured OU can't be searched (a typo, a deleted OU), it's skipped and reported as a warning; the rest still load normally, for either button.
 
@@ -335,7 +335,7 @@ The dashboard `Client updates` tab (under Installation) shows which reporting cl
 
 By default, an update push uses the server service's own identity, the same WinRM prerequisite `Client actions` already documents. If that identity cannot reach update targets, an optional dedicated WinRM account can be saved on the `Client updates` page itself (`Client update username` / `Client update password`) - the password is encrypted at rest the same way as `WebPassword`/`AdPassword`/`Token`. There is no `Install-Server.ps1` flag for these credentials; they are dashboard-only.
 
-Instead of saving a dedicated account, check "Use global AD settings" on the `Client updates` page to reuse the AD Domain/credentials already configured under "Configure AD identity" (Settings > General > Active Directory) - the server's own service identity if "Use service account identity" is checked there, or the saved AD account otherwise. This requires AD identity to actually be configured, and a saved username/password when not using the service identity - the push is rejected with a clear error otherwise.
+Instead of saving a dedicated account, check "Use global AD settings" on the `Client updates` page to reuse the AD Domain/credentials already configured under "Configure AD User" (Settings > General > Active Directory) - the server's own service identity if "Use service account identity" is checked there, or the saved AD account otherwise. This requires AD identity to actually be configured, and a saved username/password when not using the service identity - the push is rejected with a clear error otherwise.
 
 A "Schedule" section on the same page lets an administrator configure an automatic push instead of clicking "Update selected" by hand - either once at a specific date and time, or repeating every N hours. A scheduled push always targets whichever clients are outdated at the moment it fires, using the saved WinRM account (or the server's own service identity if none is saved) - there is no user present to type credentials for an unattended run.
 

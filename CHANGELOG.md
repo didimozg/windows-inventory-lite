@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.21.1] - 2026-07-21
+
+### Fixed
+
+- `Client updates`' "Use global AD settings" checkbox rendered at a different font size/color than every other checkbox nearby - it lived outside the `.install-grid` context its `Client actions` counterpart gets its muted/13px styling from. Now explicitly matched.
+- `Settings > General > Active Directory`: the "Configure AD identity" checkbox sat in a separate group from the Domain/username/password fields it actually governs, reading as unrelated to them. Moved it to the top of the identity/credentials group, directly above the Domain field.
+- Renamed "Configure AD identity" to "Configure AD User" throughout the dashboard and both READMEs, for clarity.
+- Client details' RAM row listed every module comma-joined on one line (e.g. "16 GB — 4 GB 1332 MHz, 4 GB 1332 MHz, 4 GB 1332 MHz, 4 GB 1332 MHz"), hard to read for machines with several sticks. Now the total (e.g. "16 GB") stays on its own line and each module renders as its own item in a 2-column grid below it.
+- The `Certificate` tab's "Delete installed certificate" button had no spacing below it, crowding the "Certificate file (.pfx / .p12)" field directly underneath.
+- `Install-ClientWinRM.ps1`/`Uninstall-ClientWinRM.ps1` surfaced a WinRM connection failure's raw, OS-localized exception text verbatim (e.g. Russian text on a Russian-locale target, unreadable to an admin on a different locale) - both scripts now classify the failure by its .NET exception type/error code (not by matching locale-dependent message text) into one of two short, English explanations - "Computer unreachable - could not resolve its name" or "WinRM service is not reachable on this computer" - with the original message still appended for real troubleshooting. Only the name-resolution-failure error code is mapped with real confidence; every other WinRM transport failure falls into the second, more general bucket pending further verification against a live fleet.
+
 ## [0.21.0] - 2026-07-21
 
 ### Added
