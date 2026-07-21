@@ -704,6 +704,13 @@ select {
   font-size: 13px;
 }
 
+.description-save-error {
+  display: block;
+  margin-top: 4px;
+  color: var(--danger);
+  font-size: 12px;
+}
+
 .install-targets-field {
   grid-column: 1 / span 2;
   grid-row: 1 / span 2;

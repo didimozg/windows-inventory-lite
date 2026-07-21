@@ -870,6 +870,29 @@
     }
   }
 
+  // Failed Description saves show a short inline error next to the input,
+  // matching the dashboard's existing showSavedMessage pattern - but a
+  // table cell's input has no pre-existing message element to reuse (unlike
+  // Settings forms), so one is created on demand, right after the input.
+  function showDescriptionSaveError(input, message) {
+    let errorEl = input.nextElementSibling;
+    if (!errorEl || !errorEl.classList.contains('description-save-error')) {
+      errorEl = document.createElement('small');
+      errorEl.className = 'description-save-error';
+      input.insertAdjacentElement('afterend', errorEl);
+    }
+    const existingTimer = savedMessageTimers.get(errorEl);
+    if (existingTimer) {
+      window.clearTimeout(existingTimer);
+      savedMessageTimers.delete(errorEl);
+    }
+    errorEl.textContent = message;
+    savedMessageTimers.set(errorEl, window.setTimeout(() => {
+      errorEl.remove();
+      savedMessageTimers.delete(errorEl);
+    }, 30000));
+  }
+
   // Saves an inline Description edit. Only fires on an actual change
   // (skips a no-op save when a field loses focus unmodified). Reverts the
   // input to the last known-good value on failure, since a stale client-
@@ -897,7 +920,7 @@
       })
       .catch(error => {
         input.value = input.dataset.lastSavedValue || '';
-        window.alert(`Failed to save description: ${error.message}`);
+        showDescriptionSaveError(input, error.message);
       })
       .finally(() => {
         input.disabled = false;
