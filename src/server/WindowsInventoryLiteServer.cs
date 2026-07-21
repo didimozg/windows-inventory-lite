@@ -1243,6 +1243,10 @@ namespace WindowsInventoryLite
                     {
                         DeleteClient(stream, request);
                     }
+                    else if (request.Method == "PUT" && request.Path.StartsWith("/api/v1/clients/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        UpdateClientDescription(stream, request);
+                    }
                     else if (request.Method == "POST" && request.Path == "/api/v1/client-install")
                     {
                         StartClientAction(stream, request, "install");
@@ -1687,6 +1691,99 @@ namespace WindowsInventoryLite
 
             File.Delete(path);
             SendJson(stream, "{\"status\":\"deleted\"}");
+        }
+
+        // Manual Description edit, only reachable while AD Description
+        // Sync is off (AdDescriptionSyncEnabled == false) - enforced here,
+        // not just by the dashboard hiding the edit control, since the UI
+        // is not a security boundary. Writes the same adDescription field
+        // AD Description Sync itself writes; adSyncStatus/adSyncedAt are
+        // untouched. See
+        // docs/superpowers/specs/2026-07-21-ad-editable-description-design.md.
+        private void UpdateClientDescription(Stream stream, RequestContext request)
+        {
+            const string prefix = "/api/v1/clients/";
+            const string suffix = "/description";
+            string rawPath = request.Path;
+            int queryStart = rawPath.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                rawPath = rawPath.Substring(0, queryStart);
+            }
+            if (!rawPath.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                SendText(stream, "{\"error\":\"not found\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+
+            string rawComputerName = rawPath.Substring(prefix.Length, rawPath.Length - prefix.Length - suffix.Length);
+            string computerName = Uri.UnescapeDataString(rawComputerName).Trim();
+            if (String.IsNullOrEmpty(computerName))
+            {
+                SendText(stream, "{\"error\":\"computer name is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            if (options.AdDescriptionSyncEnabled)
+            {
+                SendText(stream, "{\"error\":\"Description is synced from AD - disable \\\"Sync Description from AD\\\" in Settings first.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string description = payload.ContainsKey("description") ? Convert.ToString(payload["description"]) : "";
+            if (description.Length > 1024)
+            {
+                SendText(stream, "{\"error\":\"description must be 1024 characters or fewer\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
+            lock (reportFileLock)
+            {
+                if (!File.Exists(path))
+                {
+                    SendText(stream, "{\"error\":\"client not found\"}", "application/json; charset=utf-8", 404);
+                    return;
+                }
+                Dictionary<string, object> report;
+                try
+                {
+                    report = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                }
+                catch
+                {
+                    SendText(stream, "{\"error\":\"client report could not be read\"}", "application/json; charset=utf-8", 500);
+                    return;
+                }
+                if (report == null)
+                {
+                    SendText(stream, "{\"error\":\"client report could not be read\"}", "application/json; charset=utf-8", 500);
+                    return;
+                }
+                report["adDescription"] = description;
+                File.WriteAllText(path, serializer.Serialize(report), new UTF8Encoding(false));
+            }
+
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["status"] = "ok";
+            response["description"] = description;
+            SendJson(stream, serializer.Serialize(response));
         }
 
         private void StartClientAction(Stream stream, RequestContext request, string action)
