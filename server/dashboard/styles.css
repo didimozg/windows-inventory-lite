@@ -1428,3 +1428,21 @@ th.sort-desc::after {
     grid-template-columns: 1fr;
   }
 }
+
+/* .install-right-fields (Action/Server URL/WinRM user/password) is its own
+   nested 2-column grid, unaffected by .install-grid's own 900px collapse
+   above - its minmax(180px, ...)+minmax(140px, ...) floor (320px combined)
+   still fits comfortably down to ~600px, so it's deliberately left as 2
+   columns through the 900px breakpoint rather than single-columning early
+   where 2 columns still read fine. Only true phone widths need it to
+   collapse too. */
+@media (max-width: 480px) {
+  .install-right-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .install-right-fields > * {
+    grid-column: auto;
+    grid-row: auto;
+  }
+}

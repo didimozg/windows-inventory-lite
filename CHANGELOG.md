@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.20.1] - 2026-07-21
+
+### Fixed
+
+- The `Client actions` panel's narrow-viewport layout bug (documented at the `0.19.x` breakpoint, caused by a `.install-grid .primary-button` selector-specificity conflict with the `@media (max-width: 900px)` reset) turned out to already be resolved as a side effect of the `0.19.2`/`0.19.3` restructuring - the affected controls are no longer direct children of `.install-grid`. Re-verified clean at 900/800/600px.
+- Found and fixed a narrower, previously-undiscovered overflow: `.install-right-fields` (the Action/Server URL/WinRM user/password sub-grid introduced in `0.19.2`) kept its 2-column layout down to true phone widths, where its `minmax(180px, ...)`/`minmax(140px, ...)` combined minimum (332px) no longer fit and caused real horizontal page overflow. Added a `@media (max-width: 480px)` rule collapsing it to one column, matching the existing `.install-grid` collapse pattern.
+
 ## [0.20.0] - 2026-07-21
 
 ### Added
