@@ -169,6 +169,12 @@
     return addresses.join(', ');
   }
 
+  function formatIpAddressesHtml(client) {
+    const addresses = client.ipAddresses || [];
+    if (!Array.isArray(addresses) || addresses.length === 0) return '';
+    return addresses.map(escapeHtml).join('<br>');
+  }
+
   function escapeHtml(value) {
     return text(value)
       .replace(/&/g, '&amp;')
@@ -2077,7 +2083,7 @@
       const officeActivation = activation.office || {};
       const clientSoftware = getClientSoftware(client);
       const softwareCount = clientSoftware.length;
-      const ipAddresses = formatIpAddresses(client);
+      const ipAddressesHtml = formatIpAddressesHtml(client);
       const usbBadge = client.hasUsbStorage ? ' <span class="usb-badge">USB</span>' : '';
 
       const softwareRows = clientSoftware.map(item => `<tr>
@@ -2105,7 +2111,7 @@
       const detailsHidden = state.expandedDetails.has('client:' + clientId) ? '' : 'hidden';
 
       return `<tr class="${staleClass}">
-        <td><button class="link-button" type="button" data-client="${clientId}">${escapeHtml(client.computerName)}</button>${usbBadge}${staleBadge}<small>${escapeHtml(client.domain)}</small>${ipAddresses ? `<small class="mono">${escapeHtml(ipAddresses)}</small>` : ''}</td>
+        <td><button class="link-button" type="button" data-client="${clientId}">${escapeHtml(client.computerName)}</button>${usbBadge}${staleBadge}<small>${escapeHtml(client.domain)}</small>${ipAddressesHtml ? `<small class="mono">${ipAddressesHtml}</small>` : ''}</td>
         <td>${escapeHtml(client.clientVersion)}</td>
         <td>${escapeHtml(os.caption)}<small class="mono">${escapeHtml(os.version)} build ${escapeHtml(os.buildNumber)}</small></td>
         <td>${escapeHtml(office.name)}<small>${escapeHtml(office.version)}</small></td>
