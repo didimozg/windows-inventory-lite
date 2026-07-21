@@ -233,7 +233,7 @@ The server stores WinRM job logs in `DataPath\_client-install-jobs`. The retenti
 
 Change it later from Settings > General ("Client action log retention (days)", under Inventory) - it applies to every install/update/uninstall job, current and future, not just the one just installed with. Saved logs contain the action, targets, status, command output, errors, timestamps, and the WinRM username. Passwords are not written to log files.
 
-Instead of typing WinRM credentials for a push, check "Use global AD settings" on the `Client actions` tab to reuse the AD Domain/credentials already configured for AD Description Sync (Settings > General > Active Directory) - the server's own service identity if "Use service account identity" is checked there, or the saved AD account otherwise. This requires AD sync to actually be enabled, and a saved username/password when not using the service identity - the push is rejected with a clear error otherwise.
+Instead of typing WinRM credentials for a push, check "Use global AD settings" on the `Client actions` tab to reuse the AD Domain/credentials already configured under "Configure AD identity" (Settings > General > Active Directory) - the server's own service identity if "Use service account identity" is checked there, or the saved AD account otherwise. This requires AD identity to actually be configured, and a saved username/password when not using the service identity - the push is rejected with a clear error otherwise.
 
 ## HTTPS Setup
 
@@ -284,24 +284,29 @@ The safety gate above only checks listener state at the moment HTTP is disabled 
 
 Either path only restores HTTP — it does not touch the stored certificate or the `UseHttps` setting, so HTTPS resumes normally on its own once a working certificate is back in place.
 
-## Active Directory Description Sync
+## Active Directory Integration
 
-Optional and off by default. When enabled, the server looks up each reporting computer's Active Directory `description` attribute and shows it as a column on the `Clients` view - read-only, the dashboard never writes back to AD.
+Optional and off by default. Settings > General's "Active Directory" block splits AD integration into two independent checkboxes:
 
-Enable it on Settings > General, in the "Active Directory" block, or at install time:
+- **Configure AD identity** - makes the AD domain/credentials below available to `Client actions`, `Client updates`, and AD Computer Import (see below). On its own, it does not touch inventory data.
+- **Sync Description from AD** - looks up each reporting computer's Active Directory `description` attribute and writes it into the `Clients` table's Description column. While this is on, the column is read-only and its header reads "AD Description". Turn it off and the header switches to plain "Description", and the column becomes editable directly in the dashboard - a manual value stays in place until sync is turned back on, at which point the next refresh overwrites it with AD's value again.
+
+Enable AD identity at install time with:
 
 ```powershell
 .\src\Install-Server.ps1 -AdSyncEnabled
 ```
 
-Two sync modes:
+`-AdSyncEnabled` only configures identity. On a fresh install, Description sync has no saved value of its own yet, so it inherits whatever `-AdSyncEnabled` was set to - a first install behaves exactly like the old single flag did. Deployments upgrading from before the split keep syncing Description with no action needed, for the same reason. Either setting can be toggled independently afterward from Settings > General.
+
+Two sync modes for Description sync:
 
 - **On inventory report** (default): refreshes a computer's cached AD data when it next reports inventory, if the cached value is older than the configured sync interval (default 24 hours).
 - **Periodic timer**: refreshes every known computer on a fixed schedule, independent of whether it has reported recently - useful for computers that still exist in AD but have stopped reporting.
 
 By default the server authenticates to AD using its own Windows Service identity (the same domain account WinRM client actions already require - a `LocalSystem` service can't reach AD any more than it can reach WinRM targets). To use separate, explicit AD credentials instead, uncheck "Use service account identity" and supply a username and password. The AD password is encrypted at rest (Windows DPAPI, machine scope) — the same protection applied to `WebPassword` and `Token`.
 
-If a computer's name has no matching AD computer object, the column shows "Not found in AD"; if AD itself was unreachable at sync time, it shows "AD unreachable" and the next report/sweep retries rather than waiting out the full sync interval.
+If a computer's name has no matching AD computer object, the Description column shows "Not found in AD"; if AD itself was unreachable at sync time, it shows "AD unreachable" and the next report/sweep retries rather than waiting out the full sync interval. Reading the description attribute is allowed to any authenticated domain user under default AD ACLs, so the service account identity usually needs no special AD delegation.
 
 ## AD Computer Import
 
@@ -310,7 +315,7 @@ On the `Client actions` tab, two buttons pull a list of computer names directly 
 - **Load all PC from AD** - every computer in the configured scope.
 - **Load PC without client from AD** - the same scope, filtered down to computers that don't have a reporting client yet (compared against the computers already visible on the `Clients` tab) - useful for finding fresh install targets without manually excluding machines that already have the client.
 
-Both search whichever Organizational Units are configured in Settings > General's Active Directory panel ("Organizational Units (DN, one per line)" - one Distinguished Name per line, e.g. `OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru`), including everything nested under each one. Leave the list empty to search the whole domain instead. Both use the same AD Domain/credentials already configured for AD Description Sync above - there is nothing new to set up if that's already configured.
+Both search whichever Organizational Units are configured in Settings > General's Active Directory panel ("Organizational Units (DN, one per line)" - one Distinguished Name per line, e.g. `OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru`), including everything nested under each one. Leave the list empty to search the whole domain instead. Both use the same AD Domain/credentials already configured under "Configure AD identity" above - there is nothing new to set up if that's already configured.
 
 "Load all PC from AD" returns the raw computer list for the configured scope, unfiltered by report status - trim it by hand afterward if a particular push (e.g. an uninstall) only makes sense for a subset. If one configured OU can't be searched (a typo, a deleted OU), it's skipped and reported as a warning; the rest still load normally, for either button.
 
@@ -329,6 +334,8 @@ Off by default on both ends. Meant to be switched on for the duration of a troub
 The dashboard `Client updates` tab (under Installation) shows which reporting clients are running a version other than the client package currently on the server, and lets an administrator push an update to any of them over WinRM with one click - reusing the same install pipeline as `Client actions`.
 
 By default, an update push uses the server service's own identity, the same WinRM prerequisite `Client actions` already documents. If that identity cannot reach update targets, an optional dedicated WinRM account can be saved on the `Client updates` page itself (`Client update username` / `Client update password`) - the password is encrypted at rest the same way as `WebPassword`/`AdPassword`/`Token`. There is no `Install-Server.ps1` flag for these credentials; they are dashboard-only.
+
+Instead of saving a dedicated account, check "Use global AD settings" on the `Client updates` page to reuse the AD Domain/credentials already configured under "Configure AD identity" (Settings > General > Active Directory) - the server's own service identity if "Use service account identity" is checked there, or the saved AD account otherwise. This requires AD identity to actually be configured, and a saved username/password when not using the service identity - the push is rejected with a clear error otherwise.
 
 A "Schedule" section on the same page lets an administrator configure an automatic push instead of clicking "Update selected" by hand - either once at a specific date and time, or repeating every N hours. A scheduled push always targets whichever clients are outdated at the moment it fires, using the saved WinRM account (or the server's own service identity if none is saved) - there is no user present to type credentials for an unattended run.
 
@@ -355,7 +362,7 @@ Settings
 The dashboard polls the server every 30 seconds and updates in place: new or changed data appears without a manual reload and without disturbing whatever you're doing (current page, sort order, search filter, or expanded detail rows). Polling pauses while the browser tab is hidden and catches up immediately once it's visible again.
 
 - `Dashboard`: the landing page (no `#hash` in the URL lands here). Tile counts for Clients, Windows activated, Office activated, and Stale. A Software card shows the Licenses count and a bar chart of the 5 most commonly installed titles (counted by computer, regardless of version). A Hardware card shows computers with USB storage detected, plus bar-chart breakdowns of the top CPU models, RAM size (bucketed at 4/8/16 GB, with everything larger folded into "32 GB+"), and storage type (SSD/HDD only — disks with no recognizable type are left out) across the fleet.
-- `Clients`: one row per computer, with OS, Office, activation status, software count, report time, client agent version, and the AD Description column (see [Active Directory Description Sync](#active-directory-description-sync)) when AD sync is enabled. Computers with USB storage devices show a USB badge. Click a computer name to expand the detail row with CPU, RAM, storage summary, and the full software list.
+- `Clients`: one row per computer, with OS, Office, activation status, software count, report time, client agent version, and a Description column (see [Active Directory Integration](#active-directory-integration)) - a read-only "AD Description" synced from Active Directory while Sync Description from AD is on, or a plain "Description" field editable directly in the table while it's off. Computers with USB storage devices show a USB badge. Click a computer name to expand the detail row with CPU, RAM, storage summary, and the full software list.
 - `Software`: one row per software name, version, and publisher, with the count of installations. Click the name to expand the list of computers where the package appears. A License column links to the matching license record when one already exists for that software name — one license commonly covers several installed versions, so the match is by name only, not name and version.
 - `Hardware`: three grouped tables. CPUs groups machines by processor model. Storage groups machines by disk model, type, and size. RAM groups by total memory and module count. Click any row to expand the list of machines with that configuration. USB storage rows are highlighted.
 - `Licenses`: a manually maintained catalog with Name, Version, License, Comment, Computers, Edit, and Delete columns. Name and Version can be picked from software already seen in inventory reports or typed freely. Version, License, and Comment stay blank when not set, instead of showing a placeholder. Click the Name to expand the linked computers; add computers by typing a name and pressing Enter, or let it auto-fill by selecting a Name that matches installed software. Edit and Delete are separate, distinctly colored buttons.
@@ -412,9 +419,9 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 | `-InstallLogRetentionDays` | `30` | Default retention period in days for WinRM client action logs. |
 | `-OpenFirewall` | `off` | Create a Windows Firewall inbound rule for the listener port. |
 | `-NoRun` | `off` | Install and configure the service without starting it. |
-| `-AdSyncEnabled` | `off` | Enable Active Directory Description sync (see [Active Directory Description Sync](#active-directory-description-sync)). |
-| `-AdSyncMode` | `on-report` | `on-report` or `timer`. |
-| `-AdSyncIntervalHours` | `24` | How often a computer's AD data is refreshed (1–8760). |
+| `-AdSyncEnabled` | `off` | Enable AD identity - domain/credentials for `Client actions`, `Client updates`, AD Computer Import, and (by default, on a fresh install) Description sync (see [Active Directory Integration](#active-directory-integration)). |
+| `-AdSyncMode` | `on-report` | Description sync mode: `on-report` or `timer`. |
+| `-AdSyncIntervalHours` | `24` | How often a computer's AD Description is refreshed (1–8760). |
 | `-AdDomain` | `—` | AD domain to query. Defaults to the server's own domain when omitted. |
 | `-AdUsername` | `—` | Explicit AD account to authenticate with, instead of the service identity. |
 | `-AdPassword` | `—` | Password for `-AdUsername`. Encrypted at rest (Windows DPAPI) before being written to `server-config.json`. |

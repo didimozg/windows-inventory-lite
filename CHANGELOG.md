@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.21.0] - 2026-07-21
+
+### Added
+
+- The Clients table's Description column is now editable directly in the dashboard whenever AD Description Sync is off - previously it was always a read-only cache of AD's own value. `Settings > General > Active Directory` splits the old single "Enable AD sync" checkbox into "Configure AD identity" (domain/credentials, used by Client actions, Client updates, and AD Computer Import) and a new "Sync Description from AD" toggle (just the periodic Description write). Turning identity on but Description sync off keeps AD credentials usable everywhere else while making Description a manually-editable field (column header reads "Description" instead of "AD Description"). Existing deployments that already had AD sync enabled keep syncing Description after the upgrade with no action needed - the new toggle inherits the old flag's value automatically.
+- `Client updates` gained the same "Use global AD settings" checkbox `Client actions` got in 0.20.0 - substitutes the AD identity credentials for the saved Client Update account on a push, with the same validation (AD identity must be configured, and a saved account or service identity must actually be usable).
+
+### Changed
+
+- `Client actions`' existing "Use global AD settings" checkbox now depends on "Configure AD identity" specifically rather than the old single AD-sync flag - no behavior change for existing users (the flag it depends on is the one that kept its meaning across the split).
+
 ## [0.20.2] - 2026-07-21
 
 ### Fixed
