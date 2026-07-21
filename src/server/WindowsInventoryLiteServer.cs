@@ -20,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.21.2";
+        internal const string ProductVersion = "0.21.3";
 
         private static int Main(string[] args)
         {
@@ -3583,6 +3583,20 @@ namespace WindowsInventoryLite
 
         private void SendAdComputers(Stream stream)
         {
+            // "Configure AD User" also gates AD Computer Import, per its own
+            // documented scope (README: "makes the domain/credentials below
+            // available to Client actions, Client updates, and AD Computer
+            // Import") - this was previously unenforced here, so an admin
+            // with the checkbox off but an old saved AD account still got a
+            // working computer list, inconsistent with Client actions'/
+            // Client updates' own credential checks and confusing when
+            // compared side by side.
+            if (!options.AdSyncEnabled)
+            {
+                SendText(stream, "{\"error\":\"Check \\\"Configure AD User\\\" in Settings > General > Active Directory first.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
             ArrayList organizationalUnits = ParseAdComputerImportOUs(options.AdComputerImportOUs);
             AdLookupService.AdComputerSearchResult result = AdLookupService.SearchComputers(organizationalUnits, options);
 
@@ -4566,7 +4580,7 @@ namespace WindowsInventoryLite
             }
             if (!adSyncEnabled)
             {
-                errorMessage = "Enable AD sync in Settings > General > Active Directory first.";
+                errorMessage = "Check \"Configure AD User\" in Settings > General > Active Directory first.";
                 return false;
             }
             if (adUseServiceIdentity)

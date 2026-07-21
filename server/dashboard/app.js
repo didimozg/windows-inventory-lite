@@ -1086,9 +1086,10 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ targets: targets.join('\n'), serverUrl, username, password, force: false, addToTrustedHosts: false, useSavedCredentials: true, useAdCredentials })
     })
-      .then(response => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json();
+      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
+      .then(({ ok, status, data }) => {
+        if (!ok) throw new Error(data.error || `HTTP ${status}`);
+        return data;
       })
       .then(data => {
         state.updateJobId = data.jobId;

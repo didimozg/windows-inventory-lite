@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.21.3] - 2026-07-21
+
+### Fixed
+
+- `Install-ClientWinRM.ps1`/`Uninstall-ClientWinRM.ps1`: the friendly WinRM error message introduced in 0.21.1 was still wrapped in PowerShell's own full `ErrorRecord` ceremony (invocation position, `CategoryInfo`, `FullyQualifiedErrorId`) whenever it reached a job's captured log, since it was raised via `Write-Error`. Switched to a plain stderr write (`[Console]::Error.WriteLine`), which carries the same message with none of the surrounding noise - the job log now shows one clean line instead of a 6-line block.
+- `Client updates`' "Update selected" button showed a bare `Failed to start update job: HTTP 400` on any rejected push, discarding the server's actual error message - the same bug already fixed for `Client actions`' equivalent push button, just never mirrored to this sibling function. Now parses and shows the real message (e.g. "Check \"Configure AD User\" in Settings > General > Active Directory first.").
+- `TryResolveAdSyncCredentials`'s rejection message still said "Enable AD sync in Settings..." after "Enable AD sync" was renamed to "Configure AD User" - corrected.
+- AD Computer Import ("Load all PC from AD" / "Load PC without client from AD") never checked "Configure AD User" at all, so it kept working off a previously-saved AD account even with the checkbox unchecked - inconsistent with Client actions'/Client updates' own credential checks, and with this feature's own documented scope ("Configure AD User" makes AD credentials available to Client actions, Client updates, **and AD Computer Import**). Now rejects with the same message the other two features use when the checkbox is off.
+
 ## [0.21.2] - 2026-07-21
 
 ### Fixed

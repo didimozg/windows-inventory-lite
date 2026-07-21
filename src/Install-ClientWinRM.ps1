@@ -316,7 +316,14 @@ foreach ($computer in $ComputerName) {
     }
     catch {
         $hadFailure = $true
-        Write-Error ("Failed to install client on {0}: {1}" -f $computer, (Get-FriendlyConnectionError -Exception $_.Exception))
+        # Write-Error would work too, but PowerShell wraps it in a full
+        # ErrorRecord (position info relative to the wrapping one-line
+        # -Command invocation, CategoryInfo, FullyQualifiedErrorId) when it
+        # reaches the caller's captured stderr - exactly the kind of wall
+        # of PowerShell plumbing text Get-FriendlyConnectionError above is
+        # meant to spare the dashboard's job log from. A plain stderr write
+        # carries the same message with none of that ceremony.
+        [Console]::Error.WriteLine(("Failed to install client on {0}: {1}" -f $computer, (Get-FriendlyConnectionError -Exception $_.Exception)))
     }
     finally {
         if ($session) {
