@@ -657,6 +657,15 @@
     byId('installPassword').disabled = useAd;
   }
 
+  // Mirrors updateInstallCredentialFieldsUi (Client actions) exactly: "Use
+  // global AD settings" substitutes the typed/saved Client Update account
+  // with the AD sync credentials already configured in Settings > General.
+  function updateUpdatesCredentialFieldsUi() {
+    const useAd = byId('updatesUseAdCredentials').checked;
+    byId('updatesUsername').disabled = useAd;
+    byId('updatesPassword').disabled = useAd;
+  }
+
   // onlyMissing=false: every AD computer in the configured scope.
   // onlyMissing=true: the same AD list, filtered (client-side, against the
   // already-loaded state.clients) down to computers with no reporting
@@ -1058,8 +1067,9 @@
     // account instead of the service identity" - typing a fresh
     // username+password here still overrides that for this one push,
     // matching Client actions' per-action behavior.
-    const username = byId('updatesUsername').value.trim();
-    const password = byId('updatesPassword').value;
+    const useAdCredentials = byId('updatesUseAdCredentials').checked;
+    const username = useAdCredentials ? '' : byId('updatesUsername').value.trim();
+    const password = useAdCredentials ? '' : byId('updatesPassword').value;
     // #installServerUrl is populated once, unconditionally, on page load
     // (see the byId('installServerUrl').value = ... line near the bottom
     // of this file) - it always holds a real value by the time any tab is
@@ -1074,7 +1084,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets: targets.join('\n'), serverUrl, username, password, force: false, addToTrustedHosts: false, useSavedCredentials: true })
+      body: JSON.stringify({ targets: targets.join('\n'), serverUrl, username, password, force: false, addToTrustedHosts: false, useSavedCredentials: true, useAdCredentials })
     })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -2601,6 +2611,7 @@
   byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
   byId('clientAction').addEventListener('change', updateClientActionUi);
   byId('installUseAdCredentials').addEventListener('change', updateInstallCredentialFieldsUi);
+  byId('updatesUseAdCredentials').addEventListener('change', updateUpdatesCredentialFieldsUi);
   byId('installButton').addEventListener('click', startClientActionJob);
   byId('installLoadAdAllButton').addEventListener('click', () => loadTargetsFromAd(false));
   byId('installLoadAdMissingButton').addEventListener('click', () => loadTargetsFromAd(true));

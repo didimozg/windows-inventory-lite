@@ -452,6 +452,10 @@
             <h2 class="settings-block-title">WinRM credentials</h2>
             <p class="cert-hint">Leave both fields blank when pushing an update to use the saved account below, or the server service's own identity if nothing is saved (the same account WinRM client actions already require). Fill them in to override with a different account for this push only.</p>
             <p id="updatesSavedAccountHint" class="cert-hint hidden"></p>
+            <label class="check-label">
+              <input id="updatesUseAdCredentials" type="checkbox">
+              Use global AD settings (Settings &gt; General &gt; Active Directory)
+            </label>
             <div class="pkg-grid client-update-grid">
               <label class="pkg-token-field">
                 Client update username
