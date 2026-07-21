@@ -702,7 +702,15 @@ select {
 
 .install-targets-field textarea {
   min-height: 116px;
+  /* Capped, not unbounded: .install-targets-field spans grid-row 1/span 2,
+     the same two auto-sized rows as Action/Server URL/WinRM user/password.
+     Dragging the native resize handle past this grows those shared row
+     tracks along with it, which the grid distributes unevenly between the
+     two rows - the other fields end up spread apart with large gaps
+     instead of staying compact. Overflow scrolls internally instead. */
+  max-height: 400px;
   resize: vertical;
+  overflow-y: auto;
 }
 
 .install-action-field {
