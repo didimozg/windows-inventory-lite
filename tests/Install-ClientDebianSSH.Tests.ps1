@@ -52,8 +52,8 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
         Should -Invoke ssh.exe -Times 1
     }
 
-    It 'Invoke-RemoteCommand uses plink.exe for password auth' {
-        Mock plink.exe { $global:LASTEXITCODE = 0; return 'ok' }
+    It 'Invoke-RemoteCommand password auth calls Invoke-InteractivePuttyTool with plink.exe and no -pw anywhere' {
+        Mock Invoke-InteractivePuttyTool { return 'ok' }
         $script:usingPassword = $true
         $script:plinkPath = 'plink.exe'
         $script:CredentialUsername = 'root'
@@ -61,6 +61,22 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
 
         Invoke-RemoteCommand -TargetComputer '192.0.2.10' -Command 'echo hi'
 
-        Should -Invoke plink.exe -Times 1
+        Should -Invoke Invoke-InteractivePuttyTool -Times 1 -ParameterFilter {
+            $ExePath -eq 'plink.exe' -and ($Arguments -notcontains '-pw') -and ($Arguments -notcontains '-batch')
+        }
+    }
+
+    It 'Copy-FileToRemote password auth calls Invoke-InteractivePuttyTool with pscp.exe and no -pw anywhere' {
+        Mock Invoke-InteractivePuttyTool { return 'ok' }
+        $script:usingPassword = $true
+        $script:pscpPath = 'pscp.exe'
+        $script:CredentialUsername = 'root'
+        $script:CredentialPassword = (ConvertTo-SecureString -String 'unused-test-password' -AsPlainText -Force)
+
+        Copy-FileToRemote -TargetComputer '192.0.2.10' -LocalPath 'C:\fake\wil-linux-client' -RemotePath '/tmp/wil-linux-client-install/wil-linux-client'
+
+        Should -Invoke Invoke-InteractivePuttyTool -Times 1 -ParameterFilter {
+            $ExePath -eq 'pscp.exe' -and ($Arguments -notcontains '-pw') -and ($Arguments -notcontains '-batch')
+        }
     }
 }

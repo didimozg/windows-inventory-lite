@@ -102,6 +102,108 @@ WantedBy=timers.target
     return @{ ServicePath = $servicePath; TimerPath = $timerPath }
 }
 
+# Runs plink.exe/pscp.exe interactively and answers whichever prompt
+# actually appears - NOT a fixed-order blind pre-answer, which breaks on
+# any target whose host key this machine has already cached (PuTTY caches
+# accepted keys in HKEY_CURRENT_USER\Software\SimonTatham\PuTTY\SshHostKeys,
+# so the host-key-trust prompt only appears on a target's first-ever
+# connection from this machine - on every later connection there is no
+# such prompt, and blindly pre-sending "y" first would consume the
+# PASSWORD prompt's answer slot instead of the real password). -batch is
+# not used: it disables these prompts entirely rather than letting this
+# function answer them, which would defeat the whole point - keeping the
+# password off the command line (where -pw would put it, visible to any
+# other process/user on this host via Get-CimInstance Win32_Process/Task
+# Manager for the connection's duration - matching the principle
+# Install-ClientWinRM.ps1 already applies to WinRM credentials).
+function Invoke-InteractivePuttyTool {
+    param(
+        [string]$ExePath,
+        [string[]]$Arguments,
+        [string]$PlainPassword,
+        [int]$TimeoutSeconds = 60
+    )
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $ExePath
+    foreach ($arg in $Arguments) {
+        [void]$psi.ArgumentList.Add($arg)
+    }
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $psi
+
+    $script:puttyOutputBuffer = New-Object System.Text.StringBuilder
+    $script:puttyHostKeyAnswered = $false
+    $script:puttyPasswordSent = $false
+
+    $outputHandler = {
+        if ($null -ne $EventArgs.Data) {
+            [void]$script:puttyOutputBuffer.Append($EventArgs.Data)
+            [void]$script:puttyOutputBuffer.Append("`n")
+        }
+    }
+
+    $outSub = Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action $outputHandler
+    $errSub = Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action $outputHandler
+
+    try {
+        [void]$process.Start()
+        $process.BeginOutputReadLine()
+        $process.BeginErrorReadLine()
+
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while (-not $process.HasExited) {
+            if ((Get-Date) -ge $deadline) {
+                try { $process.Kill() } catch { }
+                throw "Timed out after $TimeoutSeconds seconds waiting for plink/pscp - the interactive prompt sequence may have differed from what this script expects. Try -KeyPath instead."
+            }
+
+            $text = $script:puttyOutputBuffer.ToString()
+
+            if (-not $script:puttyHostKeyAnswered -and $text -match '(?i)store key in cache') {
+                $process.StandardInput.WriteLine('y')
+                $script:puttyHostKeyAnswered = $true
+            }
+            elseif (-not $script:puttyPasswordSent -and $text -match '(?i)password:') {
+                $process.StandardInput.WriteLine($PlainPassword)
+                $script:puttyPasswordSent = $true
+            }
+
+            Start-Sleep -Milliseconds 150
+        }
+
+        $process.WaitForExit()
+    }
+    finally {
+        Unregister-Event -SourceIdentifier $outSub.Name -ErrorAction SilentlyContinue
+        Unregister-Event -SourceIdentifier $errSub.Name -ErrorAction SilentlyContinue
+        Remove-Job -Name $outSub.Name -Force -ErrorAction SilentlyContinue
+        Remove-Job -Name $errSub.Name -Force -ErrorAction SilentlyContinue
+    }
+
+    $exitCode = $process.ExitCode
+    $output = $script:puttyOutputBuffer.ToString()
+
+    # Callers (Invoke-RemoteCommand, Copy-FileToRemote) check $LASTEXITCODE
+    # after this call the same way they do after the ssh.exe/scp.exe key-auth
+    # branch's `&` invocation; a direct Process call never sets it on its own,
+    # so it must be set explicitly here or a stale value from an earlier
+    # command in the caller's session would leak through.
+    $global:LASTEXITCODE = $exitCode
+
+    if ($exitCode -ne 0) {
+        throw ("plink/pscp failed (exit {0}): {1}" -f $exitCode, $output)
+    }
+
+    return $output
+}
+
 # Two auth paths, since Windows' built-in OpenSSH client (ssh.exe) cannot
 # do unattended password authentication at all - it refuses to read a
 # password from a non-interactive/piped stdin, by design, with no way
@@ -114,24 +216,10 @@ function Invoke-RemoteCommand {
     if ($script:usingPassword) {
         $plainPassword = ConvertTo-PlainText -Secure $script:CredentialPassword
         try {
-            # No -batch and no -pw here: -batch disables ALL interactive prompts
-            # (aborts instead of asking), which would defeat the purpose. Piping
-            # the answers on stdin instead means the password never appears on
-            # the command line, where it would otherwise be visible to any other
-            # user/process on this host via Get-CimInstance Win32_Process / Task
-            # Manager for the connection's duration - matches the same principle
-            # Install-ClientWinRM.ps1 already applies to WinRM credentials.
-            # "y" pre-answers a possible one-time host-key trust prompt (PuTTY
-            # caches the answer in HKCU\Software\SimonTatham\PuTTY\SshHostKeys,
-            # so this only matters on a target's first-ever connection from this
-            # machine - a harmless no-op line on every later connection, since no
-            # such prompt exists to consume it).
-            # Not verified against a live never-before-seen host from this
-            # environment (no real SSH target available here) - if a target ever
-            # hangs at this step, the real prompt sequence differed from this
-            # assumption; using -KeyPath instead is the fallback until confirmed
-            # on the user's own test fleet.
-            $output = "y", $plainPassword | & $script:plinkPath -ssh "$script:CredentialUsername@$TargetComputer" $Command 2>&1
+            # See Invoke-InteractivePuttyTool for why the prompt is answered
+            # conditionally (watching real output) instead of a fixed-order
+            # blind pre-answer.
+            $output = Invoke-InteractivePuttyTool -ExePath $script:plinkPath -Arguments @('-ssh', "$script:CredentialUsername@$TargetComputer", $Command) -PlainPassword $plainPassword
         }
         finally {
             $plainPassword = $null
@@ -153,10 +241,10 @@ function Copy-FileToRemote {
     if ($script:usingPassword) {
         $plainPassword = ConvertTo-PlainText -Secure $script:CredentialPassword
         try {
-            # See Invoke-RemoteCommand's password branch for the full rationale:
-            # no -batch/-pw so the password never appears on the command line,
-            # "y" pre-answers a possible one-time host-key trust prompt.
-            "y", $plainPassword | & $script:pscpPath $LocalPath "${script:CredentialUsername}@${TargetComputer}:$RemotePath" 2>&1 | Out-Null
+            # See Invoke-InteractivePuttyTool for why the prompt is answered
+            # conditionally (watching real output) instead of a fixed-order
+            # blind pre-answer.
+            Invoke-InteractivePuttyTool -ExePath $script:pscpPath -Arguments @($LocalPath, "${script:CredentialUsername}@${TargetComputer}:$RemotePath") -PlainPassword $plainPassword | Out-Null
         }
         finally {
             $plainPassword = $null
