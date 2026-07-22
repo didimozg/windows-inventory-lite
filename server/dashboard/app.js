@@ -18,7 +18,8 @@
       hwCpu: { key: 'name', dir: 1 },
       hwDisk: { key: 'model', dir: 1 },
       hwRam: { key: 'totalMb', dir: -1 },
-      licenses: { key: 'name', dir: 1 }
+      licenses: { key: 'name', dir: 1 },
+      linuxClients: { key: 'hostname', dir: 1 }
     },
     page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1 },
     // clients/software start at a reasonable fallback and are corrected to
@@ -152,7 +153,12 @@
   // saveClientDescription detect a no-op blur/Enter and skip the network
   // request.
   function formatDescriptionEditor(client, clientId) {
-    const value = escapeHtml(client.adDescription || '');
+    // escapeHtml() runs every value through text(), which turns an empty
+    // string into the literal word "Unknown" - correct for most cells, but
+    // this editor's whole point is to show a genuinely blank input when
+    // there's no Description yet, not a placeholder word. escapeHtmlOrEmpty
+    // is the sibling helper built for exactly this case.
+    const value = escapeHtmlOrEmpty(client.adDescription);
     return `<input type="text" class="description-edit-input" data-description-client="${clientId}" data-computer-name="${escapeHtml(client.computerName)}" data-last-saved-value="${value}" value="${value}" maxlength="1024">`;
   }
 
@@ -162,14 +168,16 @@
   // needs data-platform="linux" so the shared saveClientDescription (and the
   // global keydown/blur listeners it's wired to) can tell the two tables apart.
   function formatLinuxDescriptionEditor(client, clientId) {
-    const value = escapeHtml(client.adDescription || '');
+    // See formatDescriptionEditor's comment - escapeHtml() would turn a
+    // genuinely blank Description into the literal word "Unknown" here.
+    const value = escapeHtmlOrEmpty(client.adDescription);
     return `<input type="text" class="description-edit-input" data-description-client="${clientId}" data-computer-name="${escapeHtml(client.hostname)}" data-platform="linux" data-last-saved-value="${value}" value="${value}" maxlength="1024">`;
   }
 
   function formatLinuxAdDescription(client) {
     if (client.adSyncStatus === 'not-found') return 'Not found in AD';
     if (client.adSyncStatus === 'error') return 'AD unreachable';
-    return escapeHtml(client.adDescription || '');
+    return escapeHtmlOrEmpty(client.adDescription);
   }
 
   function loadLinuxClients() {
@@ -190,12 +198,17 @@
     const tbody = byId('linuxClientsBody');
     if (!tbody) return;
 
+    renderSortHeaders();
+
     if (!clients.length) {
       tbody.innerHTML = '<tr><td colspan="7">No Linux clients reporting yet.</td></tr>';
       return;
     }
 
-    tbody.innerHTML = clients.map((client, index) => {
+    const { key: sortKey, dir: sortDir } = state.sort.linuxClients;
+    const sorted = applySort(clients, c => linuxClientSortValue(c, sortKey), sortDir);
+
+    tbody.innerHTML = sorted.map((client, index) => {
       const clientId = `linux-${index}`;
       const descriptionCell = state.adDescriptionSyncEnabled
         ? formatLinuxAdDescription(client)
@@ -383,6 +396,17 @@
       case 'officeActivated': return (client.activation && client.activation.office && client.activation.office.activated) ? 1 : 0;
       case 'softwareCount': return (client.software || []).length;
       case 'collectedAt': return new Date(client.collectedAt || client.sourceUpdatedAt || 0).getTime();
+      default: return '';
+    }
+  }
+
+  function linuxClientSortValue(client, key) {
+    switch (key) {
+      case 'hostname': return (client.hostname || '').toLowerCase();
+      case 'clientVersion': return client.clientVersion || '';
+      case 'os': return ((client.os && client.os.prettyName) || '').toLowerCase();
+      case 'softwareCount': return Array.isArray(client.packages) ? client.packages.length : 0;
+      case 'collectedAt': return new Date(client.sourceUpdatedAt || 0).getTime();
       default: return '';
     }
   }
@@ -2719,7 +2743,14 @@
         current.dir = 1;
       }
       if (state.page[table] !== undefined) state.page[table] = 1;
-      render();
+      // render() doesn't touch the Linux Clients table (it's loaded/rendered
+      // through its own loadLinuxClients()/setView('linux') path, not the
+      // main Windows-side render pipeline) - re-render it directly instead.
+      if (table === 'linuxClients') {
+        renderLinuxClientsTable(state.linuxClients);
+      } else {
+        render();
+      }
       return;
     }
 

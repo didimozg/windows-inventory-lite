@@ -6,6 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.24.0] - 2026-07-22
+
+### Added
+
+- Column sorting on the Linux Clients dashboard table (Computer/Client version/OS/Software count/Collected), mirroring the existing Windows Clients table's sort pattern - same click-to-sort/click-again-to-reverse behavior, same visual indicator.
+
+### Fixed
+
+- The Description column (both Windows and Linux Clients tables) showed the literal word "Unknown" in the editable input whenever a client had no Description yet - including on a client's very first appearance - instead of a blank field. Root cause: `escapeHtml()` routes every value through the dashboard's generic `text()` helper, which turns an empty string into `"Unknown"` for cells that are meant to show a placeholder word - correct for most columns, wrong for a text input the admin is meant to type into. Fixed by switching the three affected render functions (`formatDescriptionEditor`, `formatLinuxDescriptionEditor`, `formatLinuxAdDescription`) to the existing `escapeHtmlOrEmpty()` helper, which was already built for exactly this case but not used here. Found via live testing while verifying the Description column behaves correctly - confirmed via Playwright against a local console-mode instance with a freshly-reported client that had genuinely never had a Description set.
+
+Version `0.23.1` → `0.24.0` (MINOR - the sorting addition; the Description fix rides along in the same bump since both landed in the same change).
+
 ## [0.23.1] - 2026-07-22
 
 ### Fixed
