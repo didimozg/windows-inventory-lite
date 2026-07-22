@@ -232,6 +232,24 @@ function Show-QuickInstallSummary {
     }
 }
 
+# Gates whether the main loop shows the post-install summary: only a
+# genuinely successful ($Ran) Quick-mode install should ever print it -
+# Skip and Full both behave the same here (no summary). Extracted into its
+# own function so this decision is directly unit-testable, since the main
+# loop itself lives inside the `-ne '.'` guard below and is never reached
+# by Pester's usual dot-source-and-call pattern.
+function Test-ShouldShowQuickInstallSummary {
+    param(
+        [Parameter(Mandatory = $true)]
+        [bool]$Ran,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Mode
+    )
+
+    return ($Ran -and $Mode -eq 'Quick')
+}
+
 # Duplicated from Install-Server.ps1's own Read-ServerConfig (this project
 # doesn't share a module between scripts - see e.g. Uninstall-Server.ps1's
 # identical copy) so the wizard can detect whether a server is already
@@ -460,7 +478,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         $questions = if ($mode -eq 'Quick') { @($flow.Questions | Where-Object { $_['QuickInstall'] }) } else { $flow.Questions }
         $params = if ($mode -eq 'Skip') { @{} } else { Read-WizardAnswers -Questions $questions }
         $ran = Invoke-WizardAction -ScriptPath $scriptPath -ScriptName $flow.ScriptName -Params $params -SecretParams $flow.SecretParams
-        if ($ran -and $mode -eq 'Quick') {
+        if (Test-ShouldShowQuickInstallSummary -Ran $ran -Mode $mode) {
             Show-QuickInstallSummary -Params $params
         }
     }

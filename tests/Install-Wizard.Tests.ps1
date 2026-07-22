@@ -185,4 +185,11 @@ Describe 'Windows Inventory Lite Install Wizard' {
         $output | Should -Match 'http://localhost:8080/'
         $output | Should -Match 'Firewall:\s+not opened'
     }
+
+    It 'Test-ShouldShowQuickInstallSummary returns true only when Ran is true and Mode is Quick' {
+        Test-ShouldShowQuickInstallSummary -Ran $true -Mode 'Quick' | Should -Be $true
+        Test-ShouldShowQuickInstallSummary -Ran $false -Mode 'Quick' | Should -Be $false
+        Test-ShouldShowQuickInstallSummary -Ran $true -Mode 'Skip' | Should -Be $false
+        Test-ShouldShowQuickInstallSummary -Ran $true -Mode 'Full' | Should -Be $false
+    }
 }
