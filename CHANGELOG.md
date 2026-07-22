@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.22.1] - 2026-07-22
+
+### Fixed
+
+- GitHub Actions CI was running the Pester suite under `pwsh` (PowerShell 7), which reproducibly fails `Test-InstallServerRefreshOnly` with a `System.Web.UI.WebResourceAttribute` load error - PowerShell 7's .NET Core runtime has no GAC, and this project's config-reading test touches a `System.Web.Extensions` type that only resolves through it. Already a known, documented dev-machine quirk (this project's own convention is to run Pester via Windows PowerShell 5.1); CI itself was never updated to match. Switched the test step to `shell: powershell`, and added `-SkipPublisherCheck`/`Import-Module -Force` to reliably replace Windows PowerShell 5.1's own pre-installed Pester 3.4.0. Verified locally with the exact same command sequence before pushing: 33/33 passing.
+
+### Changed
+
+- Refreshed all 7 dashboard screenshots in `docs/images/` - the previous set predated the dark theme, tree sidebar navigation, and most of this project's feature history since (AD integration, Client Auto-Update, AD-editable Description, and more). Captured against a local console-mode instance seeded with synthetic, clearly non-production data (generic hostnames, RFC 5737 documentation IP ranges, a placeholder domain) - same convention the README already documents for its screenshots section.
+
 ## [0.22.0] - 2026-07-22
 
 ### Changed
