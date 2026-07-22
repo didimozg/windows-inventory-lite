@@ -244,6 +244,26 @@ http://inventory.example.local:8080/
 
 Вместо ввода учётных данных WinRM для конкретного задания можно отметить «Use global AD settings» на вкладке `Client actions` - тогда используются те же домен и учётные данные AD, что уже настроены в блоке «Configure AD User» (Settings > General > Active Directory): собственная учётная запись службы, если отмечено «Use service account identity», либо сохранённый AD-аккаунт. Для этого нужно, чтобы AD identity была настроена, а если используется явный аккаунт - чтобы для него были сохранены имя пользователя и пароль; иначе запуск отклоняется с понятным сообщением об ошибке.
 
+## Linux-клиент (Debian/Ubuntu)
+
+Минимальный клиент инвентаризации для Linux семейства Debian (Debian, Ubuntu; в этой первой версии только amd64). Полностью независим от Windows-клиента: свой API `/api/v1/linux/*`, своё хранилище, своя вкладка "Linux Clients" на дашборде. Собирает hostname, ОС, CPU, RAM, диски, IP-адреса и установленные пакеты; отправляет отчёт разово за запуск через systemd timer (без постоянно висящего демона).
+
+Сборка клиента (нужен Go - <https://go.dev/dl/>):
+
+```powershell
+.\src\Build-LinuxClient.ps1
+```
+
+Удалённая установка по SSH, ключом или паролем:
+
+```powershell
+.\src\Install-ClientDebianSSH.ps1 -ComputerName 192.0.2.10 -ServerUrl https://server.example.local/api/v1/linux/inventory -CredentialUsername root -KeyPath C:\path\to\id_ed25519
+```
+
+Установка по паролю дополнительно требует `plink.exe`/`pscp.exe` (PuTTY) в `deploy\linux-client\` - см. `deploy\linux-client\NOTICE`, где их взять; встроенный в Windows OpenSSH-клиент вообще не умеет неинтерактивную аутентификацию по паролю.
+
+Поле Description на вкладке Linux Clients работает точно так же, как в таблице Windows Clients: автозаполнение из Active Directory при включённой синхронизации, ручное редактирование иначе.
+
 ## Настройка HTTPS
 
 HTTP и HTTPS работают как два независимых слушателя на двух независимых портах. HTTP-порт по умолчанию — `8080` (задаётся через `-ListenPrefix`), HTTPS-порт по умолчанию — `8443` (задаётся через `-HttpsPort`). Оба могут работать одновременно, только HTTPS или только HTTP — сервер никогда не совмещает оба протокола на одном порту.

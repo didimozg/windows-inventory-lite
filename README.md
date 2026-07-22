@@ -244,6 +244,26 @@ A connection failure is reported as one of two short messages - the computer's n
 
 Instead of typing WinRM credentials for a push, check "Use global AD settings" on the `Client actions` tab to reuse the AD Domain/credentials already configured under "Configure AD User" (Settings > General > Active Directory) - the server's own service identity if "Use service account identity" is checked there, or the saved AD account otherwise. This requires AD identity to actually be configured, and a saved username/password when not using the service identity - the push is rejected with a clear error otherwise.
 
+## Linux Client (Debian/Ubuntu)
+
+A minimal inventory client for Debian-family Linux (Debian, Ubuntu; amd64 only in this first version). Fully independent of the Windows client: its own `/api/v1/linux/*` API, its own storage, its own "Linux Clients" dashboard tab. Collects hostname, OS, CPU, RAM, disks, IP addresses, and installed packages; reports once per run via a systemd timer (no long-running daemon).
+
+Build the client (requires a Go toolchain - <https://go.dev/dl/>):
+
+```powershell
+.\src\Build-LinuxClient.ps1
+```
+
+Install it remotely over SSH, with either a key or a password:
+
+```powershell
+.\src\Install-ClientDebianSSH.ps1 -ComputerName 192.0.2.10 -ServerUrl https://server.example.local/api/v1/linux/inventory -CredentialUsername root -KeyPath C:\path\to\id_ed25519
+```
+
+Password-based push additionally requires `plink.exe`/`pscp.exe` (PuTTY) in `deploy\linux-client\` - see `deploy\linux-client\NOTICE` for where to get them; Windows' own built-in OpenSSH client cannot authenticate with a password non-interactively at all.
+
+The Description field on the Linux Clients tab works exactly like the Windows Clients table's own: auto-filled from Active Directory when the host is AD-joined and AD Description Sync is on, manually editable otherwise.
+
 ## HTTPS Setup
 
 HTTP and HTTPS run as two independent listeners on two independent ports. The default HTTP port is `8080` (set with `-ListenPrefix`) and the default HTTPS port is `8443` (set with `-HttpsPort`). Both can run together, HTTPS-only, or HTTP-only — the server never multiplexes both protocols on a single port.

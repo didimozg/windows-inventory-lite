@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.23.0] - 2026-07-22
+
+### Added
+
+- Linux client v1 (Debian/Ubuntu, amd64) - a minimal Go-based collector (hostname, OS, CPU, RAM, disks, IP addresses, installed packages), reporting once per run via a systemd timer. Fully independent of the Windows client: its own `/api/v1/linux/*` API and storage, its own "Linux Clients" dashboard tab. The Description field reuses the existing AD Description Sync resolution unchanged - AD-sourced when the host is AD-joined and sync is on, manually editable otherwise.
+- `Install-ClientDebianSSH.ps1` - remote install over SSH, supporting both key-based (Windows' built-in OpenSSH client) and password-based (bundled PuTTY `plink.exe`/`pscp.exe`, since the built-in client cannot authenticate with a password non-interactively at all) authentication.
+
 ## [0.22.1] - 2026-07-22
 
 ### Fixed
