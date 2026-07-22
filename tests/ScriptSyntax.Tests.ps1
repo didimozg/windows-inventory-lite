@@ -17,6 +17,8 @@ Describe 'Windows Inventory Lite project' {
             'src\Uninstall-ClientWinRM.ps1',
             'src\Build-InventoryIndex.ps1',
             'src\Install-Server.ps1',
+            'src\Uninstall-Server.ps1',
+            'src\Install-Wizard.ps1',
             'deploy\client\Deploy-ClientGpo.ps1',
             'examples\install-server.ps1',
             'examples\install-client.ps1',

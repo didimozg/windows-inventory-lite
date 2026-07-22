@@ -6,8 +6,10 @@ using System.IO;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.AccessControl;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
+using System.Security.Principal;
 using System.ServiceProcess;
 using System.Text;
 using System.Threading;
@@ -18,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.6.1";
+        internal const string ProductVersion = "0.22.0";
 
         private static int Main(string[] args)
         {
@@ -104,6 +106,51 @@ namespace WindowsInventoryLite
         public int StaleHours;
         public bool ConsoleMode;
         public bool ShowVersion;
+        // AD sync is opt-in and off by default - deployments without AD, or
+        // with a server that isn't domain-joined, are unaffected. See
+        // AdLookupService.cs and InventoryServer.ComputeAdSyncFields.
+        public bool AdSyncEnabled;
+        // Independent of AdSyncEnabled (which now means "AD identity is
+        // configured for use by Client actions/Client updates/AD Computer
+        // Import"): this flag alone gates the periodic AD -> adDescription
+        // write path (RunAdSyncSweep, ComputeAdSyncFields). Turning it off
+        // makes the Clients table's Description column manually editable
+        // without losing AD credentials elsewhere.
+        public bool AdDescriptionSyncEnabled;
+        public string AdSyncMode;
+        public int AdSyncIntervalHours;
+        public string AdDomain;
+        public bool AdUseServiceIdentity;
+        public string AdUsername;
+        public string AdPassword;
+        // Newline-separated list of OU Distinguished Names for the AD
+        // Computer Import feature ("Load from AD" on Client actions).
+        // Empty means "search the whole domain." Not a secret - stored as
+        // plain text, same as AdDomain. Dashboard-only, no Install-Server.ps1
+        // CLI flag, same reasoning as ClientUpdateUsername below.
+        public string AdComputerImportOUs;
+        // Off by default - a plain-text file capturing AD lookups,
+        // inventory-report traffic, and unhandled server errors. See
+        // DebugLogger.cs. Only meant for troubleshooting a specific
+        // deployment; not rotated or size-capped.
+        public bool DebugLogEnabled;
+        public string DebugLogPath;
+        // Optional, off by default - dashboard-configured only, no
+        // Install-Server.ps1 CLI flag by design. Used as a fallback WinRM
+        // credential for Client Auto-Update pushes when the service's own
+        // identity can't reach a target.
+        public string ClientUpdateUsername;
+        public string ClientUpdatePassword;
+        // Off by default - dashboard-configured only, same reasoning as
+        // ClientUpdateUsername/Password above.
+        // Mode is "off", "once", or "interval" - never more than one active,
+        // same as AdSyncMode above. OnceAtUtc/LastRunUtc are ISO
+        // "yyyy-MM-ddTHH:mm:ssZ" strings (or "") rather than DateTime,
+        // matching how every other timestamp in this class is stored.
+        public string ClientUpdateScheduleMode;
+        public string ClientUpdateScheduleOnceAtUtc;
+        public int ClientUpdateScheduleIntervalHours;
+        public string ClientUpdateScheduleLastRunUtc;
 
         public static ServerOptions Parse(string[] args)
         {
@@ -119,6 +166,13 @@ namespace WindowsInventoryLite
             options.WinRmUninstallerPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-bin\Uninstall-ClientWinRM.ps1");
             options.InstallLogRetentionDays = 30;
             options.StaleHours = 48;
+            options.AdSyncMode = "on-report";
+            options.AdSyncIntervalHours = 24;
+            options.AdUseServiceIdentity = true;
+            options.ClientUpdateScheduleMode = "off";
+            options.ClientUpdateScheduleOnceAtUtc = "";
+            options.ClientUpdateScheduleIntervalHours = 24;
+            options.ClientUpdateScheduleLastRunUtc = "";
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -223,6 +277,47 @@ namespace WindowsInventoryLite
                 {
                     options.EnableHttp = false;
                 }
+                else if (key == "--ad-sync-enabled")
+                {
+                    options.AdSyncEnabled = true;
+                }
+                else if (key == "--ad-sync-mode" && i + 1 < args.Length)
+                {
+                    string mode = args[++i].ToLowerInvariant();
+                    if (mode == "on-report" || mode == "timer")
+                    {
+                        options.AdSyncMode = mode;
+                    }
+                }
+                else if (key == "--ad-sync-interval-hours" && i + 1 < args.Length)
+                {
+                    int adHours;
+                    if (Int32.TryParse(args[++i], out adHours) && adHours > 0 && adHours <= 8760)
+                    {
+                        options.AdSyncIntervalHours = adHours;
+                    }
+                }
+                else if (key == "--ad-domain" && i + 1 < args.Length)
+                {
+                    options.AdDomain = args[++i];
+                }
+                else if (key == "--ad-username" && i + 1 < args.Length)
+                {
+                    options.AdUsername = args[++i];
+                    options.AdUseServiceIdentity = false;
+                }
+                else if (key == "--ad-password" && i + 1 < args.Length)
+                {
+                    options.AdPassword = args[++i];
+                }
+                else if (key == "--debug-log-enabled")
+                {
+                    options.DebugLogEnabled = true;
+                }
+                else if (key == "--debug-log-path" && i + 1 < args.Length)
+                {
+                    options.DebugLogPath = args[++i];
+                }
             }
 
             LoadConfigFile(options);
@@ -243,7 +338,7 @@ namespace WindowsInventoryLite
                 Dictionary<string, object> config = serializer.Deserialize<Dictionary<string, object>>(json);
                 if (String.IsNullOrEmpty(options.Token))
                 {
-                    options.Token = GetConfigString(config, "Token");
+                    options.Token = SecretProtector.Unprotect(GetConfigString(config, "Token"));
                 }
                 if (String.IsNullOrEmpty(options.WebUsername))
                 {
@@ -251,7 +346,7 @@ namespace WindowsInventoryLite
                 }
                 if (String.IsNullOrEmpty(options.WebPassword))
                 {
-                    options.WebPassword = GetConfigString(config, "WebPassword");
+                    options.WebPassword = SecretProtector.Unprotect(GetConfigString(config, "WebPassword"));
                 }
                 if (!options.UseHttps)
                 {
@@ -269,6 +364,15 @@ namespace WindowsInventoryLite
                     if (!String.IsNullOrEmpty(staleHoursText) && Int32.TryParse(staleHoursText, out staleHoursFromConfig) && staleHoursFromConfig > 0)
                     {
                         options.StaleHours = staleHoursFromConfig;
+                    }
+                }
+                if (options.InstallLogRetentionDays == 30)
+                {
+                    string retentionDaysText = GetConfigString(config, "InstallLogRetentionDays");
+                    int retentionDaysFromConfig;
+                    if (!String.IsNullOrEmpty(retentionDaysText) && Int32.TryParse(retentionDaysText, out retentionDaysFromConfig) && retentionDaysFromConfig >= 1 && retentionDaysFromConfig <= 3650)
+                    {
+                        options.InstallLogRetentionDays = retentionDaysFromConfig;
                     }
                 }
                 // Deliberately NOT gated behind "no --prefix was passed" the way
@@ -306,6 +410,101 @@ namespace WindowsInventoryLite
                         options.EnableHttp = String.Equals(enableHttpText, "true", StringComparison.OrdinalIgnoreCase);
                     }
                 }
+                if (!options.AdSyncEnabled)
+                {
+                    string adSyncEnabledText = GetConfigString(config, "AdSyncEnabled");
+                    options.AdSyncEnabled = String.Equals(adSyncEnabledText, "true", StringComparison.OrdinalIgnoreCase);
+                }
+                if (!options.AdDescriptionSyncEnabled)
+                {
+                    string adDescriptionSyncEnabledText = GetConfigString(config, "AdDescriptionSyncEnabled");
+                    options.AdDescriptionSyncEnabled = ResolveAdDescriptionSyncEnabled(adDescriptionSyncEnabledText, options.AdSyncEnabled);
+                }
+                if (options.AdSyncMode == "on-report")
+                {
+                    string adSyncModeText = GetConfigString(config, "AdSyncMode");
+                    if (adSyncModeText == "timer" || adSyncModeText == "on-report")
+                    {
+                        options.AdSyncMode = adSyncModeText;
+                    }
+                }
+                if (options.AdSyncIntervalHours == 24)
+                {
+                    string adSyncIntervalText = GetConfigString(config, "AdSyncIntervalHours");
+                    int adSyncIntervalFromConfig;
+                    if (!String.IsNullOrEmpty(adSyncIntervalText) && Int32.TryParse(adSyncIntervalText, out adSyncIntervalFromConfig) && adSyncIntervalFromConfig > 0 && adSyncIntervalFromConfig <= 8760)
+                    {
+                        options.AdSyncIntervalHours = adSyncIntervalFromConfig;
+                    }
+                }
+                if (String.IsNullOrEmpty(options.AdDomain))
+                {
+                    options.AdDomain = GetConfigString(config, "AdDomain");
+                }
+                if (options.AdUseServiceIdentity)
+                {
+                    string adUseServiceIdentityText = GetConfigString(config, "AdUseServiceIdentity");
+                    if (adUseServiceIdentityText != null)
+                    {
+                        options.AdUseServiceIdentity = String.Equals(adUseServiceIdentityText, "true", StringComparison.OrdinalIgnoreCase);
+                    }
+                }
+                if (String.IsNullOrEmpty(options.AdUsername))
+                {
+                    options.AdUsername = GetConfigString(config, "AdUsername");
+                }
+                if (String.IsNullOrEmpty(options.AdPassword))
+                {
+                    // Decrypts a DPAPI-protected value (see SecretProtector.cs);
+                    // a legacy/hand-edited plaintext value is used as-is.
+                    options.AdPassword = SecretProtector.Unprotect(GetConfigString(config, "AdPassword"));
+                }
+                if (String.IsNullOrEmpty(options.AdComputerImportOUs))
+                {
+                    options.AdComputerImportOUs = GetConfigString(config, "AdComputerImportOUs");
+                }
+                if (String.IsNullOrEmpty(options.ClientUpdateUsername))
+                {
+                    options.ClientUpdateUsername = GetConfigString(config, "ClientUpdateUsername");
+                }
+                if (String.IsNullOrEmpty(options.ClientUpdatePassword))
+                {
+                    options.ClientUpdatePassword = SecretProtector.Unprotect(GetConfigString(config, "ClientUpdatePassword"));
+                }
+                if (options.ClientUpdateScheduleMode == "off")
+                {
+                    string scheduleModeText = GetConfigString(config, "ClientUpdateScheduleMode");
+                    if (scheduleModeText == "off" || scheduleModeText == "once" || scheduleModeText == "interval")
+                    {
+                        options.ClientUpdateScheduleMode = scheduleModeText;
+                    }
+                }
+                if (String.IsNullOrEmpty(options.ClientUpdateScheduleOnceAtUtc))
+                {
+                    options.ClientUpdateScheduleOnceAtUtc = GetConfigString(config, "ClientUpdateScheduleOnceAtUtc") ?? "";
+                }
+                if (options.ClientUpdateScheduleIntervalHours == 24)
+                {
+                    string scheduleIntervalText = GetConfigString(config, "ClientUpdateScheduleIntervalHours");
+                    int scheduleIntervalFromConfig;
+                    if (!String.IsNullOrEmpty(scheduleIntervalText) && Int32.TryParse(scheduleIntervalText, out scheduleIntervalFromConfig) && scheduleIntervalFromConfig > 0 && scheduleIntervalFromConfig <= 8760)
+                    {
+                        options.ClientUpdateScheduleIntervalHours = scheduleIntervalFromConfig;
+                    }
+                }
+                if (String.IsNullOrEmpty(options.ClientUpdateScheduleLastRunUtc))
+                {
+                    options.ClientUpdateScheduleLastRunUtc = GetConfigString(config, "ClientUpdateScheduleLastRunUtc") ?? "";
+                }
+                if (!options.DebugLogEnabled)
+                {
+                    string debugLogEnabledText = GetConfigString(config, "DebugLogEnabled");
+                    options.DebugLogEnabled = String.Equals(debugLogEnabledText, "true", StringComparison.OrdinalIgnoreCase);
+                }
+                if (String.IsNullOrEmpty(options.DebugLogPath))
+                {
+                    options.DebugLogPath = GetConfigString(config, "DebugLogPath");
+                }
             }
             catch
             {
@@ -340,6 +539,21 @@ namespace WindowsInventoryLite
             string value = Convert.ToString(config[key]);
             return String.IsNullOrEmpty(value) ? null : value;
         }
+
+        // Migration for upgrades from before AdDescriptionSyncEnabled
+        // existed: if the config file has no explicit value for it yet,
+        // the deployment keeps whatever behavior AdSyncEnabled (now "AD
+        // identity is configured") already gave it, so an existing AD
+        // Description Sync setup keeps running after the upgrade with no
+        // admin action required. Pure - no I/O, self-tested directly.
+        internal static bool ResolveAdDescriptionSyncEnabled(string configValueText, bool adSyncEnabledResolved)
+        {
+            if (!String.IsNullOrEmpty(configValueText))
+            {
+                return String.Equals(configValueText, "true", StringComparison.OrdinalIgnoreCase);
+            }
+            return adSyncEnabledResolved;
+        }
     }
 
     internal sealed class InventoryServer
@@ -347,6 +561,14 @@ namespace WindowsInventoryLite
         private readonly ServerOptions options;
         private readonly object installJobsLock = new object();
         private readonly Dictionary<string, InstallJob> installJobs = new Dictionary<string, InstallJob>();
+        // Lets an open dashboard tab notice a server-initiated (scheduled)
+        // push exists at all - a scheduled push never goes through any HTTP
+        // request the browser makes, so without this the browser has no way
+        // to learn a new job.Id exists to poll. Not used for jobs started
+        // from either "Client actions" or "Client updates" (both already
+        // know their own job.Id locally, from the response of the request
+        // that created them) - only the schedule timer sets this.
+        private volatile string lastScheduledUpdateJobId;
         private readonly object licensesLock = new object();
         private readonly object certificateHistoryLock = new object();
         private readonly object listenerRestartLock = new object();
@@ -358,6 +580,19 @@ namespace WindowsInventoryLite
         private readonly ListenerSlot httpSlot = new ListenerSlot();
         private readonly ListenerSlot httpsSlot = new ListenerSlot();
         private volatile X509Certificate2 serverCertificate;
+        private readonly object adSyncTimerLock = new object();
+        private Timer adSyncTimer;
+        private readonly object clientUpdateScheduleTimerLock = new object();
+        private Timer clientUpdateScheduleTimer;
+        private readonly object reportFileLock = new object();
+        // server-config.json holds the DPAPI-encrypted secrets (AdPassword/
+        // WebPassword/Token/ClientUpdatePassword) and is now written by more
+        // than one unattended background path (the AD sync and Client Update
+        // schedule timers) in addition to every operator-driven settings
+        // save - without this lock, two writers reading-modifying-writing
+        // the same file can silently drop each other's change (a lost
+        // update), found during a security review of the schedule feature.
+        private readonly object configFileLock = new object();
 
         public InventoryServer(ServerOptions options)
         {
@@ -366,6 +601,7 @@ namespace WindowsInventoryLite
 
         public void Start()
         {
+            MigratePlaintextSecrets();
             LoadServerCertificate();
 
             if (!Directory.Exists(options.DataPath))
@@ -389,6 +625,10 @@ namespace WindowsInventoryLite
                 string httpsError = ApplySlotState(httpsSlot, true, -1, options.HttpsPort, true);
                 LogSlotStartupError("HTTPS", httpsError);
             }
+
+            ReconfigureAdSyncTimer();
+            ResetMissedOnceSchedule();
+            ReconfigureClientUpdateScheduleTimer();
 
             if (!httpSlot.Running && !httpsSlot.Running)
             {
@@ -431,8 +671,341 @@ namespace WindowsInventoryLite
 
         public void Stop()
         {
+            lock (adSyncTimerLock)
+            {
+                if (adSyncTimer != null)
+                {
+                    adSyncTimer.Dispose();
+                    adSyncTimer = null;
+                }
+            }
+            lock (clientUpdateScheduleTimerLock)
+            {
+                if (clientUpdateScheduleTimer != null)
+                {
+                    clientUpdateScheduleTimer.Dispose();
+                    clientUpdateScheduleTimer = null;
+                }
+            }
             StopSlot(httpSlot);
             StopSlot(httpsSlot);
+        }
+
+        // Starts, stops, or restarts the periodic sweep to match the current
+        // options - called once at startup and again whenever AD settings
+        // change through the dashboard (ConfigureServerSettings), so a mode
+        // switch or interval change takes effect without a service restart,
+        // consistent with how every other dashboard-driven setting in this
+        // server behaves.
+        private void ReconfigureAdSyncTimer()
+        {
+            lock (adSyncTimerLock)
+            {
+                if (adSyncTimer != null)
+                {
+                    adSyncTimer.Dispose();
+                    adSyncTimer = null;
+                }
+                if (options.AdDescriptionSyncEnabled && options.AdSyncMode == "timer")
+                {
+                    // Due time is Zero, not `interval` - the first sweep
+                    // runs almost immediately after enabling/reconfiguring
+                    // timer mode, not after waiting out a full interval
+                    // (which, at the 24h default, made timer mode look
+                    // completely inert for the first day). Individual
+                    // computers still only actually get re-looked-up when
+                    // their own cached data is due, per ComputeAdSyncFields/
+                    // ShouldSyncAd - this only controls how soon the sweep
+                    // itself starts walking the fleet, not how often any
+                    // one computer's AD data refreshes.
+                    TimeSpan interval = TimeSpan.FromHours(Math.Max(1, options.AdSyncIntervalHours));
+                    adSyncTimer = new Timer(RunAdSyncSweep, null, TimeSpan.Zero, interval);
+                }
+            }
+        }
+
+        // One tick of the "timer" sync mode: walks every saved report and
+        // refreshes AD data for whichever ones are due, independent of
+        // whether that computer has reported inventory recently - the "on
+        // inventory report" mode only ever touches a computer's AD
+        // fields when that computer itself POSTs a new report, so a machine
+        // that's stopped reporting but still exists in AD would otherwise
+        // never refresh.
+        private void RunAdSyncSweep(object state)
+        {
+            if (!options.AdDescriptionSyncEnabled || options.AdSyncMode != "timer")
+            {
+                return;
+            }
+
+            string[] files;
+            try
+            {
+                files = Directory.GetFiles(options.DataPath, "*.json");
+            }
+            catch
+            {
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            foreach (string file in files)
+            {
+                try
+                {
+                    // Read a snapshot and compute the AD fields (live lookup
+                    // included) OUTSIDE reportFileLock - see ComputeAdSyncFields.
+                    // The lock is only taken afterward, to re-read the file's
+                    // CURRENT contents and merge just the AD fields onto them,
+                    // so a client report that arrived for this same computer
+                    // while the lookup was in flight is not clobbered by the
+                    // stale snapshot read here.
+                    Dictionary<string, object> snapshot = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
+                    string computerName = Convert.ToString(snapshot.ContainsKey("computerName") ? snapshot["computerName"] : Path.GetFileNameWithoutExtension(file));
+                    AdSyncFields adFields = ComputeAdSyncFields(computerName, snapshot);
+
+                    lock (reportFileLock)
+                    {
+                        Dictionary<string, object> current;
+                        try
+                        {
+                            current = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
+                        }
+                        catch
+                        {
+                            // A transient re-read failure right before
+                            // writing means this thread cannot confirm the
+                            // file is still what was snapshotted above -
+                            // skip this file rather than risk overwriting a
+                            // fresher write (e.g. a client report that
+                            // landed for this same computer while the AD
+                            // lookup was in flight) with the stale
+                            // snapshot. The AD fields get reapplied on the
+                            // next sweep tick.
+                            continue;
+                        }
+                        ApplyAdSyncFields(current, adFields);
+                        File.WriteAllText(file, serializer.Serialize(current), new UTF8Encoding(false));
+                    }
+                }
+                catch
+                {
+                    // One unreadable/corrupt report must not stop the sweep
+                    // over the rest of the fleet.
+                }
+            }
+        }
+
+        // Polls every 60 seconds rather than mirroring ShouldSyncAd's
+        // "interval IS the due time" Timer pattern - "once" mode needs to
+        // fire close to an arbitrary target time (could be any minute of the
+        // day), not just on hour boundaries, so a coarse once-per-interval
+        // Timer can't represent it. A 60-second poll costs nothing (the tick
+        // handler no-ops immediately when the schedule isn't due) and keeps
+        // both "once" and "interval" modes on one simple mechanism instead of
+        // two different Timer shapes. Called after every schedule config
+        // change (ConfigureClientUpdateSchedule) and once at startup, so a
+        // mode switch takes effect without a service restart -
+        // same pattern as ReconfigureAdSyncTimer above.
+        private void ReconfigureClientUpdateScheduleTimer()
+        {
+            lock (clientUpdateScheduleTimerLock)
+            {
+                if (clientUpdateScheduleTimer != null)
+                {
+                    clientUpdateScheduleTimer.Dispose();
+                    clientUpdateScheduleTimer = null;
+                }
+                if (options.ClientUpdateScheduleMode != "off")
+                {
+                    TimeSpan pollInterval = TimeSpan.FromSeconds(60);
+                    clientUpdateScheduleTimer = new Timer(RunClientUpdateScheduleTick, null, TimeSpan.Zero, pollInterval);
+                }
+            }
+        }
+
+        // One poll tick: checks whether the configured schedule is due and,
+        // if so, starts a push against every currently-outdated client - then
+        // updates and persists the schedule's own bookkeeping (mode/last-run)
+        // so the next tick doesn't fire the same event again.
+        private void RunClientUpdateScheduleTick(object state)
+        {
+            // An unhandled exception thrown from a System.Threading.Timer
+            // callback runs on a ThreadPool thread and tears down the whole
+            // service process on .NET Framework. Unlike a manual push, this
+            // path has no HandleClient try/catch above it, so a transient
+            // failure here (DataPath briefly unreachable, a report or config
+            // file locked by antivirus mid-read/write, disk pressure) must
+            // skip this tick and let the next 60-second poll retry, exactly
+            // as RunAdSyncSweep swallows per-sweep failures rather than crash
+            // the server. The push and its bookkeeping mutate options in
+            // memory before persisting, so a save that throws after a push
+            // starts still leaves the in-memory state that stops the next
+            // tick from re-firing the same event within this process.
+            try
+            {
+                string mode = options.ClientUpdateScheduleMode;
+                if (mode == "off")
+                {
+                    return;
+                }
+
+                DateTime? onceAtUtc = ParseUtcOrNull(options.ClientUpdateScheduleOnceAtUtc);
+                DateTime? lastRunUtc = ParseUtcOrNull(options.ClientUpdateScheduleLastRunUtc);
+                if (!ShouldRunClientUpdateSchedule(DateTime.UtcNow, mode, onceAtUtc, lastRunUtc, options.ClientUpdateScheduleIntervalHours))
+                {
+                    return;
+                }
+
+                StartScheduledClientUpdatePush();
+
+                Dictionary<string, string> updates = new Dictionary<string, string>();
+                if (mode == "once")
+                {
+                    options.ClientUpdateScheduleMode = "off";
+                    options.ClientUpdateScheduleOnceAtUtc = "";
+                    updates["ClientUpdateScheduleMode"] = "off";
+                    updates["ClientUpdateScheduleOnceAtUtc"] = "";
+                    SaveServerConfigValues(updates);
+                    ReconfigureClientUpdateScheduleTimer();
+                }
+                else
+                {
+                    options.ClientUpdateScheduleLastRunUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                    updates["ClientUpdateScheduleLastRunUtc"] = options.ClientUpdateScheduleLastRunUtc;
+                    SaveServerConfigValues(updates);
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Error", "Client update schedule tick failed: " + ex);
+            }
+        }
+
+        private static DateTime? ParseUtcOrNull(string value)
+        {
+            if (String.IsNullOrEmpty(value))
+            {
+                return null;
+            }
+            DateTime parsed;
+            if (DateTime.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out parsed))
+            {
+                return parsed.ToUniversalTime();
+            }
+            return null;
+        }
+
+        // Builds and starts an install job against every currently-outdated
+        // client, exactly as if an admin had checked every row on the Client
+        // updates page and clicked "Update selected" - reuses the same
+        // outdated-detection logic as SendClientUpdates and the same
+        // ResolveUpdateCredentials fallback chain a blank-fields manual push
+        // uses. No-ops quietly (no job started) if there's no built client
+        // package, no outdated clients, or no known server URL to hand the
+        // client - there's no user present to show an error to, and this
+        // feature deliberately has no separate notification mechanism
+        // (e.g. email/webhook on failure) - an admin checks push results
+        // the same way as any other job, via the Client updates page.
+        private void StartScheduledClientUpdatePush()
+        {
+            string net35Version = null;
+            string net40Version = null;
+            if (Directory.Exists(options.ClientPackagePath))
+            {
+                string net35Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net35.exe");
+                string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
+                net35Version = File.Exists(net35Path) ? GetExeVersion(net35Path) : null;
+                net40Version = File.Exists(net40Path) ? GetExeVersion(net40Path) : null;
+            }
+            if (net35Version == null && net40Version == null)
+            {
+                return;
+            }
+
+            ArrayList targets = new ArrayList();
+            foreach (Dictionary<string, object> client in LoadClientReports())
+            {
+                string clientVersion = GetStringValue(client, "clientVersion");
+                if (IsClientVersionCurrent(clientVersion, net35Version, net40Version))
+                {
+                    continue;
+                }
+                string computerName = GetStringValue(client, "computerName");
+                if (!String.IsNullOrEmpty(computerName))
+                {
+                    targets.Add(computerName);
+                }
+            }
+            if (targets.Count == 0)
+            {
+                return;
+            }
+
+            // The same URL an already-deployed client is configured to
+            // report to - there is no browser/admin present to type one, so
+            // this is the one already-known-correct value to reuse (a
+            // manual push's own pre-filled Server URL field is derived from
+            // the browser's own address, which isn't available here either).
+            string cmdPath = Path.Combine(options.ClientPackagePath, "Install-ClientGpo.cmd");
+            Dictionary<string, string> cmdSettings = ParseCmdSettings(cmdPath);
+            string serverUrl = cmdSettings.ContainsKey("serverUrl") ? cmdSettings["serverUrl"] : null;
+            if (String.IsNullOrEmpty(serverUrl))
+            {
+                return;
+            }
+
+            string username = "";
+            string password = "";
+            ResolveUpdateCredentials(ref username, ref password, true, options.ClientUpdateUsername, options.ClientUpdatePassword);
+
+            InstallJob job = new InstallJob();
+            job.Id = Guid.NewGuid().ToString("N");
+            job.Action = "install";
+            job.Status = "queued";
+            job.CreatedAtUtc = DateTime.UtcNow;
+            job.Targets = targets;
+            job.Results = new ArrayList();
+            job.ServerUrl = serverUrl;
+            job.Username = username;
+            job.Password = password;
+            job.Force = false;
+            job.AddToTrustedHosts = false;
+            job.RetentionDays = options.InstallLogRetentionDays;
+
+            lock (installJobsLock)
+            {
+                installJobs[job.Id] = job;
+                SaveInstallJob(job);
+            }
+            lastScheduledUpdateJobId = job.Id;
+            DebugLogger.Log(options, "Schedule", "Scheduled client update push started: job '" + job.Id + "', mode '" + options.ClientUpdateScheduleMode + "', " + targets.Count + " target(s).");
+            ThreadPool.QueueUserWorkItem(RunClientActionJob, job);
+        }
+
+        // Called once at startup, before the timer is armed - if the service
+        // was stopped through a "once" schedule's target time, that moment
+        // is gone and silently cleared rather than fired late (per the
+        // design spec: a missed one-time push is not worth surprising an
+        // admin with an unexpected WinRM push right as the service starts).
+        private void ResetMissedOnceSchedule()
+        {
+            if (options.ClientUpdateScheduleMode != "once")
+            {
+                return;
+            }
+            DateTime? onceAtUtc = ParseUtcOrNull(options.ClientUpdateScheduleOnceAtUtc);
+            if (!onceAtUtc.HasValue || DateTime.UtcNow < onceAtUtc.Value)
+            {
+                return;
+            }
+
+            options.ClientUpdateScheduleMode = "off";
+            options.ClientUpdateScheduleOnceAtUtc = "";
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["ClientUpdateScheduleMode"] = "off";
+            updates["ClientUpdateScheduleOnceAtUtc"] = "";
+            SaveServerConfigValues(updates);
         }
 
         private sealed class ListenerSlot
@@ -649,6 +1222,8 @@ namespace WindowsInventoryLite
                     }
 
                     RequestContext request = ReadRequest(stream);
+                    IPEndPoint remoteEndPoint = client.Client.RemoteEndPoint as IPEndPoint;
+                    request.RemoteAddress = remoteEndPoint != null ? remoteEndPoint.Address : IPAddress.None;
                     if (request.Method == "POST" && request.Path == "/api/v1/inventory")
                     {
                         ReceiveInventory(stream, request);
@@ -665,6 +1240,10 @@ namespace WindowsInventoryLite
                     {
                         DeleteClient(stream, request);
                     }
+                    else if (request.Method == "PUT" && request.Path.StartsWith("/api/v1/clients/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        UpdateClientDescription(stream, request);
+                    }
                     else if (request.Method == "POST" && request.Path == "/api/v1/client-install")
                     {
                         StartClientAction(stream, request, "install");
@@ -680,6 +1259,26 @@ namespace WindowsInventoryLite
                     else if (request.Method == "GET" && request.Path.StartsWith("/api/v1/client-install/", StringComparison.OrdinalIgnoreCase))
                     {
                         SendClientInstallJob(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/client-updates")
+                    {
+                        SendClientUpdates(stream);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/client-updates/credentials")
+                    {
+                        SendClientUpdateCredentialsStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/client-updates/credentials")
+                    {
+                        ConfigureClientUpdateCredentials(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/client-updates/schedule")
+                    {
+                        SendClientUpdateScheduleStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/client-updates/schedule")
+                    {
+                        ConfigureClientUpdateSchedule(stream, request);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/client-package")
                     {
@@ -720,6 +1319,10 @@ namespace WindowsInventoryLite
                     else if (request.Method == "POST" && request.Path == "/api/v1/server/settings")
                     {
                         ConfigureServerSettings(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/ad/computers")
+                    {
+                        SendAdComputers(stream);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/server/admin-password")
                     {
@@ -776,6 +1379,7 @@ namespace WindowsInventoryLite
                             System.Diagnostics.EventLogEntryType.Error);
                     }
                     catch { }
+                    DebugLogger.Log(options, "Error", ex.ToString());
                     try
                     {
                         SendText(stream, "Internal server error.", "text/plain; charset=utf-8", 500);
@@ -808,8 +1412,9 @@ namespace WindowsInventoryLite
         private void ReceiveInventory(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (!String.IsNullOrEmpty(options.Token) && token != options.Token)
+            if (!String.IsNullOrEmpty(options.Token) && !FixedTimeEquals(token, options.Token))
             {
+                DebugLogger.Log(options, "Client", "Rejected inventory report: invalid or missing token");
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
                 return;
             }
@@ -822,14 +1427,255 @@ namespace WindowsInventoryLite
             }
             catch
             {
+                DebugLogger.Log(options, "Client", "Rejected inventory report: invalid request body");
                 SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
                 return;
             }
 
             string computerName = Convert.ToString(inventory.ContainsKey("computerName") ? inventory["computerName"] : "unknown");
             string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
-            File.WriteAllText(path, request.Body, new UTF8Encoding(false));
+
+            // Read the previous report and compute the AD fields (which may
+            // involve a live, possibly slow AD lookup) BEFORE taking
+            // reportFileLock, so a slow/unreachable AD cannot serialize
+            // ingestion for the rest of the fleet behind this one request.
+            // This unlocked read is safe: a torn/partial read just fails to
+            // deserialize (falls back to previous = null, same as a
+            // brand-new computer), it cannot corrupt anything.
+            Dictionary<string, object> previous = null;
+            if (File.Exists(path))
+            {
+                try
+                {
+                    previous = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                }
+                catch
+                {
+                    previous = null;
+                }
+            }
+            AdSyncFields adFields = ComputeAdSyncFields(computerName, previous);
+
+            lock (reportFileLock)
+            {
+                ApplyAdSyncFields(inventory, adFields);
+
+                string json = serializer.Serialize(inventory);
+                File.WriteAllText(path, json, new UTF8Encoding(false));
+            }
+            DebugLogger.Log(options, "Client", "Inventory report accepted from '" + DebugLogger.SanitizeForLog(computerName) + "'");
             SendJson(stream, "{\"status\":\"ok\"}");
+        }
+
+        // Returns true when an AD lookup is due: either there is no
+        // previous sync timestamp at all, or it's older than the
+        // configured interval. Static and parameter-driven (no dependency
+        // on `options` or the clock beyond DateTime.UtcNow) so it's directly
+        // self-testable without standing up a server instance.
+        internal static bool ShouldSyncAd(DateTime? lastSyncedUtc, int intervalHours)
+        {
+            if (lastSyncedUtc == null)
+            {
+                return true;
+            }
+            return (DateTime.UtcNow - lastSyncedUtc.Value).TotalHours >= intervalHours;
+        }
+
+        // Pure decision function for the Client Update schedule timer
+        // (RunClientUpdateScheduleTick calls this on every tick) - no I/O,
+        // so it's directly self-testable. "once" fires exactly once when
+        // nowUtc reaches onceAtUtc; the caller is responsible for resetting
+        // mode back to "off" afterward (this function only answers "is it
+        // due right now", it doesn't mutate anything). "interval" fires
+        // immediately if there's no previous run recorded, then every
+        // intervalHours after the last scheduled run - manual pushes never
+        // touch lastRunUtc, only a schedule-triggered run does.
+        internal static bool ShouldRunClientUpdateSchedule(DateTime nowUtc, string mode, DateTime? onceAtUtc, DateTime? lastRunUtc, int intervalHours)
+        {
+            if (mode == "once")
+            {
+                return onceAtUtc.HasValue && nowUtc >= onceAtUtc.Value;
+            }
+            if (mode == "interval")
+            {
+                if (!lastRunUtc.HasValue)
+                {
+                    return true;
+                }
+                return nowUtc >= lastRunUtc.Value.AddHours(Math.Max(1, intervalHours));
+            }
+            return false;
+        }
+
+        // Returns true when a raw config value is still plaintext and
+        // needs migrating to encrypted storage - i.e. it's non-empty and
+        // does not already carry SecretProtector's "dpapi:" prefix. Pure
+        // and parameter-driven so it's directly self-testable without a
+        // live config file.
+        internal static bool NeedsMigration(string rawValue)
+        {
+            return !String.IsNullOrEmpty(rawValue) && !rawValue.StartsWith("dpapi:", StringComparison.Ordinal);
+        }
+
+        // Detects any of the encrypted secrets (see EncryptedConfigKeys)
+        // still stored as plaintext in server-config.json and re-encrypts
+        // them in a single batched rewrite. Runs once per service start,
+        // as the very first action inside Start() - cheap (one small JSON
+        // parse, at most 3 DPAPI calls) and must never throw, since a
+        // migration failure must not prevent the server from starting.
+        private void MigratePlaintextSecrets()
+        {
+            if (String.IsNullOrEmpty(options.ConfigPath) || !File.Exists(options.ConfigPath))
+            {
+                return;
+            }
+
+            Dictionary<string, object> config;
+            try
+            {
+                config = CreateJsonSerializer().Deserialize<Dictionary<string, object>>(
+                    File.ReadAllText(options.ConfigPath, Encoding.UTF8));
+            }
+            catch
+            {
+                return;
+            }
+
+            if (config == null)
+            {
+                return;
+            }
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            foreach (string key in EncryptedConfigKeys)
+            {
+                string raw = config.ContainsKey(key) ? Convert.ToString(config[key]) : null;
+                if (NeedsMigration(raw))
+                {
+                    updates[key] = raw;
+                }
+            }
+
+            if (updates.Count > 0)
+            {
+                try
+                {
+                    SaveServerConfigValues(updates);
+                    DebugLogger.Log(options, "Server", "Migrated " + updates.Count + " plaintext secret(s) in server-config.json to encrypted storage.");
+                }
+                catch
+                {
+                    // A migration failure must not prevent the server from
+                    // starting - the affected secret(s) simply stay
+                    // plaintext until the next successful attempt (every
+                    // subsequent startup retries).
+                }
+            }
+        }
+
+        // Holds the AD fields a caller should merge into a report, computed
+        // by ComputeAdSyncFields. Applicable is false when AD sync is
+        // disabled, in which case the other fields are meaningless and
+        // ApplyAdSyncFields is a no-op.
+        private sealed class AdSyncFields
+        {
+            public bool Applicable;
+            public object Description;
+            public object Status;
+            public object SyncedAt;
+        }
+
+        // Decides whether a computer's cached AD data is still fresh, and
+        // performs a live AD lookup (AdLookupService, up to ~15s against a
+        // slow or unreachable AD) when it isn't. Deliberately does not
+        // touch reportFileLock or any other lock - a caller must never call
+        // this while holding reportFileLock, since a slow/unreachable AD
+        // would otherwise serialize every inventory report behind whichever
+        // computer's lookup is in flight. Pure with respect to shared state
+        // (only reads `previous` and `options`); the caller is responsible
+        // for merging the result into a report via ApplyAdSyncFields.
+        private AdSyncFields ComputeAdSyncFields(string computerName, Dictionary<string, object> previous)
+        {
+            AdSyncFields fields = new AdSyncFields();
+            if (!options.AdDescriptionSyncEnabled)
+            {
+                // Sync is off, but a manually-edited Description (set via
+                // PUT /api/v1/clients/{name}/description while sync is off)
+                // must still survive this client's next inventory report -
+                // the report body the client sends never carries
+                // adDescription itself (only AD sync or a manual edit ever
+                // write that field), so without this carry-forward,
+                // HandleInventory's File.WriteAllText would overwrite the
+                // whole record with a version that has no adDescription at
+                // all, silently wiping a manual edit within one reporting
+                // interval.
+                if (previous != null)
+                {
+                    fields.Applicable = true;
+                    fields.Description = previous.ContainsKey("adDescription") ? previous["adDescription"] : null;
+                    fields.Status = previous.ContainsKey("adSyncStatus") ? previous["adSyncStatus"] : null;
+                    fields.SyncedAt = previous.ContainsKey("adSyncedAt") ? previous["adSyncedAt"] : null;
+                }
+                return fields;
+            }
+            fields.Applicable = true;
+
+            DateTime? lastSyncedUtc = null;
+            if (previous != null && previous.ContainsKey("adSyncedAt") && previous["adSyncedAt"] != null)
+            {
+                DateTime parsed;
+                if (DateTime.TryParse(Convert.ToString(previous["adSyncedAt"]), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out parsed))
+                {
+                    lastSyncedUtc = parsed.ToUniversalTime();
+                }
+            }
+
+            if (previous != null && !ShouldSyncAd(lastSyncedUtc, options.AdSyncIntervalHours))
+            {
+                fields.Description = previous.ContainsKey("adDescription") ? previous["adDescription"] : null;
+                fields.SyncedAt = previous.ContainsKey("adSyncedAt") ? previous["adSyncedAt"] : null;
+                fields.Status = previous.ContainsKey("adSyncStatus") ? previous["adSyncStatus"] : null;
+                return fields;
+            }
+
+            AdLookupResult result = AdLookupService.LookupComputerDescription(computerName, options);
+            fields.Description = result.Description;
+            fields.Status = result.Status;
+            if (result.Status != "error")
+            {
+                fields.SyncedAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            }
+            else if (previous != null && previous.ContainsKey("adSyncedAt"))
+            {
+                // Do not advance the sync timestamp on a failed lookup - a
+                // transient AD outage should be retried on the next
+                // report/sweep tick, not stick at "AD unreachable" for the
+                // full AdSyncIntervalHours window. Leaving the previous
+                // (already-stale, which is why this attempt ran at all)
+                // timestamp in place means the next ShouldSyncAd check
+                // still sees it as due.
+                fields.SyncedAt = previous["adSyncedAt"];
+            }
+            return fields;
+        }
+
+        // Merges a previously computed AdSyncFields onto `inventory`. Pure,
+        // no I/O, no lock - safe to call from inside reportFileLock right
+        // before writing, which is exactly how both call sites use it: the
+        // (possibly slow) lookup already happened outside the lock via
+        // ComputeAdSyncFields, and only this cheap merge happens inside it.
+        private static void ApplyAdSyncFields(Dictionary<string, object> inventory, AdSyncFields fields)
+        {
+            if (!fields.Applicable)
+            {
+                return;
+            }
+            inventory["adDescription"] = fields.Description;
+            inventory["adSyncStatus"] = fields.Status;
+            if (fields.SyncedAt != null)
+            {
+                inventory["adSyncedAt"] = fields.SyncedAt;
+            }
         }
 
         private void DeleteClient(Stream stream, RequestContext request)
@@ -861,14 +1707,129 @@ namespace WindowsInventoryLite
             SendJson(stream, "{\"status\":\"deleted\"}");
         }
 
+        // Manual Description edit, only reachable while AD Description
+        // Sync is off (AdDescriptionSyncEnabled == false) - enforced here,
+        // not just by the dashboard hiding the edit control, since the UI
+        // is not a security boundary. Writes the same adDescription field
+        // AD Description Sync itself writes; adSyncStatus/adSyncedAt are
+        // untouched here (ComputeAdSyncFields carries them forward
+        // separately on the next inventory report).
+        private void UpdateClientDescription(Stream stream, RequestContext request)
+        {
+            const string prefix = "/api/v1/clients/";
+            const string suffix = "/description";
+            string rawPath = request.Path;
+            int queryStart = rawPath.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                rawPath = rawPath.Substring(0, queryStart);
+            }
+            if (!rawPath.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                SendText(stream, "{\"error\":\"not found\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+
+            string rawComputerName = rawPath.Substring(prefix.Length, rawPath.Length - prefix.Length - suffix.Length);
+            string computerName = Uri.UnescapeDataString(rawComputerName).Trim();
+            if (String.IsNullOrEmpty(computerName))
+            {
+                SendText(stream, "{\"error\":\"computer name is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            if (options.AdDescriptionSyncEnabled)
+            {
+                SendText(stream, "{\"error\":\"Description is synced from AD - disable \\\"Sync Description from AD\\\" in Settings first.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string description = payload.ContainsKey("description") ? Convert.ToString(payload["description"]) : "";
+            if (description.Length > 1024)
+            {
+                SendText(stream, "{\"error\":\"description must be 1024 characters or fewer\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
+            lock (reportFileLock)
+            {
+                if (!File.Exists(path))
+                {
+                    SendText(stream, "{\"error\":\"client not found\"}", "application/json; charset=utf-8", 404);
+                    return;
+                }
+                Dictionary<string, object> report;
+                try
+                {
+                    report = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                }
+                catch
+                {
+                    SendText(stream, "{\"error\":\"client report could not be read\"}", "application/json; charset=utf-8", 500);
+                    return;
+                }
+                if (report == null)
+                {
+                    SendText(stream, "{\"error\":\"client report could not be read\"}", "application/json; charset=utf-8", 500);
+                    return;
+                }
+                report["adDescription"] = description;
+                File.WriteAllText(path, serializer.Serialize(report), new UTF8Encoding(false));
+            }
+
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["status"] = "ok";
+            response["description"] = description;
+            SendJson(stream, serializer.Serialize(response));
+        }
+
         private void StartClientAction(Stream stream, RequestContext request, string action)
         {
             JavaScriptSerializer serializer = CreateJsonSerializer();
-            Dictionary<string, object> payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
             string targetText = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "");
             string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
             string username = Convert.ToString(payload.ContainsKey("username") ? payload["username"] : "");
             string password = Convert.ToString(payload.ContainsKey("password") ? payload["password"] : "");
+            bool useSavedCredentials = payload.ContainsKey("useSavedCredentials") && Convert.ToBoolean(payload["useSavedCredentials"]);
+            ResolveUpdateCredentials(ref username, ref password, useSavedCredentials, options.ClientUpdateUsername, options.ClientUpdatePassword);
+            bool useAdCredentials = payload.ContainsKey("useAdCredentials") && Convert.ToBoolean(payload["useAdCredentials"]);
+            string adCredentialError;
+            if (!TryResolveAdSyncCredentials(useAdCredentials, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref username, ref password, out adCredentialError))
+            {
+                SendText(stream, "{\"error\":\"" + adCredentialError.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
             bool force = payload.ContainsKey("force") && Convert.ToBoolean(payload["force"]);
             bool addToTrustedHosts = payload.ContainsKey("addToTrustedHosts") && Convert.ToBoolean(payload["addToTrustedHosts"]);
             int retentionDays = options.InstallLogRetentionDays;
@@ -888,6 +1849,22 @@ namespace WindowsInventoryLite
             if (action == "install" && String.IsNullOrEmpty(serverUrl))
             {
                 SendText(stream, "{\"error\":\"serverUrl is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            // serverUrl flows unmodified through Install-ClientWinRM.ps1 into
+            // Deploy-ClientGpo.ps1's cmd.exe-based service-creation step on the
+            // TARGET machine (Invoke-ServiceCreate) - the same batch-metacharacter
+            // injection GenerateCmdLines already rejects for the GPO package path
+            // below is otherwise reachable here too, and this path can run as the
+            // service's own privileged identity when no credential is supplied.
+            try
+            {
+                ValidateBatchSafe(serverUrl, "serverUrl");
+            }
+            catch (ArgumentException ex)
+            {
+                SendText(stream, "{\"error\":\"" + ex.Message.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
                 return;
             }
 
@@ -1007,6 +1984,19 @@ namespace WindowsInventoryLite
                 SaveInstallJob(job);
             }
 
+            // Used only to patch a target's stored report after a
+            // successful install below (see PatchClientReportVersionAfterInstall) -
+            // computed once per job, not per-target.
+            string net35Version = null;
+            string net40Version = null;
+            if (job.Action != "uninstall" && Directory.Exists(options.ClientPackagePath))
+            {
+                string net35Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net35.exe");
+                string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
+                net35Version = File.Exists(net35Path) ? GetExeVersion(net35Path) : null;
+                net40Version = File.Exists(net40Path) ? GetExeVersion(net40Path) : null;
+            }
+
             foreach (string target in job.Targets)
             {
                 Dictionary<string, object> result = job.Action == "uninstall"
@@ -1017,6 +2007,11 @@ namespace WindowsInventoryLite
                     job.Results.Add(result);
                     SaveInstallJob(job);
                 }
+
+                if (job.Action != "uninstall" && GetStringValue(result, "status") == "completed")
+                {
+                    PatchClientReportVersionAfterInstall(target, net35Version, net40Version);
+                }
             }
 
             job.CompletedAtUtc = DateTime.UtcNow;
@@ -1026,6 +2021,52 @@ namespace WindowsInventoryLite
                 SaveInstallJob(job);
             }
             CleanupInstallJobLogs();
+        }
+
+        // A successful install push only becomes visible to
+        // LoadClientReports() - and therefore to the outdated-clients list
+        // both the dashboard and the update schedule read - once that
+        // client's own next inventory report arrives. Until then it still
+        // reads as outdated, so an interval-mode schedule shorter than the
+        // client's own reporting interval can redundantly re-push to a
+        // machine it just finished updating. Patching the stored report's
+        // clientVersion immediately after a successful push closes that
+        // gap; the client's own next report just confirms the same version
+        // once it arrives. A missing report file (this target has never
+        // reported at all yet) is left alone - nothing to patch.
+        private void PatchClientReportVersionAfterInstall(string computerName, string net35Version, string net40Version)
+        {
+            string installedVersion = net35Version ?? net40Version;
+            if (String.IsNullOrEmpty(installedVersion))
+            {
+                return;
+            }
+
+            string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+
+            lock (reportFileLock)
+            {
+                if (!File.Exists(path))
+                {
+                    return;
+                }
+                Dictionary<string, object> report;
+                try
+                {
+                    report = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                }
+                catch
+                {
+                    return;
+                }
+                if (report == null)
+                {
+                    return;
+                }
+                report["clientVersion"] = installedVersion;
+                File.WriteAllText(path, serializer.Serialize(report), new UTF8Encoding(false));
+            }
         }
 
         // Credentials are never embedded in the command line (see
@@ -1303,6 +2344,30 @@ namespace WindowsInventoryLite
             return fallback;
         }
 
+        // One OU Distinguished Name per line - not reused with
+        // ExpandInstallTargets' comma/semicolon/space splitting below, since
+        // a DN's own RDN components are themselves comma-separated
+        // (e.g. "OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru") and
+        // would be shredded by that splitter.
+        private static ArrayList ParseAdComputerImportOUs(string raw)
+        {
+            ArrayList result = new ArrayList();
+            if (String.IsNullOrEmpty(raw))
+            {
+                return result;
+            }
+            string[] lines = raw.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (string line in lines)
+            {
+                string trimmed = line.Trim();
+                if (trimmed.Length > 0)
+                {
+                    result.Add(trimmed);
+                }
+            }
+            return result;
+        }
+
         private static ArrayList ExpandInstallTargets(string input)
         {
             ArrayList targets = new ArrayList();
@@ -1338,6 +2403,10 @@ namespace WindowsInventoryLite
                     string[] leftParts = left.Split('.');
                     int start;
                     int end;
+                    // Capped at .254, not .255 - .255 is the broadcast address on a
+                    // /24. (The dotted full-range form below has no equivalent cap;
+                    // not reconciled since this predates this comment and changing
+                    // it would be a behavior change, not a documentation fix.)
                     if (leftParts.Length == 4 && Int32.TryParse(leftParts[3], out start) && Int32.TryParse(right, out end) && end >= start && end <= 254)
                     {
                         string prefix = leftParts[0] + "." + leftParts[1] + "." + leftParts[2] + ".";
@@ -1451,7 +2520,15 @@ namespace WindowsInventoryLite
         {
             if (String.IsNullOrEmpty(options.WebUsername) && String.IsNullOrEmpty(options.WebPassword))
             {
-                return true;
+                // Every route reaching this check - dashboard, settings,
+                // certificate import, WinRM client install/uninstall running
+                // as the service account, initial admin-password setup -
+                // would otherwise be reachable by anyone who can reach the
+                // port while Basic Auth is unconfigured. Restrict to the
+                // local machine until an administrator sets WebUsername/
+                // WebPassword. POST /api/v1/inventory is unaffected: it is
+                // dispatched before this check and gated by its own Token.
+                return request.RemoteAddress != null && IPAddress.IsLoopback(request.RemoteAddress);
             }
 
             string authorization = request.Headers.ContainsKey("authorization") ? request.Headers["authorization"] : null;
@@ -1522,7 +2599,7 @@ namespace WindowsInventoryLite
             SendText(stream, fallback, contentType, 200);
         }
 
-        private string BuildClientIndex()
+        private ArrayList LoadClientReports()
         {
             ArrayList clients = new ArrayList();
             JavaScriptSerializer serializer = CreateJsonSerializer();
@@ -1542,12 +2619,21 @@ namespace WindowsInventoryLite
                 }
             }
 
+            return clients;
+        }
+
+        private string BuildClientIndex()
+        {
+            ArrayList clients = LoadClientReports();
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+
             Dictionary<string, object> index = new Dictionary<string, object>();
             index["schemaVersion"] = "1.0";
             index["serverVersion"] = Program.ProductVersion;
             index["generatedAt"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
             index["clientCount"] = clients.Count;
             index["staleHours"] = options.StaleHours;
+            index["adDescriptionSyncEnabled"] = options.AdDescriptionSyncEnabled;
             index["clients"] = clients;
             return serializer.Serialize(index);
         }
@@ -1667,6 +2753,22 @@ namespace WindowsInventoryLite
             stream.Write(body, 0, body.Length);
         }
 
+        // script-src has no 'unsafe-inline' - the dashboard's ~20 innerHTML
+        // sinks are consistently escaped (see escapeHtml/escapeHtmlOrEmpty
+        // in app.js), so this is a backstop against a future unescaped sink,
+        // not the primary defense. style-src needs 'unsafe-inline' for the
+        // one legitimate case (bar-chart width) that sets a real inline
+        // style="..." attribute through innerHTML. The one sha256 source
+        // allows index.html's inline theme-restore <script> (reads
+        // localStorage before styles.css loads, so a saved dark preference
+        // doesn't flash light first) - it was silently CSP-blocked without
+        // this, breaking theme persistence across reloads. If that inline
+        // script's content ever changes, this hash must be recomputed to
+        // match (the browser's own CSP-violation console message reports
+        // the exact hash it expected - the fastest way to get a fresh one).
+        private const string ContentSecurityPolicy =
+            "default-src 'self'; script-src 'self' 'sha256-rqltRpQDffCU3nbpQC/zdbFn0/Eb4PSGrbmQ8EbS3q4='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+
         private static void SendText(Stream stream, string text, string contentType, int statusCode)
         {
             byte[] body = Encoding.UTF8.GetBytes(text);
@@ -1676,6 +2778,7 @@ namespace WindowsInventoryLite
                 "\r\nContent-Length: " + body.Length +
                 "\r\nX-Content-Type-Options: nosniff" +
                 "\r\nX-Frame-Options: DENY" +
+                "\r\nContent-Security-Policy: " + ContentSecurityPolicy +
                 "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
@@ -1732,6 +2835,7 @@ namespace WindowsInventoryLite
             public string Path;
             public Dictionary<string, string> Headers;
             public string Body;
+            public IPAddress RemoteAddress;
         }
 
         private sealed class InstallJob
@@ -1783,6 +2887,65 @@ namespace WindowsInventoryLite
             }
         }
 
+        private void SendClientUpdates(Stream stream)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> result = new Dictionary<string, object>();
+
+            string net35Version = null;
+            string net40Version = null;
+            if (Directory.Exists(options.ClientPackagePath))
+            {
+                string net35Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net35.exe");
+                string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
+                net35Version = File.Exists(net35Path) ? GetExeVersion(net35Path) : null;
+                net40Version = File.Exists(net40Path) ? GetExeVersion(net40Path) : null;
+            }
+
+            result["net35Version"] = net35Version;
+            result["net40Version"] = net40Version;
+            // Lets an open dashboard tab notice a schedule-triggered push it
+            // never requested itself - see lastScheduledUpdateJobId's own
+            // comment. Null until the first scheduled push of this service
+            // run.
+            result["lastScheduledJobId"] = lastScheduledUpdateJobId;
+
+            // No package built at all yet - there is nothing a push could
+            // actually deploy, so classifying every client as "outdated"
+            // here would be misleading rather than informative.
+            if (net35Version == null && net40Version == null)
+            {
+                result["packageAvailable"] = false;
+                result["updates"] = new ArrayList();
+                result["outdatedCount"] = 0;
+                SendJson(stream, serializer.Serialize(result));
+                return;
+            }
+
+            result["packageAvailable"] = true;
+            ArrayList updates = new ArrayList();
+
+            foreach (Dictionary<string, object> client in LoadClientReports())
+            {
+                string clientVersion = GetStringValue(client, "clientVersion");
+                if (IsClientVersionCurrent(clientVersion, net35Version, net40Version))
+                {
+                    continue;
+                }
+
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["computerName"] = GetStringValue(client, "computerName");
+                entry["domain"] = GetStringValue(client, "domain");
+                entry["clientVersion"] = clientVersion;
+                entry["collectedAt"] = GetStringValue(client, "collectedAt");
+                updates.Add(entry);
+            }
+
+            result["updates"] = updates;
+            result["outdatedCount"] = updates.Count;
+            SendJson(stream, serializer.Serialize(result));
+        }
+
         private void SendClientPackageStatus(Stream stream)
         {
             JavaScriptSerializer serializer = CreateJsonSerializer();
@@ -1797,10 +2960,12 @@ namespace WindowsInventoryLite
                 string deployPath = Path.Combine(options.ClientPackagePath, "Deploy-ClientGpo.ps1");
                 string cmdPath = Path.Combine(options.ClientPackagePath, "Install-ClientGpo.cmd");
 
+                string net35Version = File.Exists(net35Path) ? GetExeVersion(net35Path) : null;
+                string net40Version = File.Exists(net40Path) ? GetExeVersion(net40Path) : null;
                 result["net35Present"] = File.Exists(net35Path);
-                result["net35Version"] = File.Exists(net35Path) ? GetExeVersion(net35Path) : null;
+                result["net35Version"] = net35Version;
                 result["net40Present"] = File.Exists(net40Path);
-                result["net40Version"] = File.Exists(net40Path) ? GetExeVersion(net40Path) : null;
+                result["net40Version"] = net40Version;
                 result["deployScriptPresent"] = File.Exists(deployPath);
                 result["cmdPresent"] = File.Exists(cmdPath);
 
@@ -1808,6 +2973,7 @@ namespace WindowsInventoryLite
                 result["cmdServerUrl"] = cmdSettings.ContainsKey("serverUrl") ? (object)cmdSettings["serverUrl"] : null;
                 result["cmdIntervalHours"] = cmdSettings.ContainsKey("intervalHours") ? (object)cmdSettings["intervalHours"] : (object)"6";
                 result["cmdToken"] = cmdSettings.ContainsKey("token") ? (object)cmdSettings["token"] : null;
+                result["cmdPackageSharePath"] = cmdSettings.ContainsKey("packageSharePath") ? (object)cmdSettings["packageSharePath"] : null;
             }
             else
             {
@@ -1820,6 +2986,7 @@ namespace WindowsInventoryLite
                 result["cmdServerUrl"] = null;
                 result["cmdIntervalHours"] = "6";
                 result["cmdToken"] = null;
+                result["cmdPackageSharePath"] = null;
             }
 
             SendJson(stream, serializer.Serialize(result));
@@ -1834,18 +3001,43 @@ namespace WindowsInventoryLite
             }
 
             JavaScriptSerializer serializer = CreateJsonSerializer();
-            Dictionary<string, object> payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
             string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
             string token = Convert.ToString(payload.ContainsKey("token") ? payload["token"] : "");
+            // Only when the GPO startup script and the package files (client
+            // exes, Deploy-ClientGpo.ps1) are deployed to different
+            // locations - e.g. the script runs from SYSVOL but the files
+            // live on a separate share. Blank means "use the folder the
+            // .cmd itself runs from" (%~dp0), which is correct whenever
+            // both are copied to the same place.
+            string packageSharePath = Convert.ToString(payload.ContainsKey("packageSharePath") ? payload["packageSharePath"] : "");
+            // Reject out-of-range like every other numeric-range field on
+            // this API (staleHours, adSyncIntervalHours, schedule
+            // intervalHours, port, httpsPort) instead of silently clamping -
+            // a caller sending 100 here should see why the value it asked
+            // for wasn't used, not get a silently different one back.
             int intervalHours = 6;
             if (payload.ContainsKey("intervalHours"))
             {
-                int parsed;
-                if (Int32.TryParse(Convert.ToString(payload["intervalHours"]), out parsed))
-                    intervalHours = parsed;
+                if (!Int32.TryParse(Convert.ToString(payload["intervalHours"]), out intervalHours) || intervalHours < 1 || intervalHours > 24)
+                {
+                    SendText(stream, "{\"error\":\"intervalHours must be between 1 and 24\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
             }
-            if (intervalHours < 1) intervalHours = 1;
-            if (intervalHours > 24) intervalHours = 24;
 
             if (String.IsNullOrEmpty(serverUrl))
             {
@@ -1853,8 +3045,18 @@ namespace WindowsInventoryLite
                 return;
             }
 
+            string[] cmdLines;
+            try
+            {
+                cmdLines = GenerateCmdLines(serverUrl, token, intervalHours, packageSharePath);
+            }
+            catch (ArgumentException ex)
+            {
+                SendText(stream, "{\"error\":\"" + ex.Message.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
             string cmdPath = Path.Combine(options.ClientPackagePath, "Install-ClientGpo.cmd");
-            string[] cmdLines = GenerateCmdLines(serverUrl, token, intervalHours);
             File.WriteAllLines(cmdPath, cmdLines, Encoding.ASCII);
 
             string deployInBin = Path.Combine(Path.GetDirectoryName(options.WinRmInstallerPath), "Deploy-ClientGpo.ps1");
@@ -1872,6 +3074,21 @@ namespace WindowsInventoryLite
             if (!Directory.Exists(options.ClientPackagePath))
             {
                 SendText(stream, "Client package directory not found.", "text/plain; charset=utf-8", 404);
+                return;
+            }
+
+            string cmdPath = Path.Combine(options.ClientPackagePath, "Install-ClientGpo.cmd");
+            if (!File.Exists(cmdPath))
+            {
+                SendText(stream, "{\"error\":\"Configure the server URL on this page and save before downloading - Install-ClientGpo.cmd has not been generated yet.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string net35Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net35.exe");
+            string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
+            if (!File.Exists(net35Path) && !File.Exists(net40Path))
+            {
+                SendText(stream, "{\"error\":\"No client executable found in the package - rebuild the server (which also builds both client targets) or run New-ClientGpoPackage.ps1.\"}", "application/json; charset=utf-8", 400);
                 return;
             }
 
@@ -2364,6 +3581,43 @@ namespace WindowsInventoryLite
             SendJson(stream, "{\"status\":\"deleted\"}");
         }
 
+        private void SendAdComputers(Stream stream)
+        {
+            // "Configure AD User" also gates AD Computer Import, per its own
+            // documented scope (README: "makes the domain/credentials below
+            // available to Client actions, Client updates, and AD Computer
+            // Import") - this was previously unenforced here, so an admin
+            // with the checkbox off but an old saved AD account still got a
+            // working computer list, inconsistent with Client actions'/
+            // Client updates' own credential checks and confusing when
+            // compared side by side.
+            if (!options.AdSyncEnabled)
+            {
+                SendText(stream, "{\"error\":\"Check \\\"Configure AD User\\\" in Settings > General > Active Directory first.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            ArrayList organizationalUnits = ParseAdComputerImportOUs(options.AdComputerImportOUs);
+            AdLookupService.AdComputerSearchResult result = AdLookupService.SearchComputers(organizationalUnits, options);
+
+            if (result.AllAttemptsFailed)
+            {
+                string detail = result.Warnings.Count > 0
+                    ? String.Join(" ", (string[])result.Warnings.ToArray(typeof(string)))
+                    : "Active Directory could not be reached.";
+                Dictionary<string, object> errorResponse = new Dictionary<string, object>();
+                errorResponse["error"] = detail;
+                SendText(stream, CreateJsonSerializer().Serialize(errorResponse), "application/json; charset=utf-8", 500);
+                return;
+            }
+
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["computers"] = result.Computers;
+            response["warnings"] = result.Warnings;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(response));
+        }
+
         private void SendServerSettings(Stream stream)
         {
             Dictionary<string, object> result = BuildCertificateStatusPayload();
@@ -2371,6 +3625,21 @@ namespace WindowsInventoryLite
             result["port"] = options.Port;
             result["enableHttp"] = options.EnableHttp;
             result["httpsPort"] = options.HttpsPort;
+            result["adSyncEnabled"] = options.AdSyncEnabled;
+            result["adDescriptionSyncEnabled"] = options.AdDescriptionSyncEnabled;
+            result["adSyncMode"] = options.AdSyncMode;
+            result["adSyncIntervalHours"] = options.AdSyncIntervalHours;
+            result["adDomain"] = options.AdDomain;
+            result["adUseServiceIdentity"] = options.AdUseServiceIdentity;
+            // Username is informational (shown in the UI when the explicit-
+            // credentials option is selected); the password is never
+            // returned by this endpoint, matching how WebPassword is never
+            // echoed back either.
+            result["adUsername"] = options.AdUseServiceIdentity ? null : options.AdUsername;
+            result["adComputerImportOUs"] = options.AdComputerImportOUs;
+            result["installLogRetentionDays"] = options.InstallLogRetentionDays;
+            result["debugLogEnabled"] = options.DebugLogEnabled;
+            result["debugLogPath"] = DebugLogger.ResolvePath(options);
             JavaScriptSerializer serializer = CreateJsonSerializer();
             SendJson(stream, serializer.Serialize(result));
         }
@@ -2382,6 +3651,10 @@ namespace WindowsInventoryLite
             try
             {
                 payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
             }
             catch
             {
@@ -2401,6 +3674,18 @@ namespace WindowsInventoryLite
                 }
                 options.StaleHours = staleHours;
                 updates["StaleHours"] = staleHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("installLogRetentionDays"))
+            {
+                int installLogRetentionDays;
+                if (!Int32.TryParse(Convert.ToString(payload["installLogRetentionDays"]), out installLogRetentionDays) || installLogRetentionDays < 1 || installLogRetentionDays > 3650)
+                {
+                    SendText(stream, "{\"error\":\"installLogRetentionDays must be between 1 and 3650\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.InstallLogRetentionDays = installLogRetentionDays;
+                updates["InstallLogRetentionDays"] = installLogRetentionDays.ToString(System.Globalization.CultureInfo.InvariantCulture);
             }
 
             // HTTP and HTTPS are validated together, not field-by-field, because
@@ -2543,6 +3828,79 @@ namespace WindowsInventoryLite
                 updates["EnableHttp"] = options.EnableHttp ? "true" : "false";
             }
 
+            if (payload.ContainsKey("adSyncEnabled") || payload.ContainsKey("adDescriptionSyncEnabled") || payload.ContainsKey("adSyncMode") || payload.ContainsKey("adSyncIntervalHours")
+                || payload.ContainsKey("adDomain") || payload.ContainsKey("adUseServiceIdentity") || payload.ContainsKey("adUsername") || payload.ContainsKey("adPassword")
+                || payload.ContainsKey("adComputerImportOUs"))
+            {
+                bool adSyncEnabled = payload.ContainsKey("adSyncEnabled") ? Convert.ToBoolean(payload["adSyncEnabled"]) : options.AdSyncEnabled;
+                bool adDescriptionSyncEnabled = payload.ContainsKey("adDescriptionSyncEnabled") ? Convert.ToBoolean(payload["adDescriptionSyncEnabled"]) : options.AdDescriptionSyncEnabled;
+
+                string adSyncMode = payload.ContainsKey("adSyncMode") ? Convert.ToString(payload["adSyncMode"]) : options.AdSyncMode;
+                if (adSyncMode != "on-report" && adSyncMode != "timer")
+                {
+                    SendText(stream, "{\"error\":\"adSyncMode must be 'on-report' or 'timer'\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+
+                int adSyncIntervalHours = options.AdSyncIntervalHours;
+                if (payload.ContainsKey("adSyncIntervalHours"))
+                {
+                    if (!Int32.TryParse(Convert.ToString(payload["adSyncIntervalHours"]), out adSyncIntervalHours) || adSyncIntervalHours < 1 || adSyncIntervalHours > 8760)
+                    {
+                        SendText(stream, "{\"error\":\"adSyncIntervalHours must be between 1 and 8760\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+
+                string adDomain = payload.ContainsKey("adDomain") ? Convert.ToString(payload["adDomain"]) : options.AdDomain;
+                bool adUseServiceIdentity = payload.ContainsKey("adUseServiceIdentity") ? Convert.ToBoolean(payload["adUseServiceIdentity"]) : options.AdUseServiceIdentity;
+                string adUsername = payload.ContainsKey("adUsername") ? Convert.ToString(payload["adUsername"]) : options.AdUsername;
+                // Blank/omitted password on save means "keep the existing
+                // one" - the dashboard never pre-fills a password field with
+                // the real stored value, so treating blank as "no change"
+                // is the only way to edit other AD fields without being
+                // forced to re-type the password every time.
+                string adPassword = payload.ContainsKey("adPassword") && !String.IsNullOrEmpty(Convert.ToString(payload["adPassword"]))
+                    ? Convert.ToString(payload["adPassword"])
+                    : options.AdPassword;
+
+                if (adSyncEnabled && !adUseServiceIdentity && (String.IsNullOrEmpty(adUsername) || String.IsNullOrEmpty(adPassword)))
+                {
+                    SendText(stream, "{\"error\":\"AD username and password are required when not using the service account identity.\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+
+                options.AdSyncEnabled = adSyncEnabled;
+                options.AdDescriptionSyncEnabled = adDescriptionSyncEnabled;
+                options.AdSyncMode = adSyncMode;
+                options.AdSyncIntervalHours = adSyncIntervalHours;
+                options.AdDomain = adDomain;
+                options.AdUseServiceIdentity = adUseServiceIdentity;
+                options.AdUsername = adUsername;
+                options.AdPassword = adPassword;
+                options.AdComputerImportOUs = payload.ContainsKey("adComputerImportOUs") ? Convert.ToString(payload["adComputerImportOUs"]) : options.AdComputerImportOUs;
+                ReconfigureAdSyncTimer();
+
+                updates["AdSyncEnabled"] = options.AdSyncEnabled ? "true" : "false";
+                updates["AdDescriptionSyncEnabled"] = options.AdDescriptionSyncEnabled ? "true" : "false";
+                updates["AdSyncMode"] = options.AdSyncMode;
+                updates["AdSyncIntervalHours"] = options.AdSyncIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                updates["AdDomain"] = options.AdDomain ?? "";
+                updates["AdUseServiceIdentity"] = options.AdUseServiceIdentity ? "true" : "false";
+                updates["AdUsername"] = options.AdUsername ?? "";
+                updates["AdPassword"] = options.AdPassword ?? "";
+                updates["AdComputerImportOUs"] = options.AdComputerImportOUs ?? "";
+            }
+
+            if (payload.ContainsKey("debugLogEnabled"))
+            {
+                // The log path is deliberately not settable from here - it
+                // stays CLI/config-only, so this endpoint can't be used to
+                // make the server write an arbitrary file path.
+                options.DebugLogEnabled = Convert.ToBoolean(payload["debugLogEnabled"]);
+                updates["DebugLogEnabled"] = options.DebugLogEnabled ? "true" : "false";
+            }
+
             if (updates.Count > 0)
             {
                 SaveServerConfigValues(updates);
@@ -2561,6 +3919,150 @@ namespace WindowsInventoryLite
             SendJson(stream, serializer.Serialize(result));
         }
 
+        private void SendClientUpdateCredentialsStatus(Stream stream)
+        {
+            bool configured = !String.IsNullOrEmpty(options.ClientUpdateUsername) && !String.IsNullOrEmpty(options.ClientUpdatePassword);
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["configured"] = configured;
+            result["username"] = String.IsNullOrEmpty(options.ClientUpdateUsername) ? null : options.ClientUpdateUsername;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void ConfigureClientUpdateCredentials(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            bool clear = payload.ContainsKey("clear") && Convert.ToBoolean(payload["clear"]);
+            string username;
+            string password;
+            if (clear)
+            {
+                username = "";
+                password = "";
+            }
+            else
+            {
+                username = payload.ContainsKey("username") ? Convert.ToString(payload["username"]) : options.ClientUpdateUsername;
+                // Blank/omitted password means "keep the existing one" - the
+                // dashboard never pre-fills a password field with the real
+                // stored value, matching the AD credentials save endpoint.
+                password = payload.ContainsKey("password") && !String.IsNullOrEmpty(Convert.ToString(payload["password"]))
+                    ? Convert.ToString(payload["password"])
+                    : options.ClientUpdatePassword;
+            }
+
+            options.ClientUpdateUsername = username;
+            options.ClientUpdatePassword = password;
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["ClientUpdateUsername"] = username ?? "";
+            updates["ClientUpdatePassword"] = password ?? "";
+            SaveServerConfigValues(updates);
+
+            SendClientUpdateCredentialsStatus(stream);
+        }
+
+        private void SendClientUpdateScheduleStatus(Stream stream)
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["mode"] = options.ClientUpdateScheduleMode;
+            result["onceAtUtc"] = String.IsNullOrEmpty(options.ClientUpdateScheduleOnceAtUtc) ? null : options.ClientUpdateScheduleOnceAtUtc;
+            result["intervalHours"] = options.ClientUpdateScheduleIntervalHours;
+            result["lastRunUtc"] = String.IsNullOrEmpty(options.ClientUpdateScheduleLastRunUtc) ? null : options.ClientUpdateScheduleLastRunUtc;
+            result["hasSavedCredentials"] = !String.IsNullOrEmpty(options.ClientUpdateUsername) && !String.IsNullOrEmpty(options.ClientUpdatePassword);
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void ConfigureClientUpdateSchedule(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string mode = payload.ContainsKey("mode") ? Convert.ToString(payload["mode"]) : "off";
+            if (mode != "off" && mode != "once" && mode != "interval")
+            {
+                SendText(stream, "{\"error\":\"mode must be 'off', 'once', or 'interval'\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string onceAtUtc = "";
+            if (mode == "once")
+            {
+                string onceAtRaw = payload.ContainsKey("onceAtUtc") ? Convert.ToString(payload["onceAtUtc"]) : "";
+                DateTime parsedOnceAt;
+                if (String.IsNullOrEmpty(onceAtRaw) || !DateTime.TryParse(onceAtRaw, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out parsedOnceAt))
+                {
+                    SendText(stream, "{\"error\":\"onceAtUtc is required and must be a valid date/time for mode 'once'\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                onceAtUtc = parsedOnceAt.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+            }
+
+            int intervalHours = options.ClientUpdateScheduleIntervalHours;
+            if (mode == "interval")
+            {
+                if (!payload.ContainsKey("intervalHours") || !Int32.TryParse(Convert.ToString(payload["intervalHours"]), out intervalHours) || intervalHours < 1 || intervalHours > 8760)
+                {
+                    SendText(stream, "{\"error\":\"intervalHours must be between 1 and 8760 for mode 'interval'\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
+
+            options.ClientUpdateScheduleMode = mode;
+            options.ClientUpdateScheduleOnceAtUtc = onceAtUtc;
+            options.ClientUpdateScheduleIntervalHours = intervalHours;
+            if (mode != "interval")
+            {
+                // Switching away from interval mode clears its "last run"
+                // clock - re-enabling interval mode later starts fresh (the
+                // first tick fires right away, since ShouldRunClientUpdateSchedule
+                // treats a blank last-run as due) instead of computing the
+                // wait against a stale timestamp left over from a previous,
+                // unrelated stretch of interval mode.
+                options.ClientUpdateScheduleLastRunUtc = "";
+            }
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["ClientUpdateScheduleMode"] = options.ClientUpdateScheduleMode;
+            updates["ClientUpdateScheduleOnceAtUtc"] = options.ClientUpdateScheduleOnceAtUtc ?? "";
+            updates["ClientUpdateScheduleIntervalHours"] = options.ClientUpdateScheduleIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            updates["ClientUpdateScheduleLastRunUtc"] = options.ClientUpdateScheduleLastRunUtc ?? "";
+            SaveServerConfigValues(updates);
+
+            ReconfigureClientUpdateScheduleTimer();
+
+            SendClientUpdateScheduleStatus(stream);
+        }
+
         // Doubles as first-time setup and password rotation. Bootstrapping without
         // a current-password check is reachable by anyone on the network while
         // Basic Auth is unconfigured, but at that point the whole dashboard is
@@ -2575,6 +4077,10 @@ namespace WindowsInventoryLite
             try
             {
                 payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
             }
             catch
             {
@@ -2630,8 +4136,24 @@ namespace WindowsInventoryLite
             }
             catch { }
 
-            SendJson(stream, "{\"status\":\"ok\"}");
+            // Echoes the fresh GET-shaped status, matching every other
+            // config POST on this API (settings, certificate, client-update
+            // credentials/schedule) - a bare {"status":"ok"} was the one
+            // outlier.
+            SendAdminPasswordStatus(stream);
         }
+
+        // AdPassword, WebPassword, and Token are encrypted at rest (DPAPI,
+        // see SecretProtector.cs) before being written to server-config.json
+        // by SaveServerConfigValues below, and decrypted on load by
+        // LoadConfigFile. CertificatePfxPassword is NOT in this set - it is
+        // never persisted to server-config.json at all (it flows only into
+        // a local SecureString used once for a PFX import, in both
+        // ConfigureCertificate here and Install-Server.ps1's own import
+        // step), so there is nothing to encrypt for it.
+        private static readonly HashSet<string> EncryptedConfigKeys = new HashSet<string>(
+            new[] { "AdPassword", "WebPassword", "Token", "ClientUpdatePassword" },
+            StringComparer.Ordinal);
 
         private void SaveServerConfigValues(Dictionary<string, string> updates)
         {
@@ -2640,32 +4162,80 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            JavaScriptSerializer serializer = CreateJsonSerializer();
-            Dictionary<string, object> config;
-            if (File.Exists(options.ConfigPath))
+            // The whole read-modify-write is inside configFileLock so two
+            // writers (an operator's HTTP save and a background timer tick,
+            // or two timers) can't interleave and silently drop each
+            // other's change - see the lock's own declaration comment.
+            lock (configFileLock)
             {
-                try
+                JavaScriptSerializer serializer = CreateJsonSerializer();
+                Dictionary<string, object> config;
+                if (File.Exists(options.ConfigPath))
                 {
-                    string existing = File.ReadAllText(options.ConfigPath, Encoding.UTF8);
-                    config = serializer.Deserialize<Dictionary<string, object>>(existing) ?? new Dictionary<string, object>();
+                    try
+                    {
+                        string existing = File.ReadAllText(options.ConfigPath, Encoding.UTF8);
+                        config = serializer.Deserialize<Dictionary<string, object>>(existing) ?? new Dictionary<string, object>();
+                    }
+                    catch
+                    {
+                        config = new Dictionary<string, object>();
+                    }
                 }
-                catch
+                else
                 {
                     config = new Dictionary<string, object>();
                 }
-            }
-            else
-            {
-                config = new Dictionary<string, object>();
-            }
 
-            foreach (KeyValuePair<string, string> pair in updates)
-            {
-                config[pair.Key] = pair.Value;
-            }
+                foreach (KeyValuePair<string, string> pair in updates)
+                {
+                    config[pair.Key] = EncryptedConfigKeys.Contains(pair.Key) ? SecretProtector.Protect(pair.Value, options) : pair.Value;
+                }
 
-            string json = serializer.Serialize(config);
-            File.WriteAllText(options.ConfigPath, json, new UTF8Encoding(false));
+                string json = serializer.Serialize(config);
+                // Write to a temp file then swap it into place, instead of
+                // File.WriteAllText directly on the real path - this file
+                // holds the auth credential and encrypted secrets, so a
+                // process crash or a concurrent reader must never be able to
+                // observe a truncated/partial write.
+                string tempPath = options.ConfigPath + ".tmp";
+                File.WriteAllText(tempPath, json, new UTF8Encoding(false));
+                if (File.Exists(options.ConfigPath))
+                {
+                    File.Replace(tempPath, options.ConfigPath, null);
+                }
+                else
+                {
+                    File.Move(tempPath, options.ConfigPath);
+                }
+                ApplyRestrictedConfigAcl(options.ConfigPath);
+            }
+        }
+
+        // Mirrors Install-Server.ps1's Set-RestrictedFileAcl: restricts
+        // server-config.json to Administrators + SYSTEM only. This file can
+        // hold DPAPI-LocalMachine-protected secrets (AdPassword/WebPassword/
+        // Token, see SecretProtector.cs) which ANY local process can decrypt
+        // - the file's DACL is the only real confidentiality boundary for
+        // them. Reapplied on every write, not just at install time, so the
+        // file can never drift back to an inherited (broader) ACL if it is
+        // ever deleted and recreated by the running service.
+        private void ApplyRestrictedConfigAcl(string path)
+        {
+            try
+            {
+                SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                FileSecurity acl = File.GetAccessControl(path);
+                acl.SetAccessRuleProtection(true, false);
+                acl.AddAccessRule(new FileSystemAccessRule(adminSid, FileSystemRights.FullControl, AccessControlType.Allow));
+                acl.AddAccessRule(new FileSystemAccessRule(systemSid, FileSystemRights.FullControl, AccessControlType.Allow));
+                File.SetAccessControl(path, acl);
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Config", "Could not restrict server-config.json permissions: " + DebugLogger.SanitizeForLog(ex.Message));
+            }
         }
 
         // License inventory is an admin-entered catalog (name/version/license/comment),
@@ -2787,6 +4357,10 @@ namespace WindowsInventoryLite
             try
             {
                 payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
             }
             catch
             {
@@ -2831,6 +4405,10 @@ namespace WindowsInventoryLite
             try
             {
                 payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
             }
             catch
             {
@@ -2933,6 +4511,94 @@ namespace WindowsInventoryLite
             }
         }
 
+        // The client does not report which framework (net35/net40) it was
+        // built with, so a client is considered current if its reported
+        // version matches EITHER package currently on disk - this never
+        // flags a genuinely current client as outdated. A client with no
+        // reported version (old report predating the clientVersion field)
+        // is treated as outdated, not skipped, since it clearly isn't
+        // running anything current. A missing package (null) never counts
+        // as a match, so a client can't accidentally appear current just
+        // because one of the two package builds was never produced.
+        private static bool IsClientVersionCurrent(string clientVersion, string net35Version, string net40Version)
+        {
+            if (String.IsNullOrEmpty(clientVersion))
+            {
+                return false;
+            }
+            if (net35Version != null && String.Equals(clientVersion, net35Version, StringComparison.Ordinal))
+            {
+                return true;
+            }
+            if (net40Version != null && String.Equals(clientVersion, net40Version, StringComparison.Ordinal))
+            {
+                return true;
+            }
+            return false;
+        }
+
+        // Client updates sends useSavedCredentials=true (Client actions never
+        // does - its own per-action fields have no persisted counterpart) to
+        // signal that blank username/password should fall back to the saved
+        // ClientUpdateUsername/ClientUpdatePassword instead of silently
+        // running under the service's own identity. A typed per-push value
+        // always wins over the saved one, matching this feature's original
+        // design: per-push override, then the saved account, then the
+        // service identity. Without this, the saved credentials were stored
+        // correctly but never actually reached a push - the dashboard's
+        // password field is cleared right after a successful Save (so the
+        // password can't be echoed back), and the push read straight from
+        // that same now-empty field, so it silently fell back to the
+        // service identity on every push after the first Save.
+        private static void ResolveUpdateCredentials(ref string username, ref string password, bool useSavedCredentials, string savedUsername, string savedPassword)
+        {
+            if (useSavedCredentials && String.IsNullOrEmpty(username) && String.IsNullOrEmpty(password))
+            {
+                username = savedUsername ?? "";
+                password = savedPassword ?? "";
+            }
+        }
+
+        // "Use global AD settings" on Client actions: substitutes the AD sync
+        // credentials already configured in Settings > General > Active
+        // Directory (the same ones AdLookupService uses) for this push -
+        // either the server's own service identity (blank username/password,
+        // the same as leaving both fields empty already means to
+        // RunClientInstallTarget/RunClientUninstallTarget) or the saved
+        // explicit AD account. Requires AD sync to actually be enabled and,
+        // when not using the service identity, requires a saved username AND
+        // password - returns false (leaving username/password untouched) and
+        // sets errorMessage when either requirement isn't met, so the caller
+        // rejects the request with a clear reason instead of silently
+        // proceeding with the wrong identity or empty credentials.
+        private static bool TryResolveAdSyncCredentials(bool useAdCredentials, bool adSyncEnabled, bool adUseServiceIdentity, string adUsername, string adPassword, ref string username, ref string password, out string errorMessage)
+        {
+            errorMessage = null;
+            if (!useAdCredentials)
+            {
+                return true;
+            }
+            if (!adSyncEnabled)
+            {
+                errorMessage = "Check \"Configure AD User\" in Settings > General > Active Directory first.";
+                return false;
+            }
+            if (adUseServiceIdentity)
+            {
+                username = "";
+                password = "";
+                return true;
+            }
+            if (String.IsNullOrEmpty(adUsername) || String.IsNullOrEmpty(adPassword))
+            {
+                errorMessage = "No AD username/password is saved in Settings > General > Active Directory.";
+                return false;
+            }
+            username = adUsername;
+            password = adPassword;
+            return true;
+        }
+
         private static Dictionary<string, string> ParseCmdSettings(string cmdPath)
         {
             Dictionary<string, string> settings = new Dictionary<string, string>();
@@ -2956,19 +4622,58 @@ namespace WindowsInventoryLite
                             settings["token"] = t.Substring(start, end - start).Replace("%%", "%");
                     }
                 }
+                else if (t.StartsWith("set PACKAGE_ROOT=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string value = t.Substring(17).Replace("%%", "%");
+                    // "%~dp0" (the script's own folder) is the default -
+                    // only surface it as a configured value when it's
+                    // something else, so the dashboard field shows blank
+                    // (the "using the default" state) rather than the
+                    // literal batch-file token.
+                    if (!String.Equals(value, "%~dp0", StringComparison.OrdinalIgnoreCase))
+                    {
+                        settings["packageSharePath"] = value;
+                    }
+                }
             }
 
             return settings;
         }
 
-        private static string[] GenerateCmdLines(string serverUrl, string token, int intervalHours)
+        // Batch files treat &, |, <, >, ^ and an unbalanced " as live command
+        // separators/redirection - serverUrl and packageSharePath land on a
+        // SET line with no surrounding quotes at all, and token's quotes can
+        // be broken out of with an embedded ". A value containing any of
+        // these (or a line break, which injects a whole extra statement)
+        // turns Install-ClientGpo.cmd into an attacker-controlled script that
+        // a GPO computer startup script later runs as SYSTEM on every
+        // deployed client. % is handled separately via doubling, not
+        // rejected here, since it's expected in URLs/tokens.
+        private static readonly char[] BatchUnsafeChars = { '"', '&', '|', '<', '>', '^', '\r', '\n' };
+
+        private static void ValidateBatchSafe(string value, string fieldName)
         {
+            if (!String.IsNullOrEmpty(value) && value.IndexOfAny(BatchUnsafeChars) >= 0)
+            {
+                throw new ArgumentException(fieldName + " contains a character that is not allowed here (\", &, |, <, >, ^, or a line break).");
+            }
+        }
+
+        private static string[] GenerateCmdLines(string serverUrl, string token, int intervalHours, string packageSharePath)
+        {
+            ValidateBatchSafe(serverUrl, "serverUrl");
+            ValidateBatchSafe(token, "token");
+            ValidateBatchSafe(packageSharePath, "packageSharePath");
+
             string escapedUrl = serverUrl.Replace("%", "%%");
+            string packageRoot = String.IsNullOrEmpty(packageSharePath)
+                ? "%~dp0"
+                : packageSharePath.Replace("%", "%%").TrimEnd('\\');
             List<string> lines = new List<string>();
             lines.Add("@echo off");
             lines.Add("setlocal");
             lines.Add("");
-            lines.Add("set PACKAGE_ROOT=%~dp0");
+            lines.Add("set PACKAGE_ROOT=" + packageRoot);
             lines.Add("set SERVER_URL=" + escapedUrl);
             lines.Add("set INTERVAL_HOURS=" + intervalHours);
             lines.Add("set DEPLOY_SCRIPT=%PACKAGE_ROOT%\\Deploy-ClientGpo.ps1");
@@ -2992,6 +4697,11 @@ namespace WindowsInventoryLite
             return lines.ToArray();
         }
 
+        // 0x4a21 (used for both the local file header and the matching
+        // central directory entry below) is a fixed DOS date/time stamp -
+        // no real per-file timestamp is tracked or needed for this
+        // download, so every entry gets the same placeholder value rather
+        // than computing one. 20 is the ZIP version-needed-to-extract.
         private static byte[] BuildZip(List<string> names, List<byte[]> contents)
         {
             MemoryStream ms = new MemoryStream();
@@ -3064,7 +4774,7 @@ namespace WindowsInventoryLite
 
         private static void SendBytes(Stream stream, byte[] data, string contentType, string filename)
         {
-            string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Disposition: attachment; filename=\"" + filename + "\"\r\nContent-Length: " + data.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nConnection: close\r\n\r\n";
+            string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Disposition: attachment; filename=\"" + filename + "\"\r\nContent-Length: " + data.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
             stream.Write(data, 0, data.Length);
@@ -3104,6 +4814,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ExpandInstallTarget expands a full IPv4 range", TestExpandInstallTargetFullRange);
             allPassed &= SelfTestCheck(output, "ExpandInstallTarget passes through a single hostname", TestExpandInstallTargetHostname);
             allPassed &= SelfTestCheck(output, "ExpandInstallTargets de-duplicates and splits on separators", TestExpandInstallTargetsDedup);
+            allPassed &= SelfTestCheck(output, "ParseAdComputerImportOUs splits on newlines only, not commas", TestParseAdComputerImportOUsSplitsOnNewlinesOnly);
+            allPassed &= SelfTestCheck(output, "ParseAdComputerImportOUs treats blank input as an empty OU list", TestParseAdComputerImportOUsEmptyMeansWholeDomain);
             allPassed &= SelfTestCheck(output, "BuildZip produces a structurally valid archive", TestBuildZipStructure);
             allPassed &= SelfTestCheck(output, "NormalizeThumbprint strips separators and uppercases", TestNormalizeThumbprint);
             allPassed &= SelfTestCheck(output, "ExtractLicenseId strips the route prefix and query string", TestExtractLicenseIdWithQuery);
@@ -3111,7 +4823,48 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "SanitizeFileName escapes a reserved Windows device name", TestSanitizeFileNameReservedDeviceName);
             allPassed &= SelfTestCheck(output, "SanitizeFileName leaves a normal computer name untouched", TestSanitizeFileNameNormalName);
             allPassed &= SelfTestCheck(output, "FixedTimeEquals matches identical strings and rejects everything else", TestFixedTimeEquals);
+            allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized restricts to loopback while Basic Auth is unconfigured", TestIsWebRequestAuthorizedRestrictsToLoopbackWhenUnconfigured);
             allPassed &= SelfTestCheck(output, "TryParsePortFromPrefix extracts the port from a ListenPrefix URL", TestTryParsePortFromPrefix);
+            allPassed &= SelfTestCheck(output, "LdapFilterEscaper escapes RFC 4515 special characters", TestLdapFilterEscapeSpecialChars);
+            allPassed &= SelfTestCheck(output, "LdapFilterEscaper leaves a normal computer name untouched", TestLdapFilterEscapeNormalName);
+            allPassed &= SelfTestCheck(output, "ShouldSyncAd returns true with no previous timestamp", TestShouldSyncAdNoPreviousTimestamp);
+            allPassed &= SelfTestCheck(output, "ShouldSyncAd returns true for a stale timestamp", TestShouldSyncAdStaleTimestamp);
+            allPassed &= SelfTestCheck(output, "ShouldSyncAd returns false for a fresh timestamp", TestShouldSyncAdFreshTimestamp);
+            allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule is never due in 'off' mode", TestShouldRunClientUpdateScheduleOffMode);
+            allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'once' is not due before the target time", TestShouldRunClientUpdateScheduleOnceNotYetDue);
+            allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'once' is due after the target time", TestShouldRunClientUpdateScheduleOnceDue);
+            allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'once' is never due with no target time set", TestShouldRunClientUpdateScheduleOnceMissingTarget);
+            allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'interval' is due immediately with no previous run", TestShouldRunClientUpdateScheduleIntervalNoPreviousRun);
+            allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'interval' respects the interval window", TestShouldRunClientUpdateScheduleIntervalDueAndNotDue);
+            allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall updates a target's stored clientVersion", TestPatchClientReportVersionAfterInstallUpdatesVersion);
+            allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall is a no-op when the target has no stored report yet", TestPatchClientReportVersionAfterInstallMissingReport);
+            allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath defaults under DataPath when unset", TestDebugLoggerResolvePathDefault);
+            allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath honors an explicit DebugLogPath", TestDebugLoggerResolvePathOverride);
+            allPassed &= SelfTestCheck(output, "DebugLogger.SanitizeForLog escapes embedded CR/LF", TestDebugLoggerSanitizeForLog);
+            allPassed &= SelfTestCheck(output, "SecretProtector round-trips a value through Protect/Unprotect", TestSecretProtectorRoundTrip);
+            allPassed &= SelfTestCheck(output, "SecretProtector.Unprotect passes through a legacy plaintext value", TestSecretProtectorLegacyPlaintext);
+            allPassed &= SelfTestCheck(output, "NeedsMigration flags a plaintext value", TestNeedsMigrationPlaintextValue);
+            allPassed &= SelfTestCheck(output, "NeedsMigration does not flag an already-encrypted or empty value", TestNeedsMigrationAlreadyEncryptedOrEmpty);
+            allPassed &= SelfTestCheck(output, "GenerateCmdLines rejects serverUrl/token/packageSharePath containing batch-unsafe characters", TestGenerateCmdLinesRejectsUnsafeCharacters);
+            allPassed &= SelfTestCheck(output, "IsClientVersionCurrent matches either package version", TestIsClientVersionCurrentMatchesEitherPackage);
+            allPassed &= SelfTestCheck(output, "IsClientVersionCurrent is outdated when it matches neither package", TestIsClientVersionCurrentOutdatedWhenMatchesNeither);
+            allPassed &= SelfTestCheck(output, "IsClientVersionCurrent treats an empty clientVersion as outdated", TestIsClientVersionCurrentTreatsEmptyAsOutdated);
+            allPassed &= SelfTestCheck(output, "IsClientVersionCurrent ignores a missing package instead of false-matching it", TestIsClientVersionCurrentIgnoresMissingPackage);
+            allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials falls back to the saved account when blank", TestResolveUpdateCredentialsFallsBackToSavedWhenBlank);
+            allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials prefers a typed per-push override over the saved account", TestResolveUpdateCredentialsPrefersTypedOverride);
+            allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials is a no-op for Client actions (useSavedCredentials=false)", TestResolveUpdateCredentialsIgnoredWhenFlagIsFalse);
+            allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials falls through to the service identity when nothing is saved", TestResolveUpdateCredentialsFallsThroughWhenNothingSaved);
+            allPassed &= SelfTestCheck(output, "TryResolveAdSyncCredentials is a no-op when useAdCredentials=false", TestTryResolveAdSyncCredentialsIgnoredWhenFlagIsFalse);
+            allPassed &= SelfTestCheck(output, "TryResolveAdSyncCredentials rejects when AD sync is disabled", TestTryResolveAdSyncCredentialsRejectsWhenAdSyncDisabled);
+            allPassed &= SelfTestCheck(output, "TryResolveAdSyncCredentials resolves to the service identity when configured", TestTryResolveAdSyncCredentialsUsesServiceIdentityWhenConfigured);
+            allPassed &= SelfTestCheck(output, "TryResolveAdSyncCredentials resolves to the saved AD account when not using the service identity", TestTryResolveAdSyncCredentialsUsesSavedAccountWhenNotServiceIdentity);
+            allPassed &= SelfTestCheck(output, "TryResolveAdSyncCredentials rejects when the saved AD account is incomplete", TestTryResolveAdSyncCredentialsRejectsWhenSavedAccountIncomplete);
+            allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' default package root", TestParseCmdSettingsDefaultPackageRoot);
+            allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' custom package share path", TestParseCmdSettingsCustomPackageSharePath);
+            allPassed &= SelfTestCheck(output, "ResolveAdDescriptionSyncEnabled uses the explicit config value when present", TestResolveAdDescriptionSyncEnabledUsesExplicitConfigValue);
+            allPassed &= SelfTestCheck(output, "ResolveAdDescriptionSyncEnabled migrates from AdSyncEnabled when the config key is absent", TestResolveAdDescriptionSyncEnabledMigratesFromAdSyncEnabledWhenUnset);
+            allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
+            allPassed &= SelfTestCheck(output, "ComputeAdSyncFields is a no-op for a brand-new computer with sync disabled", TestComputeAdSyncFieldsNoOpForNewComputerWhenSyncDisabled);
             return allPassed;
         }
 
@@ -3206,6 +4959,27 @@ namespace WindowsInventoryLite
             ArrayList result = ExpandInstallTargets("host1, host1;host2\nhost1");
             string[] expected = new string[] { "host1", "host2" };
             return CompareStringLists(expected, result);
+        }
+
+        private static string TestParseAdComputerImportOUsSplitsOnNewlinesOnly()
+        {
+            ArrayList result = ParseAdComputerImportOUs("OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru\r\n\r\nOU=Servers,DC=spb,DC=cccb,DC=ru\n  \nOU=Third,DC=x,DC=y  ");
+            string[] expected = new string[] {
+                "OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru",
+                "OU=Servers,DC=spb,DC=cccb,DC=ru",
+                "OU=Third,DC=x,DC=y"
+            };
+            return CompareStringLists(expected, result);
+        }
+
+        private static string TestParseAdComputerImportOUsEmptyMeansWholeDomain()
+        {
+            ArrayList result = ParseAdComputerImportOUs("   ");
+            if (result.Count != 0)
+            {
+                return "expected a blank/whitespace-only input to produce zero OUs, got " + result.Count;
+            }
+            return null;
         }
 
         private static string CompareStringLists(string[] expected, ArrayList actual)
@@ -3350,6 +5124,50 @@ namespace WindowsInventoryLite
             return null;
         }
 
+        private static string TestIsWebRequestAuthorizedRestrictsToLoopbackWhenUnconfigured()
+        {
+            ServerOptions options = new ServerOptions();
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext loopbackRequest = new RequestContext();
+            loopbackRequest.Headers = new Dictionary<string, string>();
+            loopbackRequest.RemoteAddress = IPAddress.Loopback;
+            if (!server.IsWebRequestAuthorized(loopbackRequest))
+            {
+                return "expected a loopback request to be authorized while Basic Auth is unconfigured";
+            }
+
+            RequestContext remoteRequest = new RequestContext();
+            remoteRequest.Headers = new Dictionary<string, string>();
+            remoteRequest.RemoteAddress = IPAddress.Parse("192.168.1.50");
+            if (server.IsWebRequestAuthorized(remoteRequest))
+            {
+                return "expected a non-loopback request to be rejected while Basic Auth is unconfigured";
+            }
+
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+
+            RequestContext remoteWithoutAuth = new RequestContext();
+            remoteWithoutAuth.Headers = new Dictionary<string, string>();
+            remoteWithoutAuth.RemoteAddress = IPAddress.Parse("192.168.1.50");
+            if (server.IsWebRequestAuthorized(remoteWithoutAuth))
+            {
+                return "expected a non-loopback request with no Authorization header to be rejected once Basic Auth is configured";
+            }
+
+            RequestContext remoteWithAuth = new RequestContext();
+            remoteWithAuth.Headers = new Dictionary<string, string>();
+            remoteWithAuth.Headers["authorization"] = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("admin:secret"));
+            remoteWithAuth.RemoteAddress = IPAddress.Parse("192.168.1.50");
+            if (!server.IsWebRequestAuthorized(remoteWithAuth))
+            {
+                return "expected a non-loopback request with correct Basic Auth credentials to be authorized once Basic Auth is configured";
+            }
+
+            return null;
+        }
+
         private static string TestTryParsePortFromPrefix()
         {
             int port;
@@ -3370,6 +5188,593 @@ namespace WindowsInventoryLite
                 return "expected a null prefix to fail to parse";
             }
             return null;
+        }
+
+        private static string TestLdapFilterEscapeSpecialChars()
+        {
+            string escaped = LdapFilterEscaper.Escape("a*b(c)d\\e\0f");
+            const string expected = "a\\2ab\\28c\\29d\\5ce\\00f";
+            if (escaped != expected)
+            {
+                return "expected '" + expected + "' but got '" + escaped + "'";
+            }
+            return null;
+        }
+
+        private static string TestLdapFilterEscapeNormalName()
+        {
+            string escaped = LdapFilterEscaper.Escape("PC-WINADMIN-01");
+            if (escaped != "PC-WINADMIN-01")
+            {
+                return "expected passthrough but got '" + escaped + "'";
+            }
+            return null;
+        }
+
+        private static string TestShouldSyncAdNoPreviousTimestamp()
+        {
+            if (!InventoryServer.ShouldSyncAd(null, 24))
+            {
+                return "expected true when there is no previous sync timestamp";
+            }
+            return null;
+        }
+
+        private static string TestShouldSyncAdStaleTimestamp()
+        {
+            DateTime stale = DateTime.UtcNow.AddHours(-25);
+            if (!InventoryServer.ShouldSyncAd(stale, 24))
+            {
+                return "expected true when the previous sync is older than the interval";
+            }
+            return null;
+        }
+
+        private static string TestShouldSyncAdFreshTimestamp()
+        {
+            DateTime fresh = DateTime.UtcNow.AddHours(-1);
+            if (InventoryServer.ShouldSyncAd(fresh, 24))
+            {
+                return "expected false when the previous sync is within the interval";
+            }
+            return null;
+        }
+
+        private static string TestShouldRunClientUpdateScheduleOffMode()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            if (InventoryServer.ShouldRunClientUpdateSchedule(now, "off", now.AddHours(-1), now.AddHours(-1), 24))
+            {
+                return "expected mode 'off' to never be due, regardless of onceAtUtc/lastRunUtc values";
+            }
+            return null;
+        }
+
+        private static string TestShouldRunClientUpdateScheduleOnceNotYetDue()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            DateTime future = now.AddHours(1);
+            if (InventoryServer.ShouldRunClientUpdateSchedule(now, "once", future, null, 24))
+            {
+                return "expected mode 'once' with a future onceAtUtc to not be due yet";
+            }
+            return null;
+        }
+
+        private static string TestShouldRunClientUpdateScheduleOnceDue()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            DateTime past = now.AddMinutes(-1);
+            if (!InventoryServer.ShouldRunClientUpdateSchedule(now, "once", past, null, 24))
+            {
+                return "expected mode 'once' with a past onceAtUtc to be due";
+            }
+            return null;
+        }
+
+        private static string TestShouldRunClientUpdateScheduleOnceMissingTarget()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            if (InventoryServer.ShouldRunClientUpdateSchedule(now, "once", null, null, 24))
+            {
+                return "expected mode 'once' with no onceAtUtc value to never be due";
+            }
+            return null;
+        }
+
+        private static string TestShouldRunClientUpdateScheduleIntervalNoPreviousRun()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            if (!InventoryServer.ShouldRunClientUpdateSchedule(now, "interval", null, null, 24))
+            {
+                return "expected mode 'interval' with no previous run to be due immediately";
+            }
+            return null;
+        }
+
+        private static string TestShouldRunClientUpdateScheduleIntervalDueAndNotDue()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            DateTime stale = now.AddHours(-25);
+            DateTime fresh = now.AddHours(-1);
+            if (!InventoryServer.ShouldRunClientUpdateSchedule(now, "interval", null, stale, 24))
+            {
+                return "expected mode 'interval' to be due when lastRunUtc is older than intervalHours";
+            }
+            if (InventoryServer.ShouldRunClientUpdateSchedule(now, "interval", null, fresh, 24))
+            {
+                return "expected mode 'interval' to not be due when lastRunUtc is within intervalHours";
+            }
+            return null;
+        }
+
+        private static string TestPatchClientReportVersionAfterInstallUpdatesVersion()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                string computerName = "PATCH-TEST-01";
+                string reportPath = Path.Combine(dataPath, computerName + ".json");
+                File.WriteAllText(reportPath, "{\"computerName\":\"PATCH-TEST-01\",\"clientVersion\":\"0.1.0\"}", new UTF8Encoding(false));
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+                server.PatchClientReportVersionAfterInstall(computerName, "0.2.0", null);
+
+                JavaScriptSerializer serializer = CreateJsonSerializer();
+                Dictionary<string, object> report = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(reportPath, Encoding.UTF8));
+                if (GetStringValue(report, "clientVersion") != "0.2.0")
+                {
+                    return "expected clientVersion to be patched to '0.2.0', got '" + GetStringValue(report, "clientVersion") + "'";
+                }
+                if (GetStringValue(report, "computerName") != "PATCH-TEST-01")
+                {
+                    return "expected the rest of the report to survive the patch untouched";
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(dataPath, true);
+            }
+        }
+
+        private static string TestPatchClientReportVersionAfterInstallMissingReport()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+                // A target that has never reported at all yet - should not
+                // throw and should not create a new file out of nowhere.
+                server.PatchClientReportVersionAfterInstall("NEVER-REPORTED-01", "0.2.0", null);
+
+                if (Directory.GetFiles(dataPath, "*.json").Length != 0)
+                {
+                    return "expected no report file to be created for a target with no existing report";
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(dataPath, true);
+            }
+        }
+
+        private static string TestDebugLoggerResolvePathDefault()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = @"C:\test-data";
+            string expected = Path.Combine(@"C:\test-data", "_logs", "debug.log");
+            string actual = DebugLogger.ResolvePath(options);
+            if (actual != expected)
+            {
+                return "expected '" + expected + "' but got '" + actual + "'";
+            }
+            return null;
+        }
+
+        private static string TestDebugLoggerResolvePathOverride()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = @"C:\test-data";
+            options.DebugLogPath = @"D:\custom\debug.log";
+            string actual = DebugLogger.ResolvePath(options);
+            if (actual != @"D:\custom\debug.log")
+            {
+                return "expected the explicit DebugLogPath to be used, got '" + actual + "'";
+            }
+            return null;
+        }
+
+        private static string TestDebugLoggerSanitizeForLog()
+        {
+            string actual = DebugLogger.SanitizeForLog("EVIL\r\n2026-01-01T00:00:00Z [Error] forged line");
+            if (actual.IndexOf('\r') >= 0 || actual.IndexOf('\n') >= 0)
+            {
+                return "expected embedded CR/LF to be escaped, got '" + actual + "'";
+            }
+            if (actual.IndexOf("\\r\\n") < 0)
+            {
+                return "expected the escaped '\\r\\n' sequence to be visible, got '" + actual + "'";
+            }
+            return null;
+        }
+
+        private static string TestSecretProtectorRoundTrip()
+        {
+            ServerOptions options = new ServerOptions();
+            string original = "Sup3r$ecret AD password with spaces";
+            string protectedValue = SecretProtector.Protect(original, options);
+            if (protectedValue == original)
+            {
+                return "expected Protect to change the value (encrypt it), it returned the plaintext unchanged";
+            }
+            if (!protectedValue.StartsWith("dpapi:", StringComparison.Ordinal))
+            {
+                return "expected the protected value to carry the 'dpapi:' prefix, got '" + protectedValue + "'";
+            }
+            string roundTripped = SecretProtector.Unprotect(protectedValue);
+            if (roundTripped != original)
+            {
+                return "expected Unprotect(Protect(x)) == x, got '" + roundTripped + "'";
+            }
+            // Protecting an already-protected value must be a no-op, not a
+            // second encryption pass - otherwise a caller that accidentally
+            // re-saves a stored value (rather than fresh plaintext) would
+            // corrupt it, since Unprotect only ever decrypts once.
+            string protectedTwice = SecretProtector.Protect(protectedValue, options);
+            if (protectedTwice != protectedValue)
+            {
+                return "expected Protect to be a no-op on an already-'dpapi:'-prefixed value, got a different value";
+            }
+            return null;
+        }
+
+        private static string TestSecretProtectorLegacyPlaintext()
+        {
+            string legacy = "a-plaintext-value-with-no-prefix";
+            string actual = SecretProtector.Unprotect(legacy);
+            if (actual != legacy)
+            {
+                return "expected an unprefixed legacy value to pass through unchanged, got '" + actual + "'";
+            }
+            return null;
+        }
+
+        private static string TestNeedsMigrationPlaintextValue()
+        {
+            if (!NeedsMigration("a-plaintext-secret"))
+            {
+                return "expected a non-empty, unprefixed value to need migration";
+            }
+            return null;
+        }
+
+        private static string TestNeedsMigrationAlreadyEncryptedOrEmpty()
+        {
+            if (NeedsMigration("dpapi:AQAAANCMnd8BFdERjHoAwE"))
+            {
+                return "expected an already-'dpapi:'-prefixed value to not need migration";
+            }
+            if (NeedsMigration(null))
+            {
+                return "expected a null value to not need migration";
+            }
+            if (NeedsMigration(""))
+            {
+                return "expected an empty value to not need migration";
+            }
+            return null;
+        }
+
+        private static string TestGenerateCmdLinesRejectsUnsafeCharacters()
+        {
+            string[] unsafeValues = { "http://x \" & calc.exe & rem \"", "tok\"&calc.exe&rem\"", "\\\\share & calc.exe", "line1\nline2" };
+            foreach (string unsafeValue in unsafeValues)
+            {
+                try
+                {
+                    GenerateCmdLines(unsafeValue, null, 6, null);
+                    return "expected serverUrl '" + unsafeValue + "' to be rejected, but GenerateCmdLines accepted it";
+                }
+                catch (ArgumentException)
+                {
+                    // expected
+                }
+                try
+                {
+                    GenerateCmdLines("https://server/api/v1/inventory", unsafeValue, 6, null);
+                    return "expected token '" + unsafeValue + "' to be rejected, but GenerateCmdLines accepted it";
+                }
+                catch (ArgumentException)
+                {
+                    // expected
+                }
+                try
+                {
+                    GenerateCmdLines("https://server/api/v1/inventory", null, 6, unsafeValue);
+                    return "expected packageSharePath '" + unsafeValue + "' to be rejected, but GenerateCmdLines accepted it";
+                }
+                catch (ArgumentException)
+                {
+                    // expected
+                }
+            }
+            return null;
+        }
+
+        private static string TestIsClientVersionCurrentMatchesEitherPackage()
+        {
+            if (!IsClientVersionCurrent("0.15.1", "0.15.1", "0.16.0"))
+            {
+                return "expected a version matching net35Version to be current";
+            }
+            if (!IsClientVersionCurrent("0.16.0", "0.15.1", "0.16.0"))
+            {
+                return "expected a version matching net40Version to be current";
+            }
+            return null;
+        }
+
+        private static string TestIsClientVersionCurrentOutdatedWhenMatchesNeither()
+        {
+            if (IsClientVersionCurrent("0.14.0", "0.15.1", "0.16.0"))
+            {
+                return "expected a version matching neither package to be outdated";
+            }
+            return null;
+        }
+
+        private static string TestIsClientVersionCurrentTreatsEmptyAsOutdated()
+        {
+            if (IsClientVersionCurrent("", "0.15.1", "0.16.0"))
+            {
+                return "expected an empty clientVersion to be outdated";
+            }
+            if (IsClientVersionCurrent(null, "0.15.1", "0.16.0"))
+            {
+                return "expected a null clientVersion to be outdated";
+            }
+            return null;
+        }
+
+        private static string TestIsClientVersionCurrentIgnoresMissingPackage()
+        {
+            if (IsClientVersionCurrent("0.15.1", null, "0.16.0"))
+            {
+                return "expected a version that would have matched a missing net35 package to be outdated, not current";
+            }
+            if (!IsClientVersionCurrent("0.16.0", null, "0.16.0"))
+            {
+                return "expected a version matching the only present package (net40) to be current";
+            }
+            return null;
+        }
+
+        private static string TestResolveUpdateCredentialsFallsBackToSavedWhenBlank()
+        {
+            string username = "";
+            string password = "";
+            ResolveUpdateCredentials(ref username, ref password, true, "CORP\\svc-update", "saved-secret");
+            if (username != "CORP\\svc-update" || password != "saved-secret")
+            {
+                return "expected blank credentials with useSavedCredentials=true to resolve to the saved account, got username='" + username + "' password='" + password + "'";
+            }
+            return null;
+        }
+
+        private static string TestResolveUpdateCredentialsPrefersTypedOverride()
+        {
+            string username = "DOMAIN\\typed-admin";
+            string password = "typed-secret";
+            ResolveUpdateCredentials(ref username, ref password, true, "CORP\\svc-update", "saved-secret");
+            if (username != "DOMAIN\\typed-admin" || password != "typed-secret")
+            {
+                return "expected a typed per-push override to win over the saved account even when useSavedCredentials=true, got username='" + username + "' password='" + password + "'";
+            }
+            return null;
+        }
+
+        private static string TestResolveUpdateCredentialsIgnoredWhenFlagIsFalse()
+        {
+            string username = "";
+            string password = "";
+            ResolveUpdateCredentials(ref username, ref password, false, "CORP\\svc-update", "saved-secret");
+            if (username != "" || password != "")
+            {
+                return "expected Client actions (useSavedCredentials=false) to never fall back to the Client updates saved account, got username='" + username + "' password='" + password + "'";
+            }
+            return null;
+        }
+
+        private static string TestResolveUpdateCredentialsFallsThroughWhenNothingSaved()
+        {
+            string username = "";
+            string password = "";
+            ResolveUpdateCredentials(ref username, ref password, true, null, null);
+            if (username != "" || password != "")
+            {
+                return "expected blank credentials with no saved account configured to stay blank (falls through to the service identity), got username='" + username + "' password='" + password + "'";
+            }
+            return null;
+        }
+
+        private static string TestTryResolveAdSyncCredentialsIgnoredWhenFlagIsFalse()
+        {
+            string username = "typed-user";
+            string password = "typed-pass";
+            string error;
+            bool ok = TryResolveAdSyncCredentials(false, true, true, "CORP\\ad-admin", "ad-secret", ref username, ref password, out error);
+            if (!ok || error != null || username != "typed-user" || password != "typed-pass")
+            {
+                return "expected useAdCredentials=false to leave typed credentials untouched, got ok=" + ok + " error='" + error + "' username='" + username + "' password='" + password + "'";
+            }
+            return null;
+        }
+
+        private static string TestTryResolveAdSyncCredentialsRejectsWhenAdSyncDisabled()
+        {
+            string username = "";
+            string password = "";
+            string error;
+            bool ok = TryResolveAdSyncCredentials(true, false, true, "CORP\\ad-admin", "ad-secret", ref username, ref password, out error);
+            if (ok || String.IsNullOrEmpty(error))
+            {
+                return "expected useAdCredentials=true with AD sync disabled to be rejected with an error message, got ok=" + ok + " error='" + error + "'";
+            }
+            return null;
+        }
+
+        private static string TestTryResolveAdSyncCredentialsUsesServiceIdentityWhenConfigured()
+        {
+            string username = "";
+            string password = "";
+            string error;
+            bool ok = TryResolveAdSyncCredentials(true, true, true, "CORP\\ad-admin", "ad-secret", ref username, ref password, out error);
+            if (!ok || error != null || username != "" || password != "")
+            {
+                return "expected AdUseServiceIdentity=true to resolve to blank username/password (service identity), got ok=" + ok + " error='" + error + "' username='" + username + "' password='" + password + "'";
+            }
+            return null;
+        }
+
+        private static string TestTryResolveAdSyncCredentialsUsesSavedAccountWhenNotServiceIdentity()
+        {
+            string username = "";
+            string password = "";
+            string error;
+            bool ok = TryResolveAdSyncCredentials(true, true, false, "CORP\\ad-admin", "ad-secret", ref username, ref password, out error);
+            if (!ok || error != null || username != "CORP\\ad-admin" || password != "ad-secret")
+            {
+                return "expected AdUseServiceIdentity=false to resolve to the saved AD username/password, got ok=" + ok + " error='" + error + "' username='" + username + "' password='" + password + "'";
+            }
+            return null;
+        }
+
+        private static string TestTryResolveAdSyncCredentialsRejectsWhenSavedAccountIncomplete()
+        {
+            string username = "";
+            string password = "";
+            string error;
+            bool ok = TryResolveAdSyncCredentials(true, true, false, "CORP\\ad-admin", "", ref username, ref password, out error);
+            if (ok || String.IsNullOrEmpty(error))
+            {
+                return "expected useAdCredentials=true with AdUseServiceIdentity=false and a blank saved password to be rejected, got ok=" + ok + " error='" + error + "'";
+            }
+            return null;
+        }
+
+        private static string TestResolveAdDescriptionSyncEnabledUsesExplicitConfigValue()
+        {
+            bool result = ServerOptions.ResolveAdDescriptionSyncEnabled("false", true);
+            if (result != false)
+            {
+                return "expected an explicit 'false' config value to win over adSyncEnabledResolved=true, got " + result;
+            }
+            bool result2 = ServerOptions.ResolveAdDescriptionSyncEnabled("true", false);
+            if (result2 != true)
+            {
+                return "expected an explicit 'true' config value to win over adSyncEnabledResolved=false, got " + result2;
+            }
+            return null;
+        }
+
+        private static string TestResolveAdDescriptionSyncEnabledMigratesFromAdSyncEnabledWhenUnset()
+        {
+            bool result = ServerOptions.ResolveAdDescriptionSyncEnabled(null, true);
+            if (result != true)
+            {
+                return "expected a missing config value to inherit adSyncEnabledResolved=true, got " + result;
+            }
+            bool result2 = ServerOptions.ResolveAdDescriptionSyncEnabled(null, false);
+            if (result2 != false)
+            {
+                return "expected a missing config value to inherit adSyncEnabledResolved=false, got " + result2;
+            }
+            return null;
+        }
+
+        private static string TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled()
+        {
+            ServerOptions options = new ServerOptions();
+            options.AdDescriptionSyncEnabled = false;
+            InventoryServer server = new InventoryServer(options);
+
+            Dictionary<string, object> previous = new Dictionary<string, object>();
+            previous["adDescription"] = "Manually set description";
+            previous["adSyncStatus"] = "ok";
+            previous["adSyncedAt"] = "2026-07-20T10:00:00Z";
+
+            AdSyncFields fields = server.ComputeAdSyncFields("CARRY-FORWARD-TEST", previous);
+            if (!fields.Applicable)
+            {
+                return "expected Applicable=true so the manual Description gets written back, got false";
+            }
+            if (Convert.ToString(fields.Description) != "Manually set description")
+            {
+                return "expected the previous adDescription to be carried forward unchanged, got '" + Convert.ToString(fields.Description) + "'";
+            }
+            return null;
+        }
+
+        private static string TestComputeAdSyncFieldsNoOpForNewComputerWhenSyncDisabled()
+        {
+            ServerOptions options = new ServerOptions();
+            options.AdDescriptionSyncEnabled = false;
+            InventoryServer server = new InventoryServer(options);
+
+            AdSyncFields fields = server.ComputeAdSyncFields("BRAND-NEW-TEST", null);
+            if (fields.Applicable)
+            {
+                return "expected Applicable=false for a brand-new computer (nothing to carry forward), got true";
+            }
+            return null;
+        }
+
+        private static string TestParseCmdSettingsDefaultPackageRoot()
+        {
+            string path = Path.GetTempFileName();
+            try
+            {
+                File.WriteAllLines(path, GenerateCmdLines("https://server/api/v1/inventory", null, 6, null), Encoding.ASCII);
+                Dictionary<string, string> settings = ParseCmdSettings(path);
+                if (settings.ContainsKey("packageSharePath"))
+                {
+                    return "expected no packageSharePath key for the default %~dp0 root, got '" + settings["packageSharePath"] + "'";
+                }
+                return null;
+            }
+            finally
+            {
+                File.Delete(path);
+            }
+        }
+
+        private static string TestParseCmdSettingsCustomPackageSharePath()
+        {
+            string path = Path.GetTempFileName();
+            try
+            {
+                string share = @"\\192.168.24.4\backup\gpo-client";
+                File.WriteAllLines(path, GenerateCmdLines("https://server/api/v1/inventory", null, 6, share), Encoding.ASCII);
+                Dictionary<string, string> settings = ParseCmdSettings(path);
+                if (!settings.ContainsKey("packageSharePath") || settings["packageSharePath"] != share)
+                {
+                    string actual = settings.ContainsKey("packageSharePath") ? settings["packageSharePath"] : "(missing)";
+                    return "expected packageSharePath '" + share + "', got '" + actual + "'";
+                }
+                return null;
+            }
+            finally
+            {
+                File.Delete(path);
+            }
         }
 
         private static bool ContainsSignature(byte[] data, byte thirdByte, byte fourthByte)

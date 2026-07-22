@@ -11,6 +11,8 @@
 - The TLS server certificate and its private key in the `LocalMachine\My` certificate store.
 - The license inventory catalog (`licenses.json`) with admin-entered Name, Version, License, and Comment fields.
 - The certificate history log (`_certificates/certificate-history.json`) recording every uploaded certificate and the risks found at upload time.
+- Cached Active Directory computer descriptions (adDescription field on each report), and AD credentials when explicit AD credentials (rather than the service identity) are configured.
+- Client Auto-Update credentials (`ClientUpdateUsername`/`ClientUpdatePassword`), when a dedicated WinRM account is configured on the `Client updates` page instead of relying on the service identity.
 
 ## Trust Boundaries
 
@@ -36,6 +38,9 @@
 - POST body to `POST /api/v1/server/settings` (staleHours, useHttps, port, enableHttp, httpsPort, acknowledgeRisks fields) that changes the stale threshold and independently starts, stops, or moves the HTTP and HTTPS listeners using the currently configured certificate.
 - POST/PUT bodies to `/api/v1/licenses` (name, version, license, comment, computers fields) written to `licenses.json` and rendered back into the dashboard.
 - POST body to `POST /api/v1/server/admin-password` (newUsername, currentPassword, newPassword) that sets up or rotates the dashboard's Basic Auth username and password. `currentPassword` is required only when Basic Auth is already configured.
+- POST body to `POST /api/v1/client-updates/credentials` (username, password) that saves the optional WinRM credential fallback used by Client Auto-Update pushes. No current-password check (unlike admin-password) - any authenticated dashboard user can already trigger a WinRM push via `Client actions` with arbitrary typed credentials, so this endpoint grants no capability the dashboard didn't already have.
+- The computer name embedded in a client's inventory report, when AD sync is enabled: used to build an LDAP search filter (see AdLookupService.LookupComputerDescription), escaped per RFC 4515 before use.
+- The Organizational Unit list (`AdComputerImportOUs`) configured via `POST /api/v1/server/settings`, used to build LDAP directory paths (`LDAP://<OU DN>`) for AD Computer Import (see AdLookupService.SearchComputers) - admin-configured only, not derived from any client-reported or otherwise attacker-influenceable data, so it is not run through `LdapFilterEscaper`. That escaping targets search-filter clauses, not directory paths, and is applied to the one input in this list that IS attacker-influenceable: the client-reported computer name in the entry above.
 
 ## Required Invariants
 
@@ -51,11 +56,14 @@
 - The certificate endpoints must require the same Basic Auth as the rest of the dashboard, must reject oversized or malformed PFX input before touching the certificate store, and must never write the PFX password to logs or saved config.
 - Enabling HTTPS from `POST /api/v1/server/settings` must re-evaluate the configured certificate's risks on every call and must not switch over silently when risks are present; it must require an explicit `acknowledgeRisks` flag in that case.
 - License records are untrusted display data. The dashboard must escape them the same way it escapes report fields.
-- The admin password endpoint must require the current password to change an already-configured password. It may accept a new username and password without a current password only while Basic Auth is not yet configured — at that point the endpoint is no less exposed than the rest of the dashboard, which is already unauthenticated.
+- The admin password endpoint must require the current password to change an already-configured password. It may accept a new username and password without a current password only while Basic Auth is not yet configured — at that point the endpoint is no less exposed than the rest of the dashboard, which is restricted to the local machine (loopback) rather than open to the network (since 0.15.1).
+- Every endpoint gated by `IsWebRequestAuthorized` must reject non-loopback requests while Basic Auth is unconfigured (since 0.15.1). `POST /api/v1/inventory` is exempt from this - it is dispatched before the check and gated by its own Token.
 - TLS connections must use an explicit protocol version (not "negotiate any"), since at least one .NET Framework runtime treats the auto-negotiate value as "no protocols enabled" and rejects the handshake outright.
 - Every accepted socket must have a read/write timeout, so a stalled handshake or a client that opens a connection without sending data cannot hold a server thread indefinitely.
 - `POST /api/v1/server/settings` must reject a request that disables HTTP unless HTTPS is genuinely active (a live listener with a usable certificate) in that same evaluation, so the settings endpoint itself can never leave the server with no reachable listener.
 - Port changes for either listener must bind and start the new listener before touching the old one, so a failed rebind (port in use, no permission) leaves the previously working listener running unaffected.
+- The LDAP filter built from a client-reported computer name must have its special characters escaped before use, to prevent LDAP injection from a maliciously-named reporting host.
+- An unreachable or slow AD must not block or fail inventory report ingestion.
 
 ## Main Risks
 
@@ -65,7 +73,7 @@
 - A broad listener prefix such as `http://+:8080/` can expose the service on more interfaces than intended.
 - A compromised dashboard account can trigger remote client installation or removal through WinRM.
 - Passing WinRM credentials through plain HTTP can expose administrative credentials.
-- Broad TrustedHosts entries can weaken WinRM server authentication.
+- Broad TrustedHosts entries can weaken WinRM server authentication. Adding a target to TrustedHosts forces NTLM instead of Kerberos, which does not verify the target's identity - on an untrusted network segment this exposes the WinRM credential to a MITM or NTLM relay. TrustedHosts entries the dashboard adds are also never automatically removed afterward, so they accumulate across repeated client actions unless an administrator prunes them separately.
 - Saved action logs can expose hostnames, usernames, and command output.
 - A large `Content-Length` header or a slow-loris HTTP connection can exhaust server memory (mitigated in v0.1.0 with a 16 MB body limit and a 64 KB header limit).
 - An operator or attacker with dashboard credentials can use `POST /api/v1/client-package/configure` to redirect the server URL in `Install-ClientGpo.cmd` to a different host. Clients that download and apply the updated package will send reports to the new address. Protect the dashboard with Basic Auth and limit access to the management network.
@@ -77,8 +85,11 @@
 - A compromised dashboard account can call `DELETE /api/v1/server/certificate` to remove the active certificate and force the server back to plain HTTP, a downgrade attack against anyone who connects afterward. This is the same class of risk as an account being able to enable HTTPS with an attacker's certificate in the first place - both require dashboard-level compromise, which Basic Auth and network restrictions are the actual controls against, not anything in the certificate endpoints themselves.
 - License records accept arbitrary free text in the License and Comment fields. They are rendered into the dashboard as escaped text, not executed, but should not be treated as a place to store secrets.
 - If a browser has cached Basic Auth credentials for the dashboard's origin, a malicious page could trigger a same-origin request the browser auto-authenticates (a CSRF-like risk inherent to Basic Auth, not specific to this project). The admin password change endpoint's current-password requirement limits the blast radius of this for that one action; other state-changing endpoints do not have an equivalent second factor.
-- While Basic Auth is unconfigured, anyone who can reach the dashboard can set the initial username and password themselves, effectively claiming the account. This is an accepted tradeoff (see Required Invariants) rather than an oversight: the rest of the dashboard is equally open in that state. The mitigation is operational — configure Basic Auth immediately after install, before exposing the server beyond a trusted network.
+- While Basic Auth is unconfigured, the entire management API (dashboard, settings, certificate import, WinRM client install/uninstall, initial admin-password setup) is restricted to requests from the local machine (loopback) rather than reachable from the network (fixed in 0.15.1 - previously it was reachable by anyone who could reach the port). An administrator setting up the server for the first time from a remote workstation must either RDP/console into the server for that first step, or pass `-WebUsername`/`-WebPassword` to `Install-Server.ps1` at install time to skip the unconfigured window entirely. Configure Basic Auth as soon as practical either way, before exposing the server beyond a trusted network.
 - The HTTP-disable safety gate only evaluates listener state at the moment of the request. An operator can disable HTTP while HTTPS is genuinely working, then have HTTPS later stop working on its own (certificate expiry, deletion from the store by another tool or admin, a private key that no longer matches) with nothing left to re-evaluate the gate. The dashboard becomes unreachable until an administrator with local server access edits `server-config.json` to set `EnableHttp` back to `true` and restarts the service — documented as the recovery procedure in the README. This is an accepted operational risk of the safety gate's design, not a bug in it: the gate protects against the dashboard locking itself out at the moment of the change, not against a certificate degrading afterward.
+- AdPassword, WebPassword, and Token are all encrypted at rest with Windows DPAPI (machine scope) before being written to server-config.json; any already-plaintext value from an older install is migrated to encrypted form automatically on the next service start. CertificatePfxPassword is not persisted at all (used once, transiently, for a PFX import). DPAPI at machine scope is decryptable by any sufficiently privileged process on the same host - it raises the bar over plaintext (protects against the config file being copied off the box or into a backup) but is not a substitute for restricting who can reach the server itself.
+- AD sync is opt-in and off by default, so this entire risk surface does not apply to deployments that don't enable it.
+- `serverUrl`, `token`, and `packageSharePath` on `POST /api/v1/client-package/configure` (and the equivalent `New-ClientGpoPackage.ps1` parameters) are written into `Install-ClientGpo.cmd`, a batch file a GPO computer startup script later runs as SYSTEM on every deployed client. A value containing `"`, `&`, `|`, `<`, `>`, `^`, or a line break could previously turn a configured value into an injected command (fixed in v0.15.1: both entry points now reject any of those characters before generating the file).
 
 ## Controls
 
@@ -86,7 +97,8 @@
 - Prefer a host-specific listener prefix or firewall scope for production.
 - Use HTTPS termination or a reverse proxy outside trusted LAN segments.
 - Keep the server `DataPath` writable only by the server service identity and administrators.
-- Restrict read access to `C:\ProgramData\WindowsInventoryLite\server-config.json` to the service account and administrators. The file contains `Token`, `WebUsername`, and `WebPassword` in plaintext.
+- Restrict read access to `C:\ProgramData\WindowsInventoryLite\server-config.json` to the service account and administrators. `WebUsername` remains plaintext in the file (it is not a secret); `Token`, `WebPassword`, and `AdPassword` are encrypted at rest with Windows DPAPI (see Main Risks section above). The server reapplies this restricted ACL (Administrators + SYSTEM only) on every write, not just at install time, so the file cannot drift back to an inherited, broader ACL if it is ever deleted and recreated while the service is running (since 0.15.1). DPAPI at machine scope is decryptable by any sufficiently privileged local process regardless, so this ACL - not the encryption - is the actual confidentiality boundary for these values.
+- The dashboard sends `Content-Security-Policy: default-src 'self'; script-src 'self'; ...` on every response (since 0.15.1), as a backstop against a future unescaped `innerHTML` sink - not the primary XSS defense, which remains consistent output escaping (`escapeHtml`/`escapeHtmlOrEmpty` in app.js). `script-src` allows exactly one inline script by its `sha256` hash (`index.html`'s theme-restore script, which must run before `styles.css` loads) instead of a blanket `'unsafe-inline'` - the hash-based allowlist keeps the CSP's protection against any *other*, future inline script while still permitting this one known-fixed piece of markup. If that script's content ever changes, the hash must be recomputed or the script silently breaks again (this happened once already in 0.16.2 - see CHANGELOG).
 - Review generated JSON before sharing it outside the organization.
 - Protect the dashboard with Basic Auth and network restrictions before enabling WinRM client actions.
 - Prefer DNS computer names and Kerberos for WinRM. Use IP targets with TrustedHosts only on a trusted management network.
@@ -102,3 +114,5 @@
 - Do not treat an acknowledged certificate risk warning as resolved — replace the flagged certificate with a valid one as soon as practical.
 - Do not disable HTTP until HTTPS has been verified reachable from an actual client, not just accepted by the settings endpoint. Keep local server access (RDP, console) available for the recovery procedure in case a certificate degrades after HTTP is off.
 - Monitor certificate expiry independently of this application if HTTP is disabled in production; there is no built-in alerting for an approaching expiry date.
+- Prefer the service account identity over explicit AD credentials when the service already runs under a domain account (which WinRM client actions already require) - it needs no additional secret in server-config.json.
+- The same identity-first preference applies to Client Auto-Update: only configure `ClientUpdateUsername`/`ClientUpdatePassword` on the `Client updates` page if the service identity genuinely cannot reach update targets.

@@ -15,7 +15,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLiteClient";
-        internal const string ProductVersion = "0.6.1";
+        internal const string ProductVersion = "0.2.0";
 
         private static int Main(string[] args)
         {
@@ -30,7 +30,22 @@ namespace WindowsInventoryLite
             if (options.RunOnce)
             {
                 InventoryCollector collector = new InventoryCollector(options);
-                collector.CollectAndSave();
+                try
+                {
+                    collector.CollectAndSave();
+                    DebugLogger.Log(options, "Server", "Collection cycle completed successfully.");
+                }
+                catch (Exception ex)
+                {
+                    // Unhandled otherwise (the console already shows it,
+                    // unlike the service's timer callback which must
+                    // swallow it) - also written to the debug log when
+                    // enabled, for a manual --once diagnostic run whose
+                    // console output isn't being watched live or is being
+                    // run remotely.
+                    DebugLogger.Log(options, "Error", ex.ToString());
+                    throw;
+                }
                 return 0;
             }
 
@@ -71,6 +86,7 @@ namespace WindowsInventoryLite
                 {
                     InventoryCollector collector = new InventoryCollector(options);
                     collector.CollectAndSave();
+                    DebugLogger.Log(options, "Server", "Collection cycle completed successfully.");
                 }
                 catch (Exception ex)
                 {
@@ -78,12 +94,19 @@ namespace WindowsInventoryLite
                     // blip, disk full) doesn't take down the whole service - the
                     // timer just tries again next interval. Logged so a
                     // persistently-failing agent is actually visible somewhere
-                    // instead of silently reporting nothing forever.
+                    // instead of silently reporting nothing forever. Written to
+                    // both sinks independently (see AdLookupService.cs on the
+                    // server side for why EventLog and the debug log must never
+                    // share a try/catch): the Event Log write depends on this
+                    // machine already having (or being able to auto-register)
+                    // the "WindowsInventoryLiteClient" source, which the opt-in
+                    // debug log does not depend on at all.
                     try
                     {
                         System.Diagnostics.EventLog.WriteEntry(Program.ServiceName, ex.ToString(), System.Diagnostics.EventLogEntryType.Warning);
                     }
                     catch { }
+                    DebugLogger.Log(options, "Error", ex.ToString());
                 }
             }
         }
@@ -99,6 +122,14 @@ namespace WindowsInventoryLite
         public bool RunOnce;
         public bool SkipSoftware;
         public bool ShowVersion;
+        // Off by default - a plain-text log file capturing each collection
+        // cycle's outcome (success or the full exception on failure). See
+        // DebugLogger below. Independent of the Windows Event Log write
+        // right next to it, which depends on this machine already having
+        // (or being able to auto-register) the "WindowsInventoryLiteClient"
+        // event source.
+        public bool DebugLogEnabled;
+        public string DebugLogPath;
 
         public static ClientOptions Parse(string[] args)
         {
@@ -145,9 +176,72 @@ namespace WindowsInventoryLite
                         options.IntervalHours = parsed;
                     }
                 }
+                else if (key == "--debug-log-enabled")
+                {
+                    options.DebugLogEnabled = true;
+                }
+                else if (key == "--debug-log-path" && i + 1 < args.Length)
+                {
+                    options.DebugLogPath = args[++i];
+                }
             }
 
             return options;
+        }
+    }
+
+    // Optional, off-by-default plain-text log file - the client-side
+    // counterpart to the server's DebugLogger.cs. Exists because the
+    // Windows Event Log write next to every call site here depends on this
+    // machine already having (or being able to auto-register) the
+    // "WindowsInventoryLiteClient" event source, which is not guaranteed
+    // and has no visible failure indication when it doesn't hold - a file
+    // write has no such dependency. A no-op when disabled.
+    internal static class DebugLogger
+    {
+        private static readonly object writeLock = new object();
+
+        internal static void Log(ClientOptions options, string category, string message)
+        {
+            if (options == null || !options.DebugLogEnabled)
+            {
+                return;
+            }
+
+            string line = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + " [" + category + "] " + message;
+
+            try
+            {
+                lock (writeLock)
+                {
+                    string path = ResolvePath(options);
+                    string directory = Path.GetDirectoryName(path);
+                    if (!String.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+                    {
+                        Directory.CreateDirectory(directory);
+                    }
+                    File.AppendAllText(path, line + Environment.NewLine, new UTF8Encoding(false));
+                }
+            }
+            catch
+            {
+                // A logging failure must never break the collection cycle
+                // being logged.
+            }
+        }
+
+        internal static string ResolvePath(ClientOptions options)
+        {
+            if (!String.IsNullOrEmpty(options.DebugLogPath))
+            {
+                return options.DebugLogPath;
+            }
+            // Nested 2-argument Path.Combine calls, not the 3/4-argument
+            // overloads - those were added in .NET 4.0 and this client also
+            // targets Net35 (mscorlib 2.0), which only has the 2-arg form.
+            string baseDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WindowsInventoryLite");
+            string logsDir = Path.Combine(baseDir, "_logs");
+            return Path.Combine(logsDir, "debug-client.log");
         }
     }
 
@@ -729,6 +823,22 @@ namespace WindowsInventoryLite
 
         private static void PostJson(string url, string json, string token)
         {
+            if (url.StartsWith("https:", StringComparison.OrdinalIgnoreCase))
+            {
+                // The server requires exactly TLS 1.2 (see
+                // AuthenticateAsServer(..., SslProtocols.Tls12, ...) on the
+                // server side) with no fallback. This client targets .NET
+                // 3.5/4.0, whose SecurityProtocolType enum predates the
+                // named Tls12 member (added in .NET 4.5) and whose default
+                // enabled protocol set on older Windows/.NET installs may
+                // not include TLS 1.2 at all - without this, the handshake
+                // fails with no usable error, while plain HTTP keeps working
+                // (masking the cause). 3072 = SecurityProtocolType.Tls12's
+                // underlying value; the cast keeps this compiling under the
+                // pre-4.5 target used for the Net35 client build.
+                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
+            }
+
             byte[] body = Encoding.UTF8.GetBytes(json);
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
             request.Method = "POST";

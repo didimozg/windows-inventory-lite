@@ -27,7 +27,7 @@ The client and server are small self-contained C# services that run on .NET Fram
 - The dashboard displays server version and client agent version.
 - Operators can delete stale or unwanted host records from the dashboard.
 - Operators can install, update, or uninstall clients from the dashboard through WinRM.
-- The Client package tab shows the deployed client exe versions and current CMD settings, lets operators reconfigure the server URL, ingestion token, and reporting interval, and provides a ZIP download of the complete GPO package.
+- The Client package tab shows the deployed client exe versions and current CMD settings, lets operators reconfigure the server URL, ingestion token, reporting interval, and package share path, and provides a ZIP download of the complete GPO package.
 - HTTPS is a first-class option: bind a certificate at install time by thumbprint or by importing a PFX, or import a new PFX later from the dashboard Certificate tab. Enabling or disabling HTTPS itself is a separate step on the Settings > General page, and every certificate import is checked for common risks (expired, missing private key, no SAN, weak key) and kept in a certificate history log.
 - HTTP and HTTPS run as two independent listeners on two independent ports (defaults 8080 and 8443), each start/stop/rebind independently of the other. HTTP can be turned off entirely once HTTPS is confirmed working; the server refuses that change unless HTTPS is genuinely active, so the settings page can never lock itself out.
 - The stale threshold (default 48 hours) is configurable on Settings > General instead of fixed in code.
@@ -113,7 +113,15 @@ If the `.cmd` startup wrapper lives in SYSVOL and the PowerShell script plus cli
     -PackageSharePath '\\fileserver.example.local\software\windows-inventory-lite'
 ```
 
-After the server is installed, the server URL, ingestion token, and reporting interval in `Install-ClientGpo.cmd` can be updated from the dashboard `Client package` tab without rebuilding. The tab also generates a ZIP download of the complete package.
+After the server is installed, the server URL, ingestion token, reporting interval, and package share path in `Install-ClientGpo.cmd` can be updated from the dashboard `Client package` tab without rebuilding. The tab also generates a ZIP download of the complete package.
+
+## Interactive Install Wizard
+
+For a first-time setup, run `src/Install-Wizard.ps1` with no parameters for a menu-driven walkthrough of installing or removing the server, a local client, or clients on remote machines via WinRM - it asks one question at a time and shows the exact command it's about to run before doing anything. Everyone else can keep using the flag-based scripts below directly; the wizard only calls them, it doesn't replace them.
+
+If a server is already installed, choosing "Install server" offers a "just refresh" option that skips every question and reapplies the current saved settings as-is (useful after pulling a new build) - pick "Full reconfigure" instead to change any setting.
+
+Use `-WhatIf` to walk through the questions and see the resolved command without actually running anything.
 
 ## Server Installation
 
@@ -178,10 +186,17 @@ Deployment flow:
 5. Add `Install-ClientGpo.cmd` as a GPO computer startup script.
 6. Reboot target computers or wait for the next startup script run.
 
-The deploy script writes a local log to `C:\ProgramData\WindowsInventoryLite\Logs\gpo-deploy.log`.
-Central logging to the package share is present in the script as commented code and is disabled by default.
+The deploy script writes a local log to `C:\ProgramData\WindowsInventoryLite\client-data\Logs\gpo-deploy.log`.
 
 For updates, replace the package files in the share. The deploy script compares the packaged client version with the installed version and skips clients that already match.
+
+## Client and Server on the Same Machine
+
+When the server also runs a local client to inventory its own host, the client's files (`WindowsInventoryLiteClient.exe`, its local JSON report, `client-version.txt`, and its logs) live under `client-data\`, next to but separate from the server's own `server-bin`, `server-data`, `server-content`, and `client-package` folders - not mixed into the shared root.
+
+An already-installed client from before this layout shipped migrates automatically the next time it's installed or updated (a WinRM push from `Client actions`/`Client updates`, a GPO startup script re-run, or a manual `Install-Client.ps1`/`Deploy-ClientGpo.ps1` run) - no separate migration step is needed. The old executable is removed after the new one is confirmed running; any data files left at the old location (the old JSON report, old logs) are not deleted automatically and can be removed by hand once you've confirmed the client is reporting normally from its new location.
+
+`Uninstall-Client.ps1` and `Uninstall-ClientWinRM.ps1` both refuse to recursively delete their target folder if it turns out to be the shared `WindowsInventoryLite` root itself (detected by the presence of `server-config.json`) - this protects the server's own data on a co-located machine even if `-InstallPath` is overridden to point there by mistake.
 
 ## Forced Client Actions Through WinRM
 
@@ -210,12 +225,12 @@ Build the client package before installing or updating the server:
 
 `Install-Server.ps1` copies `.\dist\gpo-client` to `C:\ProgramData\WindowsInventoryLite\client-package` when the folder exists. You can also pass `-ClientPackageSourcePath` and `-ClientPackagePath`.
 
-After installation, the dashboard `Client package` tab can reconfigure the server URL, ingestion token, and reporting interval in `Install-ClientGpo.cmd` without running a new build.
+After installation, the dashboard `Client package` tab can reconfigure the server URL, ingestion token, reporting interval, and package share path in `Install-ClientGpo.cmd` without running a new build.
 
 If the server service runs as LocalSystem, WinRM installation to remote computers usually fails. Run the service under a domain account with the required local administrator rights, or use a managed service account with equivalent permissions.
 Do not send WinRM passwords through the dashboard over plain HTTP outside a trusted management network.
 
-The server stores WinRM job logs in `DataPath\_client-install-jobs`. The default retention period is 30 days. Set a different default during server installation:
+The server stores WinRM job logs in `DataPath\_client-install-jobs`. The retention period is 30 days by default - set the initial value during server installation:
 
 ```powershell
 .\src\Install-Server.ps1 `
@@ -223,7 +238,11 @@ The server stores WinRM job logs in `DataPath\_client-install-jobs`. The default
     -InstallLogRetentionDays 60
 ```
 
-The `Client actions` tab also lets you set the retention period for a specific job. Saved logs contain the action, targets, status, command output, errors, timestamps, and the WinRM username. Passwords are not written to log files.
+Change it later from Settings > General ("Client action log retention (days)", under Inventory) - it applies to every install/update/uninstall job, current and future, not just the one just installed with. Saved logs contain the action, targets, status, command output, errors, timestamps, and the WinRM username. Passwords are not written to log files.
+
+A connection failure is reported as one of two short messages - the computer's name could not be resolved, or WinRM itself is not reachable on that computer - with the original error text still appended, instead of the raw OS-localized exception text.
+
+Instead of typing WinRM credentials for a push, check "Use global AD settings" on the `Client actions` tab to reuse the AD Domain/credentials already configured under "Configure AD User" (Settings > General > Active Directory) - the server's own service identity if "Use service account identity" is checked there, or the saved AD account otherwise. This requires AD identity to actually be configured, and a saved username/password when not using the service identity - the push is rejected with a clear error otherwise.
 
 ## HTTPS Setup
 
@@ -274,6 +293,61 @@ The safety gate above only checks listener state at the moment HTTP is disabled 
 
 Either path only restores HTTP — it does not touch the stored certificate or the `UseHttps` setting, so HTTPS resumes normally on its own once a working certificate is back in place.
 
+## Active Directory Integration
+
+Optional and off by default. Settings > General's "Active Directory" block splits AD integration into two independent checkboxes:
+
+- **Configure AD User** - makes the AD domain/credentials below available to `Client actions`, `Client updates`, and AD Computer Import (see below). On its own, it does not touch inventory data.
+- **Sync Description from AD** - looks up each reporting computer's Active Directory `description` attribute and writes it into the `Clients` table's Description column. While this is on, the column is read-only and its header reads "AD Description". Turn it off and the header switches to plain "Description", and the column becomes editable directly in the dashboard - a manual value stays in place until sync is turned back on, at which point the next refresh overwrites it with AD's value again.
+
+Enable AD identity at install time with:
+
+```powershell
+.\src\Install-Server.ps1 -AdSyncEnabled
+```
+
+`-AdSyncEnabled` only configures identity. On a fresh install, Description sync has no saved value of its own yet, so it inherits whatever `-AdSyncEnabled` was set to - a first install behaves exactly like the old single flag did. Deployments upgrading from before the split keep syncing Description with no action needed, for the same reason. Either setting can be toggled independently afterward from Settings > General.
+
+Two sync modes for Description sync:
+
+- **On inventory report** (default): refreshes a computer's cached AD data when it next reports inventory, if the cached value is older than the configured sync interval (default 24 hours).
+- **Periodic timer**: refreshes every known computer on a fixed schedule, independent of whether it has reported recently - useful for computers that still exist in AD but have stopped reporting.
+
+By default the server authenticates to AD using its own Windows Service identity (the same domain account WinRM client actions already require - a `LocalSystem` service can't reach AD any more than it can reach WinRM targets). To use separate, explicit AD credentials instead, uncheck "Use service account identity" and supply a username and password. The AD password is encrypted at rest (Windows DPAPI, machine scope) — the same protection applied to `WebPassword` and `Token`.
+
+If a computer's name has no matching AD computer object, the Description column shows "Not found in AD"; if AD itself was unreachable at sync time, it shows "AD unreachable" and the next report/sweep retries rather than waiting out the full sync interval. Reading the description attribute is allowed to any authenticated domain user under default AD ACLs, so the service account identity usually needs no special AD delegation.
+
+## AD Computer Import
+
+On the `Client actions` tab, two buttons pull a list of computer names directly from Active Directory and fill the Targets field with it, replacing whatever was there - a faster starting point than typing names by hand before a WinRM install/uninstall push:
+
+- **Load all PC from AD** - every computer in the configured scope.
+- **Load PC without client from AD** - the same scope, filtered down to computers that don't have a reporting client yet (compared against the computers already visible on the `Clients` tab) - useful for finding fresh install targets without manually excluding machines that already have the client.
+
+Both search whichever Organizational Units are configured in Settings > General's Active Directory panel ("Organizational Units (DN, one per line)" - one Distinguished Name per line, e.g. `OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru`), including everything nested under each one. Leave the list empty to search the whole domain instead. Both use the same AD Domain/credentials already configured under "Configure AD User" above - there is nothing new to set up if that's already configured.
+
+"Load all PC from AD" returns the raw computer list for the configured scope, unfiltered by report status - trim it by hand afterward if a particular push (e.g. an uninstall) only makes sense for a subset. If one configured OU can't be searched (a typo, a deleted OU), it's skipped and reported as a warning; the rest still load normally, for either button.
+
+## Diagnostics
+
+Both the server and the client can write an optional debug log - a plain-text file capturing AD lookups, client-server report traffic, and unhandled errors, independent of the Windows Event Log (which needs its event source registered and won't always be reachable, especially right after a fresh install).
+
+Server: toggle "Enable debug log" on Settings > General, or `--debug-log-enabled` / `DebugLogEnabled` in `server-config.json`. Defaults to `<DataPath>\_logs\debug.log`; override with `--debug-log-path`.
+
+Client: `--debug-log-enabled` (service or `--once` runs), defaults to `%ProgramData%\WindowsInventoryLite\_logs\debug-client.log`; override with `--debug-log-path`.
+
+Off by default on both ends. Meant to be switched on for the duration of a troubleshooting session, not left running indefinitely.
+
+## Client Auto-Update
+
+The dashboard `Client updates` tab (under Installation) shows which reporting clients are running a version other than the client package currently on the server, and lets an administrator push an update to any of them over WinRM with one click - reusing the same install pipeline as `Client actions`.
+
+By default, an update push uses the server service's own identity, the same WinRM prerequisite `Client actions` already documents. If that identity cannot reach update targets, an optional dedicated WinRM account can be saved on the `Client updates` page itself (`Client update username` / `Client update password`) - the password is encrypted at rest the same way as `WebPassword`/`AdPassword`/`Token`. There is no `Install-Server.ps1` flag for these credentials; they are dashboard-only.
+
+Instead of saving a dedicated account, check "Use global AD settings" on the `Client updates` page to reuse the AD Domain/credentials already configured under "Configure AD User" (Settings > General > Active Directory) - the server's own service identity if "Use service account identity" is checked there, or the saved AD account otherwise. This requires AD identity to actually be configured, and a saved username/password when not using the service identity - the push is rejected with a clear error otherwise.
+
+A "Schedule" section on the same page lets an administrator configure an automatic push instead of clicking "Update selected" by hand - either once at a specific date and time, or repeating every N hours. A scheduled push always targets whichever clients are outdated at the moment it fires, using the saved WinRM account (or the server's own service identity if none is saved) - there is no user present to type credentials for an unattended run.
+
 ## Dashboard Usage
 
 Navigation is a tree sidebar with five sections, pinned in place while the page content scrolls:
@@ -294,13 +368,15 @@ Settings
   Change admin password
 ```
 
+The dashboard polls the server every 30 seconds and updates in place: new or changed data appears without a manual reload and without disturbing whatever you're doing (current page, sort order, search filter, or expanded detail rows). Polling pauses while the browser tab is hidden and catches up immediately once it's visible again.
+
 - `Dashboard`: the landing page (no `#hash` in the URL lands here). Tile counts for Clients, Windows activated, Office activated, and Stale. A Software card shows the Licenses count and a bar chart of the 5 most commonly installed titles (counted by computer, regardless of version). A Hardware card shows computers with USB storage detected, plus bar-chart breakdowns of the top CPU models, RAM size (bucketed at 4/8/16 GB, with everything larger folded into "32 GB+"), and storage type (SSD/HDD only — disks with no recognizable type are left out) across the fleet.
-- `Clients`: one row per computer, with OS, Office, activation status, software count, report time, and client agent version. Computers with USB storage devices show a USB badge. Click a computer name to expand the detail row with CPU, RAM, storage summary, and the full software list.
+- `Clients`: one row per computer, with OS, Office, activation status, software count, report time, client agent version, and a Description column (see [Active Directory Integration](#active-directory-integration)) - a read-only "AD Description" synced from Active Directory while Sync Description from AD is on, or a plain "Description" field editable directly in the table while it's off. Computers with USB storage devices show a USB badge. Click a computer name to expand the detail row with CPU, RAM, storage summary, and the full software list.
 - `Software`: one row per software name, version, and publisher, with the count of installations. Click the name to expand the list of computers where the package appears. A License column links to the matching license record when one already exists for that software name — one license commonly covers several installed versions, so the match is by name only, not name and version.
 - `Hardware`: three grouped tables. CPUs groups machines by processor model. Storage groups machines by disk model, type, and size. RAM groups by total memory and module count. Click any row to expand the list of machines with that configuration. USB storage rows are highlighted.
 - `Licenses`: a manually maintained catalog with Name, Version, License, Comment, Computers, Edit, and Delete columns. Name and Version can be picked from software already seen in inventory reports or typed freely. Version, License, and Comment stay blank when not set, instead of showing a placeholder. Click the Name to expand the linked computers; add computers by typing a name and pressing Enter, or let it auto-fill by selecting a Name that matches installed software. Edit and Delete are separate, distinctly colored buttons.
 - `Client actions`: WinRM actions for installing, updating, or uninstalling the client on a single host, a list of hosts, or an IPv4 range.
-- `Client package`: shows deployed client exe versions and the current CMD settings. Lets you update the server URL, ingestion token, and reporting interval, and download the complete GPO package as a ZIP.
+- `Client package`: shows deployed client exe versions and the current CMD settings. Lets you update the server URL, ingestion token, reporting interval, and package share path, and download the complete GPO package as a ZIP.
 - `General`: three blocks. Inventory holds the stale threshold (hours). Network holds the HTTP port and an Enable HTTP switch. HTTPS holds the HTTPS port and an Enable HTTPS switch. Turning HTTPS on re-checks the configured certificate for risks and asks for confirmation if any are found. Changing a port or disabling HTTP disconnects the current browser session; the page warns before applying either change (see [HTTPS Setup](#https-setup)).
 - `Certificate`: shows the active certificate (subject, expiry) and its risks if any, lets you upload a PFX to stage it as the configured certificate, delete the installed certificate from the machine store, and shows the certificate history log with a per-entry delete. It does not toggle HTTPS — that's on `General`.
 - `Change admin password`: rotates the dashboard's Basic Auth password, or performs the initial setup if none is configured yet (no current password required in that case). Rotating an existing password still requires the current one.
@@ -335,6 +411,11 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 | `-ClientPackageSourcePath` | `—` | Source folder to copy the client package from before installation. |
 | `-ConfigPath` | `—` | Server configuration file path. Default: `InstallPath\server-config.json`. |
 | `-ServerExecutablePath` | `—` | Path to the prebuilt server executable. Triggers a build if omitted. |
+| `-ClientNet35ExecutablePath` | `—` | Path to the prebuilt .NET 3.5 client executable. Triggers a build if omitted; always copied into `ClientPackagePath` to keep it current. |
+| `-ClientNet40ExecutablePath` | `—` | Path to the prebuilt .NET 4 client executable. Triggers a build if omitted; always copied into `ClientPackagePath` to keep it current. |
+| `-ClientServerUrl` | `—` | When set, produces a complete, ready-to-deploy GPO package (both client executables, `Deploy-ClientGpo.ps1`, and a configured `Install-ClientGpo.cmd`) in `ClientPackagePath` — the URL clients report to, e.g. `https://server.domain.local/api/v1/inventory`. No derived default. |
+| `-ClientIntervalHours` | `6` | Collection interval embedded in the generated `Install-ClientGpo.cmd`, when `-ClientServerUrl` is set (1–24). |
+| `-PackageSharePath` | `—` | GPO package share path embedded in the generated `Install-ClientGpo.cmd`, when `-ClientServerUrl` is set. Only needed when the GPO startup script and the client files are deployed to different locations. Default: the script's own folder. |
 | `-Token` | `—` | Ingestion token required in the `X-Inventory-Token` header. Optional. |
 | `-WebUsername` | `—` | Basic Auth username for dashboard and web API access. Optional. |
 | `-WebPassword` | `—` | Basic Auth password for dashboard and web API access. Optional. |
@@ -347,6 +428,14 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 | `-InstallLogRetentionDays` | `30` | Default retention period in days for WinRM client action logs. |
 | `-OpenFirewall` | `off` | Create a Windows Firewall inbound rule for the listener port. |
 | `-NoRun` | `off` | Install and configure the service without starting it. |
+| `-AdSyncEnabled` | `off` | Enable AD identity - domain/credentials for `Client actions`, `Client updates`, AD Computer Import, and (by default, on a fresh install) Description sync (see [Active Directory Integration](#active-directory-integration)). |
+| `-AdSyncMode` | `on-report` | Description sync mode: `on-report` or `timer`. |
+| `-AdSyncIntervalHours` | `24` | How often a computer's AD Description is refreshed (1–8760). |
+| `-AdDomain` | `—` | AD domain to query. Defaults to the server's own domain when omitted. |
+| `-AdUsername` | `—` | Explicit AD account to authenticate with, instead of the service identity. |
+| `-AdPassword` | `—` | Password for `-AdUsername`. Encrypted at rest (Windows DPAPI) before being written to `server-config.json`. |
+| `-DebugLogEnabled` | `off` | Write the optional debug log (see [Diagnostics](#diagnostics)). |
+| `-DebugLogPath` | `—` | Debug log file path. Default: `DataPath\_logs\debug.log`. |
 
 ### Install-Client.ps1
 
@@ -356,7 +445,7 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 | `-ServerSharePath` | `—` | UNC path to the server drop share for direct file delivery. Optional. |
 | `-Token` | `—` | Ingestion token sent in `X-Inventory-Token`. Optional. |
 | `-IntervalHours` | `6` | Collection interval in hours (1–24). |
-| `-InstallPath` | `—` | Installation folder for the client service. Default: `C:\ProgramData\WindowsInventoryLite`. |
+| `-InstallPath` | `—` | Installation folder for the client service. Default: `C:\ProgramData\WindowsInventoryLite\client-data`. |
 | `-ClientExecutablePath` | `—` | Path to the prebuilt client executable. Triggers a build if omitted. |
 | `-NoRun` | `off` | Install and configure the service without starting it. |
 
@@ -372,26 +461,33 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 | `-RemotePackagePath` | `C:\ProgramData\WindowsInventoryLite\WinRMDeploy` | Temporary folder on the remote host for the package. |
 | `-Credential` | `—` | PSCredential for WinRM authentication. Optional. |
 | `-CredentialUsername` | `—` | WinRM username as a plain string. Used if `-Credential` is not provided. |
-| `-CredentialPassword` | `—` | WinRM password as a plain string. Used if `-Credential` is not provided. |
+| `-CredentialPassword` | `—` | WinRM password as a `SecureString`. Used if `-Credential` is not provided. |
 | `-AddToTrustedHosts` | `off` | Add target computers to WinRM TrustedHosts before connecting. |
 | `-Force` | `off` | Reinstall the client even if the version already matches. |
 | `-KeepRemotePackage` | `off` | Do not delete the temporary package folder from the remote host after deployment. |
+
+### Uninstall-Server.ps1
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `-ConfigPath` | `—` | Server configuration file path to read installed paths from. Default: `C:\ProgramData\WindowsInventoryLite\server-config.json`. |
+| `-RemoveData` | `off` | Also remove inventory data (`DataPath`) and the configuration file. Without this switch, both are preserved so a reinstall picks up the previous settings. Cannot be undone. |
 
 ### Uninstall-Client.ps1
 
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
-| `-InstallPath` | `C:\ProgramData\WindowsInventoryLite` | Installation folder to remove. |
+| `-InstallPath` | `C:\ProgramData\WindowsInventoryLite\client-data` | Installation folder to remove. Refused if it resolves to the server's own shared root (detected via a `server-config.json` check) - see the "Client and server on the same machine" note below. |
 
 ### Uninstall-ClientWinRM.ps1
 
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
 | `-ComputerName` | `—` | One or more target computer names or IP addresses. Mandatory. |
-| `-InstallPath` | `C:\ProgramData\WindowsInventoryLite` | Installation folder to remove on remote hosts. |
+| `-InstallPath` | `C:\ProgramData\WindowsInventoryLite\client-data` | Installation folder to remove on remote hosts. Refused if it resolves to the target's own shared server root - see the "Client and server on the same machine" note below. |
 | `-Credential` | `—` | PSCredential for WinRM authentication. Optional. |
 | `-CredentialUsername` | `—` | WinRM username as a plain string. Used if `-Credential` is not provided. |
-| `-CredentialPassword` | `—` | WinRM password as a plain string. Used if `-Credential` is not provided. |
+| `-CredentialPassword` | `—` | WinRM password as a `SecureString`. Used if `-Credential` is not provided. |
 | `-AddToTrustedHosts` | `off` | Add target computers to WinRM TrustedHosts before connecting. |
 
 ### New-ClientGpoPackage.ps1
@@ -433,7 +529,7 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 | `-ServerUrl` | `—` | HTTP endpoint that receives client JSON reports. Mandatory. |
 | `-Token` | `—` | Ingestion token sent in `X-Inventory-Token`. Optional. |
 | `-IntervalHours` | `6` | Collection interval in hours (1–24). |
-| `-InstallPath` | `—` | Installation folder for the client service. Default: `C:\ProgramData\WindowsInventoryLite`. |
+| `-InstallPath` | `—` | Installation folder for the client service. Default: `C:\ProgramData\WindowsInventoryLite\client-data`. |
 | `-PackageClientPath` | `—` | Path to the client executable in the package. Resolved from the script directory if omitted. |
 | `-Force` | `off` | Reinstall the client even if the version already matches. |
 
@@ -481,9 +577,12 @@ The screenshots below use sample hostnames, documentation IP ranges, and placeho
 - Do not place a sensitive token in a broadly readable SYSVOL script. For GPO deployments, prefer firewall scope or a low-sensitivity ingestion token.
 - If you enable the commented central GPO logging block, limit write access to that log folder to the required computer accounts.
 - License records are free-text, admin-entered fields (Name, Version, License, Comment). Do not put secrets or credentials in the License or Comment fields; they are stored in plain JSON and rendered as-is in the dashboard.
-- Setting the initial Basic Auth username and password from the dashboard requires no prior authentication, since the whole dashboard is already open while Basic Auth is unconfigured. Once a password is set, changing it always requires the current one. Set up Basic Auth (or restrict network access) before exposing the server beyond a trusted network.
+- While Basic Auth is unconfigured, the entire management API (dashboard, settings, certificate import, WinRM client actions, initial admin-password setup) only accepts requests from the local machine - not from the network. To do first-time setup remotely, either RDP/console into the server for that one step, or pass `-WebUsername`/`-WebPassword` to `Install-Server.ps1` at install time. Once a password is set, changing it always requires the current one, and access is no longer restricted to the local machine.
 - Disabling HTTP requires HTTPS to be genuinely active at that same moment; the server rejects the change otherwise, so the settings page can never produce a fully unreachable configuration by itself. A certificate that stops working later (expiry, deletion from the store) can still leave the dashboard unreachable after HTTP was disabled — see [Recovering from an HTTPS lockout](#recovering-from-an-https-lockout).
 - Review [docs/threat-model.md](./docs/threat-model.md) before exposing the server outside a management network.
+- `AdPassword`, `WebPassword`, and `Token` are encrypted at rest with Windows DPAPI; an existing plaintext value from an older install is migrated automatically on the next service start. The certificate PFX password is never written to `server-config.json` at all - it is used once, transiently, to import the certificate.
+- The debug log (see [Diagnostics](#diagnostics)) can contain client-reported computer names and full exception text (including stack traces) but never passwords or tokens. Treat it like any other operational log - avoid leaving it enabled longer than a troubleshooting session needs.
+- `serverUrl`, `token`, and `packageSharePath` are rejected if they contain a double quote, `&`, `|`, `<`, `>`, `^`, or a line break, both on the dashboard `Client package` tab and in `New-ClientGpoPackage.ps1` - `Install-ClientGpo.cmd` is a batch file that a GPO computer startup script runs as SYSTEM on every deployed client, and any of those characters could otherwise turn a configured value into an injected command.
 
 ## Uninstall
 
@@ -492,6 +591,14 @@ Remove the client service and local client files:
 ```powershell
 .\src\Uninstall-Client.ps1
 ```
+
+Remove the server service and its files (inventory data and configuration are preserved unless `-RemoveData` is passed):
+
+```powershell
+.\src\Uninstall-Server.ps1
+```
+
+For remote client uninstalls, see [Uninstall-ClientWinRM.ps1](#uninstall-clientwinrmps1). All three uninstall scripts are also reachable from `src/Install-Wizard.ps1` (see [Interactive Install Wizard](#interactive-install-wizard)).
 
 ## Project Layout
 

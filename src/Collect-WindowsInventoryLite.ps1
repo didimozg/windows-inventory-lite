@@ -16,7 +16,13 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
-$ProjectRoot = Split-Path -Parent $PSScriptRoot
+# $PSScriptRoot is unset for a top-level script (not a module) on Windows
+# PowerShell 2.0 - it only started working outside modules in PS 3.0. This
+# script is meant to run standalone on client machines, which this project
+# still supports at the PS 2.0 floor, so it resolves its own path the
+# PS 2.0-safe way instead.
+$ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ProjectRoot = Split-Path -Parent $ScriptRoot
 
 function Resolve-InventoryPath {
     param(

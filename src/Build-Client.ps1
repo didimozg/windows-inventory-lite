@@ -15,7 +15,8 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$clientSource = Join-Path -Path $PSScriptRoot -ChildPath 'client\WindowsInventoryLiteClient.cs'
+$clientDir = Join-Path -Path $PSScriptRoot -ChildPath 'client'
+$clientSources = @(Get-ChildItem -Path $clientDir -Filter '*.cs' | ForEach-Object { $_.FullName })
 
 if (-not $OutputPath) {
     $OutputPath = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteClient.exe'
@@ -55,7 +56,11 @@ if (-not $compiler) {
     /reference:System.Management.dll `
     /reference:System.ServiceProcess.dll `
     /reference:System.Web.Extensions.dll `
-    $clientSource
+    $clientSources
+
+if ($LASTEXITCODE -ne 0) {
+    throw "csc.exe failed with exit code $LASTEXITCODE - see errors above."
+}
 
 Write-Host "Client executable: $OutputPath"
 Write-Host "Compiler: $compiler"

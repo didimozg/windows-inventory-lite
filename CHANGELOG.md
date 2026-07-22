@@ -4,7 +4,388 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+**Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
+
+## [0.22.0] - 2026-07-22
+
+### Changed
+
+- Client-owned files on a co-located client+server install (`WindowsInventoryLiteClient.exe`, its local JSON report, `client-version.txt`, its debug/deploy logs) now live in their own `client-data` subfolder under `%ProgramData%\WindowsInventoryLite\`, instead of the bare root shared with the server's `server-bin`/`server-data`/`server-content`/`client-package` folders. `Install-Client.ps1` and `Deploy-ClientGpo.ps1` now also pass `--output`/`--debug-log-path` to the client service so its own report and debug log actually land there too, not just the copied executable. Already-installed clients migrate automatically the next time they're installed or updated (WinRM push, GPO startup script, or a manual reinstall) - `Deploy-ClientGpo.ps1`'s existing "is the running service's command line still what we expect" check now detects the old path on its own, no separate migration step needed. The old executable and `client-version.txt` are removed after a successful migration; old data files are left in place and can be removed by hand.
+- **Fixed a real data-loss risk**: `Uninstall-Client.ps1` and `Uninstall-ClientWinRM.ps1` previously deleted their entire target folder recursively by default, which - on a machine running both the server and a local client - could delete the server's own `server-config.json` and data folders along with the client. Both scripts now refuse to recursively delete a folder that turns out to be the shared server root (detected by the presence of `server-config.json` there), and print a warning instead.
+
+### PowerShell 5.1 Testing Note
+
+`deploy\client\Deploy-ClientGpo.ps1`, `src\Install-Client.ps1`, and `src\Uninstall-ClientWinRM.ps1` each gained an `if ($MyInvocation.InvocationName -ne '.')` guard around their real install/uninstall logic, matching the pattern `src\Install-Wizard.ps1` already used - this lets Pester dot-source each script to unit-test its pure helper functions without performing a real service install/uninstall.
+
+## [0.21.3] - 2026-07-21
+
+### Fixed
+
+- `Install-ClientWinRM.ps1`/`Uninstall-ClientWinRM.ps1`: the friendly WinRM error message introduced in 0.21.1 was still wrapped in PowerShell's own full `ErrorRecord` ceremony (invocation position, `CategoryInfo`, `FullyQualifiedErrorId`) whenever it reached a job's captured log, since it was raised via `Write-Error`. Switched to a plain stderr write (`[Console]::Error.WriteLine`), which carries the same message with none of the surrounding noise - the job log now shows one clean line instead of a 6-line block.
+- `Client updates`' "Update selected" button showed a bare `Failed to start update job: HTTP 400` on any rejected push, discarding the server's actual error message - the same bug already fixed for `Client actions`' equivalent push button, just never mirrored to this sibling function. Now parses and shows the real message (e.g. "Check \"Configure AD User\" in Settings > General > Active Directory first.").
+- `TryResolveAdSyncCredentials`'s rejection message still said "Enable AD sync in Settings..." after "Enable AD sync" was renamed to "Configure AD User" - corrected.
+- AD Computer Import ("Load all PC from AD" / "Load PC without client from AD") never checked "Configure AD User" at all, so it kept working off a previously-saved AD account even with the checkbox unchecked - inconsistent with Client actions'/Client updates' own credential checks, and with this feature's own documented scope ("Configure AD User" makes AD credentials available to Client actions, Client updates, **and AD Computer Import**). Now rejects with the same message the other two features use when the checkbox is off.
+
+## [0.21.2] - 2026-07-21
+
+### Fixed
+
+- **Data loss**: a manually-set Description (entered while AD Description Sync is off) was silently overwritten the next time that client submitted an inventory report - the client's own report never carries an `adDescription` field (only AD sync or a manual edit ever write it), so the report-ingestion write path replaced the whole stored record with one that had lost it. Found by a pre-merge whole-codebase review, not by any single task's own review during the original 0.21.0 feature. `ComputeAdSyncFields` now carries the previous `adDescription`/`adSyncStatus`/`adSyncedAt` forward on every report while sync is off, matching the same carry-forward behavior sync already used for the "not due yet" case. Two new self-tests cover this exact scenario.
+- Comment accuracy pass across the whole codebase ahead of merging to `home`: removed 11 dangling references to internal AI-development planning documents/task numbers (`docs/superpowers/...`, `(Task N)`) that a reader outside this repo's own development history has no way to resolve; corrected one comment left over from the `AdSyncEnabled`/`AdDescriptionSyncEnabled` split that still described the old single-flag meaning; added missing explanations for two previously-uncommented magic numbers (a fixed ZIP timestamp constant, and an undocumented `.254` vs `.255` inconsistency between `ExpandInstallTarget`'s two input forms - the inconsistency itself is pre-existing and intentionally left as-is, only now documented); removed disabled, unexplained dead code (`Deploy-ClientGpo.ps1`'s commented-out central-log fragments); corrected the Install Wizard's AD question, which still asked to "Enable Active Directory description sync" when `-AdSyncEnabled` now configures AD identity, not Description sync specifically.
+- README.md/README_RU.md: added the `Client package` tab's package-share-path capability to four descriptions that had omitted it in both languages; documented the new WinRM friendly-error-message behavior; removed a hardcoded version reference in README_RU.md.
+
+## [0.21.1] - 2026-07-21
+
+### Fixed
+
+- `Client updates`' "Use global AD settings" checkbox rendered at a different font size/color than every other checkbox nearby - it lived outside the `.install-grid` context its `Client actions` counterpart gets its muted/13px styling from. Now explicitly matched.
+- `Settings > General > Active Directory`: the "Configure AD identity" checkbox sat in a separate group from the Domain/username/password fields it actually governs, reading as unrelated to them. Moved it to the top of the identity/credentials group, directly above the Domain field.
+- Renamed "Configure AD identity" to "Configure AD User" throughout the dashboard and both READMEs, for clarity.
+- Client details' RAM row listed every module comma-joined on one line (e.g. "16 GB — 4 GB 1332 MHz, 4 GB 1332 MHz, 4 GB 1332 MHz, 4 GB 1332 MHz"), hard to read for machines with several sticks. Now the total (e.g. "16 GB") stays on its own line and each module renders as its own item in a 2-column grid below it.
+- The `Certificate` tab's "Delete installed certificate" button had no spacing below it, crowding the "Certificate file (.pfx / .p12)" field directly underneath.
+- `Install-ClientWinRM.ps1`/`Uninstall-ClientWinRM.ps1` surfaced a WinRM connection failure's raw, OS-localized exception text verbatim (e.g. Russian text on a Russian-locale target, unreadable to an admin on a different locale) - both scripts now classify the failure by its .NET exception type/error code (not by matching locale-dependent message text) into one of two short, English explanations - "Computer unreachable - could not resolve its name" or "WinRM service is not reachable on this computer" - with the original message still appended for real troubleshooting. Only the name-resolution-failure error code is mapped with real confidence; every other WinRM transport failure falls into the second, more general bucket pending further verification against a live fleet.
+
+## [0.21.0] - 2026-07-21
+
+### Added
+
+- The Clients table's Description column is now editable directly in the dashboard whenever AD Description Sync is off - previously it was always a read-only cache of AD's own value. `Settings > General > Active Directory` splits the old single "Enable AD sync" checkbox into "Configure AD identity" (domain/credentials, used by Client actions, Client updates, and AD Computer Import) and a new "Sync Description from AD" toggle (just the periodic Description write). Turning identity on but Description sync off keeps AD credentials usable everywhere else while making Description a manually-editable field (column header reads "Description" instead of "AD Description"). Existing deployments that already had AD sync enabled keep syncing Description after the upgrade with no action needed - the new toggle inherits the old flag's value automatically.
+- `Client updates` gained the same "Use global AD settings" checkbox `Client actions` got in 0.20.0 - substitutes the AD identity credentials for the saved Client Update account on a push, with the same validation (AD identity must be configured, and a saved account or service identity must actually be usable).
+
+### Changed
+
+- `Client actions`' existing "Use global AD settings" checkbox now depends on "Configure AD identity" specifically rather than the old single AD-sync flag - no behavior change for existing users (the flag it depends on is the one that kept its meaning across the split).
+
+### Fixed
+
+- CSV export (`Clients` tab) always showed "Not found in AD"/"AD unreachable" for a client whose `adSyncStatus` was set that way the last time AD Description Sync ran, even after Sync was turned off and the Description manually edited - the table itself already ignored `adSyncStatus` once sync was off, but the export didn't. The export now checks `adDescriptionSyncEnabled` the same way the table does, so a manually-set Description shows correctly in the export once sync is off.
+- `README_RU.md`: fixed reversed word order ("identity AD" -> "AD identity") in the two `Client actions`/`Client updates` paragraphs describing the "Use global AD settings" checkbox requirement.
+
+## [0.20.2] - 2026-07-21
+
+### Fixed
+
+- The `Clients` table joined a computer's IP addresses onto one comma-separated line, so a machine with several IPs visually stretched the whole Computer column. Now each address renders on its own line (CSV export and the search-match text still use the comma-joined form - only the table cell's HTML rendering changed).
+
+## [0.20.1] - 2026-07-21
+
+### Fixed
+
+- The `Client actions` panel's narrow-viewport layout bug (documented at the `0.19.x` breakpoint, caused by a `.install-grid .primary-button` selector-specificity conflict with the `@media (max-width: 900px)` reset) turned out to already be resolved as a side effect of the `0.19.2`/`0.19.3` restructuring - the affected controls are no longer direct children of `.install-grid`. Re-verified clean at 900/800/600px.
+- Found and fixed a narrower, previously-undiscovered overflow: `.install-right-fields` (the Action/Server URL/WinRM user/password sub-grid introduced in `0.19.2`) kept its 2-column layout down to true phone widths, where its `minmax(180px, ...)`/`minmax(140px, ...)` combined minimum (332px) no longer fit and caused real horizontal page overflow. Added a `@media (max-width: 480px)` rule collapsing it to one column, matching the existing `.install-grid` collapse pattern.
+
+## [0.20.0] - 2026-07-21
+
+### Added
+
+- `Client actions` has a "Use global AD settings" checkbox next to WinRM user/password: reuses the AD Domain/credentials already configured for AD Description Sync (Settings > General > Active Directory) instead of typing them per push - the server's own service identity if "Use service account identity" is set there, or the saved AD account otherwise. Requires AD sync to actually be enabled and, when not using the service identity, a saved username and password - rejected with a clear error otherwise. The WinRM user/password fields are disabled while it's checked.
+
+## [0.19.3] - 2026-07-21
+
+### Fixed
+
+- The Targets textarea wrap and the textarea itself both showed a scrollbar for the same overflowing text (a classic CSS Grid/Flexbox "implicit minimum size" issue - a resizable descendant's content-driven intrinsic size can override an explicit `1fr`/percentage sizing intent unless `min-height: 0` says otherwise). Now only the textarea's own scrollbar shows.
+
+### Changed
+
+- "Log retention days" moved out of the `Client actions` form into Settings > General ("Client action log retention (days)", in the Inventory block) as a real global setting, persisted across restarts - every install/uninstall/update push now uses it, instead of re-typing a value (that silently reset to 30 on every page load) on each push.
+- Force reinstall/Add to TrustedHosts/Install client moved from their own row at the bottom of the panel into the same block as Action/Server URL/WinRM user/password, right below them - the whole set of install controls now reads as one cluster next to Action instead of split across two separate areas of the page.
+
+## [0.19.2] - 2026-07-21
+
+### Fixed
+
+- Growing the Targets textarea still made the "Load from AD" buttons scroll out of view (they lived inside the same fixed-height, scrollable wrap as the textarea). Moved them - and the result/warning message area - outside that wrap, into `.install-targets-field`'s normal flow, so they always stay visible and in place regardless of how tall Targets is dragged.
+- Action/Server URL/WinRM user/password sat at inconsistent heights depending on which fields were visible (e.g. Install vs Uninstall mode changed how the leftover row height split between them, since each field independently negotiated its own row against the much taller Targets field). Bundled all four into one `.install-right-fields` sub-grid, placed as a single item spanning the same rows Targets does - the outer grid now only ever compares one block's height against Targets', not four independent fields', so they stay pinned together at a consistent top-aligned position in both modes.
+
+## [0.19.1] - 2026-07-21
+
+### Fixed
+
+- The `0.19.0` textarea `max-height` fix wasn't enough - `.install-targets-field` (the grid cell containing Targets, spanning the same two rows as Action/Server URL/WinRM user/password) still grew along with the bounded textarea, so dragging it still shifted the other fields. Gave the cell itself a fixed 320px height, fully decoupled from its content - dragging Targets now never moves anything else, content past 320px just scrolls internally.
+
+## [0.19.0] - 2026-07-21
+
+### Added
+
+- `Client actions`' AD import gained a second button, "Load PC without client from AD", alongside the renamed "Load all PC from AD" (was "Load from AD"): pulls the same AD scope but filters out any computer that already has a reporting client (compared against the `Clients` tab's own list), for finding fresh install targets without manually excluding already-covered machines.
+
+### Changed
+
+- "Load from AD" (now "Load all PC from AD") switched from the quiet `.export-button` style to `.primary-button` - it was reading as too easy to miss next to the Targets field.
+- The Targets textarea's manual resize handle is now capped (`max-height: 400px`, scrolls internally past that) instead of unbounded - dragging it taller previously inflated the shared grid row it sits in alongside Action/Server URL/WinRM user/password, scattering them apart from each other.
+
+## [0.18.0] - 2026-07-20
+
+### Added
+
+- `Client actions` has a "Load from AD" button next to Targets: pulls a computer list directly from Active Directory (scoped to one or more Organizational Units configured in Settings > General, or the whole domain if none are set) and replaces the Targets field with it. Reuses the existing AD Domain/credentials already configured for AD Description Sync - nothing new to set up if that's already in use. A single bad/unreachable OU is skipped with a warning rather than failing the whole load.
+
+## [0.17.4] - 2026-07-20
+
+### Added
+
+- The debug log (`--debug-log-enabled` / General settings) now records a `[Schedule]` line whenever a scheduled client-update push actually starts (job ID, mode, target count) - previously the schedule tick only logged on failure, so there was no way to tell from the log whether a schedule had fired at all, only that it hadn't crashed.
+
+## [0.17.3] - 2026-07-20
+
+### Fixed
+
+- The sidebar "Client updates" badge stayed blank on a fresh page load until the first 30s poll tick, a tab visibility change, or the user opening Client updates directly - the initial page-load sequence never fetched `GET /api/v1/client-updates`, only `pollForUpdates()`'s own recurring tick did. Added the same badge-only fetch to the initial load.
+- In the `Client updates` outdated-clients table, a target only dropped out once the *entire* push job finished, even though `job.results` already grows one entry per target as each one completes (targets are pushed sequentially, one result appended and saved at a time). A machine now drops out of the table as soon as its own result comes back successful, without waiting on the rest of the batch. A failed target is left in the table - it's still outdated.
+- The `Client updates` table never refreshed after a schedule-triggered push, even with the tab open and watching - a scheduled push runs entirely server-side (the timer calls into the push logic directly, no HTTP request from any browser involved), so no open tab had any way to learn a new job existed. The server now tracks the most recent schedule-triggered job's ID and exposes it on `GET /api/v1/client-updates`; an open dashboard tab notices when this ID changes and starts live-polling that job the same way it does for a push it started itself.
+- Every settings panel's "Saved."/"Settings saved."/similar confirmation message stayed visible forever once shown, across all six Save actions (WinRM credentials, Client Update Schedule, Client package, General settings, Admin password, plus the "Saved credentials deleted." message) - none of them ever hid it again except on the next save. Extracted the shared `showSavedMessage` helper: a success message now auto-hides after 30s (tracking its own pending timer so repeated saves don't stack them); error messages are left alone, as before.
+- Interval-mode schedule pushes could redundantly re-push to a machine they had just finished updating: a successful push only becomes visible to the outdated-clients calculation once that client's own next inventory report arrives, so a schedule interval shorter than the client's own reporting interval kept re-selecting it as still outdated. A successful install push now patches the target's stored report version immediately, closing the gap - the client's own next report just confirms the same version once it arrives.
+
+## [0.17.2] - 2026-07-20
+
+### Security
+
+- `SaveServerConfigValues` read-modify-wrote `server-config.json` (which holds DPAPI-encrypted secrets) with no lock. With the new Client Update Schedule's two unattended background timers plus every HTTP-driven settings save, concurrent writers could interleave and silently lose an update. Now serialized behind a dedicated lock and written atomically (temp file + `File.Replace`/`File.Move`) instead of a direct in-place `File.WriteAllText`.
+- `-CredentialPassword` on `Install-ClientWinRM.ps1`/`Uninstall-ClientWinRM.ps1` was a plaintext `[string]` parameter, visible in local process listings and left in PowerShell history for as long as the session is kept. Changed to `[System.Security.SecureString]`; the production dashboard-driven path was already unaffected (it builds `-Credential` directly), this only hardens manual/standalone invocation. `README.md`/`README_RU.md` updated to match.
+- Fixed an XSS regression: `cpu.cores`/`speedMhz` (Hardware tab and Clients table) and `capacityMb`/`ramTotalMb` (RAM module list, Clients table) were interpolated straight into `innerHTML` instead of being coerced through `Number(x) || 0` like every other numeric field on the dashboard.
+- Eight config-mutating endpoints (`ConfigureServerSettings`, `ConfigureClientUpdateCredentials`, `ConfigureClientUpdateSchedule`, `ChangeAdminPassword`, `CreateLicense`, `UpdateLicense`, `StartClientAction`, `ConfigureClientPackage`) accepted a missing/malformed JSON body without a null check, several of them proceeding to dereference the resulting `null` payload. All eight now reject with `400` on an empty or unparseable body instead of failing further downstream.
+- `ConfigureClientPackage`'s `intervalHours` silently clamped out-of-range input (e.g. `999` became `24`) instead of rejecting it - a caller had no way to tell the value it sent was not the value that got saved. Now rejects out-of-range/non-numeric input with `400`, matching this API's reject-don't-clamp convention elsewhere.
+- `ChangeAdminPassword` returned a bare `{"status":"ok"}` instead of echoing the resource's own GET-status shape, the only config POST on this API that didn't. Now calls `SendAdminPasswordStatus` like every sibling endpoint.
+
+### Changed
+
+- WinRM credentials panel and Schedule panel: Save buttons wrapped in `.pkg-buttons` for layout consistency with the rest of the dashboard's button groups; "Delete saved credentials" switched from `.export-button` to `.danger-button-ghost` to match this dashboard's destructive-action styling convention.
+- Added a baseline `:focus-visible` outline so keyboard navigation has visible focus indication across the dashboard (previously relied entirely on browser defaults).
+- Clients table rows for stale clients (no report within the expected interval) now carry a `STALE` badge, matching the existing badge pattern used for USB devices.
+
+All of the above were found by two review passes (server/PowerShell/dashboard-client security review, and frontend/API design consistency review) requested against the full codebase, plus additional gaps found during independent verification of the reviewers' findings. Verified via the C# self-test suite (45/45), the Pester suite (18/18), and live Playwright/HTTP checks against a local console-mode instance.
+
+## [0.17.1] - 2026-07-18
+
+### Security
+
+- **Critical: command injection via `serverUrl` on the WinRM push path (`POST /api/v1/client-install`), leading to remote code execution on target machines.** `Deploy-ClientGpo.ps1`'s `sc.exe create` command line (introduced by the `0.16.4` quoting fix, which switched service creation to `cmd.exe /c` for a different bug) escaped only `"` before embedding `ServerUrl`/`Token`, but `cmd.exe`'s `&`/`|`/`<`/`>`/`^` are not neutralized by surrounding double quotes - a well-known quirk, confirmed by direct reproduction against the real code path. `Client actions`' `serverUrl` field reached this sink completely unvalidated (the `0.15.1` metacharacter guard only covered the separate GPO-`.cmd`-generation path), and with no credential supplied the resulting WinRM session runs as the server's own service identity - a dashboard user could push an install with a crafted `serverUrl` and run arbitrary commands, as that privileged identity, on every target machine. Fixed by rejecting the same unsafe characters at the server's entry point (`StartClientAction`) and, for defense-in-depth, at the `sc.exe` sink itself in `Deploy-ClientGpo.ps1`, `Install-Client.ps1`, and `Install-Server.ps1`. Confirmed the fix blocks the exact reproduced payload and does not reject a legitimate URL, verified live against a running instance. Found via a dedicated security review of the PowerShell scripts.
+
+## [0.17.0] - 2026-07-18
+
+### Added
+
+- `Client updates` has a Schedule section: push automatically once at a chosen date/time, or every N hours, targeting whichever clients are outdated when the schedule fires. Configured entirely from the dashboard; persists across service restarts; uses the same saved-account/service-identity credential fallback as a manual push with blank fields.
+
+## [0.16.11] - 2026-07-18
+
+### Changed
+
+- "Sync mode" moved out of the old wide top row into the same fixed-width panel as "Enable AD sync" (420px, matching the identity panel below it). "Sync interval (hours)" is now hidden entirely when Sync mode is "On inventory report" (it has no effect in that mode) and appears next to "Sync mode" only when "Periodic timer" is selected. Verified with Playwright, both sync modes.
+
+## [0.16.10] - 2026-07-18
+
+### Changed
+
+- Reworked the Active Directory settings layout: "Domain", "Use service account identity", "AD username", and "AD password" moved out of the wide multi-column `general-grid` into their own single-column panel capped at 420px, instead of stretching a domain/account field edge-to-edge or packing it into a row with unrelated fields. "Enable AD sync", "Sync mode", and "Sync interval" stay in the original row layout above it. Verified with Playwright against a local console-mode instance, light and dark theme.
+
+## [0.16.9] - 2026-07-18
+
+### Fixed
+
+- The Active Directory settings grid (`general-grid`, 3 columns) packed "Domain" into the same row as "Use service account identity"/"AD username" once the identity checkbox was unchecked and those two extra fields became visible - straddling two unrelated field groups across one row. "Domain" now spans the full row, keeping "Enable AD sync/Sync mode/Sync interval" as one row and "Use service account identity/AD username/AD password" as the next.
+- `Client package`'s "outdated" warning (`net35VersionMismatch`/`net40VersionMismatch`) compared the packaged client's version against the *server's* own version - a check that only made sense back when both tracked one shared project version. Now that the client version is decoupled from the server version (see the versioning note above), this comparison is permanently meaningless and would have permanently flagged every correctly-built package as outdated. Removed the check, the warning UI, and the download confirmation prompt it drove; `Install-Server.ps1`'s existing unconditional rebuild-and-copy of the client package on every run (0.14.0) is what actually keeps this package fresh.
+
+## [0.16.8] - 2026-07-18
+
+### Added
+
+- Both compiled executables now carry a proper Win32 version resource (Explorer's Properties > Details tab previously showed `0.0.0.0` and blank product info for both exes) - product name, description, and file/product version are now populated, sourced from each executable's own `Program.ProductVersion` constant so they can't drift out of sync with what the app reports at runtime.
+
+### Fixed
+
+- The sidebar "Client updates" badge count never refreshed on its own - it only updated on page load or when the Client updates tab was opened, unlike the rest of the dashboard's 30-second live auto-refresh (v0.15.0). `pollForUpdates()` now also polls `GET /api/v1/client-updates` on every tick and updates the badge, without touching the tab's own table/checkboxes (a full re-render there would have silently cleared an in-progress selection if the tab happened to be open when a poll landed).
+
+## [0.16.7] - 2026-07-18
+
+### Fixed
+
+- `Client updates`' "Save" button cleared the password field after a successful save but left the username field exactly as typed, so clicking "Update selected" right after "Save" without retyping anything reproduced the identical mismatched-credential-pair bug fixed in 0.16.6 (real username paired with a blank password sent straight to WinRM), just triggered by the save action instead of a page load. Confirmed live: `klg-wsw8-004` failed with "Access denied" after this exact save-then-push sequence. `saveClientUpdateCredentials` now clears both fields on success and refreshes the read-only "Saved account" hint, so the push form always returns to genuinely blank after a save.
+
+## [0.16.6] - 2026-07-18
+
+### Fixed
+
+- `Client updates` auto-filled the saved username into the push form's `Client update username` field on every page load, while the password field is never pre-filled by design. A push made with an untouched, "empty-looking" form therefore sent a real username paired with a genuinely blank password straight to WinRM instead of triggering the 0.16.3 saved-account fallback (which only substitutes when *both* fields are blank) - producing "Access denied" even though the saved account itself was reachable and correct, confirmed live against `KLG-WSW8-007`. The saved account is now shown as a read-only "Saved account: ..." hint instead of being written into the input, so leaving the form untouched submits two genuinely blank fields.
+
+### Added
+
+- `Client updates` has a "Delete saved credentials" button to clear the saved WinRM account, useful when re-testing the fallback-to-service-identity path without having to overwrite the saved fields with blanks by hand.
+
+## [0.16.5] - 2026-07-18
+
+### Fixed
+
+- `Install-Server.ps1 -ClientPackagePath\Deploy-ClientGpo.ps1` (the script every WinRM push - both `Client actions` and `Client updates` - actually deploys to targets, since the server always sources it from `ClientPackagePath`) was never refreshed by a plain "Just refresh" server reinstall, only by the rarer `-ClientServerUrl`/`-ClientPackageSourcePath` paths. The two client executables in `ClientPackagePath` were already kept current on every run (fixed in 0.14.0), but `Deploy-ClientGpo.ps1` was missed - meaning a server upgrade that only bumped the exe silently left every future WinRM push deploying whatever version of that script happened to exist the last time a full package request was made, including the pre-0.16.4 version with the `sc.exe` 1639 bug this session's testing had just fixed at the source. Now copied unconditionally alongside the two executables on every server install/reinstall.
+
+## [0.16.4] - 2026-07-18
+
+### Fixed
+
+- Service creation (`Install-Client.ps1`, `Install-Server.ps1`, and `Deploy-ClientGpo.ps1`, the script a GPO/WinRM push runs on the target) failed with `sc.exe exit code: 1639` ("invalid command line", `sc.exe` printing its own usage text instead of a specific error) on at least Windows PowerShell 4.0. Root cause, confirmed live on a real Windows 8 target: `sc.exe create`'s `binPath=` value must itself contain embedded double quotes around the executable path, and passing that as one element of a PowerShell array via `& sc.exe @Arguments` does not reliably preserve those embedded quotes in the command line `sc.exe` actually receives - some PowerShell engines corrupt it, breaking the argument apart. Verified two ways on the affected machine: the array form reproduced the exact failure in isolation (no WinRM involved), and building the same command as one string with the quotes backslash-escaped and invoking through `cmd.exe /c` succeeded. All three scripts' `create` call now goes through this `cmd.exe /c` form; every other `sc.exe` call (query/stop/delete/description/start) has no embedded quotes in its arguments and was unaffected, so those are unchanged.
+
+## [0.16.3] - 2026-07-18
+
+### Fixed
+
+- `Client updates`' saved WinRM credentials (`Client update username`/`Client update password`) were stored correctly but never actually used by a push. The dashboard's password field is cleared right after a successful Save (the real value is never sent back to the browser), and `Update selected` read straight from that same now-empty field - so every push after the first Save silently ran under the server's own service identity instead of the saved account, with no error until that identity turned out to lack rights on a target ("Access denied" from WinRM, reported live against a real Windows 8 target that a manually-supplied credential could reach fine). Fixed by having the dashboard send a `useSavedCredentials` flag with the push request; the server now falls back to the saved account when both the request's username and password are blank, still letting a freshly-typed per-push override take priority, and leaving `Client actions` (which never sends the flag) completely unaffected.
+
+## [0.16.2] - 2026-07-17
+
+### Fixed
+
+- Dark theme reset to light on every page reload. Root cause: the `Content-Security-Policy` header added in 0.15.1 set `script-src 'self'` with no `'unsafe-inline'` or hash, which silently blocked `index.html`'s inline theme-restore `<script>` (reads `localStorage` before `styles.css` loads, to avoid a flash of the wrong theme on load). The script never ran, so the page always fell back to the OS's `prefers-color-scheme`, ignoring the saved preference - `toggleTheme()` itself still worked and still saved to `localStorage` correctly, only the on-load restore was broken. Fixed by adding that script's exact `sha256` hash to `script-src`, allowing only this one specific, unchanging inline script rather than a blanket `'unsafe-inline'` that would have reopened the original XSS backstop the CSP was added for.
+
+## [0.16.1] - 2026-07-17
+
+### Changed
+
+- `Client updates` no longer disables Windows 7/8/8.1 targets - every outdated client can now be selected for a WinRM push, since WinRM reliability on those OS versions was a client-side issue that has since been fixed. The `eligible`/`blocked` split is gone from `GET /api/v1/client-updates`, replaced by a flat `updates` list and a single `outdatedCount`.
+
+### Fixed
+
+- `Install-Client.ps1` and `Collect-WindowsInventoryLite.ps1` (the two client-side scripts meant to run directly on a client machine, not just build/deploy from a server) used `$PSScriptRoot`, which is unset for a top-level script under Windows PowerShell 2.0 - it only started working outside modules in PS 3.0. Both scripts declared `#requires -Version 2.0` but would fail immediately on a real PS 2.0 host. Fixed by resolving the script's own path via `$MyInvocation.MyCommand.Path` instead, which works correctly back to PS 2.0. Server-side scripts (`Install-Server.ps1`, `Install-Wizard.ps1`, `New-ClientGpoPackage.ps1`, `Build-Server.ps1`, `Build-Client.ps1`) keep using `$PSScriptRoot` unchanged - they run on the server/build machine, which this project now assumes is PowerShell 5.1+.
+
+## [0.16.0] - 2026-07-17
+
+### Added
+
+- Dashboard `Client updates` tab (Installation section): shows which reporting clients are running a version other than the current client package, with a WinRM push to update selected clients. Windows 7/8/8.1 targets are listed but not selectable, since WinRM is unreliable against them. An optional dedicated WinRM credential can be saved as a fallback to the service's own identity, encrypted at rest the same way as other stored secrets.
+
+## [0.15.1] - 2026-07-17
+
+### Security
+
+- Fixed a command-injection vulnerability in `Install-ClientGpo.cmd` generation (`GenerateCmdLines` in the server, mirrored in `New-ClientGpoPackage.ps1`): `serverUrl` and `packageSharePath` were written to the `.cmd` file with no surrounding quotes, and `token`'s quoting could be broken out of with an embedded `"`. A value containing `&`, `|`, `<`, `>`, `^`, `"`, or a line break turned the generated script into an attacker-controlled command that a GPO computer startup script later runs as SYSTEM on every deployed client. Both the server's `client-package/configure` endpoint and the standalone script now reject any of these characters in `serverUrl`, `token`, or `packageSharePath` before generating the file.
+- The inventory ingestion token (`X-Inventory-Token`) is now compared with the project's existing constant-time comparison (`FixedTimeEquals`), matching how `WebPassword` and the admin password are already compared, instead of a plain `!=` that could leak the token byte-by-byte via response timing.
+- AD lookup error messages written to the Event Log and debug log are now passed through the existing log-injection sanitizer (`SanitizeForLog`), closing the one field that bypassed it.
+- While Basic Auth is unconfigured, the entire management API (dashboard, settings, certificate import, WinRM client actions, initial admin-password setup) now only accepts requests from the local machine, instead of being reachable by anyone who can reach the port. `POST /api/v1/inventory` is unaffected, since it is already gated by its own Token. Pass `-WebUsername`/`-WebPassword` to `Install-Server.ps1` at install time, or configure Basic Auth from the server console, to manage the server remotely right away.
+- `server-config.json`'s restrictive ACL (Administrators + SYSTEM only) is now reapplied on every write by the server itself, not just at install time, so it cannot drift back to a broader inherited ACL if the file is ever deleted and recreated while the service is running.
+- The dashboard now sends a `Content-Security-Policy` header on every response, as a backstop against a future unescaped rendering sink.
+
+## [0.15.0] - 2026-07-17
+
+### Added
+
+- The dashboard now polls for new inventory data every 30 seconds and updates in place, without disturbing the current page, sort, search, or any expanded detail rows. Polling pauses while the browser tab isn't visible and catches up immediately when it becomes visible again.
+
+### Fixed
+
+- Expanded detail rows (Clients/Software/Hardware "show details") no longer collapse when the table re-renders for an unrelated reason (e.g. clicking the pager's Next/Prev buttons).
+
+## [0.14.0] - 2026-07-17
+
+### Fixed
+
+- `Install-Client.ps1` and `Install-Server.ps1` now rebuild `build\*.exe` fresh every run when using the default (not caller-supplied) executable path, instead of only building when the file was entirely missing. A stale binary left over from an earlier session was previously reused silently, with no version-mismatch warning - found via live testing of `Install-Wizard.ps1`'s "Install client (local)" flow.
+- Fixed a resulting double build of the client executables in `Install-Server.ps1`, since `Build-Server.ps1` already refreshes them as a side effect of building the server.
+
+### Added
+
+- `Install-Wizard.ps1`'s "Install server" flow now detects an existing installation and offers a "just refresh" option that skips all questions and reapplies the current saved settings as-is, instead of requiring every question to be re-answered on a re-run.
+
+## [0.13.0] - 2026-07-17
+
+### Added
+
+- `Install-Wizard.ps1` - an interactive console menu covering all install/uninstall actions (server, local client, remote client via WinRM, and their uninstalls), for administrators unfamiliar with the project's flag-based scripts. Supports `-WhatIf` to preview the resolved command before running anything.
+- `Uninstall-Server.ps1` - previously only client-side uninstall scripts existed; this adds the missing server-side counterpart. Preserves inventory data and configuration by default; `-RemoveData` opts into full removal.
+
+## [0.12.0] - 2026-07-16
+
+### Added
+
+- The Clients and Software inventory tables are now paginated, with page size adapting live to the browser window's height. The Hardware CPU/Storage/RAM tables are paginated with a fixed page size.
+- The Inventory summary tiles (client count, activation counts, stale count) moved to the top of the Inventory section and are more compact.
+- Swapped the `Collected`/`AD Description` column order in the Clients table.
+
+## [0.11.0] - 2026-07-16
+
+### Added
+
+- `WebPassword` and `Token` are now encrypted at rest with Windows DPAPI, matching `AdPassword`. Any secret still stored as plaintext from an older install is migrated to encrypted form automatically on the next service start - no manual action needed.
+
+### Fixed
+
+- Confirmed `CertificatePfxPassword` was never persisted to `server-config.json` in the first place (it is used once, transiently, for a PFX import) - corrected an earlier design assumption to the contrary before it shipped.
+
+## [0.10.1] - 2026-07-16
+
+### Fixed
+
+- The Client Package page's grid layout broke when the "Package share path" field was added (a 4th field, but the shared `.pkg-grid` CSS was still templated for 3) - `Ingestion token` and `Interval` were squeezed into the wrong tracks and the Save/Download buttons wrapped onto their own row. Found via a live Playwright design review.
+- The first fix attempt (an ID-scoped override) introduced a worse bug: it silently un-collapsed the grid on mobile, overflowing a 480px viewport, since an ID selector outranks the mobile breakpoint's plain-class collapse rule regardless of source order. Replaced with a modifier class instead, matching the existing `.general-grid`/`.admin-password-grid` pattern.
+
+## [0.10.0] - 2026-07-16
+
+### Added
+
+- `Install-Server.ps1` now keeps the client package's executables current on every run, not just at first install - it builds them (via `Build-Client.ps1`, matching how `-ServerExecutablePath` already worked) if missing and always copies the current build into `ClientPackagePath`. Previously, `ClientPackagePath` was only ever populated from `-ClientPackageSourcePath` (`dist\gpo-client`), an easy-to-forget separate packaging step - a server reinstall/upgrade with no extra flags left a stale client package in place with no warning.
+- `Install-Server.ps1` gains `-ClientServerUrl` (opt-in, no derived default - guessing wrong would silently ship a broken GPO package): when set, it produces a complete, ready-to-deploy GPO package (both client executables, `Deploy-ClientGpo.ps1`, and a fully configured `Install-ClientGpo.cmd`) directly in `ClientPackagePath` by calling `New-ClientGpoPackage.ps1`, instead of a separate manual packaging step or dashboard visit. New `-ClientIntervalHours` (default 6) and `-PackageSharePath` accompany it; `-Token` is reused from the server's own ingestion token.
+- Moved "Package share path" up to sit directly under "Server URL" on the Client Package dashboard page - it was easy to miss below the interval field.
+
+## [0.9.0] - 2026-07-16
+
+Client-package deployment usability, driven by a real GPO deployment failure on the live test stand: the client wasn't installing because the GPO startup script's package share path had no dashboard-configurable equivalent, and the deployed client package could silently go stale relative to the server with no warning.
+
+### Added
+
+- `Build-Server.ps1` now also builds both client targets (Net35, Net40) into `build\`, so the executables `New-ClientGpoPackage.ps1` looks for by default are always current after a server build - no separate step to remember.
+- Client package share path is now configurable on the Client Package dashboard page and via `POST /api/v1/client-package/configure` (`packageSharePath`) - needed whenever the GPO startup script and the client files are deployed to different locations (e.g. script in SYSVOL, files on a separate share). Previously only `New-ClientGpoPackage.ps1 -PackageSharePath` could set this, and any later dashboard-driven save silently reset it back to the script's own folder.
+- The Client Package page now compares the packaged client executables' versions against the running server's version and flags a mismatch. `GET /api/v1/client-package` gains `serverVersion`, `net35VersionMismatch`, `net40VersionMismatch`.
+- `POST /api/v1/client-package/download` now refuses (400, with a clear message) to produce a package before the server URL has been configured, or when no client executable is present at all - previously it would silently include whatever partial set of files existed. Downloading a package with a version-mismatched client still works, but the dashboard now asks for confirmation first.
+
+### Fixed
+
+- An off-by-one in the new `ParseCmdSettings` extension (parsing `PACKAGE_ROOT` back out of the generated `.cmd`) miscounted the `"set PACKAGE_ROOT="` prefix length, corrupting the round-tripped default value - caught immediately via a new self-test before it shipped.
+
+## [0.8.2] - 2026-07-16
+
+Whole-branch review pass (security + code quality) covering everything added for AD Description Sync, including the live-stand follow-ups. No Critical or Important findings in security or concurrency; documentation and build-script findings fixed below.
+
+### Fixed
+
+- `Build-Server.ps1`/`Build-Client.ps1` did not check `csc.exe`'s exit code, so a failed compile could print "Server/Client executable: ..." and leave a stale binary in place without any visible error - this is what led to an earlier false-positive "server does not compile" review finding, and would have hidden a real one just as easily. Both scripts now throw on a nonzero exit code.
+- `docs/threat-model.md` and `README_RU.md` still said the AD password is stored in plaintext; it has been DPAPI-encrypted since 0.8.0. Corrected both.
+- `Install-Server.ps1` gained `-DebugLogEnabled`/`-DebugLogPath` parameters - the debug log feature existed on the server exe and in `server-config.json` since 0.8.0 but was never exposed as an install-time parameter, unlike every other setting in this project.
+- Added the AD sync and debug-log parameters to the `Install-Server.ps1` table in both READMEs, and added a Diagnostics section describing the debug log to both READMEs (was previously undocumented outside the CHANGELOG).
+- A stale code comment in `AdLookupService.cs` still referenced `InventoryServer.ApplyAdSync`, a method split into `ComputeAdSyncFields`/`ApplyAdSyncFields` earlier in this branch.
+- The AD username is now sanitized (CRLF-escaped) before being written into a log line, matching the computer name right next to it.
+
+## [0.8.1] - 2026-07-16
+
+### Fixed
+
+- Timer-mode AD sync's background sweep did not run for a full `AdSyncIntervalHours` (24h by default) after being enabled or reconfigured - its due time was set to the interval itself instead of firing almost immediately, making timer mode look completely inert for the first day of use. The sweep now starts right after enabling/reconfiguring; each computer's own AD data still only refreshes on its own schedule.
+
+## [0.8.0] - 2026-07-16
+
+Live-stand follow-up to 0.7.0's AD Description sync, driven by testing against a real Active Directory environment.
+
+### Added
+
+- Optional debug log file on both server and client (`--debug-log-enabled` / `DebugLogEnabled`, off by default), writing plain-text lines for AD lookups, client-server report traffic, and unhandled errors - independent of the Windows Event Log, which depends on this machine already having (or being able to auto-register) the relevant event source.
+- AD password is now encrypted at rest in `server-config.json` (Windows DPAPI, `LocalMachine` scope) instead of stored in plaintext, both when saved from the dashboard and when set at install time (`Install-Server.ps1 -AdPassword`).
+
+### Fixed
+
+- Client never negotiated TLS 1.2 explicitly; on older .NET Framework/Windows defaults this could leave the HTTPS handshake unable to complete against a server that only accepts TLS 1.2, while plain HTTP kept working - masking the real cause behind what looked like a routing/config problem.
+- A computer stuck on "AD unreachable" after a transient AD outage no longer waits out the full sync interval before retrying - the sync timestamp is no longer advanced on a failed lookup.
+- The AD/LDAP lookup no longer runs inside the lock that serializes inventory-report writes, so a slow or unreachable AD can no longer delay ingestion for the rest of the fleet.
+- `AdSyncIntervalHours` now enforces the same 1-8760 range on the CLI/config-file path that the settings API already enforced.
+- A CSS specificity bug hid the AD credential fields incorrectly in some cases; `.hidden` now reliably wins over more specific component rules.
+- Client-supplied computer names are now escaped before being written into Event Log or debug-log lines, closing a log-forging gap.
+
+## [0.7.0] - 2026-07-15
+
+### Added
+
+- Active Directory Description sync for the Clients table - optional, off by default. When enabled, the server looks up each reporting computer's AD `description` attribute and shows it as a read-only column; the dashboard never writes back to AD.
+- Two sync modes: **on inventory report** (default - refreshes a computer's cached AD data when it next reports, if the cached value is older than the configured sync interval) and **periodic timer** (refreshes every known computer on a fixed schedule, including ones that have stopped reporting).
+- AD authentication defaults to the server's own Windows Service identity; explicit credentials (username/password, stored in `server-config.json` like `WebPassword`) can be used instead, toggled via "Use service account identity" in Settings > General or `-AdSyncEnabled`/`-AdUseServiceAccount` at install time (`Install-Server.ps1`).
+- New `Description` column on the Clients table and in its CSV export, showing "Not found in AD" or "AD unreachable" when a lookup can't resolve.
+- `AdLookupService` escapes client-reported computer names per RFC 4515 before building LDAP filters, closing off LDAP injection from a client-controlled value.
 
 ## [0.6.1] - 2026-07-15
 

@@ -84,6 +84,11 @@
             <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="4" width="15" height="3.5" rx="0.8"/><path d="M3.5 7.5 v8 h13 v-8"/><line x1="8" y1="10.5" x2="12" y2="10.5"/></svg>
             Client package
           </button>
+          <button id="updatesTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 a7 7 0 1 1 -6.3 4"/><path d="M3 3 v4 h4"/></svg>
+            Client updates
+            <span id="updatesBadge" class="nav-badge hidden">0</span>
+          </button>
         </div>
         <div class="nav-group">
           <div class="nav-group-title">Settings</div>
@@ -113,6 +118,13 @@
       </header>
 
       <main>
+        <section id="summarySection" class="summary summary-compact" aria-label="Inventory summary">
+          <div><span id="clientCount">0</span><small>Clients</small></div>
+          <div><span id="windowsActivated">0</span><small>Windows activated</small></div>
+          <div><span id="officeActivated">0</span><small>Office activated</small></div>
+          <div id="staleTile"><span id="staleCount">0</span><small id="staleLabel">Stale &gt;48h</small></div>
+        </section>
+
         <section id="dashboardView" class="install-panel" aria-label="Dashboard">
           <div id="dashboardTiles" class="summary dashboard-tiles">
             <div><span id="dashClientCount">0</span><small>Clients</small></div>
@@ -164,7 +176,12 @@
                 Stale threshold (hours)
                 <input id="generalStaleHours" type="number" min="1" max="8760" value="48">
               </label>
+              <label class="pkg-token-field">
+                Client action log retention (days)
+                <input id="generalInstallLogRetentionDays" type="number" min="1" max="3650" value="30">
+              </label>
             </div>
+            <p class="cert-hint">How long Client actions/Client updates push job logs (Installation &gt; Client actions) are kept before being cleaned up automatically.</p>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Network</h2>
@@ -193,6 +210,65 @@
               </label>
             </div>
             <p id="generalCertHint" class="cert-hint hidden"></p>
+          </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Active Directory</h2>
+            <div class="pkg-grid ad-sync-panel">
+              <label class="check-label">
+                <input id="generalAdDescriptionSyncEnabled" type="checkbox">
+                Sync Description from AD
+              </label>
+              <div class="ad-sync-mode-row">
+                <label class="pkg-token-field">
+                  Sync mode
+                  <select id="generalAdSyncMode">
+                    <option value="on-report">On inventory report</option>
+                    <option value="timer">Periodic timer</option>
+                  </select>
+                </label>
+                <label id="generalAdSyncIntervalField" class="pkg-token-field hidden">
+                  Sync interval (hours)
+                  <input id="generalAdSyncIntervalHours" type="number" min="1" max="8760" value="24">
+                </label>
+              </div>
+            </div>
+            <div class="pkg-grid ad-identity-panel">
+              <label class="check-label">
+                <input id="generalAdSyncEnabled" type="checkbox">
+                Configure AD User
+              </label>
+              <label class="pkg-token-field">
+                Domain
+                <input id="generalAdDomain" type="text" placeholder="leave blank to use the server's own domain">
+              </label>
+              <label class="check-label">
+                <input id="generalAdUseServiceIdentity" type="checkbox" checked>
+                Use service account identity
+              </label>
+              <label id="generalAdUsernameField" class="pkg-token-field hidden">
+                AD username
+                <input id="generalAdUsername" type="text" autocomplete="off">
+              </label>
+              <label id="generalAdPasswordField" class="pkg-token-field hidden">
+                AD password
+                <input id="generalAdPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current password">
+              </label>
+              <label class="pkg-token-field">
+                Organizational Units (DN, one per line)
+                <textarea id="generalAdComputerImportOUs" rows="3" placeholder="OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru"></textarea>
+              </label>
+            </div>
+            <p class="cert-hint">"Configure AD User" makes the domain/credentials below available to Client actions, Client updates, and AD Computer Import. "Sync Description from AD" additionally writes each computer's Active Directory description into its inventory record, read-only in the Clients table while it's on. Turn it off to edit Description manually instead - re-enabling it later overwrites any manual edits on the next sync. Reading the description attribute is allowed to any authenticated domain user by default AD ACLs, so the service account identity usually needs no special AD delegation.</p>
+          </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Diagnostics</h2>
+            <div class="pkg-grid general-grid">
+              <label class="check-label">
+                <input id="generalDebugLogEnabled" type="checkbox">
+                Enable debug log
+              </label>
+            </div>
+            <p class="cert-hint">Writes a plain-text log of AD lookups, inventory-report traffic, and server errors to <code id="generalDebugLogPath" class="mono">-</code>. Off by default; only meant to be left on for the duration of a troubleshooting session.</p>
           </div>
           <div class="pkg-buttons">
             <button id="generalSaveButton" class="primary-button" type="button">Save</button>
@@ -345,10 +421,14 @@
 
         <section id="packageView" class="install-panel hidden" aria-label="Client package">
           <p id="pkgStatus" class="pkg-status">Loading package status...</p>
-          <div class="pkg-grid">
+          <div class="pkg-grid pkg-grid-package">
             <label class="pkg-url-field">
               Server URL
               <input id="pkgServerUrl" type="text" placeholder="http://192.168.1.1:8080/api/v1/inventory">
+            </label>
+            <label class="pkg-url-field">
+              Package share path
+              <input id="pkgSharePath" type="text" placeholder="leave blank to use the folder the .cmd itself runs from">
             </label>
             <label class="pkg-token-field">
               Ingestion token
@@ -363,47 +443,131 @@
               <button id="pkgDownloadButton" class="export-button" type="button">Download GPO package</button>
             </div>
           </div>
+          <p class="cert-hint">By default the GPO startup script (<code>Install-ClientGpo.cmd</code>) looks for the client files in its own folder. Set this only when the script and the client files are deployed to different locations (for example, the script runs from SYSVOL but the client executables live on a separate file share) - an UNC path such as <code>\\server\share\gpo-client</code>.</p>
           <div id="pkgMessage" class="pkg-message hidden"></div>
+        </section>
+
+        <section id="updatesView" class="install-panel hidden" aria-label="Client updates">
+          <div class="settings-block">
+            <h2 class="settings-block-title">WinRM credentials</h2>
+            <p class="cert-hint">Leave both fields blank when pushing an update to use the saved account below, or the server service's own identity if nothing is saved (the same account WinRM client actions already require). Fill them in to override with a different account for this push only.</p>
+            <p id="updatesSavedAccountHint" class="cert-hint hidden"></p>
+            <label class="check-label updates-use-ad-field">
+              <input id="updatesUseAdCredentials" type="checkbox">
+              Use global AD settings (Settings &gt; General &gt; Active Directory)
+            </label>
+            <div class="pkg-grid client-update-grid">
+              <label class="pkg-token-field">
+                Client update username
+                <input id="updatesUsername" type="text" autocomplete="username" placeholder="DOMAIN\svc-account">
+              </label>
+              <label class="pkg-token-field">
+                Client update password
+                <input id="updatesPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current one">
+              </label>
+              <div class="pkg-buttons">
+                <button id="updatesSaveCredentialsButton" class="primary-button" type="button">Save</button>
+                <button id="updatesClearCredentialsButton" class="danger-button-ghost" type="button">Delete saved credentials</button>
+              </div>
+            </div>
+            <div id="updatesCredentialsMessage" class="pkg-message hidden"></div>
+          </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Schedule</h2>
+            <p class="cert-hint">Automatically pushes to whichever clients are outdated when the schedule fires - the same targets "Update selected" would reach if every outdated row were checked. Uses the saved WinRM account above, or the server's own service identity if nothing is saved.</p>
+            <p id="updatesScheduleCredentialWarning" class="cert-hint hidden">No saved WinRM account above - scheduled pushes will use the server's own service identity.</p>
+            <div class="pkg-grid client-update-schedule-panel">
+              <label class="pkg-token-field">
+                Schedule
+                <select id="updatesScheduleMode">
+                  <option value="off">Off</option>
+                  <option value="once">Run once</option>
+                  <option value="interval">Every N hours</option>
+                </select>
+              </label>
+              <label id="updatesScheduleOnceField" class="pkg-token-field hidden">
+                Run at
+                <input id="updatesScheduleOnceAt" type="datetime-local">
+              </label>
+              <label id="updatesScheduleIntervalField" class="pkg-token-field hidden">
+                Every (hours)
+                <input id="updatesScheduleIntervalHours" type="number" min="1" max="8760" value="24">
+              </label>
+              <div class="pkg-buttons">
+                <button id="updatesScheduleSaveButton" class="primary-button" type="button">Save</button>
+              </div>
+            </div>
+            <div id="updatesScheduleMessage" class="pkg-message hidden"></div>
+          </div>
+          <p id="updatesPackageStatus" class="pkg-status">Loading client update status...</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Computer</th>
+                  <th>Domain</th>
+                  <th>Current version</th>
+                  <th>Available version</th>
+                  <th>Last collected</th>
+                  <th><input id="updatesSelectAll" type="checkbox" title="Select all"></th>
+                </tr>
+              </thead>
+              <tbody id="updatesBody"></tbody>
+            </table>
+          </div>
+          <button id="updatesPushButton" class="primary-button" type="button" disabled>Update selected</button>
+          <div id="updatesStatus" class="install-status empty">No update job started.</div>
         </section>
 
         <section id="installView" class="install-panel hidden" aria-label="Remote client actions">
           <div class="install-grid">
-            <label class="install-action-field">
-              Action
-              <select id="clientAction">
-                <option value="install">Install client</option>
-                <option value="uninstall">Uninstall client</option>
-              </select>
-            </label>
-            <label class="install-targets-field">
-              Targets
-              <textarea id="installTargets" rows="4" placeholder="PC-001&#10;PC-002&#10;192.0.2.10&#10;192.0.2.20-192.0.2.30"></textarea>
-            </label>
-            <label class="install-server-field install-only">
-              Server URL
-              <input id="installServerUrl" type="text" value="">
-            </label>
-            <label class="install-user-field">
-              WinRM user
-              <input id="installUsername" type="text" autocomplete="username" placeholder="DOMAIN\User">
-            </label>
-            <label class="install-password-field">
-              WinRM password
-              <input id="installPassword" type="password" autocomplete="current-password">
-            </label>
-            <label class="check-label install-force-field install-only">
-              <input id="installForce" type="checkbox">
-              Force reinstall
-            </label>
-            <label class="check-label install-trusted-field">
-              <input id="installTrustedHosts" type="checkbox">
-              Add to TrustedHosts
-            </label>
-            <label class="install-retention-field">
-              Log retention days
-              <input id="installRetentionDays" type="number" min="1" max="3650" value="30">
-            </label>
-            <button id="installButton" class="primary-button" type="button">Install client</button>
+            <div class="install-targets-field">
+              <div class="install-targets-textarea-wrap">
+                <label>
+                  Targets
+                  <textarea id="installTargets" rows="4" placeholder="PC-001&#10;PC-002&#10;192.0.2.10&#10;192.0.2.20-192.0.2.30"></textarea>
+                </label>
+              </div>
+              <div class="pkg-buttons">
+                <button id="installLoadAdAllButton" class="primary-button" type="button">Load all PC from AD</button>
+                <button id="installLoadAdMissingButton" class="primary-button" type="button">Load PC without client from AD</button>
+              </div>
+              <div id="installAdMessage" class="pkg-message hidden"></div>
+            </div>
+            <div class="install-right-fields">
+              <label class="install-action-field">
+                Action
+                <select id="clientAction">
+                  <option value="install">Install client</option>
+                  <option value="uninstall">Uninstall client</option>
+                </select>
+              </label>
+              <label class="install-server-field install-only">
+                Server URL
+                <input id="installServerUrl" type="text" value="">
+              </label>
+              <label class="install-user-field">
+                WinRM user
+                <input id="installUsername" type="text" autocomplete="username" placeholder="DOMAIN\User">
+              </label>
+              <label class="install-password-field">
+                WinRM password
+                <input id="installPassword" type="password" autocomplete="current-password">
+              </label>
+              <label class="check-label install-use-ad-field">
+                <input id="installUseAdCredentials" type="checkbox">
+                Use global AD settings (Settings &gt; General &gt; Active Directory)
+              </label>
+              <label class="check-label install-force-field install-only">
+                <input id="installForce" type="checkbox">
+                Force reinstall
+              </label>
+              <label class="check-label install-trusted-field">
+                <input id="installTrustedHosts" type="checkbox">
+                Add to TrustedHosts
+              </label>
+              <button id="installButton" class="primary-button install-submit-field" type="button">Install client</button>
+            </div>
           </div>
           <div id="installStatus" class="install-status empty">No install job started.</div>
           <div id="installHistory" class="install-history empty">No saved client action logs.</div>
@@ -424,6 +588,7 @@
                   <th data-sort-table="clients" data-sort-key="windowsActivated" class="sortable">Windows</th>
                   <th data-sort-table="clients" data-sort-key="officeActivated" class="sortable">Office activation</th>
                   <th data-sort-table="clients" data-sort-key="softwareCount" class="sortable">Software</th>
+                  <th id="descriptionColumnHeader">AD Description</th>
                   <th data-sort-table="clients" data-sort-key="collectedAt" class="sortable">Collected</th>
                   <th>Actions</th>
                 </tr>
@@ -431,6 +596,7 @@
               <tbody id="inventoryBody"></tbody>
             </table>
           </div>
+          <div id="clientsPager" class="pager"></div>
         </section>
 
         <section id="softwareView" class="hidden" aria-label="Software inventory">
@@ -451,6 +617,7 @@
               <tbody id="softwareBody"></tbody>
             </table>
           </div>
+          <div id="softwarePager" class="pager"></div>
         </section>
 
         <section id="hardwareView" class="hidden" aria-label="Hardware inventory">
@@ -472,6 +639,7 @@
                 <tbody id="hwCpuBody"></tbody>
               </table>
             </div>
+            <div id="hwCpuPager" class="pager"></div>
           </div>
           <div class="hw-section">
             <div class="hw-section-header">
@@ -491,6 +659,7 @@
                 <tbody id="hwDiskBody"></tbody>
               </table>
             </div>
+            <div id="hwDiskPager" class="pager"></div>
           </div>
           <div class="hw-section">
             <div class="hw-section-header">
@@ -509,14 +678,8 @@
                 <tbody id="hwRamBody"></tbody>
               </table>
             </div>
+            <div id="hwRamPager" class="pager"></div>
           </div>
-        </section>
-
-        <section id="summarySection" class="summary" aria-label="Inventory summary">
-          <div><span id="clientCount">0</span><small>Clients</small></div>
-          <div><span id="windowsActivated">0</span><small>Windows activated</small></div>
-          <div><span id="officeActivated">0</span><small>Office activated</small></div>
-          <div id="staleTile"><span id="staleCount">0</span><small id="staleLabel">Stale &gt;48h</small></div>
         </section>
       </main>
     </div>

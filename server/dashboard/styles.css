@@ -102,6 +102,16 @@
   box-sizing: border-box;
 }
 
+/* Baseline keyboard-focus affordance - this file has a pervasive :hover
+   accent system (nav, buttons, sortable headers, chips) but nothing for
+   keyboard-only navigation, which otherwise falls back to whatever the
+   browser's own default outline looks like (often invisible against a
+   dark theme). One rule covers every focusable element consistently. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 body {
   margin: 0;
   /* Inter/Roboto first per the design spec; this app ships with no web
@@ -290,6 +300,17 @@ body {
   font-weight: 650;
 }
 
+.nav-badge {
+  margin-left: auto;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
 /* A dotted "spine" running down the section list, echoing the connector
    lines in the app's own logo (an org-chart of nodes) instead of a plain
    solid divider - the sidebar's own section list is, structurally, the
@@ -314,6 +335,11 @@ body {
 
 .sidebar-footer #generatedAt {
   font-size: 11px;
+  transition: color 0.3s ease;
+}
+
+.generated-at-flash {
+  color: var(--accent);
 }
 
 .content-area {
@@ -523,6 +549,18 @@ main {
   font-weight: 700;
 }
 
+/* Declared after .summary div/span so it wins at the equal class+type
+   specificity both rule pairs share - same reasoning as .tile-alert
+   just below, which relies on the same ordering. */
+.summary-compact div {
+  padding: 7px 10px;
+}
+
+.summary-compact span {
+  font-size: 15px;
+  margin-bottom: 2px;
+}
+
 /* Reuses the existing USB-badge amber rather than adding a new color -
    this is the one tile an admin needs to react to, the other summary
    tiles are neutral facts. Left border, not a full-tile fill, so it
@@ -612,7 +650,14 @@ tr.stale td {
 }
 
 .hidden {
-  display: none;
+  /* !important is deliberate: .hidden is a utility class meant to
+     unconditionally hide an element regardless of any component-specific
+     display rule's specificity (e.g. .pkg-grid label { display: grid }
+     otherwise outranks a plain .hidden on a label nested inside .pkg-grid -
+     see server/dashboard/app.js's updateAdIdentityFields, which no longer
+     needs its own inline style.display workaround now that this wins on
+     its own). */
+  display: none !important;
 }
 
 .install-panel {
@@ -637,6 +682,22 @@ tr.stale td {
   font-size: 13px;
 }
 
+/* Client updates' "Use global AD settings" checkbox sits outside
+   .install-grid (it's a standalone label in a .settings-block, not a grid
+   item), so it never picked up the muted/13px treatment its Client actions
+   counterpart gets from .install-grid label above - it rendered at the
+   page's normal text size/color instead, standing out from every other
+   checkbox nearby. Matches that treatment explicitly here instead.
+   .check-label.updates-use-ad-field (not just .updates-use-ad-field) is
+   needed for specificity - .check-label's own color:var(--text) rule
+   (styles.css, further below) has the same one-class specificity and
+   comes later in the file, so it would otherwise win on the color
+   property alone even though font-size still applied correctly. */
+.check-label.updates-use-ad-field {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 textarea,
 input[type="text"],
 input[type="password"],
@@ -650,55 +711,137 @@ select {
   font: inherit;
 }
 
+.description-edit-input {
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 13px;
+}
+
+.description-save-error {
+  display: block;
+  margin-top: 4px;
+  color: var(--danger);
+  font-size: 12px;
+}
+
 .install-targets-field {
   grid-column: 1 / span 2;
   grid-row: 1 / span 2;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.install-targets-textarea-wrap {
+  /* Fixed, not content-driven: this cell's grid-row 1/span 2 is shared
+     with Action/Server URL/WinRM user/password. A max-height on the
+     textarea alone still let the ITEM'S OWN box grow up to that max as
+     the user dragged its resize handle, and the grid kept recomputing
+     the shared row tracks as it went - so the other fields still shifted
+     while dragging, even bounded. A hard height here removes this wrap
+     from that negotiation completely: the grid always sees one constant
+     size, never anything the user does inside the textarea. The Load
+     from AD buttons and the message area live OUTSIDE this wrap (in
+     .install-targets-field's normal flow below it) specifically so they
+     stay visible and in place too, instead of scrolling away with the
+     textarea when it's dragged past this height. */
+  height: 260px;
+  overflow-y: auto;
+}
+
+.install-targets-textarea-wrap label {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 6px;
 }
 
 .install-targets-field textarea {
-  min-height: 116px;
+  min-height: 0;
+  max-height: 500px;
   resize: vertical;
+  /* Without this, a grid/flex item's *implicit* minimum size defaults to
+     its content's intrinsic size - for a textarea, browsers can factor in
+     everything typed into it, not just this element's own box. That let
+     the textarea (and the label/wrap around it) grow to fit all of the
+     typed content instead of clipping to the wrap's fixed 260px, so BOTH
+     the textarea's own native scrollbar and the wrap's overflow-y:auto
+     scrollbar appeared at once for the same overflowing text. min-height:
+     0 here (replacing the earlier explicit 116px floor, no longer needed
+     now that the wrap already guarantees a sane minimum via its own fixed
+     height) lets the grid track's 1fr actually win, so only the
+     textarea's own scrollbar shows.
+  */
+}
+
+/* Action/Server URL/WinRM user/password used to be four independent
+   .install-grid items individually placed across rows 1-2 (the same rows
+   .install-targets-field spans) - each one negotiating its own row's
+   auto-sized height against Targets' much taller content left them
+   inconsistently distributed between row 1 and row 2 depending on which
+   fields were visible (e.g. hiding Server URL in Uninstall mode changed
+   how the leftover height split between the two rows, bunching WinRM
+   user/password at different heights between Install and Uninstall).
+   Bundling all four into one nested grid, placed as a single item
+   spanning the same grid-row: 1 / span 2, means the outer grid only ever
+   compares ONE height (this whole block's) against Targets' - never a
+   per-row tug-of-war between five independent items. */
+.install-right-fields {
+  grid-column: 3 / span 2;
+  grid-row: 1 / span 2;
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(140px, 0.6fr);
+  gap: 12px;
+  align-self: start;
 }
 
 .install-action-field {
-  grid-column: 3;
+  grid-column: 1;
   grid-row: 1;
 }
 
 .install-server-field {
-  grid-column: 4;
+  grid-column: 2;
   grid-row: 1;
 }
 
 .install-user-field {
-  grid-column: 3;
+  grid-column: 1;
   grid-row: 2;
 }
 
 .install-password-field {
-  grid-column: 4;
+  grid-column: 2;
   grid-row: 2;
+}
+
+/* Force reinstall/Add to TrustedHosts/Install client used to sit in the
+   outer grid's row 3, far below Action - moved into .install-right-fields
+   itself (rows 4-5) so the whole set of install controls reads as one
+   cluster next to Action, instead of split across two grid areas. */
+.install-use-ad-field {
+  grid-column: 1 / span 2;
+  grid-row: 3;
 }
 
 .install-force-field {
   grid-column: 1;
-  grid-row: 3;
+  grid-row: 4;
 }
 
 .install-trusted-field {
   grid-column: 2;
-  grid-row: 3;
+  grid-row: 4;
 }
 
-.install-retention-field {
-  grid-column: 3;
-  grid-row: 3;
-}
-
-.install-grid .primary-button {
-  grid-column: 4;
-  grid-row: 3;
-  align-self: end;
+.install-submit-field {
+  grid-column: 1 / span 2;
+  grid-row: 5;
+  justify-self: end;
 }
 
 .check-label {
@@ -935,6 +1078,13 @@ tr.usb-row td {
   flex-shrink: 0;
 }
 
+.ram-modules-grid {
+  display: grid;
+  grid-template-columns: repeat(2, auto);
+  gap: 2px 16px;
+  margin-top: 2px;
+}
+
 th.sortable {
   cursor: pointer;
   user-select: none;
@@ -977,6 +1127,24 @@ th.sort-desc::after {
   color: var(--accent);
 }
 
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin: 12px 0 4px;
+}
+
+.pager-button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.pager-status {
+  font-size: 13px;
+  color: var(--muted);
+}
+
 .hw-section-header {
   display: flex;
   align-items: center;
@@ -1002,6 +1170,21 @@ th.sort-desc::after {
   align-items: end;
 }
 
+/* The Client Package grid has one more field (Server URL, Package share
+   path, Ingestion token, Interval) than the base .pkg-grid template
+   accounts for (used elsewhere, e.g. the Certificate page, with 3 items) -
+   a shared class change here would reintroduce empty tracks on those other
+   pages, so this is a modifier class rather than an ID-scoped override:
+   an ID selector would outrank the plain-class .pkg-grid rule inside the
+   @media (max-width: 900px) collapse block below regardless of source
+   order, un-collapsing this grid on mobile (this exact class of bug - a
+   more specific selector silently winning over a later, lower-specificity
+   one - already happened once on this branch with .hidden). Keep the
+   field count in sync with index.html's #packageView .pkg-grid. */
+.pkg-grid-package {
+  grid-template-columns: minmax(220px, 1.4fr) minmax(200px, 1.2fr) minmax(140px, 1fr) 110px auto;
+}
+
 .pkg-grid label {
   display: grid;
   gap: 6px;
@@ -1016,6 +1199,15 @@ th.sort-desc::after {
   align-items: end;
 }
 
+/* Every other .pkg-buttons sits at the END of its form (Save/Upload/
+   Download), so it never needs bottom spacing of its own. The Certificate
+   view's Delete button is the one place a .pkg-buttons block sits BEFORE a
+   field grid instead - without a gap it read as crowding the Certificate
+   file field right below it. */
+#certificateView > .pkg-buttons {
+  margin-bottom: 16px;
+}
+
 .pkg-message {
   margin-top: 12px;
   padding: 8px 12px;
@@ -1024,6 +1216,11 @@ th.sort-desc::after {
   border: 1px solid var(--success-border);
   color: var(--success-text);
   font-size: 13px;
+  /* Every other .pkg-message caller is single-line; AD Computer Import's
+     "Loaded N computer(s)..." plus per-OU warnings joins multiple lines
+     with \n - without this, normal white-space collapses them into one
+     run-on line instead of stacking. */
+  white-space: pre-line;
 }
 
 .pkg-message.error {
@@ -1043,6 +1240,50 @@ th.sort-desc::after {
 
 .general-grid {
   grid-template-columns: minmax(180px, 1fr) minmax(280px, 2fr) auto;
+}
+
+/* Same narrow single-column treatment as .ad-identity-panel below, for the
+   "Sync Description from AD" / "Sync mode" / "Sync interval" group - keeps
+   this settings block reading as two small stacked panels instead of one
+   wide grid with mixed-purpose fields side by side. */
+.ad-sync-panel {
+  grid-template-columns: 1fr;
+  max-width: 420px;
+}
+
+/* "Sync interval" only means anything for the "Periodic timer" sync mode
+   (hidden otherwise via app.js's updateAdSyncIntervalField) - putting it
+   beside "Sync mode" instead of below keeps the two related fields
+   together instead of interval popping in and shifting everything below
+   it down a row. */
+.ad-sync-mode-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+/* Domain/identity/username/password are credential-shaped fields that
+   don't fit the wide multi-column .general-grid above them - forcing them
+   into extra grid tracks packed unrelated fields into the same row (e.g.
+   "Domain" beside "AD username"). A single narrow column, capped so a
+   domain name or account string doesn't stretch edge-to-edge, reads as one
+   deliberate group instead of a grid searching for content to fill. */
+.ad-identity-panel {
+  grid-template-columns: 1fr;
+  max-width: 420px;
+  margin-top: 12px;
+}
+
+.client-update-grid {
+  grid-template-columns: minmax(200px, 1fr) minmax(200px, 1fr) auto;
+}
+
+/* Same narrow single-column treatment as .ad-sync-panel/.ad-identity-panel -
+   the schedule's mode dropdown and its one conditional field read as a
+   small deliberate group, not stretched across the page. */
+.client-update-schedule-panel {
+  grid-template-columns: 1fr;
+  max-width: 420px;
 }
 
 .settings-block {
@@ -1230,7 +1471,26 @@ th.sort-desc::after {
   .pkg-grid,
   .license-grid,
   .admin-password-grid,
-  .general-grid {
+  .general-grid,
+  .ad-sync-mode-row {
     grid-template-columns: 1fr;
+  }
+}
+
+/* .install-right-fields (Action/Server URL/WinRM user/password) is its own
+   nested 2-column grid, unaffected by .install-grid's own 900px collapse
+   above - its minmax(180px, ...)+minmax(140px, ...) floor (320px combined)
+   still fits comfortably down to ~600px, so it's deliberately left as 2
+   columns through the 900px breakpoint rather than single-columning early
+   where 2 columns still read fine. Only true phone widths need it to
+   collapse too. */
+@media (max-width: 480px) {
+  .install-right-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .install-right-fields > * {
+    grid-column: auto;
+    grid-row: auto;
   }
 }

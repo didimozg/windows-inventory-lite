@@ -40,6 +40,38 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
+    [string]$ClientNet35ExecutablePath,
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$ClientNet40ExecutablePath,
+
+    # When set, Install-Server.ps1 produces a complete, ready-to-deploy GPO
+    # package (both client executables, Deploy-ClientGpo.ps1, and a fully
+    # configured Install-ClientGpo.cmd) in ClientPackagePath by calling
+    # New-ClientGpoPackage.ps1, instead of only refreshing the two exe
+    # files. This is the URL clients will report to - e.g.
+    # "https://server.domain.local/api/v1/inventory" - not this server's
+    # own listen address, which is why it has no derived default: guessing
+    # wrong here would silently ship a broken GPO package.
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$ClientServerUrl,
+
+    [Parameter()]
+    [ValidateRange(1, 24)]
+    [int]$ClientIntervalHours = 6,
+
+    # Only when the GPO startup script and the package files are deployed to
+    # different locations (e.g. the script runs from SYSVOL but the files
+    # live on a separate share) - passed straight through to
+    # New-ClientGpoPackage.ps1. Blank means the script's own folder.
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$PackageSharePath,
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
     [string]$Token,
 
     [Parameter()]
@@ -83,6 +115,39 @@ param(
     [switch]$DisableHttp,
 
     [Parameter()]
+    [switch]$AdSyncEnabled,
+
+    [Parameter()]
+    [ValidateSet('on-report', 'timer')]
+    [string]$AdSyncMode = 'on-report',
+
+    [Parameter()]
+    [ValidateRange(1, 8760)]
+    [int]$AdSyncIntervalHours = 24,
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$AdDomain,
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$AdUsername,
+
+    # AdPassword is written to server-config.json, not passed on the service command
+    # line. Same plain-string tradeoff as WebPassword/CertificatePfxPassword above.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', 'AdPassword')]
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$AdPassword,
+
+    [Parameter()]
+    [switch]$DebugLogEnabled,
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$DebugLogPath,
+
+    [Parameter()]
     [ValidateRange(1, 3650)]
     [int]$InstallLogRetentionDays,
 
@@ -95,6 +160,28 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+
+# DataPath/ContentPath/ClientPackagePath/ConfigPath end up embedded in the
+# sc.exe command line Invoke-ServiceCreate builds below and runs via cmd.exe
+# /c - the surrounding double quotes do NOT protect &, |, <, >, ^ from being
+# parsed as live cmd.exe operators (a well-known cmd.exe quoting quirk), so
+# an unvalidated value here is a command-injection path to code execution.
+# These are admin-supplied install-time paths (lower reachability than the
+# WinRM push path fixed server-side), but reject the same characters
+# New-ClientGpoPackage.ps1's Test-BatchSafeValue already rejects for the GPO
+# .cmd generation path, for consistency and defense-in-depth.
+function Test-BatchSafeValue {
+    param([string]$Value, [string]$FieldName)
+    if ([string]::IsNullOrEmpty($Value)) { return }
+    $unsafeChars = [char[]]('"', '&', '|', '<', '>', '^', "`r", "`n")
+    if ($Value.IndexOfAny($unsafeChars) -ge 0) {
+        throw "$FieldName contains a character that is not allowed here (double quote, &, |, <, >, ^, or a line break)."
+    }
+}
+Test-BatchSafeValue -Value $DataPath -FieldName 'DataPath'
+Test-BatchSafeValue -Value $ContentPath -FieldName 'ContentPath'
+Test-BatchSafeValue -Value $ClientPackagePath -FieldName 'ClientPackagePath'
+Test-BatchSafeValue -Value $ConfigPath -FieldName 'ConfigPath'
 
 function Invoke-ServiceControl {
     param(
@@ -110,6 +197,49 @@ function Invoke-ServiceControl {
 
     $output = & sc.exe @Arguments 2>&1
     if ($AllowedExitCodes -notcontains $LASTEXITCODE) {
+        throw ($FailureMessage + " sc.exe exit code: $LASTEXITCODE. Output: " + (($output | Out-String).Trim()))
+    }
+
+    return $output
+}
+
+# sc.exe create's binPath= value must itself contain embedded double quotes
+# (around the exe path, since it can contain spaces) - passing that as one
+# element of a PowerShell array via "& sc.exe @Arguments" does not reliably
+# preserve those embedded quotes in the raw command line sc.exe receives on
+# every PowerShell engine. Confirmed live (Windows PowerShell 4.0, a real
+# Windows 8 target, via Deploy-ClientGpo.ps1's identical pattern): the
+# array-splat form silently corrupts the command line and sc.exe returns
+# exit code 1639 (invalid command line), printing its own usage text
+# instead of a specific error - every other Invoke-ServiceControl call
+# (query/stop/delete/description/start) has no embedded quotes in its
+# arguments and is unaffected, so only "create" gets this separate path.
+# Building the full command as one string and invoking through cmd.exe /c,
+# with the embedded quotes backslash-escaped the way cmd.exe's own parser
+# expects, was confirmed to produce the correct command line on the same
+# real target that failed with the array form. This server-install script
+# is expected to run on PowerShell 5.1+ (see this project's other
+# PS-version notes), but the fix costs nothing extra to apply here too,
+# for consistency with the two client-side scripts that do need it.
+function Invoke-ServiceCreate {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ServiceName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BinPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DisplayName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FailureMessage
+    )
+
+    $escapedBinPath = $BinPath.Replace('"', '\"')
+    $commandLine = 'sc.exe create ' + $ServiceName + ' binPath= "' + $escapedBinPath + '" start= auto DisplayName= "' + $DisplayName + '"'
+    $output = cmd.exe /c $commandLine 2>&1
+    if ($LASTEXITCODE -ne 0) {
         throw ($FailureMessage + " sc.exe exit code: $LASTEXITCODE. Output: " + (($output | Out-String).Trim()))
     }
 
@@ -237,6 +367,68 @@ function Get-ConfigValue {
     return $null
 }
 
+# Encrypts a secret with Windows DPAPI (LocalMachine scope, not CurrentUser -
+# the server may run as LocalSystem/NetworkService/a service account with no
+# loaded interactive profile, so LocalMachine is the only scope any process
+# on this machine, including the running service, can reliably decrypt with).
+# Stored with a "dpapi:" prefix so WindowsInventoryLiteServer.exe's matching
+# SecretProtector.Unprotect can tell an already-encrypted value apart from a
+# legacy/hand-edited plaintext one (which it uses as-is rather than failing).
+# Used for AdPassword, Token, and WebPassword - the no-op guard below matters
+# for Token/WebPassword specifically, since (unlike AdPassword) they reload
+# their saved value from server-config.json on a re-run when not passed
+# explicitly; without the guard, an already-encrypted saved value would be
+# encrypted a second time and corrupted.
+function Protect-Secret {
+    param(
+        [string]$PlainText
+    )
+
+    if (-not $PlainText) {
+        return $PlainText
+    }
+    if ($PlainText.StartsWith('dpapi:')) {
+        return $PlainText
+    }
+
+    Add-Type -AssemblyName System.Security
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($PlainText)
+    $protectedBytes = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
+    return 'dpapi:' + [Convert]::ToBase64String($protectedBytes)
+}
+
+# Decrypts a value produced by Protect-Secret. Mirrors
+# SecretProtector.Unprotect (src/server/SecretProtector.cs) so a value
+# reloaded from server-config.json - which may now be "dpapi:"-encrypted
+# thanks to Protect-Secret - comes back out as plaintext for every
+# downstream consumer in this script (the config rewrite re-encrypts it via
+# Protect-Secret regardless, but other consumers, e.g. GPO client package
+# generation, need the real plaintext). Passes through unchanged when the
+# value is empty or not "dpapi:"-prefixed (legacy/hand-edited plaintext),
+# and returns $null on a decrypt failure, matching SecretProtector.Unprotect.
+function Unprotect-Secret {
+    param(
+        [string]$StoredValue
+    )
+
+    if (-not $StoredValue) {
+        return $StoredValue
+    }
+    if (-not $StoredValue.StartsWith('dpapi:')) {
+        return $StoredValue
+    }
+
+    try {
+        Add-Type -AssemblyName System.Security
+        $protectedBytes = [Convert]::FromBase64String($StoredValue.Substring('dpapi:'.Length))
+        $bytes = [System.Security.Cryptography.ProtectedData]::Unprotect($protectedBytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
+        return [System.Text.Encoding]::UTF8.GetString($bytes)
+    }
+    catch {
+        return $null
+    }
+}
+
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\server-config.json'
 }
@@ -301,7 +493,7 @@ if (-not $PSBoundParameters.ContainsKey('ListenPrefix')) {
 if (-not $PSBoundParameters.ContainsKey('Token')) {
     $savedToken = Get-ConfigValue -Config $existingConfig -Name 'Token'
     if ($savedToken) {
-        $Token = $savedToken
+        $Token = Unprotect-Secret -StoredValue $savedToken
     }
 }
 
@@ -315,7 +507,7 @@ if (-not $PSBoundParameters.ContainsKey('WebUsername')) {
 if (-not $PSBoundParameters.ContainsKey('WebPassword')) {
     $savedWebPassword = Get-ConfigValue -Config $existingConfig -Name 'WebPassword'
     if ($savedWebPassword) {
-        $WebPassword = $savedWebPassword
+        $WebPassword = Unprotect-Secret -StoredValue $savedWebPassword
     }
 }
 
@@ -418,6 +610,59 @@ if (-not $PSBoundParameters.ContainsKey('DisableHttp')) {
     }
 }
 
+if (-not $PSBoundParameters.ContainsKey('AdSyncEnabled')) {
+    $savedAdSyncEnabled = Get-ConfigValue -Config $existingConfig -Name 'AdSyncEnabled'
+    if ($savedAdSyncEnabled -eq 'true') {
+        $AdSyncEnabled = $true
+    }
+}
+if (-not $PSBoundParameters.ContainsKey('AdSyncMode')) {
+    $savedAdSyncMode = Get-ConfigValue -Config $existingConfig -Name 'AdSyncMode'
+    if ($savedAdSyncMode -eq 'timer' -or $savedAdSyncMode -eq 'on-report') {
+        $AdSyncMode = $savedAdSyncMode
+    }
+}
+if (-not $PSBoundParameters.ContainsKey('AdSyncIntervalHours')) {
+    $savedAdSyncIntervalHours = Get-ConfigValue -Config $existingConfig -Name 'AdSyncIntervalHours'
+    if ($savedAdSyncIntervalHours) {
+        $AdSyncIntervalHours = [int]$savedAdSyncIntervalHours
+    }
+}
+if (-not $PSBoundParameters.ContainsKey('AdDomain')) {
+    $savedAdDomain = Get-ConfigValue -Config $existingConfig -Name 'AdDomain'
+    if ($savedAdDomain) {
+        $AdDomain = $savedAdDomain
+    }
+}
+if (-not $PSBoundParameters.ContainsKey('AdUsername')) {
+    $savedAdUsername = Get-ConfigValue -Config $existingConfig -Name 'AdUsername'
+    if ($savedAdUsername) {
+        $AdUsername = $savedAdUsername
+    }
+}
+# AdPassword is deliberately NOT reloaded from the saved config the way
+# AdUsername is - re-running the installer without -AdPassword must not
+# require re-supplying it if it's already saved, but the *existing* saved
+# value is what server-config.json already has and $config.AdPassword
+# below only overwrites it when a new one was actually passed this run.
+$adUseServiceIdentity = [string]::IsNullOrEmpty($AdUsername)
+if ($AdSyncEnabled -and -not $adUseServiceIdentity -and -not $AdPassword -and -not (Get-ConfigValue -Config $existingConfig -Name 'AdPassword')) {
+    throw "-AdUsername was supplied without -AdPassword, and no AD password is already saved - provide -AdPassword."
+}
+
+if (-not $PSBoundParameters.ContainsKey('DebugLogEnabled')) {
+    $savedDebugLogEnabled = Get-ConfigValue -Config $existingConfig -Name 'DebugLogEnabled'
+    if ($savedDebugLogEnabled -eq 'true') {
+        $DebugLogEnabled = $true
+    }
+}
+if (-not $PSBoundParameters.ContainsKey('DebugLogPath')) {
+    $savedDebugLogPath = Get-ConfigValue -Config $existingConfig -Name 'DebugLogPath'
+    if ($savedDebugLogPath) {
+        $DebugLogPath = $savedDebugLogPath
+    }
+}
+
 if ($DisableHttp -and -not $UseHttps) {
     throw "-DisableHttp requires -UseHttps (or an already-configured working HTTPS setup) - disabling HTTP with no HTTPS would make the dashboard unreachable."
 }
@@ -456,13 +701,49 @@ if (-not $PSBoundParameters.ContainsKey('InstallLogRetentionDays')) {
     }
 }
 
+# For all three of these: no explicit path means this is the project's own
+# build output (not a caller-supplied binary), so rebuild fresh every run -
+# the same pattern New-ClientGpoPackage.ps1 already uses for its default
+# paths. An existence-only check let a stale build\*.exe from an earlier
+# session get deployed silently. A caller-supplied path is left as-is
+# unless literally missing, since passing one explicitly means "use this
+# binary", not "rebuild it".
+# Build-Server.ps1 already rebuilds both client targets at their own
+# default build\ paths as an unconditional side effect (see its own
+# comment) - tracked here so the ClientNet35/40ExecutablePath blocks below
+# don't immediately redo that same work a second time whenever it just ran.
+$serverBuildInvoked = $false
 if (-not $ServerExecutablePath) {
     $projectRoot = Split-Path -Parent $PSScriptRoot
     $ServerExecutablePath = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteServer.exe'
+    & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Server.ps1') -OutputPath $ServerExecutablePath
+    $serverBuildInvoked = $true
+}
+elseif (-not (Test-Path -LiteralPath $ServerExecutablePath)) {
+    & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Server.ps1') -OutputPath $ServerExecutablePath
+    $serverBuildInvoked = $true
 }
 
-if (-not (Test-Path -LiteralPath $ServerExecutablePath)) {
-    & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Server.ps1') -OutputPath $ServerExecutablePath
+if (-not $ClientNet35ExecutablePath) {
+    $projectRoot = Split-Path -Parent $PSScriptRoot
+    $ClientNet35ExecutablePath = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteClient-net35.exe'
+    if (-not $serverBuildInvoked) {
+        & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Client.ps1') -OutputPath $ClientNet35ExecutablePath -TargetFramework Net35
+    }
+}
+elseif (-not (Test-Path -LiteralPath $ClientNet35ExecutablePath)) {
+    & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Client.ps1') -OutputPath $ClientNet35ExecutablePath -TargetFramework Net35
+}
+
+if (-not $ClientNet40ExecutablePath) {
+    $projectRoot = Split-Path -Parent $PSScriptRoot
+    $ClientNet40ExecutablePath = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteClient-net40.exe'
+    if (-not $serverBuildInvoked) {
+        & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Client.ps1') -OutputPath $ClientNet40ExecutablePath -TargetFramework Net40
+    }
+}
+elseif (-not (Test-Path -LiteralPath $ClientNet40ExecutablePath)) {
+    & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Client.ps1') -OutputPath $ClientNet40ExecutablePath -TargetFramework Net40
 }
 
 foreach ($path in @($InstallPath, $DataPath, $ContentPath, $ClientPackagePath)) {
@@ -505,12 +786,57 @@ if (Test-Path -LiteralPath $deployScriptSource) {
     Copy-Item -LiteralPath $deployScriptSource -Destination $deployScriptBinPath -Force
 }
 
-if ($ClientPackageSourcePath -and (Test-Path -LiteralPath $ClientPackageSourcePath)) {
-    Copy-Item -Path (Join-Path -Path $ClientPackageSourcePath -ChildPath '*') -Destination $ClientPackagePath -Recurse -Force
-}
-
 $clientNet35PackagePath = Join-Path -Path $ClientPackagePath -ChildPath 'WindowsInventoryLiteClient-net35.exe'
 $clientNet40PackagePath = Join-Path -Path $ClientPackagePath -ChildPath 'WindowsInventoryLiteClient-net40.exe'
+
+if ($ClientServerUrl) {
+    # Produces a complete, ready-to-deploy package (both client exes,
+    # Deploy-ClientGpo.ps1, and a fully configured Install-ClientGpo.cmd) in
+    # one step - reuses New-ClientGpoPackage.ps1 rather than reimplementing
+    # its .cmd-generation logic a third time (the dashboard's
+    # ConfigureClientPackage already has its own C#-side copy for
+    # already-running-service edits).
+    $gpoPackageParams = @{
+        ServerUrl       = $ClientServerUrl
+        IntervalHours   = $ClientIntervalHours
+        OutputPath      = $ClientPackagePath
+        ClientNet35Path = $ClientNet35ExecutablePath
+        ClientNet40Path = $ClientNet40ExecutablePath
+    }
+    if ($Token) {
+        $gpoPackageParams.Token = $Token
+    }
+    if ($PackageSharePath) {
+        $gpoPackageParams.PackageSharePath = $PackageSharePath
+    }
+    & (Join-Path -Path $PSScriptRoot -ChildPath 'New-ClientGpoPackage.ps1') @gpoPackageParams
+}
+else {
+    if ($ClientPackageSourcePath -and (Test-Path -LiteralPath $ClientPackageSourcePath)) {
+        Copy-Item -Path (Join-Path -Path $ClientPackageSourcePath -ChildPath '*') -Destination $ClientPackagePath -Recurse -Force
+    }
+    # Even without a full GPO package request, keep the two executables
+    # themselves current - this is what was missing before: a server
+    # reinstall/upgrade left a stale client-package\*.exe in place with no
+    # warning, since ClientPackageSourcePath (dist\gpo-client) is only
+    # populated by a separate, easy-to-forget packaging step.
+    Copy-Item -LiteralPath $ClientNet35ExecutablePath -Destination $clientNet35PackagePath -Force
+    Copy-Item -LiteralPath $ClientNet40ExecutablePath -Destination $clientNet40PackagePath -Force
+    # Same staleness gap, one file over: ClientPackagePath\Deploy-ClientGpo.ps1
+    # is what every WinRM push (Client actions AND Client updates, both routed
+    # through options.ClientPackagePath server-side) actually deploys to
+    # targets - a "Just refresh" server reinstall left it untouched forever,
+    # silently re-deploying whatever version of this script existed the one
+    # time -ClientServerUrl or -ClientPackageSourcePath happened to be used.
+    # Confirmed live: this is exactly how the sc.exe 1639 fix kept failing to
+    # reach a real target even after the source fix was pushed and the
+    # server's own exe was rebuilt.
+    if (Test-Path -LiteralPath $deployScriptSource) {
+        $clientDeployScriptPackagePath = Join-Path -Path $ClientPackagePath -ChildPath 'Deploy-ClientGpo.ps1'
+        Copy-Item -LiteralPath $deployScriptSource -Destination $clientDeployScriptPackagePath -Force
+    }
+}
+
 $clientNet35Version = $null
 $clientNet40Version = $null
 if (Test-Path -LiteralPath $clientNet35PackagePath) {
@@ -570,17 +896,28 @@ $config.InstallPath             = $InstallPath
 $config.ContentPath             = $ContentPath
 $config.ClientPackagePath       = $ClientPackagePath
 $config.InstallLogRetentionDays = $InstallLogRetentionDays
-$config.Token                   = $Token
+$config.Token                   = Protect-Secret -PlainText $Token
 $config.WebUsername             = $WebUsername
-$config.WebPassword             = $WebPassword
+$config.WebPassword             = Protect-Secret -PlainText $WebPassword
 $config.UseHttps                = if ($UseHttps) { 'true' } else { 'false' }
 $config.CertificateThumbprint   = $CertificateThumbprint
 $config.HttpsPort               = $HttpsPort
 $config.EnableHttp              = if ($DisableHttp) { 'false' } else { 'true' }
+$config.AdSyncEnabled           = if ($AdSyncEnabled) { 'true' } else { 'false' }
+$config.AdSyncMode              = $AdSyncMode
+$config.AdSyncIntervalHours     = $AdSyncIntervalHours
+$config.AdDomain                = $AdDomain
+$config.AdUseServiceIdentity    = if ($adUseServiceIdentity) { 'true' } else { 'false' }
+$config.AdUsername              = $AdUsername
+if ($AdPassword) {
+    $config.AdPassword = Protect-Secret -PlainText $AdPassword
+}
+$config.DebugLogEnabled         = if ($DebugLogEnabled) { 'true' } else { 'false' }
+$config.DebugLogPath            = $DebugLogPath
 Write-ServerConfig -Path $ConfigPath -Config $config
 Set-RestrictedFileAcl -FilePath $ConfigPath
 
-Invoke-ServiceControl -Arguments @('create', $serviceName, 'binPath=', $serviceCommand, 'start=', 'auto', 'DisplayName=', 'Windows Inventory Lite Server') -FailureMessage "Failed to create service. Run PowerShell as Administrator." | Out-Null
+Invoke-ServiceCreate -ServiceName $serviceName -BinPath $serviceCommand -DisplayName 'Windows Inventory Lite Server' -FailureMessage "Failed to create service. Run PowerShell as Administrator." | Out-Null
 Invoke-ServiceControl -Arguments @('description', $serviceName, "Receives Windows Inventory Lite reports and serves the dashboard. Version $serverVersion.") -FailureMessage "Failed to set service description." | Out-Null
 
 if ($OpenFirewall) {
