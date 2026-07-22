@@ -88,6 +88,10 @@ namespace WindowsInventoryLite
         public int HttpsPort;
         public IPAddress Address;
         public string DataPath;
+        // Fully separate from DataPath (Windows reports) - the Linux client
+        // v1 has its own independent storage, API, and dashboard tab. See
+        // ReceiveLinuxInventory/BuildLinuxClientIndex.
+        public string LinuxDataPath;
         public string ContentPath;
         public string ClientPackagePath;
         public string WinRmInstallerPath;
@@ -160,6 +164,7 @@ namespace WindowsInventoryLite
             options.HttpsPort = 8443;
             options.Address = IPAddress.Any;
             options.DataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server");
+            options.LinuxDataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\linux-clients-data");
             options.ContentPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-content");
             options.ClientPackagePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\client-package");
             options.WinRmInstallerPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-bin\Install-ClientWinRM.ps1");
@@ -208,6 +213,10 @@ namespace WindowsInventoryLite
                 else if (key == "--data" && i + 1 < args.Length)
                 {
                     options.DataPath = args[++i];
+                }
+                else if (key == "--linux-data" && i + 1 < args.Length)
+                {
+                    options.LinuxDataPath = args[++i];
                 }
                 else if (key == "--content" && i + 1 < args.Length)
                 {
@@ -607,6 +616,10 @@ namespace WindowsInventoryLite
             if (!Directory.Exists(options.DataPath))
             {
                 Directory.CreateDirectory(options.DataPath);
+            }
+            if (!Directory.Exists(options.LinuxDataPath))
+            {
+                Directory.CreateDirectory(options.LinuxDataPath);
             }
             if (!Directory.Exists(GetInstallJobDirectory()))
             {
@@ -1228,6 +1241,10 @@ namespace WindowsInventoryLite
                     {
                         ReceiveInventory(stream, request);
                     }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/linux/inventory")
+                    {
+                        ReceiveLinuxInventory(stream, request);
+                    }
                     else if (!IsWebRequestAuthorized(request))
                     {
                         SendUnauthorized(stream);
@@ -1243,6 +1260,18 @@ namespace WindowsInventoryLite
                     else if (request.Method == "PUT" && request.Path.StartsWith("/api/v1/clients/", StringComparison.OrdinalIgnoreCase))
                     {
                         UpdateClientDescription(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/linux/clients")
+                    {
+                        SendJson(stream, BuildLinuxClientIndex());
+                    }
+                    else if (request.Method == "DELETE" && request.Path.StartsWith("/api/v1/linux/clients/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        DeleteLinuxClient(stream, request);
+                    }
+                    else if (request.Method == "PUT" && request.Path.StartsWith("/api/v1/linux/clients/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        UpdateLinuxClientDescription(stream, request);
                     }
                     else if (request.Method == "POST" && request.Path == "/api/v1/client-install")
                     {
@@ -1792,6 +1821,226 @@ namespace WindowsInventoryLite
                 }
                 report["adDescription"] = description;
                 File.WriteAllText(path, serializer.Serialize(report), new UTF8Encoding(false));
+            }
+
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["status"] = "ok";
+            response["description"] = description;
+            SendJson(stream, serializer.Serialize(response));
+        }
+
+        // Ingests a Linux client report - fully independent of
+        // ReceiveInventory (different storage directory, different report
+        // schema entirely). Shares the server's one Token setting (same
+        // header, same FixedTimeEquals check) and the AD Description Sync
+        // resolution (ComputeAdSyncFields/ApplyAdSyncFields, both already
+        // generic over "a hostname string and a previous report dict" -
+        // zero changes needed to reuse them here).
+        private void ReceiveLinuxInventory(Stream stream, RequestContext request)
+        {
+            string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
+            if (!String.IsNullOrEmpty(options.Token) && !FixedTimeEquals(token, options.Token))
+            {
+                DebugLogger.Log(options, "Client", "Rejected Linux inventory report: invalid or missing token");
+                SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> inventory;
+            try
+            {
+                inventory = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+            }
+            catch
+            {
+                DebugLogger.Log(options, "Client", "Rejected Linux inventory report: invalid request body");
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string hostname = Convert.ToString(inventory.ContainsKey("hostname") ? inventory["hostname"] : "unknown");
+            string path = Path.Combine(options.LinuxDataPath, SanitizeFileName(hostname) + ".json");
+
+            // Same lock-avoidance reasoning as ReceiveInventory: compute the
+            // (possibly slow, up to ~15s against an unreachable AD) fields
+            // before taking reportFileLock, which Windows and Linux
+            // ingestion share - one slow AD lookup must not serialize
+            // ingestion for the rest of either fleet.
+            Dictionary<string, object> previous = null;
+            if (File.Exists(path))
+            {
+                try
+                {
+                    previous = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                }
+                catch
+                {
+                    previous = null;
+                }
+            }
+            AdSyncFields adFields = ComputeAdSyncFields(hostname, previous);
+
+            lock (reportFileLock)
+            {
+                ApplyAdSyncFields(inventory, adFields);
+
+                string json = serializer.Serialize(inventory);
+                File.WriteAllText(path, json, new UTF8Encoding(false));
+            }
+            DebugLogger.Log(options, "Client", "Linux inventory report accepted from '" + DebugLogger.SanitizeForLog(hostname) + "'");
+            SendJson(stream, "{\"status\":\"ok\"}");
+        }
+
+        private ArrayList LoadLinuxClientReports()
+        {
+            ArrayList clients = new ArrayList();
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+
+            foreach (string file in Directory.GetFiles(options.LinuxDataPath, "*.json"))
+            {
+                try
+                {
+                    string raw = File.ReadAllText(file, Encoding.UTF8);
+                    Dictionary<string, object> client = serializer.Deserialize<Dictionary<string, object>>(raw);
+                    client["sourceFile"] = Path.GetFileName(file);
+                    client["sourceUpdatedAt"] = File.GetLastWriteTimeUtc(file).ToString("yyyy-MM-ddTHH:mm:ssZ");
+                    clients.Add(client);
+                }
+                catch
+                {
+                }
+            }
+
+            return clients;
+        }
+
+        private string BuildLinuxClientIndex()
+        {
+            ArrayList clients = LoadLinuxClientReports();
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+
+            Dictionary<string, object> index = new Dictionary<string, object>();
+            index["schemaVersion"] = "1.0";
+            index["serverVersion"] = Program.ProductVersion;
+            index["generatedAt"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            index["clientCount"] = clients.Count;
+            index["adDescriptionSyncEnabled"] = options.AdDescriptionSyncEnabled;
+            index["clients"] = clients;
+            return serializer.Serialize(index);
+        }
+
+        private void DeleteLinuxClient(Stream stream, RequestContext request)
+        {
+            const string prefix = "/api/v1/linux/clients/";
+            string rawHostname = request.Path.Substring(prefix.Length);
+            int queryStart = rawHostname.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                rawHostname = rawHostname.Substring(0, queryStart);
+            }
+
+            string hostname = Uri.UnescapeDataString(rawHostname).Trim();
+            if (String.IsNullOrEmpty(hostname))
+            {
+                SendText(stream, "{\"error\":\"hostname is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string path = Path.Combine(options.LinuxDataPath, SanitizeFileName(hostname) + ".json");
+            if (!File.Exists(path))
+            {
+                SendText(stream, "{\"error\":\"client not found\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+
+            File.Delete(path);
+            SendJson(stream, "{\"status\":\"deleted\"}");
+        }
+
+        // Manual Description edit for a Linux client - same rule as
+        // UpdateClientDescription: only reachable while AD Description
+        // Sync is off, enforced here (not just by the dashboard hiding the
+        // control). Writes the same adDescription field
+        // ComputeAdSyncFields/ApplyAdSyncFields already read/write.
+        private void UpdateLinuxClientDescription(Stream stream, RequestContext request)
+        {
+            const string prefix = "/api/v1/linux/clients/";
+            const string suffix = "/description";
+            string rawPath = request.Path;
+            int queryStart = rawPath.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                rawPath = rawPath.Substring(0, queryStart);
+            }
+            if (!rawPath.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                SendText(stream, "{\"error\":\"not found\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+
+            string rawHostname = rawPath.Substring(prefix.Length, rawPath.Length - prefix.Length - suffix.Length);
+            string hostname = Uri.UnescapeDataString(rawHostname).Trim();
+            if (String.IsNullOrEmpty(hostname))
+            {
+                SendText(stream, "{\"error\":\"hostname is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            if (options.AdDescriptionSyncEnabled)
+            {
+                SendText(stream, "{\"error\":\"Description is synced from AD - disable \\\"Sync Description from AD\\\" in Settings first.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string description = payload.ContainsKey("description") ? Convert.ToString(payload["description"]) : "";
+            if (description.Length > 1024)
+            {
+                SendText(stream, "{\"error\":\"description must be 1024 characters or fewer\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string path = Path.Combine(options.LinuxDataPath, SanitizeFileName(hostname) + ".json");
+            lock (reportFileLock)
+            {
+                if (!File.Exists(path))
+                {
+                    SendText(stream, "{\"error\":\"client not found\"}", "application/json; charset=utf-8", 404);
+                    return;
+                }
+                Dictionary<string, object> record;
+                try
+                {
+                    record = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                }
+                catch
+                {
+                    SendText(stream, "{\"error\":\"client report could not be read\"}", "application/json; charset=utf-8", 500);
+                    return;
+                }
+                if (record == null)
+                {
+                    SendText(stream, "{\"error\":\"client report could not be read\"}", "application/json; charset=utf-8", 500);
+                    return;
+                }
+                record["adDescription"] = description;
+                File.WriteAllText(path, serializer.Serialize(record), new UTF8Encoding(false));
             }
 
             Dictionary<string, object> response = new Dictionary<string, object>();
