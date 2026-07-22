@@ -344,6 +344,24 @@ function Get-BinPathFlagValue {
     return $Matches[1] -replace '\\"', '"'
 }
 
+# Thin wrapper around sc.exe, existing purely so Pester can mock it
+# directly. Mocking sc.exe itself fails under Windows PowerShell 5.1
+# with "Alias is not writeable because alias sc is read-only or
+# constant and cannot be written to" - "sc" is a built-in, protected
+# (ReadOnly, AllScope) alias for Set-Content on this PowerShell
+# version, and Pester's mocking machinery for an external/application
+# command collides with it. Mocking a plain function has no such
+# problem.
+function Invoke-ScExe {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    $output = & sc.exe @Arguments 2>&1
+    return @{ Output = $output; ExitCode = $LASTEXITCODE }
+}
+
 # Reads a service's raw binPath the same way Deploy-ClientGpo.ps1's own
 # Get-ServiceBinaryPath already does (sc.exe qc + a regex on
 # BINARY_PATH_NAME) - duplicated rather than shared, matching this
@@ -354,12 +372,12 @@ function Get-ClientServiceBinaryPath {
         [string]$ServiceName
     )
 
-    $output = & sc.exe qc $ServiceName 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    $result = Invoke-ScExe -Arguments @('qc', $ServiceName)
+    if ($result.ExitCode -ne 0) {
         return $null
     }
 
-    foreach ($line in $output) {
+    foreach ($line in $result.Output) {
         if ($line -match 'BINARY_PATH_NAME\s*:\s*(.+)$') {
             return $matches[1].Trim()
         }
@@ -439,8 +457,8 @@ function Get-InstallClientMode {
         [string]$ServiceName
     )
 
-    $null = & sc.exe query $ServiceName 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    $queryResult = Invoke-ScExe -Arguments @('query', $ServiceName)
+    if ($queryResult.ExitCode -ne 0) {
         return @{ Mode = 'Full'; Params = @{} }
     }
 

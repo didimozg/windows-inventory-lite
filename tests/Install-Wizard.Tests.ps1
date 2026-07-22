@@ -236,10 +236,9 @@ Describe 'Windows Inventory Lite Install Wizard' {
     }
 
     It 'Get-InstallClientMode returns Full with empty Params when the service does not exist' {
-        Mock sc.exe {
-            $global:LASTEXITCODE = 1060
-            return 'The specified service does not exist as an installed service.'
-        } -ParameterFilter { $args[0] -eq 'query' }
+        Mock Invoke-ScExe {
+            return @{ Output = @('The specified service does not exist as an installed service.'); ExitCode = 1060 }
+        } -ParameterFilter { $Arguments[0] -eq 'query' }
 
         $result = Get-InstallClientMode -ServiceName 'WindowsInventoryLiteClient'
 
@@ -248,14 +247,12 @@ Describe 'Windows Inventory Lite Install Wizard' {
     }
 
     It 'Get-InstallClientMode returns Full when the service exists but its binPath has no --server-url' {
-        Mock sc.exe {
-            $global:LASTEXITCODE = 0
-            return 'SERVICE_NAME: WindowsInventoryLiteClient'
-        } -ParameterFilter { $args[0] -eq 'query' }
-        Mock sc.exe {
-            $global:LASTEXITCODE = 0
-            return 'BINARY_PATH_NAME : "C:\client\WindowsInventoryLiteClient.exe" --output "C:\client"'
-        } -ParameterFilter { $args[0] -eq 'qc' }
+        Mock Invoke-ScExe {
+            return @{ Output = @('SERVICE_NAME: WindowsInventoryLiteClient'); ExitCode = 0 }
+        } -ParameterFilter { $Arguments[0] -eq 'query' }
+        Mock Invoke-ScExe {
+            return @{ Output = @('BINARY_PATH_NAME : "C:\client\WindowsInventoryLiteClient.exe" --output "C:\client"'); ExitCode = 0 }
+        } -ParameterFilter { $Arguments[0] -eq 'qc' }
 
         $result = Get-InstallClientMode -ServiceName 'WindowsInventoryLiteClient'
 
@@ -263,14 +260,12 @@ Describe 'Windows Inventory Lite Install Wizard' {
     }
 
     It 'Get-InstallClientMode returns Skip with the reconstructed Params when the service exists, parses, and the user accepts the default choice' {
-        Mock sc.exe {
-            $global:LASTEXITCODE = 0
-            return 'SERVICE_NAME: WindowsInventoryLiteClient'
-        } -ParameterFilter { $args[0] -eq 'query' }
-        Mock sc.exe {
-            $global:LASTEXITCODE = 0
-            return 'BINARY_PATH_NAME : "C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory" --interval-hours 6 --output "C:\ProgramData\WindowsInventoryLite\client-data" --debug-log-path "C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug.log"'
-        } -ParameterFilter { $args[0] -eq 'qc' }
+        Mock Invoke-ScExe {
+            return @{ Output = @('SERVICE_NAME: WindowsInventoryLiteClient'); ExitCode = 0 }
+        } -ParameterFilter { $Arguments[0] -eq 'query' }
+        Mock Invoke-ScExe {
+            return @{ Output = @('BINARY_PATH_NAME : "C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory" --interval-hours 6 --output "C:\ProgramData\WindowsInventoryLite\client-data" --debug-log-path "C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug.log"'); ExitCode = 0 }
+        } -ParameterFilter { $Arguments[0] -eq 'qc' }
         Mock Read-WizardAnswer { return $null }
 
         $result = Get-InstallClientMode -ServiceName 'WindowsInventoryLiteClient'
@@ -281,14 +276,12 @@ Describe 'Windows Inventory Lite Install Wizard' {
     }
 
     It 'Get-InstallClientMode returns Full when the service exists, parses, and the user explicitly picks full reconfigure' {
-        Mock sc.exe {
-            $global:LASTEXITCODE = 0
-            return 'SERVICE_NAME: WindowsInventoryLiteClient'
-        } -ParameterFilter { $args[0] -eq 'query' }
-        Mock sc.exe {
-            $global:LASTEXITCODE = 0
-            return 'BINARY_PATH_NAME : "C:\client\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory" --interval-hours 6 --output "C:\client" --debug-log-path "C:\client\debug.log"'
-        } -ParameterFilter { $args[0] -eq 'qc' }
+        Mock Invoke-ScExe {
+            return @{ Output = @('SERVICE_NAME: WindowsInventoryLiteClient'); ExitCode = 0 }
+        } -ParameterFilter { $Arguments[0] -eq 'query' }
+        Mock Invoke-ScExe {
+            return @{ Output = @('BINARY_PATH_NAME : "C:\client\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory" --interval-hours 6 --output "C:\client" --debug-log-path "C:\client\debug.log"'); ExitCode = 0 }
+        } -ParameterFilter { $Arguments[0] -eq 'qc' }
         Mock Read-WizardAnswer { return '2' }
 
         $result = Get-InstallClientMode -ServiceName 'WindowsInventoryLiteClient'
