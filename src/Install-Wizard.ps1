@@ -410,13 +410,17 @@ if ($MyInvocation.InvocationName -ne '.') {
         $scriptPath = Join-Path -Path $PSScriptRoot -ChildPath $flow.ScriptName
 
         # Only the "Install server" flow has an existing-install detection
-        # step - see Test-InstallServerRefreshOnly for why "just refresh"
-        # means an empty params hashtable rather than a shorter question
-        # list.
+        # step - see Get-InstallServerMode for what each of its three
+        # return values means. Quick/Full both still ask every question
+        # for now (unchanged from before this fix) - a later task narrows
+        # 'Quick' down to a shorter question list; this fix only restores
+        # the broken caller after Get-InstallServerMode replaced
+        # Test-InstallServerRefreshOnly.
         $skipQuestions = $false
         if ($choice -eq '1') {
             $defaultConfigPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\server-config.json'
-            $skipQuestions = Test-InstallServerRefreshOnly -ConfigPath $defaultConfigPath
+            $mode = Get-InstallServerMode -ConfigPath $defaultConfigPath
+            $skipQuestions = ($mode -eq 'Skip')
         }
 
         $params = if ($skipQuestions) { @{} } else { Read-WizardAnswers -Questions $flow.Questions }
