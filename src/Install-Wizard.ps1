@@ -250,6 +250,33 @@ function Test-ShouldShowQuickInstallSummary {
     return ($Ran -and $Mode -eq 'Quick')
 }
 
+# Decides what params hashtable a flow should pass to its target script,
+# given the resolved mode. Consolidates logic that used to be inlined
+# directly in the main loop (see the loop's own history) into one small,
+# directly-testable function - the main loop itself lives inside the
+# `-ne '.'` guard below and is never reached by Pester's usual
+# dot-source-and-call pattern, so any decision left inline there is
+# otherwise only provable by hand-tracing.
+function Resolve-WizardFlowParams {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Mode,
+
+        [Parameter(Mandatory = $true)]
+        [object[]]$Questions,
+
+        [Parameter()]
+        [hashtable]$SkipParams = @{}
+    )
+
+    if ($Mode -eq 'Skip') {
+        return $SkipParams
+    }
+
+    $effectiveQuestions = if ($Mode -eq 'Quick') { @($Questions | Where-Object { $_['QuickInstall'] }) } else { $Questions }
+    return Read-WizardAnswers -Questions $effectiveQuestions
+}
+
 # Duplicated from Install-Server.ps1's own Read-ServerConfig (this project
 # doesn't share a module between scripts - see e.g. Uninstall-Server.ps1's
 # identical copy) so the wizard can detect whether a server is already
@@ -627,17 +654,24 @@ if ($MyInvocation.InvocationName -ne '.') {
 
         $scriptPath = Join-Path -Path $PSScriptRoot -ChildPath $flow.ScriptName
 
-        # Only the "Install server" flow distinguishes Quick/Skip/Full -
-        # see Get-InstallServerMode for what each means. Every other flow
-        # keeps asking its full question list, unaffected.
+        # "Install server" and "Install client (local)" are the only two
+        # flows that distinguish Quick/Skip/Full - see Get-InstallServerMode
+        # and Get-InstallClientMode for what each means for its own flow.
+        # Every other flow keeps asking its full question list, unaffected
+        # ($mode stays 'Full', $skipParams stays empty and unused).
         $mode = 'Full'
+        $skipParams = @{}
         if ($choice -eq '1') {
             $defaultConfigPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\server-config.json'
             $mode = Get-InstallServerMode -ConfigPath $defaultConfigPath
         }
+        elseif ($choice -eq '2') {
+            $clientMode = Get-InstallClientMode -ServiceName 'WindowsInventoryLiteClient'
+            $mode = $clientMode.Mode
+            $skipParams = $clientMode.Params
+        }
 
-        $questions = if ($mode -eq 'Quick') { @($flow.Questions | Where-Object { $_['QuickInstall'] }) } else { $flow.Questions }
-        $params = if ($mode -eq 'Skip') { @{} } else { Read-WizardAnswers -Questions $questions }
+        $params = Resolve-WizardFlowParams -Mode $mode -Questions $flow.Questions -SkipParams $skipParams
         $ran = Invoke-WizardAction -ScriptPath $scriptPath -ScriptName $flow.ScriptName -Params $params -SecretParams $flow.SecretParams
         if (Test-ShouldShowQuickInstallSummary -Ran $ran -Mode $mode) {
             Show-QuickInstallSummary -Params $params

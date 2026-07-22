@@ -288,4 +288,43 @@ Describe 'Windows Inventory Lite Install Wizard' {
 
         $result.Mode | Should -Be 'Full'
     }
+
+    It 'Resolve-WizardFlowParams returns SkipParams verbatim when Mode is Skip' {
+        $skipParams = @{ ServerUrl = 'https://example.local/api/v1/inventory'; IntervalHours = 6 }
+
+        $result = Resolve-WizardFlowParams -Mode 'Skip' -Questions $installClientQuestions -SkipParams $skipParams
+
+        $result | Should -Be $skipParams
+    }
+
+    It 'Resolve-WizardFlowParams asks every question when Mode is Full, ignoring any SkipParams' {
+        Mock Read-WizardAnswer {
+            param($Prompt, $Default, [switch]$Mandatory, [switch]$Secure)
+            if ($Prompt -like 'Server URL*') { return 'https://full.example.local/api/v1/inventory' }
+            return $null
+        }
+
+        $result = Resolve-WizardFlowParams -Mode 'Full' -Questions $installClientQuestions -SkipParams @{ ServerUrl = 'https://ignored.example.local/api/v1/inventory' }
+
+        $result['ServerUrl'] | Should -Be 'https://full.example.local/api/v1/inventory'
+    }
+
+    It 'Resolve-WizardFlowParams filters to QuickInstall-flagged questions when Mode is Quick' {
+        Mock Read-WizardAnswer {
+            param($Prompt, $Default, [switch]$Mandatory, [switch]$Secure)
+            if ($Prompt -like 'Listen prefix*') { return 'http://+:9090/' }
+            return $null
+        }
+
+        $result = Resolve-WizardFlowParams -Mode 'Quick' -Questions $installServerQuestions
+
+        $result['ListenPrefix'] | Should -Be 'http://+:9090/'
+        $result.ContainsKey('UseHttps') | Should -Be $false
+    }
+
+    It 'Resolve-WizardFlowParams defaults SkipParams to an empty hashtable when not supplied (matches the server flow''s existing Skip behavior)' {
+        $result = Resolve-WizardFlowParams -Mode 'Skip' -Questions $installServerQuestions
+
+        $result.Count | Should -Be 0
+    }
 }
