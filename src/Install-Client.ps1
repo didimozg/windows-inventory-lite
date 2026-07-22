@@ -152,72 +152,133 @@ function ConvertTo-ServiceArgValue {
     return $Value -replace '"', '\"'
 }
 
-if (-not $InstallPath) {
-    $InstallPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite'
+function Get-ClientServiceCommand {
+    param(
+        [string]$ServicePath,
+        [string]$Url,
+        [int]$Hours,
+        [string]$SharePath,
+        [string]$SharedToken,
+        [string]$OutputDirectory,
+        [string]$DebugLogPath
+    )
+
+    $command = '"' + (ConvertTo-ServiceArgValue $ServicePath) + '" --server-url "' + (ConvertTo-ServiceArgValue $Url) + '" --interval-hours ' + $Hours
+    if ($SharePath) {
+        $command += ' --share "' + (ConvertTo-ServiceArgValue $SharePath) + '"'
+    }
+    if ($SharedToken) {
+        $command += ' --token "' + (ConvertTo-ServiceArgValue $SharedToken) + '"'
+    }
+    $command += ' --output "' + (ConvertTo-ServiceArgValue $OutputDirectory) + '"'
+    $command += ' --debug-log-path "' + (ConvertTo-ServiceArgValue $DebugLogPath) + '"'
+
+    return $command
 }
 
-$serviceName = 'WindowsInventoryLiteClient'
-$buildScript = Join-Path -Path $ScriptRoot -ChildPath 'Build-Client.ps1'
+# Deletes the pre-client-data-layout exe/version marker from the shared
+# WindowsInventoryLite root once the service has been successfully
+# recreated pointing at its new client-data location - mirrors the
+# cleanup this file already does for legacy WindowsLicenseInventory*
+# artifacts. Local data files (<hostname>.json, _logs\) are deliberately
+# left alone: they get recreated fresh at the new location on the
+# client's next run.
+function Remove-LegacyClientFiles {
+    param(
+        [string]$LegacyRoot,
+        [string]$NewServicePath
+    )
 
-if (-not $ClientExecutablePath) {
-    # No explicit path was given, so this is the project's own build output
-    # (not a caller-supplied binary) - rebuild it fresh every run, the same
-    # way New-ClientGpoPackage.ps1 already does for its default paths. An
-    # existence-only check let a stale build\WindowsInventoryLiteClient.exe
-    # from an earlier session get installed silently, with no version
-    # mismatch warning like the dashboard's package view has.
-    $projectRoot = Split-Path -Parent $ScriptRoot
-    $ClientExecutablePath = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteClient.exe'
-    & $buildScript -OutputPath $ClientExecutablePath
-}
-elseif (-not (Test-Path -LiteralPath $ClientExecutablePath)) {
-    & $buildScript -OutputPath $ClientExecutablePath
-}
+    $newDirectory = Split-Path -Parent $NewServicePath
 
-if (-not (Test-Path -LiteralPath $InstallPath)) {
-    New-Item -Path $InstallPath -ItemType Directory -Force | Out-Null
-}
+    $legacyExePath = Join-Path -Path $LegacyRoot -ChildPath 'WindowsInventoryLiteClient.exe'
+    if ((Test-Path -LiteralPath $legacyExePath) -and ($legacyExePath -ne $NewServicePath)) {
+        Write-Host "Removing legacy client executable: $legacyExePath"
+        Remove-Item -LiteralPath $legacyExePath -Force
+    }
 
-foreach ($legacyName in @('WindowsLicenseInventoryClient', 'WindowsLicenseInventory')) {
-    $null = & sc.exe query $legacyName 2>&1
-    if ($LASTEXITCODE -eq 0) {
-        Invoke-ServiceControl -Arguments @('stop', $legacyName) -FailureMessage "Failed to stop legacy service $legacyName." -AllowedExitCodes @(0, 1062) | Out-Null
-        Invoke-ServiceControl -Arguments @('delete', $legacyName) -FailureMessage "Failed to delete legacy service $legacyName." | Out-Null
+    # Same path-equality guard as the exe above - without it, an operator
+    # who explicitly passes -InstallPath back to the legacy bare root (still
+    # technically permitted) would have this delete a client-version.txt
+    # that legitimately belongs at that same "new" location (e.g. written by
+    # an earlier Deploy-ClientGpo.ps1 run against the same path).
+    $legacyVersionPath = Join-Path -Path $LegacyRoot -ChildPath 'client-version.txt'
+    $newVersionPath = Join-Path -Path $newDirectory -ChildPath 'client-version.txt'
+    if ((Test-Path -LiteralPath $legacyVersionPath) -and ($legacyVersionPath -ne $newVersionPath)) {
+        Write-Host "Removing legacy client-version.txt: $legacyVersionPath"
+        Remove-Item -LiteralPath $legacyVersionPath -Force
     }
 }
 
-$legacyInstallPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsLicenseInventory'
-if (Test-Path -LiteralPath $legacyInstallPath) {
-    Remove-Item -LiteralPath $legacyInstallPath -Recurse -Force
+# Wrapped so Pester can dot-source this file (". $ScriptPath -ServerUrl ...")
+# to load Get-ClientServiceCommand/Remove-LegacyClientFiles for direct
+# unit testing without performing a real install - same technique used in
+# src\Install-Wizard.ps1 and deploy\client\Deploy-ClientGpo.ps1.
+if ($MyInvocation.InvocationName -ne '.') {
+    if (-not $InstallPath) {
+        $InstallPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\client-data'
+    }
+
+    $serviceName = 'WindowsInventoryLiteClient'
+    $buildScript = Join-Path -Path $ScriptRoot -ChildPath 'Build-Client.ps1'
+
+    if (-not $ClientExecutablePath) {
+        # No explicit path was given, so this is the project's own build output
+        # (not a caller-supplied binary) - rebuild it fresh every run, the same
+        # way New-ClientGpoPackage.ps1 already does for its default paths. An
+        # existence-only check let a stale build\WindowsInventoryLiteClient.exe
+        # from an earlier session get installed silently, with no version
+        # mismatch warning like the dashboard's package view has.
+        $projectRoot = Split-Path -Parent $ScriptRoot
+        $ClientExecutablePath = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteClient.exe'
+        & $buildScript -OutputPath $ClientExecutablePath
+    }
+    elseif (-not (Test-Path -LiteralPath $ClientExecutablePath)) {
+        & $buildScript -OutputPath $ClientExecutablePath
+    }
+
+    if (-not (Test-Path -LiteralPath $InstallPath)) {
+        New-Item -Path $InstallPath -ItemType Directory -Force | Out-Null
+    }
+
+    foreach ($legacyName in @('WindowsLicenseInventoryClient', 'WindowsLicenseInventory')) {
+        $null = & sc.exe query $legacyName 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Invoke-ServiceControl -Arguments @('stop', $legacyName) -FailureMessage "Failed to stop legacy service $legacyName." -AllowedExitCodes @(0, 1062) | Out-Null
+            Invoke-ServiceControl -Arguments @('delete', $legacyName) -FailureMessage "Failed to delete legacy service $legacyName." | Out-Null
+        }
+    }
+
+    $legacyInstallPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsLicenseInventory'
+    if (Test-Path -LiteralPath $legacyInstallPath) {
+        Remove-Item -LiteralPath $legacyInstallPath -Recurse -Force
+    }
+
+    $servicePath = Join-Path -Path $InstallPath -ChildPath 'WindowsInventoryLiteClient.exe'
+    $debugLogPath = Join-Path -Path $InstallPath -ChildPath '_logs\debug-client.log'
+    $null = & sc.exe query $serviceName 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Invoke-ServiceControl -Arguments @('stop', $serviceName) -FailureMessage "Failed to stop existing service." -AllowedExitCodes @(0, 1062) | Out-Null
+        Invoke-ServiceControl -Arguments @('delete', $serviceName) -FailureMessage "Failed to delete existing service." | Out-Null
+        Wait-FileRelease -Path $servicePath
+    }
+
+    Copy-Item -LiteralPath $ClientExecutablePath -Destination $servicePath -Force
+    $clientVersion = (& $servicePath --version 2>&1 | Select-Object -First 1)
+
+    $serviceCommand = Get-ClientServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SharePath $ServerSharePath -SharedToken $Token -OutputDirectory $InstallPath -DebugLogPath $debugLogPath
+
+    Invoke-ServiceCreate -ServiceName $serviceName -BinPath $serviceCommand -DisplayName 'Windows Inventory Lite' -FailureMessage "Failed to create service. Run PowerShell as Administrator." | Out-Null
+    Invoke-ServiceControl -Arguments @('description', $serviceName, "Collects Windows, Office, activation, and software inventory for Windows Inventory Lite. Version $clientVersion.") -FailureMessage "Failed to set service description." | Out-Null
+    Write-Host "Service created: $serviceName"
+    Write-Host "Client version: $clientVersion"
+
+    if (-not $NoRun) {
+        Invoke-ServiceControl -Arguments @('start', $serviceName) -FailureMessage "Failed to start service." | Out-Null
+        Write-Host "Service started: $serviceName"
+    }
+
+    Remove-LegacyClientFiles -LegacyRoot (Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite') -NewServicePath $servicePath
+
+    Write-Host "Client installed: $InstallPath"
 }
-
-$servicePath = Join-Path -Path $InstallPath -ChildPath 'WindowsInventoryLiteClient.exe'
-$null = & sc.exe query $serviceName 2>&1
-if ($LASTEXITCODE -eq 0) {
-    Invoke-ServiceControl -Arguments @('stop', $serviceName) -FailureMessage "Failed to stop existing service." -AllowedExitCodes @(0, 1062) | Out-Null
-    Invoke-ServiceControl -Arguments @('delete', $serviceName) -FailureMessage "Failed to delete existing service." | Out-Null
-    Wait-FileRelease -Path $servicePath
-}
-
-Copy-Item -LiteralPath $ClientExecutablePath -Destination $servicePath -Force
-$clientVersion = (& $servicePath --version 2>&1 | Select-Object -First 1)
-
-$serviceCommand = '"' + (ConvertTo-ServiceArgValue $servicePath) + '" --server-url "' + (ConvertTo-ServiceArgValue $ServerUrl) + '" --interval-hours ' + $IntervalHours
-if ($ServerSharePath) {
-    $serviceCommand += ' --share "' + (ConvertTo-ServiceArgValue $ServerSharePath) + '"'
-}
-if ($Token) {
-    $serviceCommand += ' --token "' + (ConvertTo-ServiceArgValue $Token) + '"'
-}
-
-Invoke-ServiceCreate -ServiceName $serviceName -BinPath $serviceCommand -DisplayName 'Windows Inventory Lite' -FailureMessage "Failed to create service. Run PowerShell as Administrator." | Out-Null
-Invoke-ServiceControl -Arguments @('description', $serviceName, "Collects Windows, Office, activation, and software inventory for Windows Inventory Lite. Version $clientVersion.") -FailureMessage "Failed to set service description." | Out-Null
-Write-Host "Service created: $serviceName"
-Write-Host "Client version: $clientVersion"
-
-if (-not $NoRun) {
-    Invoke-ServiceControl -Arguments @('start', $serviceName) -FailureMessage "Failed to start service." | Out-Null
-    Write-Host "Service started: $serviceName"
-}
-
-Write-Host "Client installed: $InstallPath"
