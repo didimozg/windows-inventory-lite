@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.22.0] - 2026-07-22
+
+### Changed
+
+- Client-owned files on a co-located client+server install (`WindowsInventoryLiteClient.exe`, its local JSON report, `client-version.txt`, its debug/deploy logs) now live in their own `client-data` subfolder under `%ProgramData%\WindowsInventoryLite\`, instead of the bare root shared with the server's `server-bin`/`server-data`/`server-content`/`client-package` folders. `Install-Client.ps1` and `Deploy-ClientGpo.ps1` now also pass `--output`/`--debug-log-path` to the client service so its own report and debug log actually land there too, not just the copied executable. Already-installed clients migrate automatically the next time they're installed or updated (WinRM push, GPO startup script, or a manual reinstall) - `Deploy-ClientGpo.ps1`'s existing "is the running service's command line still what we expect" check now detects the old path on its own, no separate migration step needed. The old executable and `client-version.txt` are removed after a successful migration; old data files are left in place and can be removed by hand.
+- **Fixed a real data-loss risk**: `Uninstall-Client.ps1` and `Uninstall-ClientWinRM.ps1` previously deleted their entire target folder recursively by default, which - on a machine running both the server and a local client - could delete the server's own `server-config.json` and data folders along with the client. Both scripts now refuse to recursively delete a folder that turns out to be the shared server root (detected by the presence of `server-config.json` there), and print a warning instead.
+
+### PowerShell 5.1 Testing Note
+
+`deploy\client\Deploy-ClientGpo.ps1`, `src\Install-Client.ps1`, and `src\Uninstall-ClientWinRM.ps1` each gained an `if ($MyInvocation.InvocationName -ne '.')` guard around their real install/uninstall logic, matching the pattern `src\Install-Wizard.ps1` already used - this lets Pester dot-source each script to unit-test its pure helper functions without performing a real service install/uninstall.
+
 ## [0.21.3] - 2026-07-21
 
 ### Fixed

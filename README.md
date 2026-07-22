@@ -186,10 +186,17 @@ Deployment flow:
 5. Add `Install-ClientGpo.cmd` as a GPO computer startup script.
 6. Reboot target computers or wait for the next startup script run.
 
-The deploy script writes a local log to `C:\ProgramData\WindowsInventoryLite\Logs\gpo-deploy.log`.
-Central logging to the package share is present in the script as commented code and is disabled by default.
+The deploy script writes a local log to `C:\ProgramData\WindowsInventoryLite\client-data\Logs\gpo-deploy.log`.
 
 For updates, replace the package files in the share. The deploy script compares the packaged client version with the installed version and skips clients that already match.
+
+## Client and Server on the Same Machine
+
+When the server also runs a local client to inventory its own host, the client's files (`WindowsInventoryLiteClient.exe`, its local JSON report, `client-version.txt`, and its logs) live under `client-data\`, next to but separate from the server's own `server-bin`, `server-data`, `server-content`, and `client-package` folders - not mixed into the shared root.
+
+An already-installed client from before this layout shipped migrates automatically the next time it's installed or updated (a WinRM push from `Client actions`/`Client updates`, a GPO startup script re-run, or a manual `Install-Client.ps1`/`Deploy-ClientGpo.ps1` run) - no separate migration step is needed. The old executable is removed after the new one is confirmed running; any data files left at the old location (the old JSON report, old logs) are not deleted automatically and can be removed by hand once you've confirmed the client is reporting normally from its new location.
+
+`Uninstall-Client.ps1` and `Uninstall-ClientWinRM.ps1` both refuse to recursively delete their target folder if it turns out to be the shared `WindowsInventoryLite` root itself (detected by the presence of `server-config.json`) - this protects the server's own data on a co-located machine even if `-InstallPath` is overridden to point there by mistake.
 
 ## Forced Client Actions Through WinRM
 
@@ -438,7 +445,7 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 | `-ServerSharePath` | `—` | UNC path to the server drop share for direct file delivery. Optional. |
 | `-Token` | `—` | Ingestion token sent in `X-Inventory-Token`. Optional. |
 | `-IntervalHours` | `6` | Collection interval in hours (1–24). |
-| `-InstallPath` | `—` | Installation folder for the client service. Default: `C:\ProgramData\WindowsInventoryLite`. |
+| `-InstallPath` | `—` | Installation folder for the client service. Default: `C:\ProgramData\WindowsInventoryLite\client-data`. |
 | `-ClientExecutablePath` | `—` | Path to the prebuilt client executable. Triggers a build if omitted. |
 | `-NoRun` | `off` | Install and configure the service without starting it. |
 
@@ -470,14 +477,14 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
-| `-InstallPath` | `C:\ProgramData\WindowsInventoryLite` | Installation folder to remove. |
+| `-InstallPath` | `C:\ProgramData\WindowsInventoryLite\client-data` | Installation folder to remove. Refused if it resolves to the server's own shared root (detected via a `server-config.json` check) - see the "Client and server on the same machine" note below. |
 
 ### Uninstall-ClientWinRM.ps1
 
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
 | `-ComputerName` | `—` | One or more target computer names or IP addresses. Mandatory. |
-| `-InstallPath` | `C:\ProgramData\WindowsInventoryLite` | Installation folder to remove on remote hosts. |
+| `-InstallPath` | `C:\ProgramData\WindowsInventoryLite\client-data` | Installation folder to remove on remote hosts. Refused if it resolves to the target's own shared server root - see the "Client and server on the same machine" note below. |
 | `-Credential` | `—` | PSCredential for WinRM authentication. Optional. |
 | `-CredentialUsername` | `—` | WinRM username as a plain string. Used if `-Credential` is not provided. |
 | `-CredentialPassword` | `—` | WinRM password as a `SecureString`. Used if `-Credential` is not provided. |
@@ -522,7 +529,7 @@ Deleting a host from the dashboard removes the server-side JSON report for that 
 | `-ServerUrl` | `—` | HTTP endpoint that receives client JSON reports. Mandatory. |
 | `-Token` | `—` | Ingestion token sent in `X-Inventory-Token`. Optional. |
 | `-IntervalHours` | `6` | Collection interval in hours (1–24). |
-| `-InstallPath` | `—` | Installation folder for the client service. Default: `C:\ProgramData\WindowsInventoryLite`. |
+| `-InstallPath` | `—` | Installation folder for the client service. Default: `C:\ProgramData\WindowsInventoryLite\client-data`. |
 | `-PackageClientPath` | `—` | Path to the client executable in the package. Resolved from the script directory if omitted. |
 | `-Force` | `off` | Reinstall the client even if the version already matches. |
 
