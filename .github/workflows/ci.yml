@@ -19,10 +19,19 @@ jobs:
         shell: pwsh
         run: node --check server/dashboard/app.js
 
+      # Windows PowerShell 5.1 (not pwsh/PowerShell 7): this project's tests
+      # touch System.Web.Extensions types that only resolve via the .NET
+      # Framework GAC, which PowerShell 7's .NET Core runtime doesn't have -
+      # pwsh reproducibly fails Test-InstallServerRefreshOnly with a
+      # WebResourceAttribute load error unrelated to the code under test.
+      # -SkipPublisherCheck/-Force are needed to replace Windows PowerShell
+      # 5.1's own pre-installed Pester 3.4.0 (different signing cert) with
+      # the modern version this suite requires.
       - name: Run PowerShell tests
-        shell: pwsh
+        shell: powershell
         run: |
-          Install-Module Pester -Force -Scope CurrentUser
+          Install-Module Pester -Force -Scope CurrentUser -SkipPublisherCheck
+          Import-Module Pester -Force
           Invoke-Pester -Path .\tests\ -CI
 
       - name: Build server
