@@ -60,8 +60,10 @@ $sharedRoot = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite'
 if (Test-IsSharedServerRoot -Path $InstallPath -SharedRoot $sharedRoot) {
     Write-Warning "Skipped removing $InstallPath - it looks like the server's own directory (server-config.json present). Remove client files manually if needed."
 }
-elseif ((Test-Path -LiteralPath $InstallPath) -and $PSCmdlet.ShouldProcess($InstallPath, 'Remove client files')) {
-    Remove-Item -LiteralPath $InstallPath -Recurse -Force
-}
+else {
+    if ((Test-Path -LiteralPath $InstallPath) -and $PSCmdlet.ShouldProcess($InstallPath, 'Remove client files')) {
+        Remove-Item -LiteralPath $InstallPath -Recurse -Force
+    }
 
-Write-Host "Client removed."
+    Write-Host "Client removed."
+}

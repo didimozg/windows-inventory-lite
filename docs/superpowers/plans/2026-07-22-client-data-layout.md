@@ -158,14 +158,23 @@ function Remove-LegacyClientFiles {
         [string]$NewServicePath
     )
 
+    $newDirectory = Split-Path -Parent $NewServicePath
+
     $legacyExePath = Join-Path -Path $LegacyRoot -ChildPath 'WindowsInventoryLiteClient.exe'
     if ((Test-Path -LiteralPath $legacyExePath) -and ($legacyExePath -ne $NewServicePath)) {
         Write-DeployLog "Removing legacy client executable: $legacyExePath"
         Remove-Item -LiteralPath $legacyExePath -Force
     }
 
+    # Same path-equality guard as the exe above - without it, an operator
+    # who explicitly passes -InstallPath back to the legacy bare root (still
+    # technically permitted) would have this delete the client-version.txt
+    # Save-InstalledVersion just wrote to that same path seconds earlier,
+    # making Get-InstalledVersion read nothing on the next run and forcing
+    # a needless reinstall on every subsequent deploy.
     $legacyVersionPath = Join-Path -Path $LegacyRoot -ChildPath 'client-version.txt'
-    if (Test-Path -LiteralPath $legacyVersionPath) {
+    $newVersionPath = Join-Path -Path $newDirectory -ChildPath 'client-version.txt'
+    if ((Test-Path -LiteralPath $legacyVersionPath) -and ($legacyVersionPath -ne $newVersionPath)) {
         Write-DeployLog "Removing legacy client-version.txt: $legacyVersionPath"
         Remove-Item -LiteralPath $legacyVersionPath -Force
     }
@@ -402,14 +411,22 @@ function Remove-LegacyClientFiles {
         [string]$NewServicePath
     )
 
+    $newDirectory = Split-Path -Parent $NewServicePath
+
     $legacyExePath = Join-Path -Path $LegacyRoot -ChildPath 'WindowsInventoryLiteClient.exe'
     if ((Test-Path -LiteralPath $legacyExePath) -and ($legacyExePath -ne $NewServicePath)) {
         Write-Host "Removing legacy client executable: $legacyExePath"
         Remove-Item -LiteralPath $legacyExePath -Force
     }
 
+    # Same path-equality guard as the exe above - without it, an operator
+    # who explicitly passes -InstallPath back to the legacy bare root (still
+    # technically permitted) would have this delete a client-version.txt
+    # that legitimately belongs at that same "new" location (e.g. written by
+    # an earlier Deploy-ClientGpo.ps1 run against the same path).
     $legacyVersionPath = Join-Path -Path $LegacyRoot -ChildPath 'client-version.txt'
-    if (Test-Path -LiteralPath $legacyVersionPath) {
+    $newVersionPath = Join-Path -Path $newDirectory -ChildPath 'client-version.txt'
+    if ((Test-Path -LiteralPath $legacyVersionPath) -and ($legacyVersionPath -ne $newVersionPath)) {
         Write-Host "Removing legacy client-version.txt: $legacyVersionPath"
         Remove-Item -LiteralPath $legacyVersionPath -Force
     }
@@ -639,11 +656,13 @@ $sharedRoot = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite'
 if (Test-IsSharedServerRoot -Path $InstallPath -SharedRoot $sharedRoot) {
     Write-Warning "Skipped removing $InstallPath - it looks like the server's own directory (server-config.json present). Remove client files manually if needed."
 }
-elseif ((Test-Path -LiteralPath $InstallPath) -and $PSCmdlet.ShouldProcess($InstallPath, 'Remove client files')) {
-    Remove-Item -LiteralPath $InstallPath -Recurse -Force
-}
+else {
+    if ((Test-Path -LiteralPath $InstallPath) -and $PSCmdlet.ShouldProcess($InstallPath, 'Remove client files')) {
+        Remove-Item -LiteralPath $InstallPath -Recurse -Force
+    }
 
-Write-Host "Client removed."
+    Write-Host "Client removed."
+}
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
