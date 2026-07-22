@@ -10,7 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- Install-Wizard.ps1's "Install server" flow now asks only 4 questions on a genuinely fresh install (listen prefix/port, open-firewall, dashboard username/password) instead of ~21, letting `Install-Server.ps1`'s own defaults apply to everything else (HTTPS, AD sync, ingestion token, client GPO package, debug logging, log retention). Prints a summary after install of what was defaulted and where to change it - HTTPS/AD sync/the ingestion token via Settings, the GPO client package via the Client package tab. The existing "Just refresh"/"Full reconfigure" choice for an already-installed server is unchanged.
+- Install-Wizard.ps1's "Install server" flow now asks only 4 questions on a genuinely fresh install (listen prefix/port, open-firewall, dashboard username/password) instead of ~21, letting `Install-Server.ps1`'s own defaults apply to everything else (HTTPS, AD sync, ingestion token, client GPO package, debug logging, log retention). Prints a summary after install of what was defaulted and where to change it - HTTPS/AD sync via Settings, the GPO client package via the Client package tab; the auto-generated ingestion token itself isn't shown anywhere in the dashboard, so the summary points at re-running with `-Token <value>` (or "Full reconfigure") instead. The existing "Just refresh"/"Full reconfigure" choice for an already-installed server is unchanged.
 
 ## [0.24.0] - 2026-07-22
 

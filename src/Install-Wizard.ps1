@@ -222,7 +222,7 @@ function Show-QuickInstallSummary {
     Write-Output "Dashboard:        http://localhost:$port/"
     Write-Output 'HTTPS:            disabled - enable via Settings > General'
     Write-Output 'AD sync:          disabled - configure via Settings > General'
-    Write-Output 'Ingestion token:  auto-generated - view/copy it via Settings > General'
+    Write-Output 'Ingestion token:  auto-generated - not shown anywhere in the dashboard; re-run with -Token <value> (or choose Full reconfigure) if clients need a token you can give them'
     Write-Output 'Client package:   not built yet - build via the Client package tab'
     if ($firewallOpened) {
         Write-Output "Firewall:         opened for port $port"
