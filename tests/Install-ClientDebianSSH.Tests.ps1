@@ -52,8 +52,8 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
         Should -Invoke ssh.exe -Times 1
     }
 
-    It 'Invoke-RemoteCommand password auth calls Invoke-InteractivePuttyTool with plink.exe and no -pw anywhere' {
-        Mock Invoke-InteractivePuttyTool { return 'ok' }
+    It 'Invoke-RemoteCommand password auth calls Invoke-PlinkWithPasswordFile with plink.exe, no -pw/-batch in its own Arguments, and the real password' {
+        Mock Invoke-PlinkWithPasswordFile { return 'ok' }
         $script:usingPassword = $true
         $script:plinkPath = 'plink.exe'
         $script:CredentialUsername = 'root'
@@ -61,13 +61,13 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
 
         Invoke-RemoteCommand -TargetComputer '192.0.2.10' -Command 'echo hi'
 
-        Should -Invoke Invoke-InteractivePuttyTool -Times 1 -ParameterFilter {
+        Should -Invoke Invoke-PlinkWithPasswordFile -Times 1 -ParameterFilter {
             $ExePath -eq 'plink.exe' -and ($Arguments -notcontains '-pw') -and ($Arguments -notcontains '-batch') -and ($PlainPassword -eq 'unused-test-password')
         }
     }
 
-    It 'Copy-FileToRemote password auth calls Invoke-InteractivePuttyTool with pscp.exe and no -pw anywhere' {
-        Mock Invoke-InteractivePuttyTool { return 'ok' }
+    It 'Copy-FileToRemote password auth calls Invoke-PlinkWithPasswordFile with pscp.exe, no -pw/-batch in its own Arguments, and the real password' {
+        Mock Invoke-PlinkWithPasswordFile { return 'ok' }
         $script:usingPassword = $true
         $script:pscpPath = 'pscp.exe'
         $script:CredentialUsername = 'root'
@@ -75,59 +75,42 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
 
         Copy-FileToRemote -TargetComputer '192.0.2.10' -LocalPath 'C:\fake\wil-linux-client' -RemotePath '/tmp/wil-linux-client-install/wil-linux-client'
 
-        Should -Invoke Invoke-InteractivePuttyTool -Times 1 -ParameterFilter {
+        Should -Invoke Invoke-PlinkWithPasswordFile -Times 1 -ParameterFilter {
             $ExePath -eq 'pscp.exe' -and ($Arguments -notcontains '-pw') -and ($Arguments -notcontains '-batch') -and ($PlainPassword -eq 'unused-test-password')
         }
     }
 
-    Context 'Get-NextPuttyPromptAction' {
-        It 'returns HostKey when only the host-key prompt has appeared and neither flag is set' {
-            $result = Get-NextPuttyPromptAction -BufferedOutput 'The server''s host key is not cached. Store key in cache?' -HostKeyAnswered $false -PasswordSent $false
+    Context 'Invoke-PlinkWithPasswordFile' {
+        It 'never puts the password on the plink/pscp command line, and cleans up its temp password file' {
+            # A fake "plink" that just echoes what -pwfile pointed at, so the
+            # test can assert on the real file content/cleanup without a
+            # live SSH target - this exercises the function's own file
+            # handling, not network behavior.
+            $fakeExe = Join-Path -Path $TestDrive -ChildPath 'fake-plink.cmd'
+            Set-Content -LiteralPath $fakeExe -Value '@echo off' -Encoding ASCII
+            Add-Content -LiteralPath $fakeExe -Value 'echo ARGS: %*' -Encoding ASCII
+            Add-Content -LiteralPath $fakeExe -Value 'exit /b 0' -Encoding ASCII
 
-            $result | Should -Be 'HostKey'
+            $capturedPwFile = $null
+            $output = Invoke-PlinkWithPasswordFile -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'echo hi') -PlainPassword 'unused-test-password'
+
+            $output | Should -Match ([regex]::Escape('-pwfile'))
+            $output | Should -Match '-batch'
+            $output | Should -Not -Match ([regex]::Escape('unused-test-password'))
+            if ($output -match '-pwfile\s+(\S+)') {
+                $capturedPwFile = $Matches[1]
+                Test-Path -LiteralPath $capturedPwFile | Should -Be $false
+            }
         }
 
-        It 'returns Password when only the password prompt has appeared and neither flag is set' {
-            $result = Get-NextPuttyPromptAction -BufferedOutput 'root@192.0.2.10''s password:' -HostKeyAnswered $false -PasswordSent $false
+        It 'throws a clear, actionable error when plink/pscp fails on an untrusted host key under -batch' {
+            $fakeExe = Join-Path -Path $TestDrive -ChildPath 'fake-plink-hostkey-fail.cmd'
+            Set-Content -LiteralPath $fakeExe -Value '@echo off' -Encoding ASCII
+            Add-Content -LiteralPath $fakeExe -Value 'echo The server''s host key is not cached and -batch prevents interactive prompting 1>&2' -Encoding ASCII
+            Add-Content -LiteralPath $fakeExe -Value 'exit /b 1' -Encoding ASCII
 
-            $result | Should -Be 'Password'
-        }
-
-        It 'returns Password (not HostKey) when the buffer contains only a password prompt, as on an already-trusted target - regression test for the prior Critical bug' {
-            $result = Get-NextPuttyPromptAction -BufferedOutput 'root@192.0.2.10''s password:' -HostKeyAnswered $false -PasswordSent $false
-
-            $result | Should -Be 'Password'
-            $result | Should -Not -Be 'HostKey'
-        }
-
-        It 'answers HostKey first when both prompts are present in the buffer and the host key has not been answered yet' {
-            $buffer = "The server's host key is not cached. Store key in cache?`nroot@192.0.2.10's password:"
-
-            $result = Get-NextPuttyPromptAction -BufferedOutput $buffer -HostKeyAnswered $false -PasswordSent $false
-
-            $result | Should -Be 'HostKey'
-        }
-
-        It 'answers Password when both prompts are present in the buffer but the host key was already answered' {
-            $buffer = "The server's host key is not cached. Store key in cache?`nroot@192.0.2.10's password:"
-
-            $result = Get-NextPuttyPromptAction -BufferedOutput $buffer -HostKeyAnswered $true -PasswordSent $false
-
-            $result | Should -Be 'Password'
-        }
-
-        It 'returns nothing once both prompts have already been answered' {
-            $buffer = "The server's host key is not cached. Store key in cache?`nroot@192.0.2.10's password:"
-
-            $result = Get-NextPuttyPromptAction -BufferedOutput $buffer -HostKeyAnswered $true -PasswordSent $true
-
-            $result | Should -BeNullOrEmpty
-        }
-
-        It 'returns nothing when neither prompt has appeared in the buffer yet' {
-            $result = Get-NextPuttyPromptAction -BufferedOutput 'Connecting to 192.0.2.10 port 22' -HostKeyAnswered $false -PasswordSent $false
-
-            $result | Should -BeNullOrEmpty
+            { Invoke-PlinkWithPasswordFile -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'echo hi') -PlainPassword 'unused-test-password' } |
+                Should -Throw '*host key*'
         }
     }
 }

@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.23.1] - 2026-07-22
+
+### Fixed
+
+- `Install-ClientDebianSSH.ps1` password-based push was broken end to end against a real fleet, found only by live testing (never caught by Pester, since the affected code paths are always mocked in tests):
+  - `ProcessStartInfo.ArgumentList` does not exist on the .NET Framework build Windows PowerShell 5.1 ships with (needs .NET Framework 4.7.1+), so every password-auth attempt failed immediately with a PowerShell property error.
+  - Answering plink's interactive host-key/password prompts by watching redirected stdout/stderr and writing to redirected stdin cannot work at all: plink writes those prompts directly to the process's console, not the redirected streams, so the prompt text was never seen and the typed answer was never delivered - this silently hung every password-auth call that actually needed a password (as opposed to authenticating for free via an already-loaded SSH agent key). Replaced with `-pwfile` (reads the password from a short-lived, current-user-only temp file - added in PuTTY 0.81) plus `-batch`, which needs no interactive prompt handling at all and fails fast with a clear, actionable message if a target's host key isn't yet trusted by this machine.
+  - `$ErrorActionPreference = 'Stop'` combined with `2>&1` turned any stderr output from ssh.exe/plink.exe - including completely normal, successful output like `systemctl enable`'s own "Created symlink ..." confirmation - into a terminating error, so a fully successful remote install could be reported as a failure. Native command output is now captured with a temporarily relaxed `$ErrorActionPreference`, judged by exit code instead.
+  - The install commands unconditionally prefixed every remote step with `sudo`, which fails outright on a minimal Debian image where the connecting user is already `root` and `sudo` was never installed at all (a real, confirmed case on this project's own test fleet). The `sudo` prefix is now skipped when `-CredentialUsername` is `root`.
+  - `ssh.exe`/`scp.exe` (key-auth path) had no `-o ConnectTimeout`, so an unreachable or slow-to-respond target could stall a multi-host push run with no bound.
+- `ScriptSyntax.Tests.ps1`'s English-only Cyrillic scan read every file under `deploy\` (among others) as UTF8 text with no extension filter - a legitimately gitignored, user-downloaded `plink.exe`/`pscp.exe` binary in `deploy\linux-client\` produced false-positive Cyrillic matches from raw PE bytes. The scan now skips known binary extensions.
+
+Live-verified against this project's own real Debian/Ubuntu test fleet (13 machines): a real password-based install completed successfully end to end (client binary copied, systemd timer installed and confirmed `active`) on a `sudo`-less root-only target; a 13-host capability survey (key vs. password auth, `sudo` presence) was recorded locally, outside git, per this feature's own design note.
+
 ## [0.23.0] - 2026-07-22
 
 ### Added

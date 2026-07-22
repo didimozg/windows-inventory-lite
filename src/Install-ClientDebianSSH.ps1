@@ -102,134 +102,92 @@ WantedBy=timers.target
     return @{ ServicePath = $servicePath; TimerPath = $timerPath }
 }
 
-# Decides which prompt answer (if any) to send next, given the buffered
-# plink/pscp output seen so far and which prompts have already been
-# answered. Pure function - no I/O - so this exact conditional logic (the
-# source of a prior Critical bug: blindly pre-answering "y" before a
-# host-key prompt that never appears on an already-trusted target, which
-# then consumes the PASSWORD prompt's answer slot instead of the real
-# password) can be unit-tested directly with synthetic buffer strings,
-# not only indirectly through a mocked Invoke-InteractivePuttyTool.
-function Get-NextPuttyPromptAction {
-    param(
-        [string]$BufferedOutput,
-        [bool]$HostKeyAnswered,
-        [bool]$PasswordSent
-    )
+# $ErrorActionPreference = 'Stop' (set script-wide, above) turns EVERY line
+# a native command writes to stderr into a terminating error the instant
+# `2>&1` merges it into the pipeline - even a perfectly normal, successful
+# command that merely logs informational text to stderr (systemd's own
+# "systemctl enable" prints "Created symlink ..." to stderr on SUCCESS,
+# confirmed by live testing: a real install fully succeeded on the remote
+# host - service running, timer active - yet was reported as a failure
+# here, with that exact success message as the "error"). Native stderr
+# text must be allowed to flow through as plain output and be judged by
+# the command's actual exit code instead, not treated as fatal on sight.
+function Invoke-NativeAllowingStderr {
+    param([scriptblock]$ScriptBlock)
 
-    if (-not $HostKeyAnswered -and $BufferedOutput -match '(?i)store key in cache') {
-        return 'HostKey'
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $ScriptBlock
     }
-    if (-not $PasswordSent -and $BufferedOutput -match '(?i)password:') {
-        return 'Password'
+    finally {
+        $ErrorActionPreference = $previousEap
     }
-    return $null
 }
 
-# Runs plink.exe/pscp.exe interactively and answers whichever prompt
-# actually appears - NOT a fixed-order blind pre-answer, which breaks on
-# any target whose host key this machine has already cached (PuTTY caches
-# accepted keys in HKEY_CURRENT_USER\Software\SimonTatham\PuTTY\SshHostKeys,
-# so the host-key-trust prompt only appears on a target's first-ever
-# connection from this machine - on every later connection there is no
-# such prompt, and blindly pre-sending "y" first would consume the
-# PASSWORD prompt's answer slot instead of the real password). -batch is
-# not used: it disables these prompts entirely rather than letting this
-# function answer them, which would defeat the whole point - keeping the
-# password off the command line (where -pw would put it, visible to any
-# other process/user on this host via Get-CimInstance Win32_Process/Task
-# Manager for the connection's duration - matching the principle
-# Install-ClientWinRM.ps1 already applies to WinRM credentials). The
-# decision of which prompt to answer is delegated to
-# Get-NextPuttyPromptAction (see above) so it can be unit-tested directly.
-function Invoke-InteractivePuttyTool {
+# Runs plink.exe/pscp.exe with the password supplied via a short-lived,
+# current-user-only temp file (-pwfile) instead of the command line (-pw,
+# visible to any other process/user on this host via Get-CimInstance
+# Win32_Process/Task Manager for the connection's duration) and without any
+# interactive prompt (-batch).
+#
+# An earlier version of this function tried to answer plink's interactive
+# host-key/password prompts by watching redirected stdout/stderr and
+# writing to redirected stdin. Live testing against this project's real
+# Debian test fleet found that design fundamentally cannot work: plink
+# writes its interactive prompts directly to the process's console (the
+# same reason it can suppress password echo), not to the redirected
+# stdout/stderr streams .NET's Process class exposes - so a fully
+# redirected, windowless child process (CreateNoWindow = $true, as this
+# function used) never surfaces the prompt text at all, and a
+# StandardInput.WriteLine() answer is never actually delivered to plink's
+# real prompt reader either. This was invisible to Pester (the function
+# was always mocked) and even to a first pass of manual testing against a
+# single already-authorized host (auth succeeded silently via the
+# Windows OpenSSH ssh-agent's own loaded key, before any password prompt
+# was ever needed) - it only surfaced against a second host where the
+# agent key was not authorized and a real password prompt was required,
+# which then hung until the function's own timeout fired every time.
+# -pwfile (added in PuTTY 0.81) sidesteps the whole console-vs-redirected-
+# stream problem: plink reads the password from the file directly, no
+# interactive prompt involved at all. -batch then makes an unknown/
+# mismatched host key a clean, immediate failure instead of a prompt this
+# function has no way to answer - see Invoke-RemoteCommand's error
+# handling for the operator-facing message that results.
+function Invoke-PlinkWithPasswordFile {
     param(
         [string]$ExePath,
         [string[]]$Arguments,
-        [string]$PlainPassword,
-        [int]$TimeoutSeconds = 60
+        [string]$PlainPassword
     )
 
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $ExePath
-    foreach ($arg in $Arguments) {
-        [void]$psi.ArgumentList.Add($arg)
-    }
-    $psi.RedirectStandardInput = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-
-    $process = New-Object System.Diagnostics.Process
-    $process.StartInfo = $psi
-
-    $script:puttyOutputBuffer = New-Object System.Text.StringBuilder
-    $script:puttyHostKeyAnswered = $false
-    $script:puttyPasswordSent = $false
-
-    $outputHandler = {
-        if ($null -ne $EventArgs.Data) {
-            [void]$script:puttyOutputBuffer.Append($EventArgs.Data)
-            [void]$script:puttyOutputBuffer.Append("`n")
-        }
-    }
-
-    $outSub = Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action $outputHandler
-    $errSub = Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action $outputHandler
-
+    $pwFile = [System.IO.Path]::GetTempFileName()
     try {
-        [void]$process.Start()
-        $process.BeginOutputReadLine()
-        $process.BeginErrorReadLine()
+        $acl = Get-Acl -LiteralPath $pwFile
+        $acl.SetAccessRuleProtection($true, $false)
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($currentUser, 'FullControl', 'Allow')
+        $acl.AddAccessRule($rule)
+        Set-Acl -LiteralPath $pwFile -AclObject $acl
 
-        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-        while (-not $process.HasExited) {
-            if ((Get-Date) -ge $deadline) {
-                try { $process.Kill() } catch { }
-                throw "Timed out after $TimeoutSeconds seconds waiting for plink/pscp - the interactive prompt sequence may have differed from what this script expects. Try -KeyPath instead."
+        [System.IO.File]::WriteAllText($pwFile, $PlainPassword, (New-Object System.Text.UTF8Encoding($false)))
+
+        $fullArgs = @('-pwfile', $pwFile, '-batch') + $Arguments
+        $output = Invoke-NativeAllowingStderr { & $ExePath @fullArgs 2>&1 }
+
+        if ($LASTEXITCODE -ne 0) {
+            $joined = $output -join "`n"
+            if ($joined -match '(?i)host key') {
+                throw ("plink/pscp failed (exit {0}): the target's SSH host key is not yet trusted by this machine (PuTTY caches trusted keys separately from Windows' own OpenSSH known_hosts). -batch refuses to prompt for an unknown host key rather than risk silently trusting the wrong one. Connect once with -KeyPath, or run plink/pscp interactively against this target once to accept its host key, then retry. Raw output: {1}" -f $LASTEXITCODE, $joined)
             }
-
-            $text = $script:puttyOutputBuffer.ToString()
-
-            switch (Get-NextPuttyPromptAction -BufferedOutput $text -HostKeyAnswered $script:puttyHostKeyAnswered -PasswordSent $script:puttyPasswordSent) {
-                'HostKey' {
-                    $process.StandardInput.WriteLine('y')
-                    $script:puttyHostKeyAnswered = $true
-                }
-                'Password' {
-                    $process.StandardInput.WriteLine($PlainPassword)
-                    $script:puttyPasswordSent = $true
-                }
-            }
-
-            Start-Sleep -Milliseconds 150
+            throw ("plink/pscp failed (exit {0}): {1}" -f $LASTEXITCODE, $joined)
         }
 
-        $process.WaitForExit()
+        return $output
     }
     finally {
-        Unregister-Event -SourceIdentifier $outSub.Name -ErrorAction SilentlyContinue
-        Unregister-Event -SourceIdentifier $errSub.Name -ErrorAction SilentlyContinue
-        Remove-Job -Name $outSub.Name -Force -ErrorAction SilentlyContinue
-        Remove-Job -Name $errSub.Name -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $pwFile -Force -ErrorAction SilentlyContinue
     }
-
-    $exitCode = $process.ExitCode
-    $output = $script:puttyOutputBuffer.ToString()
-
-    # Callers (Invoke-RemoteCommand, Copy-FileToRemote) check $LASTEXITCODE
-    # after this call the same way they do after the ssh.exe/scp.exe key-auth
-    # branch's `&` invocation; a direct Process call never sets it on its own,
-    # so it must be set explicitly here or a stale value from an earlier
-    # command in the caller's session would leak through.
-    $global:LASTEXITCODE = $exitCode
-
-    if ($exitCode -ne 0) {
-        throw ("plink/pscp failed (exit {0}): {1}" -f $exitCode, $output)
-    }
-
-    return $output
 }
 
 # Two auth paths, since Windows' built-in OpenSSH client (ssh.exe) cannot
@@ -244,17 +202,14 @@ function Invoke-RemoteCommand {
     if ($script:usingPassword) {
         $plainPassword = ConvertTo-PlainText -Secure $script:CredentialPassword
         try {
-            # See Invoke-InteractivePuttyTool for why the prompt is answered
-            # conditionally (watching real output) instead of a fixed-order
-            # blind pre-answer.
-            $output = Invoke-InteractivePuttyTool -ExePath $script:plinkPath -Arguments @('-ssh', "$script:CredentialUsername@$TargetComputer", $Command) -PlainPassword $plainPassword
+            $output = Invoke-PlinkWithPasswordFile -ExePath $script:plinkPath -Arguments @('-ssh', "$script:CredentialUsername@$TargetComputer", $Command) -PlainPassword $plainPassword
         }
         finally {
             $plainPassword = $null
         }
     }
     else {
-        $output = & ssh.exe -i $script:KeyPath -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$script:CredentialUsername@$TargetComputer" $Command 2>&1
+        $output = Invoke-NativeAllowingStderr { & ssh.exe -i $script:KeyPath -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "$script:CredentialUsername@$TargetComputer" $Command 2>&1 }
     }
 
     if ($LASTEXITCODE -ne 0) {
@@ -269,17 +224,14 @@ function Copy-FileToRemote {
     if ($script:usingPassword) {
         $plainPassword = ConvertTo-PlainText -Secure $script:CredentialPassword
         try {
-            # See Invoke-InteractivePuttyTool for why the prompt is answered
-            # conditionally (watching real output) instead of a fixed-order
-            # blind pre-answer.
-            Invoke-InteractivePuttyTool -ExePath $script:pscpPath -Arguments @($LocalPath, "${script:CredentialUsername}@${TargetComputer}:$RemotePath") -PlainPassword $plainPassword | Out-Null
+            Invoke-PlinkWithPasswordFile -ExePath $script:pscpPath -Arguments @($LocalPath, "${script:CredentialUsername}@${TargetComputer}:$RemotePath") -PlainPassword $plainPassword | Out-Null
         }
         finally {
             $plainPassword = $null
         }
     }
     else {
-        & scp.exe -i $script:KeyPath -o BatchMode=yes -o StrictHostKeyChecking=accept-new $LocalPath "${script:CredentialUsername}@${TargetComputer}:$RemotePath" 2>&1 | Out-Null
+        Invoke-NativeAllowingStderr { & scp.exe -i $script:KeyPath -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 $LocalPath "${script:CredentialUsername}@${TargetComputer}:$RemotePath" 2>&1 } | Out-Null
     }
 
     if ($LASTEXITCODE -ne 0) {
@@ -321,6 +273,15 @@ if ($MyInvocation.InvocationName -ne '.') {
         }
     }
 
+    # Live testing against this project's real Debian test fleet found a
+    # genuine target: connecting as root on a minimal/base install where
+    # sudo is not present at all ("sudo: command not found") - an
+    # unconditional "sudo " prefix would fail outright there, even though
+    # root never needed elevation in the first place. Skip the prefix
+    # specifically when the connecting user already IS root; a non-root
+    # CredentialUsername still gets "sudo " exactly as before.
+    $sudoPrefix = if ($CredentialUsername -eq 'root') { '' } else { 'sudo ' }
+
     $hadFailure = $false
     $stagingDir = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ([System.Guid]::NewGuid().ToString())
     New-Item -Path $stagingDir -ItemType Directory -Force | Out-Null
@@ -331,7 +292,7 @@ if ($MyInvocation.InvocationName -ne '.') {
             try {
                 Write-Host "Connecting: $computer"
                 $remoteTmpDir = "/tmp/wil-linux-client-install"
-                Invoke-RemoteCommand -TargetComputer $computer -Command "sudo mkdir -p $InstallPath $remoteTmpDir && sudo chmod 755 $remoteTmpDir" | Out-Null
+                Invoke-RemoteCommand -TargetComputer $computer -Command "${sudoPrefix}mkdir -p $InstallPath $remoteTmpDir && ${sudoPrefix}chmod 755 $remoteTmpDir" | Out-Null
 
                 Write-Host "Copying client binary: $computer"
                 Copy-FileToRemote -TargetComputer $computer -LocalPath $ClientBinaryPath -RemotePath "$remoteTmpDir/wil-linux-client"
@@ -339,13 +300,13 @@ if ($MyInvocation.InvocationName -ne '.') {
                 Copy-FileToRemote -TargetComputer $computer -LocalPath $units.TimerPath -RemotePath "$remoteTmpDir/wil-linux-client.timer"
 
                 Write-Host "Installing service: $computer"
-                $installCommand = "sudo mv $remoteTmpDir/wil-linux-client $InstallPath/wil-linux-client && " +
-                    "sudo chmod 755 $InstallPath/wil-linux-client && " +
-                    "sudo mv $remoteTmpDir/wil-linux-client.service /etc/systemd/system/wil-linux-client.service && " +
-                    "sudo mv $remoteTmpDir/wil-linux-client.timer /etc/systemd/system/wil-linux-client.timer && " +
-                    "sudo rm -rf $remoteTmpDir && " +
-                    "sudo systemctl daemon-reload && " +
-                    "sudo systemctl enable --now wil-linux-client.timer"
+                $installCommand = "${sudoPrefix}mv $remoteTmpDir/wil-linux-client $InstallPath/wil-linux-client && " +
+                    "${sudoPrefix}chmod 755 $InstallPath/wil-linux-client && " +
+                    "${sudoPrefix}mv $remoteTmpDir/wil-linux-client.service /etc/systemd/system/wil-linux-client.service && " +
+                    "${sudoPrefix}mv $remoteTmpDir/wil-linux-client.timer /etc/systemd/system/wil-linux-client.timer && " +
+                    "${sudoPrefix}rm -rf $remoteTmpDir && " +
+                    "${sudoPrefix}systemctl daemon-reload && " +
+                    "${sudoPrefix}systemctl enable --now wil-linux-client.timer"
                 Invoke-RemoteCommand -TargetComputer $computer -Command $installCommand | Out-Null
 
                 Write-Host "Client installed: $computer"
