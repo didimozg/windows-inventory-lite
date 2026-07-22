@@ -322,6 +322,149 @@ function Get-InstallServerMode {
     return 'Skip'
 }
 
+# Extracts one --flagname "value" pair's value out of a service binPath
+# string, un-escaping the \" that ConvertTo-ServiceArgValue (in
+# Install-Client.ps1 and Deploy-ClientGpo.ps1) would have escaped an
+# embedded literal " into when the value was originally written. Returns
+# $null if the flag isn't present at all - the caller decides whether
+# that's fatal (ServerUrl) or fine (ServerSharePath/Token, both optional
+# on the real command line).
+function Get-BinPathFlagValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BinPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FlagName
+    )
+
+    if ($BinPath -notmatch ([regex]::Escape($FlagName) + '\s+"((?:[^"\\]|\\.)*)"')) {
+        return $null
+    }
+    return $Matches[1] -replace '\\"', '"'
+}
+
+# Reads a service's raw binPath the same way Deploy-ClientGpo.ps1's own
+# Get-ServiceBinaryPath already does (sc.exe qc + a regex on
+# BINARY_PATH_NAME) - duplicated rather than shared, matching this
+# project's established per-script convention.
+function Get-ClientServiceBinaryPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ServiceName
+    )
+
+    $output = & sc.exe qc $ServiceName 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        return $null
+    }
+
+    foreach ($line in $output) {
+        if ($line -match 'BINARY_PATH_NAME\s*:\s*(.+)$') {
+            return $matches[1].Trim()
+        }
+    }
+
+    return $null
+}
+
+# Reverse-parses a WindowsInventoryLiteClient service's binPath back into
+# the same named parameters Install-Client.ps1 accepts. Built to handle
+# both real shapes this project produces: Install-Client.ps1's own
+# Get-ClientServiceCommand (may include --share) and
+# Deploy-ClientGpo.ps1's Get-DesiredServiceCommand (never includes
+# --share) - both use identical --flag "value" syntax for everything
+# else, so a flag-based (not position-based) parser handles both without
+# special-casing either one. Returns $null when --server-url can't be
+# found at all - the one value Install-Client.ps1 treats as strictly
+# required, and the signal the caller uses to fall back to asking every
+# question instead of trusting a malformed/unrecognized binPath.
+function ConvertFrom-ClientBinPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BinPath
+    )
+
+    $serverUrl = Get-BinPathFlagValue -BinPath $BinPath -FlagName '--server-url'
+    if (-not $serverUrl) {
+        return $null
+    }
+
+    $params = @{ ServerUrl = $serverUrl }
+
+    $sharePath = Get-BinPathFlagValue -BinPath $BinPath -FlagName '--share'
+    if ($sharePath) {
+        $params['ServerSharePath'] = $sharePath
+    }
+
+    $token = Get-BinPathFlagValue -BinPath $BinPath -FlagName '--token'
+    if ($token) {
+        $params['Token'] = $token
+    }
+
+    if ($BinPath -match '--interval-hours\s+(\d+)') {
+        $params['IntervalHours'] = [int]$Matches[1]
+    }
+
+    if ($BinPath -match '^"((?:[^"\\]|\\.)*)"') {
+        $exePath = $Matches[1] -replace '\\"', '"'
+        $installPath = Split-Path -Parent $exePath
+        if ($installPath) {
+            $params['InstallPath'] = $installPath
+        }
+    }
+
+    return $params
+}
+
+# Decides how the "Install client (local)" flow should proceed, mirroring
+# Get-InstallServerMode's shape:
+#   Mode = 'Full' - no existing service, or its binPath doesn't parse (no
+#                   -ServerUrl found) - the caller should ask every
+#                   question in $installClientQuestions, exactly as this
+#                   flow has always worked. Params is always @{}.
+#   Mode = 'Skip' - an existing, parseable service was found and the user
+#                   picked "Just refresh" - the caller should pass Params
+#                   (the reconstructed hashtable) straight to
+#                   Install-Client.ps1 with no questions asked. Unlike
+#                   Install-Server.ps1, Install-Client.ps1 has no
+#                   config-file-reload fallback of its own (-ServerUrl is
+#                   Mandatory with nothing to fall back to) - so "just
+#                   refresh" here must supply real reconstructed values,
+#                   not an empty hashtable the way the server flow's own
+#                   Skip mode does.
+function Get-InstallClientMode {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ServiceName
+    )
+
+    $null = & sc.exe query $ServiceName 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        return @{ Mode = 'Full'; Params = @{} }
+    }
+
+    $binPath = Get-ClientServiceBinaryPath -ServiceName $ServiceName
+    if (-not $binPath) {
+        return @{ Mode = 'Full'; Params = @{} }
+    }
+
+    $parsedParams = ConvertFrom-ClientBinPath -BinPath $binPath
+    if (-not $parsedParams) {
+        return @{ Mode = 'Full'; Params = @{} }
+    }
+
+    Write-Host ''
+    Write-Host 'An existing client installation was detected.'
+    Write-Host '1. Just refresh (recommended) - reapply current settings, no questions asked'
+    Write-Host '2. Full reconfigure - re-answer every question from scratch'
+    $updateChoice = Read-WizardAnswer -Prompt 'Choice' -Default '1'
+    if ($updateChoice -eq '2') {
+        return @{ Mode = 'Full'; Params = @{} }
+    }
+    return @{ Mode = 'Skip'; Params = $parsedParams }
+}
+
 $installClientQuestions = @(
     @{ Name = 'ServerUrl'; Prompt = 'Server URL (e.g. https://server.domain.local/api/v1/inventory)'; Type = 'String'; Mandatory = $true }
     @{ Name = 'ServerSharePath'; Prompt = 'Server share path for client updates (leave blank to skip)'; Type = 'String'; Mandatory = $false }

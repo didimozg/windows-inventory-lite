@@ -192,4 +192,107 @@ Describe 'Windows Inventory Lite Install Wizard' {
         Test-ShouldShowQuickInstallSummary -Ran $true -Mode 'Skip' | Should -Be $false
         Test-ShouldShowQuickInstallSummary -Ran $true -Mode 'Full' | Should -Be $false
     }
+
+    It 'ConvertFrom-ClientBinPath extracts all fields from a full binPath (wizard-installed shape, with --share and --token)' {
+        $binPath = '"C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory" --interval-hours 6 --share "\\server\share" --token "abc123" --output "C:\ProgramData\WindowsInventoryLite\client-data" --debug-log-path "C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug.log"'
+
+        $result = ConvertFrom-ClientBinPath -BinPath $binPath
+
+        $result['ServerUrl'] | Should -Be 'https://server.example.local/api/v1/inventory'
+        $result['ServerSharePath'] | Should -Be '\\server\share'
+        $result['Token'] | Should -Be 'abc123'
+        $result['IntervalHours'] | Should -Be 6
+        $result['InstallPath'] | Should -Be 'C:\ProgramData\WindowsInventoryLite\client-data'
+    }
+
+    It 'ConvertFrom-ClientBinPath extracts a partial set from a GPO-shaped binPath (no --share, no --token)' {
+        $binPath = '"C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory" --interval-hours 12 --output "C:\ProgramData\WindowsInventoryLite\client-data" --debug-log-path "C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug.log"'
+
+        $result = ConvertFrom-ClientBinPath -BinPath $binPath
+
+        $result['ServerUrl'] | Should -Be 'https://server.example.local/api/v1/inventory'
+        $result.ContainsKey('ServerSharePath') | Should -Be $false
+        $result.ContainsKey('Token') | Should -Be $false
+        $result['IntervalHours'] | Should -Be 12
+        $result['InstallPath'] | Should -Be 'C:\ProgramData\WindowsInventoryLite\client-data'
+    }
+
+    It 'ConvertFrom-ClientBinPath un-escapes an embedded backslash-quote inside a value' {
+        $binPath = '"C:\client\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory" --interval-hours 6 --token "has\"quote" --output "C:\client" --debug-log-path "C:\client\debug.log"'
+
+        $result = ConvertFrom-ClientBinPath -BinPath $binPath
+
+        $result['Token'] | Should -Be 'has"quote'
+    }
+
+    It 'ConvertFrom-ClientBinPath returns null when --server-url is absent' {
+        $binPath = '"C:\client\WindowsInventoryLiteClient.exe" --interval-hours 6 --output "C:\client" --debug-log-path "C:\client\debug.log"'
+
+        ConvertFrom-ClientBinPath -BinPath $binPath | Should -BeNullOrEmpty
+    }
+
+    It 'ConvertFrom-ClientBinPath returns null for garbage input' {
+        ConvertFrom-ClientBinPath -BinPath 'not a real binpath at all' | Should -BeNullOrEmpty
+    }
+
+    It 'Get-InstallClientMode returns Full with empty Params when the service does not exist' {
+        Mock sc.exe {
+            $global:LASTEXITCODE = 1060
+            return 'The specified service does not exist as an installed service.'
+        } -ParameterFilter { $args[0] -eq 'query' }
+
+        $result = Get-InstallClientMode -ServiceName 'WindowsInventoryLiteClient'
+
+        $result.Mode | Should -Be 'Full'
+        $result.Params.Count | Should -Be 0
+    }
+
+    It 'Get-InstallClientMode returns Full when the service exists but its binPath has no --server-url' {
+        Mock sc.exe {
+            $global:LASTEXITCODE = 0
+            return 'SERVICE_NAME: WindowsInventoryLiteClient'
+        } -ParameterFilter { $args[0] -eq 'query' }
+        Mock sc.exe {
+            $global:LASTEXITCODE = 0
+            return 'BINARY_PATH_NAME : "C:\client\WindowsInventoryLiteClient.exe" --output "C:\client"'
+        } -ParameterFilter { $args[0] -eq 'qc' }
+
+        $result = Get-InstallClientMode -ServiceName 'WindowsInventoryLiteClient'
+
+        $result.Mode | Should -Be 'Full'
+    }
+
+    It 'Get-InstallClientMode returns Skip with the reconstructed Params when the service exists, parses, and the user accepts the default choice' {
+        Mock sc.exe {
+            $global:LASTEXITCODE = 0
+            return 'SERVICE_NAME: WindowsInventoryLiteClient'
+        } -ParameterFilter { $args[0] -eq 'query' }
+        Mock sc.exe {
+            $global:LASTEXITCODE = 0
+            return 'BINARY_PATH_NAME : "C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory" --interval-hours 6 --output "C:\ProgramData\WindowsInventoryLite\client-data" --debug-log-path "C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug.log"'
+        } -ParameterFilter { $args[0] -eq 'qc' }
+        Mock Read-WizardAnswer { return $null }
+
+        $result = Get-InstallClientMode -ServiceName 'WindowsInventoryLiteClient'
+
+        $result.Mode | Should -Be 'Skip'
+        $result.Params['ServerUrl'] | Should -Be 'https://server.example.local/api/v1/inventory'
+        $result.Params['InstallPath'] | Should -Be 'C:\ProgramData\WindowsInventoryLite\client-data'
+    }
+
+    It 'Get-InstallClientMode returns Full when the service exists, parses, and the user explicitly picks full reconfigure' {
+        Mock sc.exe {
+            $global:LASTEXITCODE = 0
+            return 'SERVICE_NAME: WindowsInventoryLiteClient'
+        } -ParameterFilter { $args[0] -eq 'query' }
+        Mock sc.exe {
+            $global:LASTEXITCODE = 0
+            return 'BINARY_PATH_NAME : "C:\client\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory" --interval-hours 6 --output "C:\client" --debug-log-path "C:\client\debug.log"'
+        } -ParameterFilter { $args[0] -eq 'qc' }
+        Mock Read-WizardAnswer { return '2' }
+
+        $result = Get-InstallClientMode -ServiceName 'WindowsInventoryLiteClient'
+
+        $result.Mode | Should -Be 'Full'
+    }
 }
