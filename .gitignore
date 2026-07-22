@@ -5,6 +5,8 @@ tmp/
 *.log
 *.tmp
 inventory-index.json
+deploy/linux-client/plink.exe
+deploy/linux-client/pscp.exe
 
 # Internal AI-assisted development scratch - useful locally while building a
 # feature, not meant for a reader of the public repo. docs/project-specification.md

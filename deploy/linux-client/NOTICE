@@ -1,0 +1,28 @@
+This directory bundles plink.exe and pscp.exe from the PuTTY project
+(https://www.chiark.greenend.org.uk/~sgtatham/putty/), used here for
+unattended SSH password authentication - Windows' own built-in OpenSSH
+client cannot read a password from a non-interactive stdin at all, so
+there is no dependency-free way to script password-based SSH from
+PowerShell without a different tool.
+
+PuTTY (including plink and pscp) is distributed under the MIT license:
+
+Copyright (c) 1997-2024 Simon Tatham.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to permit
+persons to whom the Software is furnished to do so, subject to the
+following conditions: the above copyright notice and this permission
+notice shall be included in all copies or substantial portions of the
+Software.
+
+Download plink.exe/pscp.exe for the matching architecture from the
+official release page:
+https://www.chiark.greenend.org.uk/~sgtatham/putty/latest.html
+Place both files in this directory (deploy\linux-client\). They are not
+tracked in this repository - each user/build should fetch and verify
+their own copy directly from the official source rather than trust a
+third-party redistribution.
