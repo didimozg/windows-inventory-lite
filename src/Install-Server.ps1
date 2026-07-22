@@ -679,16 +679,21 @@ if ($DisableHttp -and $UseHttps -and -not $certificateFoundInStore) {
     throw "-DisableHttp requires a working HTTPS setup, but the configured certificate (thumbprint $CertificateThumbprint) was not found in LocalMachine\My. Import it first (-CertificatePfxPath), or drop -DisableHttp until it is confirmed working."
 }
 
-if ($UseHttps -and -not $DisableHttp) {
-    $listenPrefixPort = $null
-    try {
-        $listenPrefixPort = ([Uri]($ListenPrefix -replace '\+', 'localhost')).Port
-    }
-    catch {
-    }
-    if ($listenPrefixPort -and $HttpsPort -eq $listenPrefixPort) {
-        throw "-HttpsPort must be different from the HTTP port ($listenPrefixPort) when both are enabled."
-    }
+# Parsed unconditionally: consumed below both by the HTTPS/HTTP port-clash
+# check (HTTPS-only) and by the -OpenFirewall block (any HTTP install) - a
+# version of this that only ran under "if ($UseHttps ...)" left
+# $listenPrefixPort unset under Set-StrictMode whenever HTTPS was off,
+# throwing "variable cannot be retrieved" the moment -OpenFirewall tried to
+# read it.
+$listenPrefixPort = $null
+try {
+    $listenPrefixPort = ([Uri]($ListenPrefix -replace '\+', 'localhost')).Port
+}
+catch {
+}
+
+if ($UseHttps -and -not $DisableHttp -and $listenPrefixPort -and $HttpsPort -eq $listenPrefixPort) {
+    throw "-HttpsPort must be different from the HTTP port ($listenPrefixPort) when both are enabled."
 }
 
 if (-not $PSBoundParameters.ContainsKey('InstallLogRetentionDays')) {
