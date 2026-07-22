@@ -1,7 +1,7 @@
 (function () {
   const inventoryViews = ['clients', 'software', 'hardware'];
   const state = {
-    clients: [], view: getInitialView(), installJobId: null, installPollTimer: null, installJobs: [],
+    clients: [], linuxClients: [], view: getInitialView(), installJobId: null, installPollTimer: null, installJobs: [],
     updateJobId: null, updatePollTimer: null,
     // Baselined from the first client-updates poll response, then compared
     // on every later one - lets an open dashboard tab pick up a scheduled
@@ -83,13 +83,14 @@
     if (hash === 'general') return 'general';
     if (hash === 'certificate') return 'certificate';
     if (hash === 'licenses') return 'licenses';
+    if (hash === 'linux-clients' || hash === 'linux') return 'linux';
     if (hash === 'admin-password' || hash === 'admin') return 'admin';
     return 'dashboard';
   }
 
   function setView(view) {
     state.view = view;
-    const hash = view === 'install' ? 'client-actions' : view === 'package' ? 'client-package' : view === 'updates' ? 'client-updates' : view === 'admin' ? 'admin-password' : view;
+    const hash = view === 'install' ? 'client-actions' : view === 'package' ? 'client-package' : view === 'updates' ? 'client-updates' : view === 'admin' ? 'admin-password' : view === 'linux' ? 'linux-clients' : view;
     if (window.location.hash.replace(/^#/, '') !== hash) {
       window.location.hash = hash;
       return;
@@ -101,6 +102,7 @@
     if (view === 'general') loadGeneralSettings();
     if (view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (view === 'licenses') loadLicenses();
+    if (view === 'linux') loadLinuxClients();
     if (view === 'admin') loadAdminPasswordStatus();
   }
 
@@ -152,6 +154,64 @@
   function formatDescriptionEditor(client, clientId) {
     const value = escapeHtml(client.adDescription || '');
     return `<input type="text" class="description-edit-input" data-description-client="${clientId}" data-computer-name="${escapeHtml(client.computerName)}" data-last-saved-value="${value}" value="${value}" maxlength="1024">`;
+  }
+
+  // Linux-table counterparts of formatAdDescription/formatDescriptionEditor.
+  // Separate functions (rather than branching the Windows ones) because the
+  // Linux report shape keys off `hostname` instead of `computerName` and
+  // needs data-platform="linux" so the shared saveClientDescription (and the
+  // global keydown/blur listeners it's wired to) can tell the two tables apart.
+  function formatLinuxDescriptionEditor(client, clientId) {
+    const value = escapeHtml(client.adDescription || '');
+    return `<input type="text" class="description-edit-input" data-description-client="${clientId}" data-computer-name="${escapeHtml(client.hostname)}" data-platform="linux" data-last-saved-value="${value}" value="${value}" maxlength="1024">`;
+  }
+
+  function formatLinuxAdDescription(client) {
+    if (client.adSyncStatus === 'not-found') return 'Not found in AD';
+    if (client.adSyncStatus === 'error') return 'AD unreachable';
+    return escapeHtml(client.adDescription || '');
+  }
+
+  function loadLinuxClients() {
+    fetch('/api/v1/linux/clients', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.linuxClients = data.clients || [];
+        state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
+        renderLinuxClientsTable(state.linuxClients);
+      })
+      .catch(() => {});
+  }
+
+  function renderLinuxClientsTable(clients) {
+    const tbody = byId('linuxClientsBody');
+    if (!tbody) return;
+
+    if (!clients.length) {
+      tbody.innerHTML = '<tr><td colspan="7">No Linux clients reporting yet.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = clients.map((client, index) => {
+      const clientId = `linux-${index}`;
+      const descriptionCell = state.adDescriptionSyncEnabled
+        ? formatLinuxAdDescription(client)
+        : formatLinuxDescriptionEditor(client, clientId);
+      const osName = (client.os && client.os.prettyName) || '';
+      const packageCount = Array.isArray(client.packages) ? client.packages.length : 0;
+      return `<tr>
+        <td>${escapeHtml(client.hostname)}</td>
+        <td>${escapeHtml(client.clientVersion)}</td>
+        <td>${escapeHtml(osName)}</td>
+        <td>${formatIpAddressesHtml(client)}</td>
+        <td>${packageCount}</td>
+        <td>${descriptionCell}</td>
+        <td>${formatDateTime(client.sourceUpdatedAt)}</td>
+      </tr>`;
+    }).join('');
   }
 
   function formatDateTime(value) {
@@ -913,8 +973,13 @@
     const newValue = input.value;
     if (newValue === input.dataset.lastSavedValue) return;
 
+    const isLinux = input.dataset.platform === 'linux';
+    const endpoint = isLinux
+      ? `/api/v1/linux/clients/${encodeURIComponent(computerName)}/description`
+      : `/api/v1/clients/${encodeURIComponent(computerName)}/description`;
+
     input.disabled = true;
-    fetch(`/api/v1/clients/${encodeURIComponent(computerName)}/description`, {
+    fetch(endpoint, {
       method: 'PUT',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
@@ -924,7 +989,9 @@
       .then(({ ok, data }) => {
         if (!ok) throw new Error(data.error || 'Save failed');
         input.dataset.lastSavedValue = data.description;
-        const client = (state.clients || []).find(c => c.computerName === computerName);
+        const list = isLinux ? (state.linuxClients || []) : (state.clients || []);
+        const key = isLinux ? 'hostname' : 'computerName';
+        const client = list.find(c => c[key] === computerName);
         if (client) client.adDescription = data.description;
       })
       .catch(error => {
@@ -2393,6 +2460,7 @@
     byId('generalStatusView').classList.toggle('hidden', state.view !== 'general');
     byId('certificateView').classList.toggle('hidden', state.view !== 'certificate');
     byId('licensesView').classList.toggle('hidden', state.view !== 'licenses');
+    byId('linuxClientsView').classList.toggle('hidden', state.view !== 'linux');
     byId('adminPasswordView').classList.toggle('hidden', state.view !== 'admin');
     byId('dashboardTab').classList.toggle('active', state.view === 'dashboard');
     byId('clientsTab').classList.toggle('active', state.view === 'clients');
@@ -2404,6 +2472,7 @@
     byId('generalTab').classList.toggle('active', state.view === 'general');
     byId('certificateTab').classList.toggle('active', state.view === 'certificate');
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
+    byId('linuxClientsTab').classList.toggle('active', state.view === 'linux');
     byId('adminPasswordTab').classList.toggle('active', state.view === 'admin');
     const isInventoryView = inventoryViews.includes(state.view);
     byId('summarySection').classList.toggle('hidden', !isInventoryView);
@@ -2614,6 +2683,7 @@
     if (state.view === 'general') loadGeneralSettings();
     if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (state.view === 'licenses') loadLicenses();
+    if (state.view === 'linux') loadLinuxClients();
     if (state.view === 'admin') loadAdminPasswordStatus();
   });
   byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
@@ -2720,6 +2790,7 @@
   byId('certUploadButton').addEventListener('click', uploadCertificate);
   byId('certDeleteButton').addEventListener('click', deleteCertificate);
   byId('licensesTab').addEventListener('click', () => setView('licenses'));
+  byId('linuxClientsTab').addEventListener('click', () => setView('linux'));
   byId('exportLicensesBtn').addEventListener('click', exportLicenses);
   byId('licenseAddButton').addEventListener('click', () => openLicenseForm(null));
   byId('licenseSaveButton').addEventListener('click', saveLicense);
@@ -2742,6 +2813,7 @@
   if (state.view === 'general') loadGeneralSettings();
   if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
   if (state.view === 'licenses') loadLicenses();
+  if (state.view === 'linux') loadLinuxClients();
   if (state.view === 'admin') loadAdminPasswordStatus();
   updateClientActionUi();
   loadInstallHistory();
