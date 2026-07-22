@@ -5,6 +5,12 @@ client cannot read a password from a non-interactive stdin at all, so
 there is no dependency-free way to script password-based SSH from
 PowerShell without a different tool.
 
+Install-ClientDebianSSH.ps1 pipes the password (and a pre-emptive host-key
+trust answer) to plink.exe/pscp.exe over stdin rather than passing it via
+the -pw command-line argument, so the password never appears in a local
+process listing (Get-CimInstance Win32_Process, Task Manager) for the
+duration of the connection.
+
 PuTTY (including plink and pscp) is distributed under the MIT license:
 
 Copyright (c) 1997-2024 Simon Tatham.

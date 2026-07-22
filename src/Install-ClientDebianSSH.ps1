@@ -114,7 +114,24 @@ function Invoke-RemoteCommand {
     if ($script:usingPassword) {
         $plainPassword = ConvertTo-PlainText -Secure $script:CredentialPassword
         try {
-            $output = & $script:plinkPath -ssh -batch -pw $plainPassword "$script:CredentialUsername@$TargetComputer" $Command 2>&1
+            # No -batch and no -pw here: -batch disables ALL interactive prompts
+            # (aborts instead of asking), which would defeat the purpose. Piping
+            # the answers on stdin instead means the password never appears on
+            # the command line, where it would otherwise be visible to any other
+            # user/process on this host via Get-CimInstance Win32_Process / Task
+            # Manager for the connection's duration - matches the same principle
+            # Install-ClientWinRM.ps1 already applies to WinRM credentials.
+            # "y" pre-answers a possible one-time host-key trust prompt (PuTTY
+            # caches the answer in HKCU\Software\SimonTatham\PuTTY\SshHostKeys,
+            # so this only matters on a target's first-ever connection from this
+            # machine - a harmless no-op line on every later connection, since no
+            # such prompt exists to consume it).
+            # Not verified against a live never-before-seen host from this
+            # environment (no real SSH target available here) - if a target ever
+            # hangs at this step, the real prompt sequence differed from this
+            # assumption; using -KeyPath instead is the fallback until confirmed
+            # on the user's own test fleet.
+            $output = "y", $plainPassword | & $script:plinkPath -ssh "$script:CredentialUsername@$TargetComputer" $Command 2>&1
         }
         finally {
             $plainPassword = $null
@@ -136,7 +153,10 @@ function Copy-FileToRemote {
     if ($script:usingPassword) {
         $plainPassword = ConvertTo-PlainText -Secure $script:CredentialPassword
         try {
-            & $script:pscpPath -batch -pw $plainPassword $LocalPath "${script:CredentialUsername}@${TargetComputer}:$RemotePath" 2>&1 | Out-Null
+            # See Invoke-RemoteCommand's password branch for the full rationale:
+            # no -batch/-pw so the password never appears on the command line,
+            # "y" pre-answers a possible one-time host-key trust prompt.
+            "y", $plainPassword | & $script:pscpPath $LocalPath "${script:CredentialUsername}@${TargetComputer}:$RemotePath" 2>&1 | Out-Null
         }
         finally {
             $plainPassword = $null
