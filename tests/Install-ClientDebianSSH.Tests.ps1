@@ -79,4 +79,55 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
             $ExePath -eq 'pscp.exe' -and ($Arguments -notcontains '-pw') -and ($Arguments -notcontains '-batch')
         }
     }
+
+    Context 'Get-NextPuttyPromptAction' {
+        It 'returns HostKey when only the host-key prompt has appeared and neither flag is set' {
+            $result = Get-NextPuttyPromptAction -BufferedOutput 'The server''s host key is not cached. Store key in cache?' -HostKeyAnswered $false -PasswordSent $false
+
+            $result | Should -Be 'HostKey'
+        }
+
+        It 'returns Password when only the password prompt has appeared and neither flag is set' {
+            $result = Get-NextPuttyPromptAction -BufferedOutput 'root@192.0.2.10''s password:' -HostKeyAnswered $false -PasswordSent $false
+
+            $result | Should -Be 'Password'
+        }
+
+        It 'returns Password (not HostKey) when the buffer contains only a password prompt, as on an already-trusted target - regression test for the prior Critical bug' {
+            $result = Get-NextPuttyPromptAction -BufferedOutput 'root@192.0.2.10''s password:' -HostKeyAnswered $false -PasswordSent $false
+
+            $result | Should -Be 'Password'
+            $result | Should -Not -Be 'HostKey'
+        }
+
+        It 'answers HostKey first when both prompts are present in the buffer and the host key has not been answered yet' {
+            $buffer = "The server's host key is not cached. Store key in cache?`nroot@192.0.2.10's password:"
+
+            $result = Get-NextPuttyPromptAction -BufferedOutput $buffer -HostKeyAnswered $false -PasswordSent $false
+
+            $result | Should -Be 'HostKey'
+        }
+
+        It 'answers Password when both prompts are present in the buffer but the host key was already answered' {
+            $buffer = "The server's host key is not cached. Store key in cache?`nroot@192.0.2.10's password:"
+
+            $result = Get-NextPuttyPromptAction -BufferedOutput $buffer -HostKeyAnswered $true -PasswordSent $false
+
+            $result | Should -Be 'Password'
+        }
+
+        It 'returns nothing once both prompts have already been answered' {
+            $buffer = "The server's host key is not cached. Store key in cache?`nroot@192.0.2.10's password:"
+
+            $result = Get-NextPuttyPromptAction -BufferedOutput $buffer -HostKeyAnswered $true -PasswordSent $true
+
+            $result | Should -BeNullOrEmpty
+        }
+
+        It 'returns nothing when neither prompt has appeared in the buffer yet' {
+            $result = Get-NextPuttyPromptAction -BufferedOutput 'Connecting to 192.0.2.10 port 22' -HostKeyAnswered $false -PasswordSent $false
+
+            $result | Should -BeNullOrEmpty
+        }
+    }
 }

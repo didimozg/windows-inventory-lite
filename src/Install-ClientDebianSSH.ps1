@@ -102,6 +102,30 @@ WantedBy=timers.target
     return @{ ServicePath = $servicePath; TimerPath = $timerPath }
 }
 
+# Decides which prompt answer (if any) to send next, given the buffered
+# plink/pscp output seen so far and which prompts have already been
+# answered. Pure function - no I/O - so this exact conditional logic (the
+# source of a prior Critical bug: blindly pre-answering "y" before a
+# host-key prompt that never appears on an already-trusted target, which
+# then consumes the PASSWORD prompt's answer slot instead of the real
+# password) can be unit-tested directly with synthetic buffer strings,
+# not only indirectly through a mocked Invoke-InteractivePuttyTool.
+function Get-NextPuttyPromptAction {
+    param(
+        [string]$BufferedOutput,
+        [bool]$HostKeyAnswered,
+        [bool]$PasswordSent
+    )
+
+    if (-not $HostKeyAnswered -and $BufferedOutput -match '(?i)store key in cache') {
+        return 'HostKey'
+    }
+    if (-not $PasswordSent -and $BufferedOutput -match '(?i)password:') {
+        return 'Password'
+    }
+    return $null
+}
+
 # Runs plink.exe/pscp.exe interactively and answers whichever prompt
 # actually appears - NOT a fixed-order blind pre-answer, which breaks on
 # any target whose host key this machine has already cached (PuTTY caches
@@ -115,7 +139,9 @@ WantedBy=timers.target
 # password off the command line (where -pw would put it, visible to any
 # other process/user on this host via Get-CimInstance Win32_Process/Task
 # Manager for the connection's duration - matching the principle
-# Install-ClientWinRM.ps1 already applies to WinRM credentials).
+# Install-ClientWinRM.ps1 already applies to WinRM credentials). The
+# decision of which prompt to answer is delegated to
+# Get-NextPuttyPromptAction (see above) so it can be unit-tested directly.
 function Invoke-InteractivePuttyTool {
     param(
         [string]$ExePath,
@@ -166,13 +192,15 @@ function Invoke-InteractivePuttyTool {
 
             $text = $script:puttyOutputBuffer.ToString()
 
-            if (-not $script:puttyHostKeyAnswered -and $text -match '(?i)store key in cache') {
-                $process.StandardInput.WriteLine('y')
-                $script:puttyHostKeyAnswered = $true
-            }
-            elseif (-not $script:puttyPasswordSent -and $text -match '(?i)password:') {
-                $process.StandardInput.WriteLine($PlainPassword)
-                $script:puttyPasswordSent = $true
+            switch (Get-NextPuttyPromptAction -BufferedOutput $text -HostKeyAnswered $script:puttyHostKeyAnswered -PasswordSent $script:puttyPasswordSent) {
+                'HostKey' {
+                    $process.StandardInput.WriteLine('y')
+                    $script:puttyHostKeyAnswered = $true
+                }
+                'Password' {
+                    $process.StandardInput.WriteLine($PlainPassword)
+                    $script:puttyPasswordSent = $true
+                }
             }
 
             Start-Sleep -Milliseconds 150
