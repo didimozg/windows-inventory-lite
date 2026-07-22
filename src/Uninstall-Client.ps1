@@ -10,8 +10,28 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+# Safety net for the client/server co-located case: if $InstallPath still
+# resolves to the shared WindowsInventoryLite root (an explicit override,
+# or an uninstall run against a machine never reinstalled since the
+# client-data layout shipped) and server-config.json is sitting right
+# there, a recursive delete would take the server's own data with it.
+# Refuse only in that specific case - a client-only machine's bare root
+# (no server-config.json) still gets fully cleaned up as before.
+function Test-IsSharedServerRoot {
+    param(
+        [string]$Path,
+        [string]$SharedRoot
+    )
+
+    if ($Path.TrimEnd('\') -ne $SharedRoot.TrimEnd('\')) {
+        return $false
+    }
+
+    return Test-Path -LiteralPath (Join-Path -Path $SharedRoot -ChildPath 'server-config.json')
+}
+
 if (-not $InstallPath) {
-    $InstallPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite'
+    $InstallPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\client-data'
 }
 
 foreach ($legacyName in @('WindowsLicenseInventoryClient', 'WindowsLicenseInventory')) {
@@ -36,7 +56,11 @@ if ($LASTEXITCODE -eq 0 -and $PSCmdlet.ShouldProcess($serviceName, 'Stop and del
     Start-Sleep -Seconds 2
 }
 
-if ((Test-Path -LiteralPath $InstallPath) -and $PSCmdlet.ShouldProcess($InstallPath, 'Remove client files')) {
+$sharedRoot = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite'
+if (Test-IsSharedServerRoot -Path $InstallPath -SharedRoot $sharedRoot) {
+    Write-Warning "Skipped removing $InstallPath - it looks like the server's own directory (server-config.json present). Remove client files manually if needed."
+}
+elseif ((Test-Path -LiteralPath $InstallPath) -and $PSCmdlet.ShouldProcess($InstallPath, 'Remove client files')) {
     Remove-Item -LiteralPath $InstallPath -Recurse -Force
 }
 
