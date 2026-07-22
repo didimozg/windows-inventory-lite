@@ -224,21 +224,26 @@ function Read-WizardServerConfig {
     return $null
 }
 
-# Detects an existing server install (via the default server-config.json
-# location) and, if found, asks whether to just refresh (reapply the
-# current settings, no questions asked) or fully reconfigure. Returns
-# $true when the caller should skip the question sequence entirely and
-# pass Install-Server.ps1 an empty params hashtable - relies on the same
-# behavior every other blank/omitted wizard answer already relies on:
-# leaving a parameter unspecified makes Install-Server.ps1 reload its
-# last-saved value, so an empty hashtable is a genuine "no change" reapply,
-# not a reset to the wizard's own hardcoded defaults. Detection only
-# checks the default config path (the same one Uninstall-Server.ps1 falls
-# back to) - a server installed at a custom -ConfigPath won't be detected,
-# same limitation as every other path-override this wizard doesn't ask
-# about, and simply behaves as if no install exists (asks all 22
-# questions, as before).
-function Test-InstallServerRefreshOnly {
+# Decides how the "Install server" flow should proceed, based on whether
+# server-config.json already exists at the default location:
+#   'Quick' - no existing config at all (a genuinely fresh install) - the
+#             caller should ask only the QuickInstall-flagged questions
+#             below and let Install-Server.ps1's own defaults handle
+#             everything else.
+#   'Skip'  - an existing config was found and the user picked "Just
+#             refresh" - the caller should pass Install-Server.ps1 an
+#             empty params hashtable (every parameter left unspecified
+#             reloads its last-saved value, a genuine "no change" reapply).
+#   'Full'  - an existing config was found and the user explicitly picked
+#             "Full reconfigure" - the caller should ask every question in
+#             $installServerQuestions, exactly as this flow has always
+#             worked for that choice.
+# Detection only checks the default config path (the same one
+# Uninstall-Server.ps1 falls back to) - a server installed at a custom
+# -ConfigPath won't be detected, same limitation as every other
+# path-override this wizard doesn't ask about, and is treated as 'Quick'
+# (behaves as a fresh install).
+function Get-InstallServerMode {
     param(
         [Parameter(Mandatory = $true)]
         [string]$ConfigPath
@@ -246,7 +251,7 @@ function Test-InstallServerRefreshOnly {
 
     $existingConfig = Read-WizardServerConfig -Path $ConfigPath
     if (-not $existingConfig) {
-        return $false
+        return 'Quick'
     }
 
     Write-Host ''
@@ -254,7 +259,10 @@ function Test-InstallServerRefreshOnly {
     Write-Host '1. Just refresh (recommended) - reapply current settings, no questions asked'
     Write-Host '2. Full reconfigure - re-answer every question from scratch'
     $updateChoice = Read-WizardAnswer -Prompt 'Choice' -Default '1'
-    return ($updateChoice -ne '2')
+    if ($updateChoice -eq '2') {
+        return 'Full'
+    }
+    return 'Skip'
 }
 
 $installClientQuestions = @(
@@ -268,8 +276,8 @@ $installClientQuestions = @(
 
 $installServerQuestions = @(
     # Network
-    @{ Name = 'ListenPrefix'; Prompt = 'Listen prefix'; Type = 'String'; Default = 'http://+:8080/'; Mandatory = $false }
-    @{ Name = 'OpenFirewall'; Prompt = 'Open the Windows Firewall for the listen port(s)'; Type = 'Switch' }
+    @{ Name = 'ListenPrefix'; Prompt = 'Listen prefix'; Type = 'String'; Default = 'http://+:8080/'; Mandatory = $false; QuickInstall = $true }
+    @{ Name = 'OpenFirewall'; Prompt = 'Open the Windows Firewall for the listen port(s)'; Type = 'Switch'; QuickInstall = $true }
 
     # HTTPS
     @{ Name = 'UseHttps'; Prompt = 'Enable HTTPS'; Type = 'Switch' }
@@ -280,8 +288,8 @@ $installServerQuestions = @(
     @{ Name = 'DisableHttp'; Prompt = 'Disable plain HTTP once HTTPS is confirmed working (refused unless HTTPS is enabled)'; Type = 'Switch' }
 
     # Basic Auth / dashboard access
-    @{ Name = 'WebUsername'; Prompt = 'Dashboard username'; Type = 'String'; Mandatory = $false }
-    @{ Name = 'WebPassword'; Prompt = 'Dashboard password'; Type = 'SecureString'; Mandatory = $false }
+    @{ Name = 'WebUsername'; Prompt = 'Dashboard username'; Type = 'String'; Mandatory = $false; QuickInstall = $true }
+    @{ Name = 'WebPassword'; Prompt = 'Dashboard password'; Type = 'SecureString'; Mandatory = $false; QuickInstall = $true }
     @{ Name = 'Token'; Prompt = 'Inventory ingestion token (leave blank to auto-generate)'; Type = 'SecureString'; Mandatory = $false }
 
     # Active Directory identity - configures the domain/credentials used by

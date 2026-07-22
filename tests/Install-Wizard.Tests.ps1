@@ -98,25 +98,53 @@ Describe 'Windows Inventory Lite Install Wizard' {
         Read-WizardServerConfig -Path 'C:\this-path-does-not-exist-installer-wizard-test\server-config.json' | Should -BeNullOrEmpty
     }
 
-    It 'Test-InstallServerRefreshOnly returns false when no config file exists (asks all questions, as before)' {
-        Test-InstallServerRefreshOnly -ConfigPath 'C:\this-path-does-not-exist-installer-wizard-test\server-config.json' | Should -Be $false
+    It 'Get-InstallServerMode returns Quick when no config file exists (fresh install)' {
+        Get-InstallServerMode -ConfigPath 'C:\this-path-does-not-exist-installer-wizard-test\server-config.json' | Should -Be 'Quick'
     }
 
-    It 'Test-InstallServerRefreshOnly returns true when a config exists and the user picks the default (just refresh)' {
+    It 'Get-InstallServerMode returns Skip when a config exists and the user picks the default (just refresh)' {
         $tempConfigPath = Join-Path -Path $TestDrive -ChildPath 'server-config.json'
         Set-Content -LiteralPath $tempConfigPath -Value '{"ListenPrefix":"http://+:8080/"}' -Encoding UTF8
 
         Mock Read-WizardAnswer { return $null }
 
-        Test-InstallServerRefreshOnly -ConfigPath $tempConfigPath | Should -Be $true
+        Get-InstallServerMode -ConfigPath $tempConfigPath | Should -Be 'Skip'
     }
 
-    It 'Test-InstallServerRefreshOnly returns false when a config exists and the user explicitly picks full reconfigure' {
+    It 'Get-InstallServerMode returns Full when a config exists and the user explicitly picks full reconfigure' {
         $tempConfigPath = Join-Path -Path $TestDrive -ChildPath 'server-config.json'
         Set-Content -LiteralPath $tempConfigPath -Value '{"ListenPrefix":"http://+:8080/"}' -Encoding UTF8
 
         Mock Read-WizardAnswer { return '2' }
 
-        Test-InstallServerRefreshOnly -ConfigPath $tempConfigPath | Should -Be $false
+        Get-InstallServerMode -ConfigPath $tempConfigPath | Should -Be 'Full'
+    }
+
+    It 'exactly 4 install-server questions are flagged QuickInstall: ListenPrefix, OpenFirewall, WebUsername, WebPassword' {
+        $quickNames = @($installServerQuestions | Where-Object { $_['QuickInstall'] } | ForEach-Object { $_.Name })
+        $quickNames | Should -Be @('ListenPrefix', 'OpenFirewall', 'WebUsername', 'WebPassword')
+    }
+
+    It 'answering only the QuickInstall-flagged questions never produces a $params key from the other 17 questions' {
+        $quickQuestions = @($installServerQuestions | Where-Object { $_['QuickInstall'] })
+        Mock Read-WizardAnswer {
+            param($Prompt, $Default, [switch]$Mandatory, [switch]$Secure)
+            if ($Prompt -like 'Listen prefix*') { return 'http://+:9090/' }
+            if ($Prompt -like 'Open the Windows Firewall*') { return 'y' }
+            if ($Prompt -like 'Dashboard username*') { return 'admin' }
+            if ($Prompt -like 'Dashboard password*') { return 'testpass' }
+            return $null
+        }
+
+        $params = Read-WizardAnswers -Questions $quickQuestions
+
+        $otherQuestionNames = @($installServerQuestions | Where-Object { -not $_['QuickInstall'] } | ForEach-Object { $_.Name } | Select-Object -Unique)
+        foreach ($name in $otherQuestionNames) {
+            $params.ContainsKey($name) | Should -Be $false
+        }
+        $params['ListenPrefix'] | Should -Be 'http://+:9090/'
+        $params['OpenFirewall'] | Should -Be $true
+        $params['WebUsername'] | Should -Be 'admin'
+        $params['WebPassword'] | Should -Be 'testpass'
     }
 }
