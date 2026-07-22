@@ -181,16 +181,55 @@ function Invoke-WizardAction {
     Write-Host ''
 
     if (-not $PSCmdlet.ShouldProcess($ScriptName, 'Run')) {
-        return
+        return $false
     }
 
     $confirm = Read-WizardAnswer -Prompt 'Proceed? [y/N]' -Default 'N'
     if ($confirm -notmatch '^(y|yes)$') {
         Write-Host 'Cancelled.'
-        return
+        return $false
     }
 
     & $ScriptPath @Params
+    return $true
+}
+
+# Printed only right after a genuinely successful quick install (not
+# cancelled, not -WhatIf - see the main loop's $ran check below) - lists
+# exactly what was left at its default and where to change it, so the
+# admin never has to wonder whether something is actually configured.
+# Values are read back from the same $Params the wizard itself resolved
+# and passed to Install-Server.ps1, not re-derived separately.
+function Show-QuickInstallSummary {
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Params
+    )
+
+    $listenPrefix = if ($Params.ContainsKey('ListenPrefix')) { $Params['ListenPrefix'] } else { 'http://+:8080/' }
+    $port = 8080
+    if ($listenPrefix -match ':(\d+)/?$') {
+        $port = [int]$Matches[1]
+    }
+    $firewallOpened = [bool]$Params['OpenFirewall']
+
+    # Write-Output, not Write-Host: this function's output must flow
+    # through the pipeline so it can be captured (e.g. via | Out-String in
+    # tests) - it still prints to the console exactly as before when the
+    # main loop calls it directly and doesn't capture the result.
+    Write-Output ''
+    Write-Output 'Server installed and started.'
+    Write-Output "Dashboard:        http://localhost:$port/"
+    Write-Output 'HTTPS:            disabled - enable via Settings > General'
+    Write-Output 'AD sync:          disabled - configure via Settings > General'
+    Write-Output 'Ingestion token:  auto-generated - view/copy it via Settings > General'
+    Write-Output 'Client package:   not built yet - build via the Client package tab'
+    if ($firewallOpened) {
+        Write-Output "Firewall:         opened for port $port"
+    }
+    else {
+        Write-Output "Firewall:         not opened - see the Windows Firewall section in Settings if clients can't reach this server"
+    }
 }
 
 # Duplicated from Install-Server.ps1's own Read-ServerConfig (this project
@@ -409,21 +448,20 @@ if ($MyInvocation.InvocationName -ne '.') {
 
         $scriptPath = Join-Path -Path $PSScriptRoot -ChildPath $flow.ScriptName
 
-        # Only the "Install server" flow has an existing-install detection
-        # step - see Get-InstallServerMode for what each of its three
-        # return values means. Quick/Full both still ask every question
-        # for now (unchanged from before this fix) - a later task narrows
-        # 'Quick' down to a shorter question list; this fix only restores
-        # the broken caller after Get-InstallServerMode replaced
-        # Test-InstallServerRefreshOnly.
-        $skipQuestions = $false
+        # Only the "Install server" flow distinguishes Quick/Skip/Full -
+        # see Get-InstallServerMode for what each means. Every other flow
+        # keeps asking its full question list, unaffected.
+        $mode = 'Full'
         if ($choice -eq '1') {
             $defaultConfigPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\server-config.json'
             $mode = Get-InstallServerMode -ConfigPath $defaultConfigPath
-            $skipQuestions = ($mode -eq 'Skip')
         }
 
-        $params = if ($skipQuestions) { @{} } else { Read-WizardAnswers -Questions $flow.Questions }
-        Invoke-WizardAction -ScriptPath $scriptPath -ScriptName $flow.ScriptName -Params $params -SecretParams $flow.SecretParams
+        $questions = if ($mode -eq 'Quick') { @($flow.Questions | Where-Object { $_['QuickInstall'] }) } else { $flow.Questions }
+        $params = if ($mode -eq 'Skip') { @{} } else { Read-WizardAnswers -Questions $questions }
+        $ran = Invoke-WizardAction -ScriptPath $scriptPath -ScriptName $flow.ScriptName -Params $params -SecretParams $flow.SecretParams
+        if ($ran -and $mode -eq 'Quick') {
+            Show-QuickInstallSummary -Params $params
+        }
     }
 }

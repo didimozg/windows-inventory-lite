@@ -147,4 +147,42 @@ Describe 'Windows Inventory Lite Install Wizard' {
         $params['WebUsername'] | Should -Be 'admin'
         $params['WebPassword'] | Should -Be 'testpass'
     }
+
+    It 'Invoke-WizardAction returns false under -WhatIf without invoking the script' {
+        Mock Read-WizardAnswer { return 'y' }
+        $scriptRan = $false
+        function script:Test-InvokeWizardActionTarget { $script:scriptRan = $true }
+
+        $result = Invoke-WizardAction -ScriptPath 'Test-InvokeWizardActionTarget' -ScriptName 'Test-InvokeWizardActionTarget' -Params @{} -WhatIf
+
+        $result | Should -Be $false
+        $scriptRan | Should -Be $false
+    }
+
+    It 'Invoke-WizardAction returns false when the user declines to proceed' {
+        Mock Read-WizardAnswer { return 'n' }
+        $scriptRan = $false
+        function script:Test-InvokeWizardActionTarget2 { $script:scriptRan = $true }
+
+        $result = Invoke-WizardAction -ScriptPath 'Test-InvokeWizardActionTarget2' -ScriptName 'Test-InvokeWizardActionTarget2' -Params @{}
+
+        $result | Should -Be $false
+        $scriptRan | Should -Be $false
+    }
+
+    It 'Show-QuickInstallSummary reports the resolved port and a firewall-opened line when OpenFirewall was set' {
+        $output = Show-QuickInstallSummary -Params @{ ListenPrefix = 'http://+:9090/'; OpenFirewall = $true } | Out-String
+
+        $output | Should -Match 'http://localhost:9090/'
+        $output | Should -Match 'Firewall:\s+opened for port 9090'
+        $output | Should -Match 'HTTPS:\s+disabled'
+        $output | Should -Match 'AD sync:\s+disabled'
+    }
+
+    It 'Show-QuickInstallSummary reports the default port 8080 and a not-opened firewall line when ListenPrefix/OpenFirewall were not answered' {
+        $output = Show-QuickInstallSummary -Params @{} | Out-String
+
+        $output | Should -Match 'http://localhost:8080/'
+        $output | Should -Match 'Firewall:\s+not opened'
+    }
 }
