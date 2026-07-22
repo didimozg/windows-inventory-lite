@@ -121,7 +121,7 @@ For a first-time setup, run `src/Install-Wizard.ps1` with no parameters for a me
 
 If a server is already installed, choosing "Install server" offers a "just refresh" option that skips every question and reapplies the current saved settings as-is (useful after pulling a new build) - pick "Full reconfigure" instead to change any setting.
 
-On a genuinely fresh install (no existing `server-config.json`), "Install server" now asks only 4 questions - listen prefix/port, whether to open the Windows Firewall, and the dashboard username/password - printing a summary afterward of what was left at its default (HTTPS, AD sync, the ingestion token, the client GPO package) and where to configure each one later, in Settings. An already-installed server still gets the existing "Just refresh" / "Full reconfigure" choice, unchanged.
+On a genuinely fresh install (no existing `server-config.json`), "Install server" now asks only 4 questions - listen prefix/port, whether to open the Windows Firewall, and the dashboard username/password - printing a summary afterward of what was left at its default (HTTPS, AD sync, the ingestion token, the client GPO package) and where to configure each one later - HTTPS/AD sync/the token in Settings, the GPO package via the Client package tab. An already-installed server still gets the existing "Just refresh" / "Full reconfigure" choice, unchanged.
 
 Use `-WhatIf` to walk through the questions and see the resolved command without actually running anything.
 
