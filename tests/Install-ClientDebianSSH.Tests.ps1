@@ -62,7 +62,7 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
         Invoke-RemoteCommand -TargetComputer '192.0.2.10' -Command 'echo hi'
 
         Should -Invoke Invoke-InteractivePuttyTool -Times 1 -ParameterFilter {
-            $ExePath -eq 'plink.exe' -and ($Arguments -notcontains '-pw') -and ($Arguments -notcontains '-batch')
+            $ExePath -eq 'plink.exe' -and ($Arguments -notcontains '-pw') -and ($Arguments -notcontains '-batch') -and ($PlainPassword -eq 'unused-test-password')
         }
     }
 
@@ -76,7 +76,7 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
         Copy-FileToRemote -TargetComputer '192.0.2.10' -LocalPath 'C:\fake\wil-linux-client' -RemotePath '/tmp/wil-linux-client-install/wil-linux-client'
 
         Should -Invoke Invoke-InteractivePuttyTool -Times 1 -ParameterFilter {
-            $ExePath -eq 'pscp.exe' -and ($Arguments -notcontains '-pw') -and ($Arguments -notcontains '-batch')
+            $ExePath -eq 'pscp.exe' -and ($Arguments -notcontains '-pw') -and ($Arguments -notcontains '-batch') -and ($PlainPassword -eq 'unused-test-password')
         }
     }
 
