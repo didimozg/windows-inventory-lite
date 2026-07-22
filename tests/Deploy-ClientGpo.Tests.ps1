@@ -45,4 +45,20 @@ Describe 'Windows Inventory Lite Deploy-ClientGpo client-data layout' {
 
         Test-Path -LiteralPath $legacyExe | Should -Be $true
     }
+
+    It 'Remove-LegacyClientFiles does not delete client-version.txt when LegacyRoot and new path directory are the same' {
+        $script:LogPath = Join-Path -Path $TestDrive -ChildPath 'test-deploy3.log'
+        $bareRoot = Join-Path -Path $TestDrive -ChildPath 'bare-root'
+        New-Item -Path $bareRoot -ItemType Directory -Force | Out-Null
+        $versionFile = Join-Path -Path $bareRoot -ChildPath 'client-version.txt'
+        Set-Content -LiteralPath $versionFile -Value '0.21.3'
+
+        # Simulate operator passing -InstallPath back to the legacy bare root
+        $newServicePath = Join-Path -Path $bareRoot -ChildPath 'WindowsInventoryLiteClient.exe'
+
+        Remove-LegacyClientFiles -LegacyRoot $bareRoot -NewServicePath $newServicePath
+
+        # The version file should NOT have been deleted since the new path is also in the same bare root
+        Test-Path -LiteralPath $versionFile | Should -Be $true
+    }
 }
