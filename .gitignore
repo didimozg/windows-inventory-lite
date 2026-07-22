@@ -5,3 +5,10 @@ tmp/
 *.log
 *.tmp
 inventory-index.json
+
+# Internal AI-assisted development scratch - useful locally while building a
+# feature, not meant for a reader of the public repo. docs/project-specification.md
+# (the one consolidated project spec) is the exception and stays tracked.
+docs/superpowers/
+.superpowers/
+.claude/skills/
