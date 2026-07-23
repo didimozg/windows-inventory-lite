@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.25.2] - 2026-07-23
+
+### Fixed
+
+- `Get-ClientServiceBinaryPath` (Install-Wizard.ps1) and `Get-ServiceBinaryPath` (Deploy-ClientGpo.ps1) read a service's binPath via WMI (`Win32_Service.PathName`) instead of parsing `sc.exe qc`'s text output for a `BINARY_PATH_NAME` label. That label is localized by the OS's own display language, so the previous regex never matched on a non-English Windows host - confirmed missing entirely on a live Russian-language machine. Effects of the bug: Install-Wizard.ps1's "Install client (local)" just-refresh detection (0.25.1) silently never triggered on such hosts, always falling back to asking every question; separately, and more consequentially, Deploy-ClientGpo.ps1's own already-current-skip-reinstall check always saw a `$null` binPath, so `$needsInstall` was always true - every GPO startup-script run silently reinstalled the client, even when nothing had changed, on any non-English-locale machine. Both were the same pre-existing bug in `Deploy-ClientGpo.ps1`; Install-Wizard.ps1 inherited it when it copied the same pattern in 0.25.1.
+
 ## [0.25.1] - 2026-07-22
 
 ### Added

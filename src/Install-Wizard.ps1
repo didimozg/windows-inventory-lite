@@ -389,28 +389,27 @@ function Invoke-ScExe {
     return @{ Output = $output; ExitCode = $LASTEXITCODE }
 }
 
-# Reads a service's raw binPath the same way Deploy-ClientGpo.ps1's own
-# Get-ServiceBinaryPath already does (sc.exe qc + a regex on
-# BINARY_PATH_NAME) - duplicated rather than shared, matching this
-# project's established per-script convention.
+# Reads a service's raw binPath via WMI (Win32_Service.PathName), the same
+# way Deploy-ClientGpo.ps1's own Get-ServiceBinaryPath now does too -
+# duplicated rather than shared, matching this project's established
+# per-script convention. Deliberately NOT sc.exe qc + a regex on
+# BINARY_PATH_NAME (the original approach here): that field label is
+# localized by the OS's own display language, so the regex never matches
+# on a non-English Windows host - confirmed missing entirely on a live
+# Russian-language machine. WMI property names are stable regardless of
+# OS language, so this can't silently fail the same way.
 function Get-ClientServiceBinaryPath {
     param(
         [Parameter(Mandatory = $true)]
         [string]$ServiceName
     )
 
-    $result = Invoke-ScExe -Arguments @('qc', $ServiceName)
-    if ($result.ExitCode -ne 0) {
+    $service = Get-WmiObject -Class Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
+    if (-not $service) {
         return $null
     }
 
-    foreach ($line in $result.Output) {
-        if ($line -match 'BINARY_PATH_NAME\s*:\s*(.+)$') {
-            return $matches[1].Trim()
-        }
-    }
-
-    return $null
+    return $service.PathName
 }
 
 # Reverse-parses a WindowsInventoryLiteClient service's binPath back into

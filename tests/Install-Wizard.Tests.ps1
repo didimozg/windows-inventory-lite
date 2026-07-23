@@ -246,13 +246,27 @@ Describe 'Windows Inventory Lite Install Wizard' {
         $result.Params.Count | Should -Be 0
     }
 
+    It 'Get-ClientServiceBinaryPath returns the WMI PathName for an existing service' {
+        Mock Get-WmiObject {
+            return [pscustomobject]@{ PathName = '"C:\client\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory"' }
+        }
+
+        Get-ClientServiceBinaryPath -ServiceName 'WindowsInventoryLiteClient' | Should -Be '"C:\client\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory"'
+    }
+
+    It 'Get-ClientServiceBinaryPath returns null when the service does not exist' {
+        Mock Get-WmiObject { return $null }
+
+        Get-ClientServiceBinaryPath -ServiceName 'WindowsInventoryLiteClient' | Should -BeNullOrEmpty
+    }
+
     It 'Get-InstallClientMode returns Full when the service exists but its binPath has no --server-url' {
         Mock Invoke-ScExe {
             return @{ Output = @('SERVICE_NAME: WindowsInventoryLiteClient'); ExitCode = 0 }
         } -ParameterFilter { $Arguments[0] -eq 'query' }
-        Mock Invoke-ScExe {
-            return @{ Output = @('BINARY_PATH_NAME : "C:\client\WindowsInventoryLiteClient.exe" --output "C:\client"'); ExitCode = 0 }
-        } -ParameterFilter { $Arguments[0] -eq 'qc' }
+        Mock Get-WmiObject {
+            return [pscustomobject]@{ PathName = '"C:\client\WindowsInventoryLiteClient.exe" --output "C:\client"' }
+        }
 
         $result = Get-InstallClientMode -ServiceName 'WindowsInventoryLiteClient'
 
@@ -263,9 +277,9 @@ Describe 'Windows Inventory Lite Install Wizard' {
         Mock Invoke-ScExe {
             return @{ Output = @('SERVICE_NAME: WindowsInventoryLiteClient'); ExitCode = 0 }
         } -ParameterFilter { $Arguments[0] -eq 'query' }
-        Mock Invoke-ScExe {
-            return @{ Output = @('BINARY_PATH_NAME : "C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory" --interval-hours 6 --output "C:\ProgramData\WindowsInventoryLite\client-data" --debug-log-path "C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug.log"'); ExitCode = 0 }
-        } -ParameterFilter { $Arguments[0] -eq 'qc' }
+        Mock Get-WmiObject {
+            return [pscustomobject]@{ PathName = '"C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory" --interval-hours 6 --output "C:\ProgramData\WindowsInventoryLite\client-data" --debug-log-path "C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug.log"' }
+        }
         Mock Read-WizardAnswer { return $null }
 
         $result = Get-InstallClientMode -ServiceName 'WindowsInventoryLiteClient'
@@ -279,9 +293,9 @@ Describe 'Windows Inventory Lite Install Wizard' {
         Mock Invoke-ScExe {
             return @{ Output = @('SERVICE_NAME: WindowsInventoryLiteClient'); ExitCode = 0 }
         } -ParameterFilter { $Arguments[0] -eq 'query' }
-        Mock Invoke-ScExe {
-            return @{ Output = @('BINARY_PATH_NAME : "C:\client\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory" --interval-hours 6 --output "C:\client" --debug-log-path "C:\client\debug.log"'); ExitCode = 0 }
-        } -ParameterFilter { $Arguments[0] -eq 'qc' }
+        Mock Get-WmiObject {
+            return [pscustomobject]@{ PathName = '"C:\client\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory" --interval-hours 6 --output "C:\client" --debug-log-path "C:\client\debug.log"' }
+        }
         Mock Read-WizardAnswer { return '2' }
 
         $result = Get-InstallClientMode -ServiceName 'WindowsInventoryLiteClient'
