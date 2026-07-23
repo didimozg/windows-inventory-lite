@@ -123,6 +123,8 @@ If a server is already installed, choosing "Install server" offers a "just refre
 
 On a genuinely fresh install (no existing `server-config.json`), "Install server" now asks only 4 questions - listen prefix/port, whether to open the Windows Firewall, and the dashboard username/password - printing a summary afterward of what was left at its default (HTTPS, AD sync, the ingestion token, the client GPO package) and where to configure it later - HTTPS/AD sync via Settings, the GPO package via the Client package tab. The auto-generated ingestion token itself isn't shown anywhere in the dashboard; re-run with `-Token <value>` (or choose "Full reconfigure") if clients need a token you can give them. An already-installed server still gets the existing "Just refresh" / "Full reconfigure" choice, unchanged.
 
+"Install client (local)" now gets the same "Just refresh"/"Full reconfigure" choice when a client is already installed - the wizard reads the running service's own command line and reconstructs the server URL, share path, token, interval, and install path from it, so "Just refresh" reinstalls with the exact same settings without asking anything. This works for a client installed any way (this wizard, a WinRM push, or a GPO package) - it reads the same underlying service, not a config file specific to one install method. If the service's command line can't be parsed (an unrecognized or missing server URL), the flow silently falls back to asking every question, same as if no client were installed at all.
+
 Use `-WhatIf` to walk through the questions and see the resolved command without actually running anything.
 
 ## Server Installation

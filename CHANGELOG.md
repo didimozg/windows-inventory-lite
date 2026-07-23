@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.25.1] - 2026-07-22
+
+### Added
+
+- Install-Wizard.ps1's "Install client (local)" flow now offers the same "Just refresh"/"Full reconfigure" choice the "Install server" flow already has, when a client is already installed - reconstructed from the running service's own command line (server URL, share path, token, interval, install path), not a new config file, so it works regardless of whether the client was originally installed via this wizard, a WinRM push, or a GPO package. Falls back to asking every question, unchanged, if the service's command line can't be parsed.
+
 ## [0.25.0] - 2026-07-22
 
 ### Added
