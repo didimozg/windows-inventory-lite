@@ -198,6 +198,7 @@
         state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
         renderLinuxClientsTable(state.linuxClients);
         renderLinuxSoftwareTable(state.linuxClients);
+        renderLinuxHardwarePage(state.linuxClients);
       })
       .catch(() => {});
   }
@@ -564,6 +565,33 @@
     }
   }
 
+  function linuxCpuSortValue(g, key) {
+    switch (key) {
+      case 'name': return (g.name || '').toLowerCase();
+      case 'cores': return g.cores || 0;
+      case 'count': return g.clients.length;
+      default: return '';
+    }
+  }
+
+  function linuxDiskSortValue(g, key) {
+    switch (key) {
+      case 'model': return (g.model || '').toLowerCase();
+      case 'type': return (g.type || '').toLowerCase();
+      case 'sizeGb': return g.sizeGb || 0;
+      case 'count': return g.clients.length;
+      default: return '';
+    }
+  }
+
+  function linuxRamSortValue(g, key) {
+    switch (key) {
+      case 'totalMb': return g.totalMb || 0;
+      case 'count': return g.clients.length;
+      default: return '';
+    }
+  }
+
   function licenseSortValue(license, key) {
     switch (key) {
       case 'name': return (license.name || '').toLowerCase();
@@ -679,6 +707,45 @@
       groups.map(g => [g.name, g.version, g.clients.length, g.clients.map(c => c.hostname).join(', ')])
     );
     downloadCsv('linux-software-' + csvDate() + '.csv', rows);
+  }
+
+  function exportLinuxHardwareCpu() {
+    const query = byId('searchInput').value.trim();
+    const { key: sortKey, dir: sortDir } = state.sort.linuxHwCpu;
+    const groups = applySort(
+      getLinuxCpuGroups(state.linuxClients).filter(g => hwMatches([g.name].concat(g.clients.map(c => c.hostname)).join(' '), query)),
+      g => linuxCpuSortValue(g, sortKey), sortDir
+    );
+    const rows = [['Model', 'Cores', 'Machines', 'Computers']].concat(
+      groups.map(g => [g.name, g.cores != null ? g.cores : '', g.clients.length, g.clients.map(c => c.hostname).join(', ')])
+    );
+    downloadCsv('linux-hardware-cpu-' + csvDate() + '.csv', rows);
+  }
+
+  function exportLinuxHardwareDisk() {
+    const query = byId('searchInput').value.trim();
+    const { key: sortKey, dir: sortDir } = state.sort.linuxHwDisk;
+    const groups = applySort(
+      getLinuxDiskGroups(state.linuxClients).filter(g => hwMatches([g.model, g.type].concat(g.clients.map(c => c.hostname)).join(' '), query)),
+      g => linuxDiskSortValue(g, sortKey), sortDir
+    );
+    const rows = [['Model', 'Type', 'Size GB', 'Machines', 'Computers']].concat(
+      groups.map(g => [g.model, g.type, g.sizeGb || '', g.clients.length, g.clients.map(c => c.hostname).join(', ')])
+    );
+    downloadCsv('linux-hardware-storage-' + csvDate() + '.csv', rows);
+  }
+
+  function exportLinuxHardwareRam() {
+    const query = byId('searchInput').value.trim();
+    const { key: sortKey, dir: sortDir } = state.sort.linuxHwRam;
+    const groups = applySort(
+      getLinuxRamGroups(state.linuxClients).filter(g => hwMatches([g.totalGb].concat(g.clients.map(c => c.hostname)).join(' '), query)),
+      g => linuxRamSortValue(g, sortKey), sortDir
+    );
+    const rows = [['Total RAM', 'Machines', 'Computers']].concat(
+      groups.map(g => [g.totalGb, g.clients.length, g.clients.map(c => c.hostname).join(', ')])
+    );
+    downloadCsv('linux-hardware-ram-' + csvDate() + '.csv', rows);
   }
 
   function exportSoftware() {
@@ -2277,6 +2344,73 @@
     return Array.from(groups.values()).sort((a, b) => b.totalMb - a.totalMb);
   }
 
+  // Mirrors getCpuGroups (Windows) - groups by model+cores only. Linux
+  // CPUInfo (linux-client/collect/cpu.go) has no clock-speed field.
+  function getLinuxCpuGroups(clients) {
+    const groups = new Map();
+    clients.forEach(client => {
+      const cpu = client.cpu || {};
+      if (!cpu.model) return;
+      const key = String(cpu.model).toLowerCase();
+      if (!groups.has(key)) {
+        groups.set(key, { name: cpu.model, cores: cpu.cores, clients: [], clientKeys: new Set() });
+      }
+      const group = groups.get(key);
+      const clientKey = String(client.hostname || '').toLowerCase();
+      if (!group.clientKeys.has(clientKey)) {
+        group.clientKeys.add(clientKey);
+        group.clients.push(client);
+      }
+    });
+    return Array.from(groups.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  // Mirrors getDiskGroups (Windows) - groups by model+type+sizeGb. Linux
+  // DiskInfo (linux-client/collect/disks.go) has no USB-detection field,
+  // so there's no usb flag/badge on this side.
+  function getLinuxDiskGroups(clients) {
+    const groups = new Map();
+    clients.forEach(client => {
+      (client.disks || []).forEach(disk => {
+        if (!disk.model) return;
+        const key = [disk.model, disk.type, disk.sizeGb].join('\x1f').toLowerCase();
+        if (!groups.has(key)) {
+          groups.set(key, { model: disk.model, type: disk.type || 'HDD', sizeGb: disk.sizeGb || 0, clients: [], clientKeys: new Set() });
+        }
+        const group = groups.get(key);
+        const clientKey = String(client.hostname || '').toLowerCase();
+        if (!group.clientKeys.has(clientKey)) {
+          group.clientKeys.add(clientKey);
+          group.clients.push(client);
+        }
+      });
+    });
+    return Array.from(groups.values()).sort((a, b) => a.model.localeCompare(b.model));
+  }
+
+  // Mirrors getRamGroups (Windows) - groups by total size only. The Linux
+  // client reports a single ramTotalMb per machine, no per-module
+  // breakdown the way Windows' ramModules provides, so there's no
+  // moduleCount/Modules column here.
+  function getLinuxRamGroups(clients) {
+    const groups = new Map();
+    clients.forEach(client => {
+      const totalMb = client.ramTotalMb || 0;
+      const key = String(totalMb);
+      if (!groups.has(key)) {
+        const totalGb = totalMb >= 1024 ? `${Math.round(totalMb / 1024)} GB` : `${totalMb} MB`;
+        groups.set(key, { totalMb, totalGb, clients: [], clientKeys: new Set() });
+      }
+      const group = groups.get(key);
+      const clientKey = String(client.hostname || '').toLowerCase();
+      if (!group.clientKeys.has(clientKey)) {
+        group.clientKeys.add(clientKey);
+        group.clients.push(client);
+      }
+    });
+    return Array.from(groups.values()).sort((a, b) => b.totalMb - a.totalMb);
+  }
+
   // Top N CPU models by client count, with the rest folded into "Other" so the
   // chart stays readable on fleets with many distinct models.
   function getTopCpuModels(clients, limit) {
@@ -2682,6 +2816,73 @@
     renderPager('hwRamPager', 'hwRam', ramPage, ramTotalPages, () => renderHardwarePage(state.clients));
   }
 
+  // Mirrors renderHardwarePage (Windows) - three stacked group-by tables
+  // (CPU/Storage/RAM), same row-expand pattern, no USB badge on disks and
+  // no Modules column on RAM (see getLinuxDiskGroups/getLinuxRamGroups).
+  function renderLinuxHardwarePage(clients) {
+    const query = byId('searchInput').value.trim();
+
+    const { key: cpuSortKey, dir: cpuSortDir } = state.sort.linuxHwCpu;
+    const cpuFiltered = applySort(getLinuxCpuGroups(clients).filter(g => hwMatches([g.name, ...g.clients.map(c => c.hostname)].join(' '), query)), g => linuxCpuSortValue(g, cpuSortKey), cpuSortDir);
+    const { items: cpuPageItems, page: cpuPage, totalPages: cpuTotalPages } = paginate(cpuFiltered, state.page.linuxHwCpu, state.pageSize.linuxHwCpu);
+    state.page.linuxHwCpu = cpuPage;
+    const cpuRows = cpuPageItems.map(g => {
+      const id = safeId('linux-cpu:' + g.name);
+      const detailsHidden = state.expandedDetails.has('linux-hw:' + id) ? '' : 'hidden';
+      const computers = g.clients.map(c => `<li>${escapeHtml(c.hostname)}</li>`).join('');
+      return `<tr>
+        <td><button class="link-button" type="button" data-linux-hw="${id}">${escapeHtml(g.name)}</button></td>
+        <td class="hw-num">${g.cores != null ? (Number(g.cores) || 0) : 'Unknown'}</td>
+        <td class="hw-num">${g.clients.length}</td>
+      </tr>
+      <tr class="details-row ${detailsHidden}" data-linux-hw-details="${id}">
+        <td colspan="3"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
+      </tr>`;
+    });
+    byId('hwLinuxCpuBody').innerHTML = cpuRows.join('') || '<tr><td colspan="3" class="empty">No CPU data.</td></tr>';
+    renderPager('hwLinuxCpuPager', 'linuxHwCpu', cpuPage, cpuTotalPages, () => renderLinuxHardwarePage(state.linuxClients));
+
+    const { key: diskSortKey, dir: diskSortDir } = state.sort.linuxHwDisk;
+    const diskFiltered = applySort(getLinuxDiskGroups(clients).filter(g => hwMatches([g.model, g.type, ...g.clients.map(c => c.hostname)].join(' '), query)), g => linuxDiskSortValue(g, diskSortKey), diskSortDir);
+    const { items: diskPageItems, page: diskPage, totalPages: diskTotalPages } = paginate(diskFiltered, state.page.linuxHwDisk, state.pageSize.linuxHwDisk);
+    state.page.linuxHwDisk = diskPage;
+    const diskRows = diskPageItems.map(g => {
+      const id = safeId('linux-disk:' + g.model + g.sizeGb);
+      const detailsHidden = state.expandedDetails.has('linux-hw:' + id) ? '' : 'hidden';
+      const computers = g.clients.map(c => `<li>${escapeHtml(c.hostname)}</li>`).join('');
+      return `<tr>
+        <td><button class="link-button" type="button" data-linux-hw="${id}">${escapeHtml(g.model)}</button></td>
+        <td>${escapeHtml(g.type)}</td>
+        <td class="hw-num">${g.sizeGb || 'Unknown'}</td>
+        <td class="hw-num">${g.clients.length}</td>
+      </tr>
+      <tr class="details-row ${detailsHidden}" data-linux-hw-details="${id}">
+        <td colspan="4"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
+      </tr>`;
+    });
+    byId('hwLinuxDiskBody').innerHTML = diskRows.join('') || '<tr><td colspan="4" class="empty">No storage data.</td></tr>';
+    renderPager('hwLinuxDiskPager', 'linuxHwDisk', diskPage, diskTotalPages, () => renderLinuxHardwarePage(state.linuxClients));
+
+    const { key: ramSortKey, dir: ramSortDir } = state.sort.linuxHwRam;
+    const ramFiltered = applySort(getLinuxRamGroups(clients).filter(g => hwMatches([g.totalGb, ...g.clients.map(c => c.hostname)].join(' '), query)), g => linuxRamSortValue(g, ramSortKey), ramSortDir);
+    const { items: ramPageItems, page: ramPage, totalPages: ramTotalPages } = paginate(ramFiltered, state.page.linuxHwRam, state.pageSize.linuxHwRam);
+    state.page.linuxHwRam = ramPage;
+    const ramRows = ramPageItems.map(g => {
+      const id = safeId('linux-ram:' + g.totalMb);
+      const detailsHidden = state.expandedDetails.has('linux-hw:' + id) ? '' : 'hidden';
+      const computers = g.clients.map(c => `<li>${escapeHtml(c.hostname)}</li>`).join('');
+      return `<tr>
+        <td><button class="link-button" type="button" data-linux-hw="${id}">${escapeHtml(g.totalGb)}</button></td>
+        <td class="hw-num">${g.clients.length}</td>
+      </tr>
+      <tr class="details-row ${detailsHidden}" data-linux-hw-details="${id}">
+        <td colspan="2"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
+      </tr>`;
+    });
+    byId('hwLinuxRamBody').innerHTML = ramRows.join('') || '<tr><td colspan="2" class="empty">No RAM data.</td></tr>';
+    renderPager('hwLinuxRamPager', 'linuxHwRam', ramPage, ramTotalPages, () => renderLinuxHardwarePage(state.linuxClients));
+  }
+
   function render() {
     renderDashboardTiles();
     renderSummary(state.clients);
@@ -2917,6 +3118,8 @@
       renderLinuxClientsTable(state.linuxClients);
     } else if (state.view === 'linuxSoftware') {
       renderLinuxSoftwareTable(state.linuxClients);
+    } else if (state.view === 'linuxHardware') {
+      renderLinuxHardwarePage(state.linuxClients);
     }
   });
 
@@ -2992,6 +3195,8 @@
         renderLinuxClientsTable(state.linuxClients);
       } else if (table === 'linuxSoftware') {
         renderLinuxSoftwareTable(state.linuxClients);
+      } else if (table === 'linuxHwCpu' || table === 'linuxHwDisk' || table === 'linuxHwRam') {
+        renderLinuxHardwarePage(state.linuxClients);
       } else {
         render();
       }
@@ -3109,6 +3314,9 @@
   byId('linuxHardwareTab').addEventListener('click', () => setView('linuxHardware'));
   byId('exportLinuxClientsBtn').addEventListener('click', exportLinuxClients);
   byId('exportLinuxSoftwareBtn').addEventListener('click', exportLinuxSoftware);
+  byId('exportLinuxCpuBtn').addEventListener('click', exportLinuxHardwareCpu);
+  byId('exportLinuxDiskBtn').addEventListener('click', exportLinuxHardwareDisk);
+  byId('exportLinuxRamBtn').addEventListener('click', exportLinuxHardwareRam);
   byId('exportLicensesBtn').addEventListener('click', exportLicenses);
   byId('licenseAddButton').addEventListener('click', () => openLicenseForm(null));
   byId('licenseSaveButton').addEventListener('click', saveLicense);
