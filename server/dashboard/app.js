@@ -2196,7 +2196,7 @@
     clients.forEach(client => {
       (client.packages || []).forEach(item => {
         if (!item.name) return;
-        const key = [item.name, item.version || ''].join('').toLowerCase();
+        const key = [item.name, item.version || ''].join('\u001f').toLowerCase();
         if (!groups.has(key)) {
           groups.set(key, { name: item.name, version: item.version || '', clients: [], clientKeys: new Set() });
         }
