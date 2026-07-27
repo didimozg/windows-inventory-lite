@@ -2737,7 +2737,7 @@
 
     const rows = pageItems.map(group => {
       const computers = group.clients.map(client => `<li>${escapeHtml(client.hostname)}</li>`).join('');
-      const groupId = safeId('linux:' + group.name + group.version);
+      const groupId = safeId('linux:' + group.name + '\u001f' + group.version);
       const detailsHidden = state.expandedDetails.has('linux-software:' + groupId) ? '' : 'hidden';
 
       return `<tr>
@@ -3352,7 +3352,7 @@
   if (state.view === 'general') loadGeneralSettings();
   if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
   if (state.view === 'licenses') loadLicenses();
-  if (state.view === 'linux') loadLinuxClients();
+  if (state.view === 'linux' || state.view === 'linuxSoftware' || state.view === 'linuxHardware') loadLinuxClients();
   if (state.view === 'admin') loadAdminPasswordStatus();
   updateClientActionUi();
   loadInstallHistory();
