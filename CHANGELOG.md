@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.26.0] - 2026-07-23
+
+### Added
+
+- Dashboard sidebar now splits inventory into "Windows Inventory" and "Linux Inventory" top-level nav-groups. Linux Inventory gains Software and Hardware (CPU/Storage/RAM) sub-views, grouped and rendered the same way the Windows side already works (client-side aggregation, no server changes - all data already reported by the Linux client). The existing Linux Clients table gains pagination, row expand-for-details (CPU/RAM/Disks summary plus a nested packages table), a Delete button, search filtering, CSV export, and live 30-second refresh, matching the Windows Clients table's own behavior. A new Linux-only summary tile row (Clients/Stale) is shown while any Linux Inventory tab is active.
+
 ## [0.25.2] - 2026-07-23
 
 ### Fixed
