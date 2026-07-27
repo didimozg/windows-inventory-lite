@@ -197,6 +197,7 @@
         state.linuxClients = data.clients || [];
         state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
         renderLinuxClientsTable(state.linuxClients);
+        renderLinuxSoftwareTable(state.linuxClients);
       })
       .catch(() => {});
   }
@@ -525,6 +526,15 @@
     }
   }
 
+  function linuxSoftwareSortValue(group, key) {
+    switch (key) {
+      case 'name': return (group.name || '').toLowerCase();
+      case 'version': return group.version || '';
+      case 'count': return group.clients.length;
+      default: return '';
+    }
+  }
+
   function cpuSortValue(g, key) {
     switch (key) {
       case 'name': return (g.name || '').toLowerCase();
@@ -659,6 +669,16 @@
       })
     );
     downloadCsv('linux-clients-' + csvDate() + '.csv', rows);
+  }
+
+  function exportLinuxSoftware() {
+    const query = byId('searchInput').value.trim();
+    const { key: sortKey, dir: sortDir } = state.sort.linuxSoftware;
+    const groups = applySort(getLinuxSoftwareGroups(state.linuxClients).filter(g => linuxSoftwareMatches(g, query)), g => linuxSoftwareSortValue(g, sortKey), sortDir);
+    const rows = [['Software', 'Version', 'Installations', 'Computers']].concat(
+      groups.map(g => [g.name, g.version, g.clients.length, g.clients.map(c => c.hostname).join(', ')])
+    );
+    downloadCsv('linux-software-' + csvDate() + '.csv', rows);
   }
 
   function exportSoftware() {
@@ -2168,6 +2188,33 @@
     });
   }
 
+  // Mirrors getSoftwareGroups (Windows) - groups by name+version only.
+  // Linux PackageInfo (linux-client/collect/packages.go) has no publisher
+  // field, unlike Windows software entries.
+  function getLinuxSoftwareGroups(clients) {
+    const groups = new Map();
+    clients.forEach(client => {
+      (client.packages || []).forEach(item => {
+        if (!item.name) return;
+        const key = [item.name, item.version || ''].join('').toLowerCase();
+        if (!groups.has(key)) {
+          groups.set(key, { name: item.name, version: item.version || '', clients: [], clientKeys: new Set() });
+        }
+        const group = groups.get(key);
+        const clientKey = String(client.hostname || '').toLowerCase();
+        if (!group.clientKeys.has(clientKey)) {
+          group.clientKeys.add(clientKey);
+          group.clients.push(client);
+        }
+      });
+    });
+
+    return Array.from(groups.values()).sort((a, b) => {
+      const nameCompare = a.name.localeCompare(b.name);
+      return nameCompare || a.version.localeCompare(b.version);
+    });
+  }
+
   function getCpuGroups(clients) {
     const groups = new Map();
     clients.forEach(client => {
@@ -2327,6 +2374,13 @@
     if (!query) return true;
     const computers = group.clients.map(client => client.computerName).join(' ');
     const haystack = [group.name, group.version, group.publisher, computers].join(' ').toLowerCase();
+    return haystack.indexOf(query.toLowerCase()) !== -1;
+  }
+
+  function linuxSoftwareMatches(group, query) {
+    if (!query) return true;
+    const computers = group.clients.map(client => client.hostname).join(' ');
+    const haystack = [group.name, group.version, computers].join(' ').toLowerCase();
     return haystack.indexOf(query.toLowerCase()) !== -1;
   }
 
@@ -2519,6 +2573,44 @@
         openLicenseForSoftware(button.dataset.softwareLicenseName, button.dataset.softwareLicenseVersion);
       });
     });
+  }
+
+  // Mirrors renderSoftwareTable (Windows) - row-expand shows which
+  // computers have this package (no License column, no publisher - this
+  // project has no Linux licensing concept and PackageInfo has no
+  // publisher field).
+  function renderLinuxSoftwareTable(clients) {
+    const tbody = byId('linuxSoftwareBody');
+    if (!tbody) return;
+
+    const query = byId('searchInput').value.trim();
+    const { key: sortKey, dir: sortDir } = state.sort.linuxSoftware;
+    const filtered = applySort(getLinuxSoftwareGroups(clients).filter(g => linuxSoftwareMatches(g, query)), g => linuxSoftwareSortValue(g, sortKey), sortDir);
+    const { items: pageItems, page, totalPages } = paginate(filtered, state.page.linuxSoftware, state.pageSize.linuxSoftware);
+    state.page.linuxSoftware = page;
+
+    const rows = pageItems.map(group => {
+      const computers = group.clients.map(client => `<li>${escapeHtml(client.hostname)}</li>`).join('');
+      const groupId = safeId('linux:' + group.name + group.version);
+      const detailsHidden = state.expandedDetails.has('linux-software:' + groupId) ? '' : 'hidden';
+
+      return `<tr>
+        <td><button class="link-button" type="button" data-linux-software="${groupId}">${escapeHtml(group.name)}</button></td>
+        <td>${escapeHtml(group.version)}</td>
+        <td class="hw-num">${group.clients.length}</td>
+      </tr>
+      <tr class="details-row ${detailsHidden}" data-linux-software-details="${groupId}">
+        <td colspan="3">
+          <div class="details">
+            <h2>${escapeHtml(group.name)}</h2>
+            <ul class="computer-list">${computers}</ul>
+          </div>
+        </td>
+      </tr>`;
+    });
+
+    tbody.innerHTML = rows.join('') || '<tr><td colspan="3" class="empty">No matching software records.</td></tr>';
+    renderPager('linuxSoftwarePager', 'linuxSoftware', page, totalPages, () => renderLinuxSoftwareTable(state.linuxClients));
   }
 
   function renderHardwarePage(clients) {
@@ -2823,6 +2915,8 @@
     render();
     if (state.view === 'linux') {
       renderLinuxClientsTable(state.linuxClients);
+    } else if (state.view === 'linuxSoftware') {
+      renderLinuxSoftwareTable(state.linuxClients);
     }
   });
 
@@ -2896,6 +2990,8 @@
       // main Windows-side render pipeline) - re-render it directly instead.
       if (table === 'linuxClients') {
         renderLinuxClientsTable(state.linuxClients);
+      } else if (table === 'linuxSoftware') {
+        renderLinuxSoftwareTable(state.linuxClients);
       } else {
         render();
       }
@@ -3012,6 +3108,7 @@
   byId('linuxSoftwareTab').addEventListener('click', () => setView('linuxSoftware'));
   byId('linuxHardwareTab').addEventListener('click', () => setView('linuxHardware'));
   byId('exportLinuxClientsBtn').addEventListener('click', exportLinuxClients);
+  byId('exportLinuxSoftwareBtn').addEventListener('click', exportLinuxSoftware);
   byId('exportLicensesBtn').addEventListener('click', exportLicenses);
   byId('licenseAddButton').addEventListener('click', () => openLicenseForm(null));
   byId('licenseSaveButton').addEventListener('click', saveLicense);
