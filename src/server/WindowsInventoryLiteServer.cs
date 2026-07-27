@@ -8,6 +8,7 @@ using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.AccessControl;
 using System.Security.Authentication;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Principal;
 using System.ServiceProcess;
@@ -1360,6 +1361,14 @@ namespace WindowsInventoryLite
                     else if (request.Method == "POST" && request.Path == "/api/v1/server/admin-password")
                     {
                         ChangeAdminPassword(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/server/ingestion-token")
+                    {
+                        SendIngestionTokenStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/server/ingestion-token/regenerate")
+                    {
+                        RegenerateIngestionToken(stream, request);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/licenses")
                     {
@@ -4158,6 +4167,57 @@ namespace WindowsInventoryLite
             SendServerSettings(stream);
         }
 
+        // Same shape as Install-Server.ps1's own New-RandomToken (32 bytes,
+        // hex-encoded to 64 lowercase characters) - not shared code (this
+        // runs in the C# server, that runs in PowerShell at install time),
+        // but deliberately the same generation approach for consistency.
+        private static string GenerateRandomToken()
+        {
+            byte[] bytes = new byte[32];
+            using (RandomNumberGenerator rng = RandomNumberGenerator.Create())
+            {
+                rng.GetBytes(bytes);
+            }
+            StringBuilder sb = new StringBuilder(bytes.Length * 2);
+            foreach (byte b in bytes)
+            {
+                sb.Append(b.ToString("x2"));
+            }
+            return sb.ToString();
+        }
+
+        private void SendIngestionTokenStatus(Stream stream)
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["configured"] = !String.IsNullOrEmpty(options.Token);
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void RegenerateIngestionToken(Stream stream, RequestContext request)
+        {
+            string newToken = GenerateRandomToken();
+            options.Token = newToken;
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["Token"] = newToken;
+            SaveServerConfigValues(updates);
+
+            try
+            {
+                System.Diagnostics.EventLog.WriteEntry(
+                    "WindowsInventoryLite",
+                    "Ingestion token regenerated from the Settings page. Existing clients will be unable to submit inventory until reconfigured with the new token.",
+                    System.Diagnostics.EventLogEntryType.Information);
+            }
+            catch { }
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["token"] = newToken;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
         private void SendAdminPasswordStatus(Stream stream)
         {
             bool configured = !String.IsNullOrEmpty(options.WebUsername) && !String.IsNullOrEmpty(options.WebPassword);
@@ -5121,6 +5181,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields is a no-op for a brand-new computer with sync disabled", TestComputeAdSyncFieldsNoOpForNewComputerWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
+            allPassed &= SelfTestCheck(output, "GenerateRandomToken returns a 64-character lowercase hex string, different each call", TestGenerateRandomTokenShape);
+            allPassed &= SelfTestCheck(output, "Ingestion token configured-state reflects whether options.Token is set", TestSendIngestionTokenStatusReflectsConfiguredState);
             return allPassed;
         }
 
@@ -6049,6 +6111,48 @@ namespace WindowsInventoryLite
             {
                 try { Directory.Delete(dataPath, true); } catch { }
             }
+        }
+
+        private static string TestGenerateRandomTokenShape()
+        {
+            string token = GenerateRandomToken();
+            if (token == null || token.Length != 64)
+            {
+                return "expected a 64-character token, got " + (token == null ? "null" : token.Length.ToString());
+            }
+            foreach (char c in token)
+            {
+                bool isLowerHex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+                if (!isLowerHex)
+                {
+                    return "expected only lowercase hex characters, found '" + c + "'";
+                }
+            }
+            string second = GenerateRandomToken();
+            if (token == second)
+            {
+                return "expected two calls to produce different tokens";
+            }
+            return null;
+        }
+
+        private static string TestSendIngestionTokenStatusReflectsConfiguredState()
+        {
+            ServerOptions options = new ServerOptions();
+            options.Token = null;
+            bool configuredWhenEmpty = !String.IsNullOrEmpty(options.Token);
+            if (configuredWhenEmpty)
+            {
+                return "expected configured=false when Token is null";
+            }
+
+            options.Token = "some-token-value";
+            bool configuredWhenSet = !String.IsNullOrEmpty(options.Token);
+            if (!configuredWhenSet)
+            {
+                return "expected configured=true when Token is set";
+            }
+            return null;
         }
 
         private static string TestParseCmdSettingsDefaultPackageRoot()
