@@ -4544,6 +4544,12 @@ namespace WindowsInventoryLite
             JavaScriptSerializer serializer = CreateJsonSerializer();
             string json = serializer.Serialize(licenses);
             File.WriteAllText(GetLicensesFilePath(), json, new UTF8Encoding(false));
+            // Licenses can hold real product keys (see index.html's "License
+            // type, key, or note" field hint) - restrict the same way
+            // server-config.json already is, reapplied on every write so the
+            // file can't drift back to an inherited (broader) ACL if it's
+            // ever deleted and recreated.
+            ApplyRestrictedConfigAcl(GetLicensesFilePath());
         }
 
         private static string ExtractLicenseId(string path)
@@ -5114,6 +5120,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ResolveAdDescriptionSyncEnabled migrates from AdSyncEnabled when the config key is absent", TestResolveAdDescriptionSyncEnabledMigratesFromAdSyncEnabledWhenUnset);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields is a no-op for a brand-new computer with sync disabled", TestComputeAdSyncFieldsNoOpForNewComputerWhenSyncDisabled);
+            allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
             return allPassed;
         }
 
@@ -5984,6 +5991,64 @@ namespace WindowsInventoryLite
                 return "expected Applicable=false for a brand-new computer (nothing to carry forward), got true";
             }
             return null;
+        }
+
+        private static string TestSaveLicensesRestrictsFileAcl()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-license-acl-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+                List<Dictionary<string, object>> licenses = new List<Dictionary<string, object>>();
+                Dictionary<string, object> record = new Dictionary<string, object>();
+                record["name"] = "Test Software";
+                record["version"] = "1.0";
+                record["license"] = "TEST-KEY-1234";
+                licenses.Add(record);
+
+                server.SaveLicenses(licenses);
+
+                string licensesPath = Path.Combine(dataPath, "_licenses", "licenses.json");
+                if (!File.Exists(licensesPath))
+                {
+                    return "expected licenses.json to exist after SaveLicenses";
+                }
+
+                FileSecurity acl = File.GetAccessControl(licensesPath);
+                AuthorizationRuleCollection rules = acl.GetAccessRules(true, true, typeof(SecurityIdentifier));
+                SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                bool hasAdminFullControl = false;
+                bool hasSystemFullControl = false;
+                foreach (FileSystemAccessRule rule in rules)
+                {
+                    if (rule.IdentityReference == adminSid && rule.FileSystemRights == FileSystemRights.FullControl && rule.AccessControlType == AccessControlType.Allow)
+                    {
+                        hasAdminFullControl = true;
+                    }
+                    if (rule.IdentityReference == systemSid && rule.FileSystemRights == FileSystemRights.FullControl && rule.AccessControlType == AccessControlType.Allow)
+                    {
+                        hasSystemFullControl = true;
+                    }
+                }
+
+                if (!hasAdminFullControl)
+                {
+                    return "expected Administrators to have FullControl on licenses.json";
+                }
+                if (!hasSystemFullControl)
+                {
+                    return "expected SYSTEM to have FullControl on licenses.json";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
         }
 
         private static string TestParseCmdSettingsDefaultPackageRoot()
