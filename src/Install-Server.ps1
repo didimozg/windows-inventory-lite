@@ -367,6 +367,50 @@ function Get-ConfigValue {
     return $null
 }
 
+# Generates a cryptographically random ingestion token. 32 bytes,
+# hex-encoded to 64 lowercase characters: long enough to be
+# unguessable, and hex avoids the +/=/ characters base64 would produce,
+# which are awkward to pass as a CLI arg or paste into a URL header.
+function New-RandomToken {
+    $bytes = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    }
+    finally {
+        $rng.Dispose()
+    }
+    return -join ($bytes | ForEach-Object { $_.ToString('x2') })
+}
+
+# Decides the ingestion token to actually use: an explicit -Token value
+# always wins, then a saved value from an existing server-config.json,
+# and only if neither exists does this generate a brand new random one.
+# Install-Wizard.ps1's own prompt has always said "leave blank to
+# auto-generate" but nothing ever actually generated one before this -
+# a blank Token meant inventory ingestion ran completely unauthenticated,
+# not "protected by an unseen random value". This makes that promise
+# true, and (as a beneficial side effect) self-heals an existing install
+# that's already in that broken empty-token state the next time its
+# config is touched in any mode, since $SavedToken would itself be
+# empty/falsy for such an install. Extracted as its own function - not
+# inlined at the call site - specifically so it's testable without
+# needing to dot-source the rest of this script, which is not
+# dot-source-safe (see this task's own file-list note).
+function Resolve-InstallToken {
+    param(
+        [string]$ExplicitToken,
+        [string]$SavedToken
+    )
+    if ($ExplicitToken) {
+        return $ExplicitToken
+    }
+    if ($SavedToken) {
+        return $SavedToken
+    }
+    return New-RandomToken
+}
+
 # Encrypts a secret with Windows DPAPI (LocalMachine scope, not CurrentUser -
 # the server may run as LocalSystem/NetworkService/a service account with no
 # loaded interactive profile, so LocalMachine is the only scope any process
@@ -490,12 +534,11 @@ if (-not $PSBoundParameters.ContainsKey('ListenPrefix')) {
     }
 }
 
-if (-not $PSBoundParameters.ContainsKey('Token')) {
-    $savedToken = Get-ConfigValue -Config $existingConfig -Name 'Token'
-    if ($savedToken) {
-        $Token = Unprotect-Secret -StoredValue $savedToken
-    }
+$savedToken = Get-ConfigValue -Config $existingConfig -Name 'Token'
+if ($savedToken) {
+    $savedToken = Unprotect-Secret -StoredValue $savedToken
 }
+$Token = Resolve-InstallToken -ExplicitToken $Token -SavedToken $savedToken
 
 if (-not $PSBoundParameters.ContainsKey('WebUsername')) {
     $savedWebUsername = Get-ConfigValue -Config $existingConfig -Name 'WebUsername'
