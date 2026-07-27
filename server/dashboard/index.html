@@ -56,7 +56,7 @@
           Dashboard
         </button>
         <div class="nav-group">
-          <div class="nav-group-title">Inventory</div>
+          <div class="nav-group-title">Windows Inventory</div>
           <button id="clientsTab" class="nav-item" type="button">
             <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="10" rx="1.2"/><line x1="7" y1="17" x2="13" y2="17"/><line x1="10" y1="13.5" x2="10" y2="17"/></svg>
             Clients
@@ -74,10 +74,21 @@
           <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 2.5 h7 l3 3 v12 h-10 z"/><path d="M12 2.5 v3 h3"/><line x1="7" y1="11" x2="13" y2="11"/><line x1="7" y1="14" x2="11" y2="14"/></svg>
           Licenses
         </button>
-        <button id="linuxClientsTab" class="nav-item nav-item-root" type="button">
-          <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M6.5 8c1.2-1.8 5.8-1.8 7 0M6.5 12c1.2 1.8 5.8 1.8 7 0"/></svg>
-          Linux Clients
-        </button>
+        <div class="nav-group">
+          <div class="nav-group-title">Linux Inventory</div>
+          <button id="linuxClientsTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="10" rx="1.2"/><line x1="7" y1="17" x2="13" y2="17"/><line x1="10" y1="13.5" x2="10" y2="17"/></svg>
+            Clients
+          </button>
+          <button id="linuxSoftwareTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5 L17.5 6.5 L17.5 13.5 L10 17.5 L2.5 13.5 L2.5 6.5 Z"/><line x1="10" y1="10" x2="17.3" y2="6.3"/><line x1="10" y1="10" x2="2.7" y2="6.3"/><line x1="10" y1="10" x2="10" y2="17.5"/></svg>
+            Software
+          </button>
+          <button id="linuxHardwareTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="5" width="10" height="10" rx="1"/><line x1="8" y1="1.5" x2="8" y2="5"/><line x1="12" y1="1.5" x2="12" y2="5"/><line x1="8" y1="15" x2="8" y2="18.5"/><line x1="12" y1="15" x2="12" y2="18.5"/><line x1="1.5" y1="8" x2="5" y2="8"/><line x1="1.5" y1="12" x2="5" y2="12"/><line x1="15" y1="8" x2="18.5" y2="8"/><line x1="15" y1="12" x2="18.5" y2="12"/></svg>
+            Hardware
+          </button>
+        </div>
         <div class="nav-group">
           <div class="nav-group-title">Installation</div>
           <button id="installTab" class="nav-item" type="button">
@@ -424,6 +435,9 @@
         </section>
 
         <section id="linuxClientsView" class="hidden" aria-label="Linux clients">
+          <div class="view-toolbar">
+            <button id="exportLinuxClientsBtn" class="export-button" type="button">Export CSV</button>
+          </div>
           <div class="table-wrap">
             <table>
               <thead>
@@ -433,12 +447,93 @@
                   <th data-sort-table="linuxClients" data-sort-key="os" class="sortable">OS</th>
                   <th>IP</th>
                   <th data-sort-table="linuxClients" data-sort-key="softwareCount" class="sortable">Software</th>
-                  <th>Description</th>
+                  <th id="linuxDescriptionColumnHeader">AD Description</th>
                   <th data-sort-table="linuxClients" data-sort-key="collectedAt" class="sortable">Collected</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody id="linuxClientsBody"></tbody>
             </table>
+          </div>
+          <div id="linuxClientsPager" class="pager"></div>
+        </section>
+
+        <section id="linuxSoftwareView" class="hidden" aria-label="Linux software inventory">
+          <div class="view-toolbar">
+            <button id="exportLinuxSoftwareBtn" class="export-button" type="button">Export CSV</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th data-sort-table="linuxSoftware" data-sort-key="name" class="sortable">Software</th>
+                  <th data-sort-table="linuxSoftware" data-sort-key="version" class="sortable">Version</th>
+                  <th data-sort-table="linuxSoftware" data-sort-key="count" class="sortable">Installations</th>
+                </tr>
+              </thead>
+              <tbody id="linuxSoftwareBody"></tbody>
+            </table>
+          </div>
+          <div id="linuxSoftwarePager" class="pager"></div>
+        </section>
+
+        <section id="linuxHardwareView" class="hidden" aria-label="Linux hardware inventory">
+          <div class="hw-section">
+            <div class="hw-section-header">
+              <h2 class="hw-heading">CPUs</h2>
+              <button id="exportLinuxCpuBtn" class="export-button" type="button">Export CSV</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th data-sort-table="linuxHwCpu" data-sort-key="name" class="sortable">Model</th>
+                    <th data-sort-table="linuxHwCpu" data-sort-key="cores" class="sortable">Cores</th>
+                    <th data-sort-table="linuxHwCpu" data-sort-key="count" class="sortable">Machines</th>
+                  </tr>
+                </thead>
+                <tbody id="hwLinuxCpuBody"></tbody>
+              </table>
+            </div>
+            <div id="hwLinuxCpuPager" class="pager"></div>
+          </div>
+          <div class="hw-section">
+            <div class="hw-section-header">
+              <h2 class="hw-heading">Storage</h2>
+              <button id="exportLinuxDiskBtn" class="export-button" type="button">Export CSV</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th data-sort-table="linuxHwDisk" data-sort-key="model" class="sortable">Model</th>
+                    <th data-sort-table="linuxHwDisk" data-sort-key="type" class="sortable">Type</th>
+                    <th data-sort-table="linuxHwDisk" data-sort-key="sizeGb" class="sortable">Size</th>
+                    <th data-sort-table="linuxHwDisk" data-sort-key="count" class="sortable">Machines</th>
+                  </tr>
+                </thead>
+                <tbody id="hwLinuxDiskBody"></tbody>
+              </table>
+            </div>
+            <div id="hwLinuxDiskPager" class="pager"></div>
+          </div>
+          <div class="hw-section">
+            <div class="hw-section-header">
+              <h2 class="hw-heading">RAM</h2>
+              <button id="exportLinuxRamBtn" class="export-button" type="button">Export CSV</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th data-sort-table="linuxHwRam" data-sort-key="totalMb" class="sortable">Total</th>
+                    <th data-sort-table="linuxHwRam" data-sort-key="count" class="sortable">Machines</th>
+                  </tr>
+                </thead>
+                <tbody id="hwLinuxRamBody"></tbody>
+              </table>
+            </div>
+            <div id="hwLinuxRamPager" class="pager"></div>
           </div>
         </section>
 

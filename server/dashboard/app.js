@@ -1,5 +1,6 @@
 (function () {
   const inventoryViews = ['clients', 'software', 'hardware'];
+  const linuxInventoryViews = ['linux', 'linuxSoftware', 'linuxHardware'];
   const state = {
     clients: [], linuxClients: [], view: getInitialView(), installJobId: null, installPollTimer: null, installJobs: [],
     updateJobId: null, updatePollTimer: null,
@@ -19,16 +20,20 @@
       hwDisk: { key: 'model', dir: 1 },
       hwRam: { key: 'totalMb', dir: -1 },
       licenses: { key: 'name', dir: 1 },
-      linuxClients: { key: 'hostname', dir: 1 }
+      linuxClients: { key: 'hostname', dir: 1 },
+      linuxSoftware: { key: 'name', dir: 1 },
+      linuxHwCpu: { key: 'name', dir: 1 },
+      linuxHwDisk: { key: 'model', dir: 1 },
+      linuxHwRam: { key: 'totalMb', dir: -1 }
     },
-    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1 },
+    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxClients: 1, linuxSoftware: 1, linuxHwCpu: 1, linuxHwDisk: 1, linuxHwRam: 1 },
     // clients/software start at a reasonable fallback and are corrected to
     // the real viewport-fitting value the first time their table becomes
     // visible (see computeLiveRowsPerPage/recalculateActivePagination).
     // hwCpu/hwDisk/hwRam are fixed (see HW_PAGE_SIZE) - the three Hardware
     // sub-tables render stacked in one view and are rarely large enough to
     // need viewport-adaptive sizing.
-    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20 },
+    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20, linuxClients: 20, linuxSoftware: 20, linuxHwCpu: 20, linuxHwDisk: 20, linuxHwRam: 20 },
     // Prefixed keys ('client:'/'software:'/'hw:' + id) so the three
     // separate data-*-details attribute namespaces can't collide in one
     // Set. Drives each render function's initial hidden/visible class for
@@ -85,13 +90,15 @@
     if (hash === 'certificate') return 'certificate';
     if (hash === 'licenses') return 'licenses';
     if (hash === 'linux-clients' || hash === 'linux') return 'linux';
+    if (hash === 'linux-software') return 'linuxSoftware';
+    if (hash === 'linux-hardware') return 'linuxHardware';
     if (hash === 'admin-password' || hash === 'admin') return 'admin';
     return 'dashboard';
   }
 
   function setView(view) {
     state.view = view;
-    const hash = view === 'install' ? 'client-actions' : view === 'package' ? 'client-package' : view === 'updates' ? 'client-updates' : view === 'admin' ? 'admin-password' : view === 'linux' ? 'linux-clients' : view;
+    const hash = view === 'install' ? 'client-actions' : view === 'package' ? 'client-package' : view === 'updates' ? 'client-updates' : view === 'admin' ? 'admin-password' : view === 'linux' ? 'linux-clients' : view === 'linuxSoftware' ? 'linux-software' : view === 'linuxHardware' ? 'linux-hardware' : view;
     if (window.location.hash.replace(/^#/, '') !== hash) {
       window.location.hash = hash;
       return;
@@ -103,7 +110,7 @@
     if (view === 'general') loadGeneralSettings();
     if (view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (view === 'licenses') loadLicenses();
-    if (view === 'linux') loadLinuxClients();
+    if (view === 'linux' || view === 'linuxSoftware' || view === 'linuxHardware') loadLinuxClients();
     if (view === 'admin') loadAdminPasswordStatus();
   }
 
@@ -194,37 +201,134 @@
       .catch(() => {});
   }
 
+  // Mirrors clientMatches (Windows) - haystack built from the fields a
+  // Linux client actually reports (see linux-client/report.go): hostname,
+  // client version, IP, OS pretty name, CPU model, package name+version,
+  // disk model+type. No publisher/office/domain fields exist on this side.
+  function linuxClientMatches(client, query) {
+    if (!query) return true;
+    const packages = (client.packages || []).map(item => `${item.name} ${item.version}`).join(' ');
+    const disks = (client.disks || []).map(d => `${d.model} ${d.type}`).join(' ');
+    const haystack = [
+      client.hostname,
+      client.clientVersion,
+      formatIpAddresses(client),
+      client.os && client.os.prettyName,
+      client.cpu && client.cpu.model,
+      packages,
+      disks
+    ].join(' ').toLowerCase();
+    return haystack.indexOf(query.toLowerCase()) !== -1;
+  }
+
+  function deleteLinuxClient(hostname) {
+    if (!hostname) return;
+    const confirmed = window.confirm(`Delete ${hostname} from the inventory dashboard?`);
+    if (!confirmed) return;
+
+    fetch(`/api/v1/linux/clients/${encodeURIComponent(hostname)}`, {
+      method: 'DELETE',
+      cache: 'no-store'
+    })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        state.linuxClients = state.linuxClients.filter(client => client.hostname !== hostname);
+        renderLinuxClientsTable(state.linuxClients);
+      })
+      .catch(error => {
+        window.alert(`Failed to delete ${hostname}: ${error.message}`);
+      });
+  }
+
+  // Mirrors renderTable (Windows Clients) - pagination, a stable
+  // safeId(hostname)-based row id (NOT the old positional linux-${index},
+  // which would silently misattribute an expanded row's state to a
+  // different client after any sort or data change), row-expand with a
+  // CPU/RAM/Disks summary plus a nested packages table (name/version only
+  // - Linux packages carry no publisher or install date), a Delete
+  // button, and the same in-progress-edit-survives-a-rerender handling
+  // renderTable already has for the Windows Description editor.
   function renderLinuxClientsTable(clients) {
     const tbody = byId('linuxClientsBody');
     if (!tbody) return;
 
+    const activeElement = document.activeElement;
+    const editingClientId = activeElement && activeElement.matches('.description-edit-input') && activeElement.dataset.platform === 'linux' ? activeElement.dataset.descriptionClient : null;
+    const editingValue = editingClientId ? activeElement.value : null;
+    const editingSelectionStart = editingClientId ? activeElement.selectionStart : null;
+
     renderSortHeaders();
+    byId('linuxDescriptionColumnHeader').textContent = state.adDescriptionSyncEnabled ? 'AD Description' : 'Description';
 
-    if (!clients.length) {
-      tbody.innerHTML = '<tr><td colspan="7">No Linux clients reporting yet.</td></tr>';
-      return;
-    }
-
+    const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.linuxClients;
-    const sorted = applySort(clients, c => linuxClientSortValue(c, sortKey), sortDir);
+    const filtered = applySort(clients.filter(client => linuxClientMatches(client, query)), c => linuxClientSortValue(c, sortKey), sortDir);
+    const { items: pageItems, page, totalPages } = paginate(filtered, state.page.linuxClients, state.pageSize.linuxClients);
+    state.page.linuxClients = page;
 
-    tbody.innerHTML = sorted.map((client, index) => {
-      const clientId = `linux-${index}`;
+    const rows = pageItems.map(client => {
+      const clientId = safeId(client.hostname || '');
       const descriptionCell = state.adDescriptionSyncEnabled
         ? formatLinuxAdDescription(client)
         : formatLinuxDescriptionEditor(client, clientId);
       const osName = (client.os && client.os.prettyName) || '';
-      const packageCount = Array.isArray(client.packages) ? client.packages.length : 0;
+      const packages = Array.isArray(client.packages) ? client.packages : [];
+      const packageCount = packages.length;
+      const detailsHidden = state.expandedDetails.has('linux-client:' + clientId) ? '' : 'hidden';
+
+      const packageRows = packages.map(item => `<tr>
+        <td>${escapeHtml(item.name)}</td>
+        <td>${escapeHtml(item.version)}</td>
+      </tr>`).join('');
+
+      const cpu = client.cpu || {};
+      const cpuText = cpu.model ? `${escapeHtml(cpu.model)}${cpu.cores ? `, ${Number(cpu.cores) || 0} cores` : ''}` : 'Unknown';
+      const ramGb = client.ramTotalMb
+        ? (client.ramTotalMb >= 1024 ? `${Math.round(client.ramTotalMb / 1024)} GB` : `${Number(client.ramTotalMb) || 0} MB`)
+        : 'Unknown';
+      const disksSummary = (client.disks || []).map(d => {
+        const size = d.sizeGb ? ` ${d.sizeGb} GB` : '';
+        return `${escapeHtml(d.type)}${escapeHtml(size)} <small>${escapeHtml(d.model)}</small>`;
+      }).join('<br>') || 'Unknown';
+
       return `<tr>
-        <td>${escapeHtml(client.hostname)}</td>
+        <td><button class="link-button" type="button" data-linux-client="${clientId}">${escapeHtml(client.hostname)}</button></td>
         <td>${escapeHtml(client.clientVersion)}</td>
         <td>${escapeHtml(osName)}</td>
         <td>${formatIpAddressesHtml(client)}</td>
         <td>${packageCount}</td>
         <td>${descriptionCell}</td>
         <td>${formatDateTime(client.sourceUpdatedAt)}</td>
+        <td><button class="danger-button-ghost" type="button" data-delete-linux-client="${escapeHtml(client.hostname)}">Delete</button></td>
+      </tr>
+      <tr class="details-row ${detailsHidden}" data-linux-client-details="${clientId}">
+        <td colspan="8">
+          <div class="details">
+            <div class="hw-summary">
+              <div><strong>CPU</strong><span>${cpuText}</span></div>
+              <div><strong>RAM</strong><span>${ramGb}</span></div>
+              <div><strong>Storage</strong><span>${disksSummary}</span></div>
+            </div>
+            <h2>${escapeHtml(client.hostname)} packages</h2>
+            <table class="nested-table">
+              <thead><tr><th>Name</th><th>Version</th></tr></thead>
+              <tbody>${packageRows || '<tr><td colspan="2" class="empty">No package records.</td></tr>'}</tbody>
+            </table>
+          </div>
+        </td>
       </tr>`;
-    }).join('');
+    });
+
+    tbody.innerHTML = rows.join('') || '<tr><td colspan="8" class="empty">No matching Linux clients.</td></tr>';
+    if (editingClientId) {
+      const restoredInput = document.querySelector(`.description-edit-input[data-description-client="${editingClientId}"][data-platform="linux"]`);
+      if (restoredInput) {
+        restoredInput.value = editingValue;
+        restoredInput.focus();
+        restoredInput.setSelectionRange(editingSelectionStart, editingSelectionStart);
+      }
+    }
+    renderPager('linuxClientsPager', 'linuxClients', page, totalPages, () => renderLinuxClientsTable(state.linuxClients));
   }
 
   function formatDateTime(value) {
@@ -533,6 +637,28 @@
       })
     );
     downloadCsv('clients-' + csvDate() + '.csv', rows);
+  }
+
+  function exportLinuxClients() {
+    const query = byId('searchInput').value.trim();
+    const { key: sortKey, dir: sortDir } = state.sort.linuxClients;
+    const items = applySort(state.linuxClients.filter(c => linuxClientMatches(c, query)), c => linuxClientSortValue(c, sortKey), sortDir);
+    const rows = [['Computer', 'IP Addresses', 'Client Version', 'OS', 'Package Count', 'CPU', 'RAM', 'Disks', 'Collected', 'AD Description']].concat(
+      items.map(c => {
+        const os = c.os || {};
+        const cpu = c.cpu || {};
+        const ramText = c.ramTotalMb ? (c.ramTotalMb >= 1024 ? Math.round(c.ramTotalMb / 1024) + ' GB' : c.ramTotalMb + ' MB') : '';
+        const disksText = (c.disks || []).map(d => (d.type || '') + ' ' + (d.sizeGb ? d.sizeGb + ' GB' : '') + ' ' + (d.model || '')).join(', ').trim();
+        return [
+          c.hostname || '', formatIpAddresses(c), c.clientVersion || '',
+          os.prettyName || '', Array.isArray(c.packages) ? c.packages.length : 0,
+          cpu.model || '', ramText, disksText,
+          formatDateTime(c.sourceUpdatedAt),
+          state.adDescriptionSyncEnabled ? (c.adSyncStatus === 'not-found' ? 'Not found in AD' : c.adSyncStatus === 'error' ? 'AD unreachable' : (c.adDescription || '')) : (c.adDescription || '')
+        ];
+      })
+    );
+    downloadCsv('linux-clients-' + csvDate() + '.csv', rows);
   }
 
   function exportSoftware() {
@@ -2485,6 +2611,8 @@
     byId('certificateView').classList.toggle('hidden', state.view !== 'certificate');
     byId('licensesView').classList.toggle('hidden', state.view !== 'licenses');
     byId('linuxClientsView').classList.toggle('hidden', state.view !== 'linux');
+    byId('linuxSoftwareView').classList.toggle('hidden', state.view !== 'linuxSoftware');
+    byId('linuxHardwareView').classList.toggle('hidden', state.view !== 'linuxHardware');
     byId('adminPasswordView').classList.toggle('hidden', state.view !== 'admin');
     byId('dashboardTab').classList.toggle('active', state.view === 'dashboard');
     byId('clientsTab').classList.toggle('active', state.view === 'clients');
@@ -2497,11 +2625,14 @@
     byId('certificateTab').classList.toggle('active', state.view === 'certificate');
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
     byId('linuxClientsTab').classList.toggle('active', state.view === 'linux');
+    byId('linuxSoftwareTab').classList.toggle('active', state.view === 'linuxSoftware');
+    byId('linuxHardwareTab').classList.toggle('active', state.view === 'linuxHardware');
     byId('adminPasswordTab').classList.toggle('active', state.view === 'admin');
     const isInventoryView = inventoryViews.includes(state.view);
+    const isLinuxInventoryView = linuxInventoryViews.includes(state.view);
     byId('summarySection').classList.toggle('hidden', !isInventoryView);
-    byId('searchInput').classList.toggle('hidden', !isInventoryView);
-    byId('generatedAt').classList.toggle('hidden', !isInventoryView);
+    byId('searchInput').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
+    byId('generatedAt').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
     recalculateActivePagination();
   }
 
@@ -2587,6 +2718,15 @@
       .catch(() => {
         // Silent - see function comment above.
       });
+
+    // Linux data has no separate change-fingerprint (its own dataset is
+    // much smaller in practice than the Windows fleet this project was
+    // built around) - loadLinuxClients() always re-fetches+re-renders on
+    // every 30s tick while any Linux Inventory tab is open, same silent-
+    // on-failure behavior as the Windows poll above.
+    if (linuxInventoryViews.includes(state.view)) {
+      loadLinuxClients();
+    }
 
     // Separate fetch, badge-only: the sidebar "Client updates" count should
     // stay live even when the Client updates tab itself isn't open. A full
@@ -2675,7 +2815,15 @@
     state.page.hwCpu = 1;
     state.page.hwDisk = 1;
     state.page.hwRam = 1;
+    state.page.linuxClients = 1;
+    state.page.linuxSoftware = 1;
+    state.page.linuxHwCpu = 1;
+    state.page.linuxHwDisk = 1;
+    state.page.linuxHwRam = 1;
     render();
+    if (state.view === 'linux') {
+      renderLinuxClientsTable(state.linuxClients);
+    }
   });
 
   let paginationResizeTimer = null;
@@ -2707,7 +2855,7 @@
     if (state.view === 'general') loadGeneralSettings();
     if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (state.view === 'licenses') loadLicenses();
-    if (state.view === 'linux') loadLinuxClients();
+    if (state.view === 'linux' || state.view === 'linuxSoftware' || state.view === 'linuxHardware') loadLinuxClients();
     if (state.view === 'admin') loadAdminPasswordStatus();
   });
   byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
@@ -2787,9 +2935,48 @@
       return;
     }
 
+    const linuxClientBtn = e.target.closest('[data-linux-client]');
+    if (linuxClientBtn) {
+      const key = 'linux-client:' + linuxClientBtn.dataset.linuxClient;
+      const row = document.querySelector(`[data-linux-client-details="${linuxClientBtn.dataset.linuxClient}"]`);
+      if (row) {
+        const nowHidden = row.classList.toggle('hidden');
+        if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
+      }
+      return;
+    }
+
+    const linuxSoftwareBtn = e.target.closest('[data-linux-software]');
+    if (linuxSoftwareBtn) {
+      const key = 'linux-software:' + linuxSoftwareBtn.dataset.linuxSoftware;
+      const row = document.querySelector(`[data-linux-software-details="${linuxSoftwareBtn.dataset.linuxSoftware}"]`);
+      if (row) {
+        const nowHidden = row.classList.toggle('hidden');
+        if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
+      }
+      return;
+    }
+
+    const linuxHwBtn = e.target.closest('[data-linux-hw]');
+    if (linuxHwBtn) {
+      const key = 'linux-hw:' + linuxHwBtn.dataset.linuxHw;
+      const row = document.querySelector(`[data-linux-hw-details="${linuxHwBtn.dataset.linuxHw}"]`);
+      if (row) {
+        const nowHidden = row.classList.toggle('hidden');
+        if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
+      }
+      return;
+    }
+
     const deleteBtn = e.target.closest('[data-delete-client]');
     if (deleteBtn) {
       deleteClient(deleteBtn.dataset.deleteClient);
+      return;
+    }
+
+    const deleteLinuxBtn = e.target.closest('[data-delete-linux-client]');
+    if (deleteLinuxBtn) {
+      deleteLinuxClient(deleteLinuxBtn.dataset.deleteLinuxClient);
     }
   });
   byId('packageTab').addEventListener('click', () => setView('package'));
@@ -2822,6 +3009,9 @@
   byId('certDeleteButton').addEventListener('click', deleteCertificate);
   byId('licensesTab').addEventListener('click', () => setView('licenses'));
   byId('linuxClientsTab').addEventListener('click', () => setView('linux'));
+  byId('linuxSoftwareTab').addEventListener('click', () => setView('linuxSoftware'));
+  byId('linuxHardwareTab').addEventListener('click', () => setView('linuxHardware'));
+  byId('exportLinuxClientsBtn').addEventListener('click', exportLinuxClients);
   byId('exportLicensesBtn').addEventListener('click', exportLicenses);
   byId('licenseAddButton').addEventListener('click', () => openLicenseForm(null));
   byId('licenseSaveButton').addEventListener('click', saveLicense);
