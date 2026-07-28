@@ -926,7 +926,7 @@ function Set-RestrictedFileAcl {
 # silently revert to whatever port was set at install time. The server reads
 # ListenPrefix/HttpsPort/EnableHttp from --config on every startup instead,
 # same as WebUsername, UseHttps, and the other dashboard-only settings.
-$serviceCommand = '"' + (ConvertTo-ServiceArgValue $servicePath) + '" --data "' + (ConvertTo-ServiceArgValue $DataPath) + '" --content "' + (ConvertTo-ServiceArgValue $ContentPath) + '" --client-package "' + (ConvertTo-ServiceArgValue $ClientPackagePath) + '" --winrm-installer "' + (ConvertTo-ServiceArgValue $winRmInstallerPath) + '" --winrm-uninstaller "' + (ConvertTo-ServiceArgValue $winRmUninstallerPath) + '"'
+$serviceCommand = '"' + (ConvertTo-ServiceArgValue $servicePath) + '" --data "' + (ConvertTo-ServiceArgValue $DataPath) + '" --content "' + (ConvertTo-ServiceArgValue $ContentPath) + '" --client-package "' + (ConvertTo-ServiceArgValue $ClientPackagePath) + '" --winrm-installer "' + (ConvertTo-ServiceArgValue $winRmInstallerPath) + '" --winrm-uninstaller "' + (ConvertTo-ServiceArgValue $winRmUninstallerPath) + '" --linux-ssh-installer "' + (ConvertTo-ServiceArgValue $linuxSshInstallerPath) + '" --linux-ssh-uninstaller "' + (ConvertTo-ServiceArgValue $linuxSshUninstallerPath) + '"'
 $serviceCommand += ' --install-log-retention-days ' + $InstallLogRetentionDays
 $serviceCommand += ' --config "' + (ConvertTo-ServiceArgValue $ConfigPath) + '"'
 

@@ -659,6 +659,10 @@ namespace WindowsInventoryLite
             {
                 Directory.CreateDirectory(GetInstallJobDirectory());
             }
+            if (!Directory.Exists(GetLinuxInstallJobDirectory()))
+            {
+                Directory.CreateDirectory(GetLinuxInstallJobDirectory());
+            }
             CleanupInstallJobLogs();
 
             if (options.EnableHttp)
@@ -2369,6 +2373,11 @@ namespace WindowsInventoryLite
                     SendText(stream, "{\"error\":\"" + adCredentialError.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
                     return;
                 }
+                if (String.IsNullOrEmpty(username) || String.IsNullOrEmpty(password))
+                {
+                    SendText(stream, "{\"error\":\"AD service-identity mode is not usable for SSH pushes to Linux targets (there is no SSH equivalent of running as the service's own identity). Select 'Stored Linux credentials' or 'SSH key' instead, or configure an explicit AD account rather than service identity in Settings > General > Active Directory.\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
             }
             else if (authMode == "credentials")
             {
@@ -2412,7 +2421,7 @@ namespace WindowsInventoryLite
             }
             catch (ArgumentException ex)
             {
-                SendText(stream, "{\"error\":\"" + ex.Message.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                SendText(stream, "{\"error\":\"" + ex.Message.Replace("\\", "\\\\").Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
                 return;
             }
 
