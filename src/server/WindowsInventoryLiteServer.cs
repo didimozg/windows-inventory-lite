@@ -106,6 +106,14 @@ namespace WindowsInventoryLite
         public string LinuxUpdateUsername;
         public string LinuxUpdatePassword;
         public string LinuxUpdateKeyPath;
+        public string LinuxClientPackagePath;
+        // Independent of ClientUpdateSchedule* above - a separate Linux
+        // fleet with separate credentials needs its own schedule, per
+        // explicit user choice during design.
+        public string LinuxUpdateScheduleMode;
+        public string LinuxUpdateScheduleOnceAtUtc;
+        public int LinuxUpdateScheduleIntervalHours;
+        public string LinuxUpdateScheduleLastRunUtc;
         public string Token;
         public string WebUsername;
         public string WebPassword;
@@ -177,6 +185,7 @@ namespace WindowsInventoryLite
             options.LinuxDataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\linux-clients-data");
             options.ContentPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-content");
             options.ClientPackagePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\client-package");
+            options.LinuxClientPackagePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\linux-client-package");
             options.WinRmInstallerPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-bin\Install-ClientWinRM.ps1");
             options.WinRmUninstallerPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-bin\Uninstall-ClientWinRM.ps1");
             options.LinuxSshInstallerPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-bin\Install-ClientDebianSSH.ps1");
@@ -190,6 +199,10 @@ namespace WindowsInventoryLite
             options.ClientUpdateScheduleOnceAtUtc = "";
             options.ClientUpdateScheduleIntervalHours = 24;
             options.ClientUpdateScheduleLastRunUtc = "";
+            options.LinuxUpdateScheduleMode = "off";
+            options.LinuxUpdateScheduleOnceAtUtc = "";
+            options.LinuxUpdateScheduleIntervalHours = 24;
+            options.LinuxUpdateScheduleLastRunUtc = "";
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -237,6 +250,10 @@ namespace WindowsInventoryLite
                 else if (key == "--client-package" && i + 1 < args.Length)
                 {
                     options.ClientPackagePath = args[++i];
+                }
+                else if (key == "--linux-client-package" && i + 1 < args.Length)
+                {
+                    options.LinuxClientPackagePath = args[++i];
                 }
                 else if (key == "--winrm-installer" && i + 1 < args.Length)
                 {
@@ -512,6 +529,31 @@ namespace WindowsInventoryLite
                 {
                     options.LinuxUpdateKeyPath = GetConfigString(config, "LinuxUpdateKeyPath");
                 }
+                if (options.LinuxUpdateScheduleMode == "off")
+                {
+                    string linuxScheduleModeText = GetConfigString(config, "LinuxUpdateScheduleMode");
+                    if (linuxScheduleModeText == "off" || linuxScheduleModeText == "once" || linuxScheduleModeText == "interval")
+                    {
+                        options.LinuxUpdateScheduleMode = linuxScheduleModeText;
+                    }
+                }
+                if (String.IsNullOrEmpty(options.LinuxUpdateScheduleOnceAtUtc))
+                {
+                    options.LinuxUpdateScheduleOnceAtUtc = GetConfigString(config, "LinuxUpdateScheduleOnceAtUtc") ?? "";
+                }
+                if (options.LinuxUpdateScheduleIntervalHours == 24)
+                {
+                    string linuxScheduleIntervalText = GetConfigString(config, "LinuxUpdateScheduleIntervalHours");
+                    int linuxScheduleIntervalFromConfig;
+                    if (!String.IsNullOrEmpty(linuxScheduleIntervalText) && Int32.TryParse(linuxScheduleIntervalText, out linuxScheduleIntervalFromConfig) && linuxScheduleIntervalFromConfig > 0 && linuxScheduleIntervalFromConfig <= 8760)
+                    {
+                        options.LinuxUpdateScheduleIntervalHours = linuxScheduleIntervalFromConfig;
+                    }
+                }
+                if (String.IsNullOrEmpty(options.LinuxUpdateScheduleLastRunUtc))
+                {
+                    options.LinuxUpdateScheduleLastRunUtc = GetConfigString(config, "LinuxUpdateScheduleLastRunUtc") ?? "";
+                }
                 if (options.ClientUpdateScheduleMode == "off")
                 {
                     string scheduleModeText = GetConfigString(config, "ClientUpdateScheduleMode");
@@ -612,6 +654,7 @@ namespace WindowsInventoryLite
         // know their own job.Id locally, from the response of the request
         // that created them) - only the schedule timer sets this.
         private volatile string lastScheduledUpdateJobId;
+        private string lastScheduledLinuxUpdateJobId;
         private readonly object licensesLock = new object();
         private readonly object certificateHistoryLock = new object();
         private readonly object listenerRestartLock = new object();
@@ -680,6 +723,7 @@ namespace WindowsInventoryLite
             ReconfigureAdSyncTimer();
             ResetMissedOnceSchedule();
             ReconfigureClientUpdateScheduleTimer();
+            ReconfigureLinuxUpdateScheduleTimer();
 
             if (!httpSlot.Running && !httpsSlot.Running)
             {
@@ -1375,6 +1419,26 @@ namespace WindowsInventoryLite
                     {
                         SendLinuxClientInstallJob(stream, request);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-updates")
+                    {
+                        SendLinuxClientUpdates(stream);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-updates/credentials")
+                    {
+                        SendLinuxUpdateCredentialsStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-updates/credentials")
+                    {
+                        ConfigureLinuxUpdateCredentials(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-updates/schedule")
+                    {
+                        SendLinuxUpdateScheduleStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-updates/schedule")
+                    {
+                        ConfigureLinuxUpdateSchedule(stream, request);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/server/certificate")
                     {
                         SendCertificateStatus(stream);
@@ -1975,6 +2039,380 @@ namespace WindowsInventoryLite
             }
 
             return clients;
+        }
+
+        // The Linux client is a Linux ELF binary - unlike GetExeVersion
+        // (which runs the Windows client .exe locally to ask its version),
+        // this server cannot execute a foreign-OS binary. Reads the
+        // sidecar .version file Build-LinuxClient.ps1 writes alongside the
+        // binary instead.
+        private string GetLinuxClientPackageVersion()
+        {
+            string versionPath = Path.Combine(options.LinuxClientPackagePath, "wil-linux-client.version");
+            if (!File.Exists(versionPath))
+            {
+                return null;
+            }
+            try
+            {
+                return File.ReadAllText(versionPath, Encoding.UTF8).Trim();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private void SendLinuxClientUpdates(Stream stream)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> result = new Dictionary<string, object>();
+
+            string currentVersion = GetLinuxClientPackageVersion();
+            result["currentVersion"] = currentVersion;
+            result["lastScheduledJobId"] = lastScheduledLinuxUpdateJobId;
+
+            if (String.IsNullOrEmpty(currentVersion))
+            {
+                result["packageAvailable"] = false;
+                result["updates"] = new ArrayList();
+                result["outdatedCount"] = 0;
+                SendJson(stream, serializer.Serialize(result));
+                return;
+            }
+
+            result["packageAvailable"] = true;
+            ArrayList updates = new ArrayList();
+
+            foreach (Dictionary<string, object> client in LoadLinuxClientReports())
+            {
+                string clientVersion = GetStringValue(client, "clientVersion");
+                if (!String.IsNullOrEmpty(clientVersion) && String.Equals(clientVersion, currentVersion, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["hostname"] = GetStringValue(client, "hostname");
+                entry["clientVersion"] = clientVersion;
+                entry["sourceUpdatedAt"] = GetStringValue(client, "sourceUpdatedAt");
+                updates.Add(entry);
+            }
+
+            result["updates"] = updates;
+            result["outdatedCount"] = updates.Count;
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void SendLinuxUpdateCredentialsStatus(Stream stream)
+        {
+            bool hasStoredCredentials = !String.IsNullOrEmpty(options.LinuxUpdateUsername) && !String.IsNullOrEmpty(options.LinuxUpdatePassword);
+            bool hasStoredKey = !String.IsNullOrEmpty(options.LinuxUpdateUsername) && !String.IsNullOrEmpty(options.LinuxUpdateKeyPath);
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["configured"] = hasStoredCredentials || hasStoredKey;
+            result["username"] = String.IsNullOrEmpty(options.LinuxUpdateUsername) ? null : options.LinuxUpdateUsername;
+            result["hasPassword"] = !String.IsNullOrEmpty(options.LinuxUpdatePassword);
+            result["keyPath"] = String.IsNullOrEmpty(options.LinuxUpdateKeyPath) ? null : options.LinuxUpdateKeyPath;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void ConfigureLinuxUpdateCredentials(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            bool clear = payload.ContainsKey("clear") && Convert.ToBoolean(payload["clear"]);
+            string username;
+            string password;
+            string keyPath;
+            if (clear)
+            {
+                username = "";
+                password = "";
+                keyPath = "";
+            }
+            else
+            {
+                username = payload.ContainsKey("username") ? Convert.ToString(payload["username"]) : options.LinuxUpdateUsername;
+                password = payload.ContainsKey("password") && !String.IsNullOrEmpty(Convert.ToString(payload["password"]))
+                    ? Convert.ToString(payload["password"])
+                    : options.LinuxUpdatePassword;
+                keyPath = payload.ContainsKey("keyPath") ? Convert.ToString(payload["keyPath"]) : options.LinuxUpdateKeyPath;
+            }
+
+            options.LinuxUpdateUsername = username;
+            options.LinuxUpdatePassword = password;
+            options.LinuxUpdateKeyPath = keyPath;
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["LinuxUpdateUsername"] = username ?? "";
+            updates["LinuxUpdatePassword"] = password ?? "";
+            updates["LinuxUpdateKeyPath"] = keyPath ?? "";
+            SaveServerConfigValues(updates);
+
+            SendLinuxUpdateCredentialsStatus(stream);
+        }
+
+        private void SendLinuxUpdateScheduleStatus(Stream stream)
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["mode"] = options.LinuxUpdateScheduleMode;
+            result["onceAtUtc"] = String.IsNullOrEmpty(options.LinuxUpdateScheduleOnceAtUtc) ? null : options.LinuxUpdateScheduleOnceAtUtc;
+            result["intervalHours"] = options.LinuxUpdateScheduleIntervalHours;
+            result["lastRunUtc"] = String.IsNullOrEmpty(options.LinuxUpdateScheduleLastRunUtc) ? null : options.LinuxUpdateScheduleLastRunUtc;
+            result["hasSavedCredentials"] = !String.IsNullOrEmpty(options.LinuxUpdateUsername) && (!String.IsNullOrEmpty(options.LinuxUpdatePassword) || !String.IsNullOrEmpty(options.LinuxUpdateKeyPath));
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void ConfigureLinuxUpdateSchedule(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string mode = payload.ContainsKey("mode") ? Convert.ToString(payload["mode"]) : "off";
+            if (mode != "off" && mode != "once" && mode != "interval")
+            {
+                SendText(stream, "{\"error\":\"mode must be 'off', 'once', or 'interval'\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string onceAtUtc = "";
+            if (mode == "once")
+            {
+                string onceAtRaw = payload.ContainsKey("onceAtUtc") ? Convert.ToString(payload["onceAtUtc"]) : "";
+                DateTime parsedOnceAt;
+                if (String.IsNullOrEmpty(onceAtRaw) || !DateTime.TryParse(onceAtRaw, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out parsedOnceAt))
+                {
+                    SendText(stream, "{\"error\":\"onceAtUtc is required and must be a valid date/time for mode 'once'\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                onceAtUtc = parsedOnceAt.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+            }
+
+            int intervalHours = options.LinuxUpdateScheduleIntervalHours;
+            if (mode == "interval")
+            {
+                if (!payload.ContainsKey("intervalHours") || !Int32.TryParse(Convert.ToString(payload["intervalHours"]), out intervalHours) || intervalHours < 1 || intervalHours > 8760)
+                {
+                    SendText(stream, "{\"error\":\"intervalHours must be between 1 and 8760 for mode 'interval'\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
+
+            options.LinuxUpdateScheduleMode = mode;
+            options.LinuxUpdateScheduleOnceAtUtc = onceAtUtc;
+            options.LinuxUpdateScheduleIntervalHours = intervalHours;
+            if (mode != "interval")
+            {
+                options.LinuxUpdateScheduleLastRunUtc = "";
+            }
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["LinuxUpdateScheduleMode"] = options.LinuxUpdateScheduleMode;
+            updates["LinuxUpdateScheduleOnceAtUtc"] = options.LinuxUpdateScheduleOnceAtUtc ?? "";
+            updates["LinuxUpdateScheduleIntervalHours"] = options.LinuxUpdateScheduleIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            updates["LinuxUpdateScheduleLastRunUtc"] = options.LinuxUpdateScheduleLastRunUtc ?? "";
+            SaveServerConfigValues(updates);
+
+            ReconfigureLinuxUpdateScheduleTimer();
+
+            SendLinuxUpdateScheduleStatus(stream);
+        }
+
+        private readonly object linuxUpdateScheduleTimerLock = new object();
+        private Timer linuxUpdateScheduleTimer;
+
+        private void ReconfigureLinuxUpdateScheduleTimer()
+        {
+            lock (linuxUpdateScheduleTimerLock)
+            {
+                if (linuxUpdateScheduleTimer != null)
+                {
+                    linuxUpdateScheduleTimer.Dispose();
+                    linuxUpdateScheduleTimer = null;
+                }
+                if (options.LinuxUpdateScheduleMode != "off")
+                {
+                    TimeSpan pollInterval = TimeSpan.FromSeconds(60);
+                    linuxUpdateScheduleTimer = new Timer(RunLinuxUpdateScheduleTick, null, TimeSpan.Zero, pollInterval);
+                }
+            }
+        }
+
+        private void RunLinuxUpdateScheduleTick(object state)
+        {
+            try
+            {
+                string mode = options.LinuxUpdateScheduleMode;
+                if (mode == "off")
+                {
+                    return;
+                }
+
+                DateTime? onceAtUtc = ParseUtcOrNull(options.LinuxUpdateScheduleOnceAtUtc);
+                DateTime? lastRunUtc = ParseUtcOrNull(options.LinuxUpdateScheduleLastRunUtc);
+                if (!ShouldRunClientUpdateSchedule(DateTime.UtcNow, mode, onceAtUtc, lastRunUtc, options.LinuxUpdateScheduleIntervalHours))
+                {
+                    return;
+                }
+
+                StartScheduledLinuxClientUpdatePush();
+
+                Dictionary<string, string> updates = new Dictionary<string, string>();
+                if (mode == "once")
+                {
+                    options.LinuxUpdateScheduleMode = "off";
+                    options.LinuxUpdateScheduleOnceAtUtc = "";
+                    updates["LinuxUpdateScheduleMode"] = "off";
+                    updates["LinuxUpdateScheduleOnceAtUtc"] = "";
+                    SaveServerConfigValues(updates);
+                    ReconfigureLinuxUpdateScheduleTimer();
+                }
+                else
+                {
+                    options.LinuxUpdateScheduleLastRunUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                    updates["LinuxUpdateScheduleLastRunUtc"] = options.LinuxUpdateScheduleLastRunUtc;
+                    SaveServerConfigValues(updates);
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Error", "Linux update schedule tick failed: " + ex);
+            }
+        }
+
+        private void StartScheduledLinuxClientUpdatePush()
+        {
+            string currentVersion = GetLinuxClientPackageVersion();
+            if (String.IsNullOrEmpty(currentVersion))
+            {
+                return;
+            }
+
+            ArrayList targets = new ArrayList();
+            foreach (Dictionary<string, object> client in LoadLinuxClientReports())
+            {
+                string clientVersion = GetStringValue(client, "clientVersion");
+                if (!String.IsNullOrEmpty(clientVersion) && String.Equals(clientVersion, currentVersion, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                string hostname = GetStringValue(client, "hostname");
+                if (!String.IsNullOrEmpty(hostname))
+                {
+                    targets.Add(hostname);
+                }
+            }
+            if (targets.Count == 0)
+            {
+                return;
+            }
+
+            // A scheduled push re-runs Install-ClientDebianSSH.ps1 against
+            // an already-installed target, exactly like a manual "Update
+            // selected" push - the script requires -ServerUrl (Mandatory),
+            // so this needs the same URL/token/install-path used for the
+            // original install, not blank values. Reads them back from the
+            // Linux package settings Task 7's ConfigureLinuxClientPackage
+            // writes (linux-package-settings.json) - the direct Linux
+            // analog of how StartScheduledClientUpdatePush (Windows) reads
+            // ParseCmdSettings(cmdPath) for the same reason. Gracefully
+            // no-ops (like the Windows path) if that file doesn't exist yet
+            // - nothing to push with an unknown server URL.
+            string serverUrl = null;
+            string token = null;
+            string installPath = "/opt/windows-inventory-lite";
+            int intervalHours = 6;
+            string packageSettingsPath = Path.Combine(options.LinuxClientPackagePath, "linux-package-settings.json");
+            if (File.Exists(packageSettingsPath))
+            {
+                try
+                {
+                    JavaScriptSerializer settingsSerializer = CreateJsonSerializer();
+                    Dictionary<string, object> savedSettings = settingsSerializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(packageSettingsPath, Encoding.UTF8));
+                    serverUrl = GetStringValue(savedSettings, "serverUrl");
+                    token = GetStringValue(savedSettings, "token");
+                    string savedInstallPath = GetStringValue(savedSettings, "installPath");
+                    if (!String.IsNullOrEmpty(savedInstallPath))
+                    {
+                        installPath = savedInstallPath;
+                    }
+                    intervalHours = GetIntValue(savedSettings, "intervalHours", 6);
+                }
+                catch
+                {
+                    serverUrl = null;
+                }
+            }
+            if (String.IsNullOrEmpty(serverUrl))
+            {
+                DebugLogger.Log(options, "Schedule", "Scheduled Linux client update push skipped: no server URL saved yet - configure it on the Client package tab's Linux package section first.");
+                return;
+            }
+
+            string authMode = !String.IsNullOrEmpty(options.LinuxUpdateKeyPath) ? "key" : "credentials";
+            string username = options.LinuxUpdateUsername;
+            string password = options.LinuxUpdatePassword;
+            string keyPath = options.LinuxUpdateKeyPath;
+            if (String.IsNullOrEmpty(username) || (authMode == "credentials" && String.IsNullOrEmpty(password)) || (authMode == "key" && String.IsNullOrEmpty(keyPath)))
+            {
+                DebugLogger.Log(options, "Schedule", "Scheduled Linux client update push skipped: no saved Linux credentials configured.");
+                return;
+            }
+
+            LinuxInstallJob job = new LinuxInstallJob();
+            job.Id = Guid.NewGuid().ToString("N");
+            job.Action = "install";
+            job.Status = "queued";
+            job.CreatedAtUtc = DateTime.UtcNow;
+            job.Targets = targets;
+            job.Results = new ArrayList();
+            job.AuthMode = authMode;
+            job.ServerUrl = serverUrl;
+            job.Token = token;
+            job.InstallPath = installPath;
+            job.IntervalHours = intervalHours;
+            job.Username = username;
+            job.Password = password;
+            job.KeyPath = keyPath;
+            job.RetentionDays = options.InstallLogRetentionDays;
+
+            lock (linuxInstallJobsLock)
+            {
+                linuxInstallJobs[job.Id] = job;
+                SaveLinuxInstallJob(job);
+            }
+            lastScheduledLinuxUpdateJobId = job.Id;
+            DebugLogger.Log(options, "Schedule", "Scheduled Linux client update push started: job '" + job.Id + "', " + targets.Count + " target(s).");
+            ThreadPool.QueueUserWorkItem(RunLinuxClientActionJob, job);
         }
 
         private string BuildLinuxClientIndex()
