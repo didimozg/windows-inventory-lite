@@ -107,7 +107,7 @@
     if (view === 'install') loadInstallHistory();
     if (view === 'package') loadPackageStatus();
     if (view === 'updates') loadClientUpdates();
-    if (view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); }
+    if (view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (view === 'licenses') loadLicenses();
     if (view === 'linux' || view === 'linuxSoftware' || view === 'linuxHardware') loadLinuxClients();
@@ -963,6 +963,93 @@
     const useAd = byId('updatesUseAdCredentials').checked;
     byId('updatesUsername').disabled = useAd;
     byId('updatesPassword').disabled = useAd;
+  }
+
+  function loadLinuxUpdateCredentials() {
+    fetch('/api/v1/linux-client-updates/credentials', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('linuxCredsUsername').value = data.username || '';
+        byId('linuxCredsKeyPath').value = data.keyPath || '';
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxCredsMessage'), `Status unavailable: ${error.message}`, true);
+      });
+  }
+
+  function loadLinuxSshToolsStatus() {
+    fetch('/api/v1/server/linux-ssh-tools-status', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        const statusElement = byId('linuxSshToolsStatus');
+        if (data.plinkFound && data.pscpFound) {
+          statusElement.textContent = 'plink.exe/pscp.exe found - password-based SSH push is available. Key-based push works regardless.';
+        } else {
+          statusElement.textContent = 'plink.exe/pscp.exe not found - password-based SSH push will fail. See deploy\\linux-client\\NOTICE for how to obtain them. Key-based push works regardless.';
+        }
+      })
+      .catch(error => {
+        byId('linuxSshToolsStatus').textContent = `SSH tools status unavailable: ${error.message}`;
+      });
+  }
+
+  function saveLinuxUpdateCredentials() {
+    const username = byId('linuxCredsUsername').value.trim();
+    const password = byId('linuxCredsPassword').value;
+    const keyPath = byId('linuxCredsKeyPath').value.trim();
+
+    byId('linuxCredsSaveButton').disabled = true;
+    fetch('/api/v1/linux-client-updates/credentials', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, keyPath })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        byId('linuxCredsPassword').value = '';
+        showSavedMessage(byId('linuxCredsMessage'), 'Saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxCredsMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('linuxCredsSaveButton').disabled = false;
+      });
+  }
+
+  function clearLinuxUpdateCredentials() {
+    const confirmed = window.confirm('Delete the saved Linux update username/password/key path?');
+    if (!confirmed) return;
+
+    byId('linuxCredsClearButton').disabled = true;
+    fetch('/api/v1/linux-client-updates/credentials', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clear: true })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Delete failed');
+        byId('linuxCredsUsername').value = '';
+        byId('linuxCredsPassword').value = '';
+        byId('linuxCredsKeyPath').value = '';
+        showSavedMessage(byId('linuxCredsMessage'), 'Deleted.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxCredsMessage'), `Delete failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('linuxCredsClearButton').disabled = false;
+      });
   }
 
   // onlyMissing=false: every AD computer in the configured scope.
@@ -3225,7 +3312,7 @@
     if (state.view === 'install') loadInstallHistory();
     if (state.view === 'package') loadPackageStatus();
     if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
-    if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); }
+    if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (state.view === 'licenses') loadLicenses();
     if (state.view === 'linux' || state.view === 'linuxSoftware' || state.view === 'linuxHardware') loadLinuxClients();
@@ -3409,11 +3496,13 @@
   byId('adminPasswordTab').addEventListener('click', () => setView('admin'));
   byId('adminPasswordSaveButton').addEventListener('click', changeAdminPassword);
   byId('ingestionTokenRegenerateButton').addEventListener('click', regenerateIngestionToken);
+  byId('linuxCredsSaveButton').addEventListener('click', saveLinuxUpdateCredentials);
+  byId('linuxCredsClearButton').addEventListener('click', clearLinuxUpdateCredentials);
   byId('themeToggle').addEventListener('click', toggleTheme);
   updateThemeToggle();
   if (state.view === 'package') loadPackageStatus();
   if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
-  if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); }
+  if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
   if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
   if (state.view === 'licenses') loadLicenses();
   if (state.view === 'linux' || state.view === 'linuxSoftware' || state.view === 'linuxHardware') loadLinuxClients();

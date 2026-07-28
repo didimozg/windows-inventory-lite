@@ -281,6 +281,30 @@
             <p class="cert-hint">"Configure AD User" makes the domain/credentials below available to Client actions, Client updates, and AD Computer Import. "Sync Description from AD" additionally writes each computer's Active Directory description into its inventory record, read-only in the Clients table while it's on. Turn it off to edit Description manually instead - re-enabling it later overwrites any manual edits on the next sync. Reading the description attribute is allowed to any authenticated domain user by default AD ACLs, so the service account identity usually needs no special AD delegation.</p>
           </div>
           <div class="settings-block">
+            <h2 class="settings-block-title">Linux Client update credentials</h2>
+            <p class="cert-hint">Used by Linux Client actions/updates pushes when "Stored Linux credentials" or "SSH key" auth mode is selected on those pages. Leave password/key path blank to keep the currently saved value.</p>
+            <div class="pkg-grid client-update-grid">
+              <label class="pkg-token-field">
+                Linux update username
+                <input id="linuxCredsUsername" type="text" autocomplete="username" placeholder="root">
+              </label>
+              <label class="pkg-token-field">
+                Linux update password
+                <input id="linuxCredsPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current one">
+              </label>
+              <label class="pkg-token-field">
+                SSH key path
+                <input id="linuxCredsKeyPath" type="text" autocomplete="off" placeholder="C:\path\to\private-key.pem">
+              </label>
+              <div class="pkg-buttons">
+                <button id="linuxCredsSaveButton" class="primary-button" type="button">Save</button>
+                <button id="linuxCredsClearButton" class="danger-button-ghost" type="button">Delete saved credentials</button>
+              </div>
+            </div>
+            <p id="linuxSshToolsStatus" class="cert-hint">Checking plink.exe/pscp.exe status...</p>
+            <div id="linuxCredsMessage" class="pkg-message hidden"></div>
+          </div>
+          <div class="settings-block">
             <h2 class="settings-block-title">Ingestion Token</h2>
             <p id="ingestionTokenStatusText" class="pkg-status">Loading status...</p>
             <div class="pkg-buttons">
