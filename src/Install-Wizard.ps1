@@ -222,7 +222,7 @@ function Show-QuickInstallSummary {
     Write-Output "Dashboard:        http://localhost:$port/"
     Write-Output 'HTTPS:            disabled - enable via Settings > General'
     Write-Output 'AD sync:          disabled - configure via Settings > General'
-    Write-Output 'Ingestion token:  auto-generated - view/rotate it via Settings > General > Ingestion Token (regenerate only - the current value is never displayed, matching the Admin Password page)'
+    Write-Output 'Ingestion token:  auto-generated - rotate it via Settings > General > Ingestion Token (regenerate only, matching the Admin Password page - the current value is not shown there, but it can be viewed in plaintext on the Client package tab when building a package)'
     Write-Output 'Client package:   not built yet - build via the Client package tab'
     if ($firewallOpened) {
         Write-Output "Firewall:         opened for port $port"

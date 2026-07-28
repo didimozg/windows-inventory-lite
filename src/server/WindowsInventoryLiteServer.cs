@@ -21,7 +21,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.27.0";
+        internal const string ProductVersion = "0.27.1";
 
         private static int Main(string[] args)
         {
@@ -4197,11 +4197,17 @@ namespace WindowsInventoryLite
         private void RegenerateIngestionToken(Stream stream, RequestContext request)
         {
             string newToken = GenerateRandomToken();
-            options.Token = newToken;
 
             Dictionary<string, string> updates = new Dictionary<string, string>();
             updates["Token"] = newToken;
             SaveServerConfigValues(updates);
+
+            // Only mutate in-memory state after the save succeeds - if
+            // SaveServerConfigValues throws, the exception propagates to the
+            // generic error handler and options.Token is left untouched, so
+            // a failed persist never leaves live clients 401'ing against a
+            // token that was never actually written to disk.
+            options.Token = newToken;
 
             try
             {

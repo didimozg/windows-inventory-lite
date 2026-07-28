@@ -1936,7 +1936,12 @@
           : 'No token configured - inventory ingestion is unauthenticated. Regenerate to set one.';
       })
       .catch(error => {
-        showSavedMessage(byId('ingestionTokenMessage'), `Status unavailable: ${error.message}`, true);
+        // Deliberately writes to the status line, not ingestionTokenMessage -
+        // this is also called right after a successful regenerate to refresh
+        // the "configured" state, and ingestionTokenMessage may still be
+        // showing the one-time token reveal at that point. A failed status
+        // fetch here must not clobber the admin's only copy of the token.
+        byId('ingestionTokenStatusText').textContent = `Status unavailable: ${error.message}`;
       });
   }
 
@@ -1946,7 +1951,7 @@
   // isError styling (red) would also be semantically wrong for a
   // successful generation, so this sets the message classes directly.
   function regenerateIngestionToken() {
-    const confirmed = window.confirm('Regenerate the ingestion token? Every already-installed client will stop reporting until it is reinstalled or reconfigured with the new token. This cannot be undone.');
+    const confirmed = window.confirm('Regenerate the ingestion token? Every already-installed client will stop reporting until it is reconfigured with the new token - and any not-yet-deployed GPO package still has the OLD token baked in, so it must be rebuilt from the Client package tab, not just redeployed. This cannot be undone.');
     if (!confirmed) return;
 
     byId('ingestionTokenRegenerateButton').disabled = true;
@@ -1955,9 +1960,20 @@
       method: 'POST',
       cache: 'no-store'
     })
-      .then(response => response.json().then(data => ({ ok: response.ok, data })))
-      .then(({ ok, data }) => {
-        if (!ok) throw new Error(data.error || 'Regenerate failed');
+      .then(response => {
+        if (response.ok) {
+          return response.json().then(data => ({ ok: true, data }));
+        }
+        // The generic server error handler returns a text/plain body, not
+        // JSON (e.g. on a failed config save) - parse defensively so that
+        // case falls back to a generic message instead of surfacing a raw
+        // "Unexpected token..." JSON-parse error to the admin.
+        return response.json()
+          .catch(() => null)
+          .then(data => ({ ok: false, data, statusText: response.statusText }));
+      })
+      .then(({ ok, data, statusText }) => {
+        if (!ok) throw new Error((data && data.error) || statusText || 'Regenerate failed');
         const messageEl = byId('ingestionTokenMessage');
         messageEl.textContent = `New token (copy this now, it will not be shown again): ${data.token}`;
         messageEl.className = 'pkg-message';

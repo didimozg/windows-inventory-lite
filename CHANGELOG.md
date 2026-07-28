@@ -6,11 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.27.1] - 2026-07-28
+
+### Fixed
+
+- `RegenerateIngestionToken` now saves the new token to `server-config.json` before updating the in-memory value - previously the in-memory token was mutated first, so a save failure (disk full, permissions) left the live server requiring a token that was never actually persisted, 401-ing every client until a service restart reloaded the old value.
+- The regenerate confirm() dialog, `docs/pending-readme-updates.md`, and the CHANGELOG's 0.27.0 entry overstated what "reinstalled or reconfigured" fixes: an already-built GPO package (`Install-ClientGpo.cmd`) is not updated by regenerate and keeps the old token baked in, so it needs to be rebuilt from the Client package tab, not just redeployed. Wording corrected in all three places.
+- The 0.27.0 CHANGELOG entry, `docs/pending-readme-updates.md`, and `Install-Wizard.ps1`'s post-install summary claimed the ingestion token is "never displayed anywhere" - it is in fact shown in plaintext on the Client package tab's build-package field (pre-existing behavior, not a regression). Wording corrected to scope the claim to the Settings page.
+- Dashboard: a failed status-refresh immediately after a successful token regenerate could overwrite the one-time token-reveal message with an error. `loadIngestionTokenStatus()`'s error handler now writes to the status line instead of the message div.
+- Dashboard: the regenerate button's error handling assumed a JSON response body; the server's generic error handler returns plain text, which produced a confusing JSON-parse error instead of a useful message. The error path now falls back to `response.statusText` when the body isn't valid JSON.
+
 ## [0.27.0] - 2026-07-27
 
 ### Added
 
-- Settings > General gains an "Ingestion Token" section: shows whether an ingestion token is configured and lets an admin regenerate it. Write-only, matching the Admin Password page - the current value is never displayed, only shown once immediately after a regenerate action.
+- Settings > General gains an "Ingestion Token" section: shows whether an ingestion token is configured and lets an admin regenerate it. Write-only on this page, matching the Admin Password page - the current value is not shown here, only revealed once immediately after a regenerate action (it remains viewable in plaintext on the Client package tab's build-package field, as before).
 
 ### Fixed
 
