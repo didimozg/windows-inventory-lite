@@ -93,7 +93,7 @@
           <div class="nav-group-title">Installation</div>
           <button id="installTab" class="nav-item" type="button">
             <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M11 2 L4 11.5 H9.5 L8.5 18 L16 8 H10.5 Z"/></svg>
-            Client actions
+            Windows Client actions
           </button>
           <button id="packageTab" class="nav-item" type="button">
             <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="4" width="15" height="3.5" rx="0.8"/><path d="M3.5 7.5 v8 h13 v-8"/><line x1="8" y1="10.5" x2="12" y2="10.5"/></svg>
@@ -101,8 +101,17 @@
           </button>
           <button id="updatesTab" class="nav-item" type="button">
             <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 a7 7 0 1 1 -6.3 4"/><path d="M3 3 v4 h4"/></svg>
-            Client updates
+            Windows Client updates
             <span id="updatesBadge" class="nav-badge hidden">0</span>
+          </button>
+          <button id="linuxInstallTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M11 2 L4 11.5 H9.5 L8.5 18 L16 8 H10.5 Z"/></svg>
+            Linux Client actions
+          </button>
+          <button id="linuxUpdatesTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 a7 7 0 1 1 -6.3 4"/><path d="M3 3 v4 h4"/></svg>
+            Linux Client updates
+            <span id="linuxUpdatesBadge" class="nav-badge hidden">0</span>
           </button>
         </div>
         <div class="nav-group">
@@ -726,6 +735,67 @@
           </div>
           <div id="installStatus" class="install-status empty">No install job started.</div>
           <div id="installHistory" class="install-history empty">No saved client action logs.</div>
+        </section>
+
+        <section id="linuxInstallView" class="install-panel hidden" aria-label="Linux client actions">
+          <div class="install-grid">
+            <div class="install-targets-field">
+              <div class="install-targets-textarea-wrap">
+                <label>
+                  Targets (hostnames or IPs)
+                  <textarea id="linuxInstallTargets" rows="4" placeholder="192.168.4.100&#10;192.168.4.101&#10;192.168.4.102-192.168.4.112"></textarea>
+                </label>
+              </div>
+            </div>
+            <div class="install-right-fields">
+              <label class="install-action-field">
+                Action
+                <select id="linuxClientAction">
+                  <option value="install">Install client</option>
+                  <option value="uninstall">Uninstall client</option>
+                </select>
+              </label>
+              <label class="install-server-field install-only">
+                Server URL
+                <input id="linuxInstallServerUrl" type="text" placeholder="http://192.168.1.1:8080/api/v1/linux/inventory">
+              </label>
+              <label class="install-server-field install-only">
+                Ingestion token
+                <input id="linuxInstallToken" type="text" autocomplete="off" placeholder="leave empty if not used">
+              </label>
+              <label class="install-server-field install-only">
+                Interval (hours)
+                <input id="linuxInstallIntervalHours" type="number" min="1" max="24" value="6">
+              </label>
+              <label class="install-server-field">
+                Install path
+                <input id="linuxInstallPath" type="text" value="/opt/windows-inventory-lite">
+              </label>
+              <label class="install-action-field">
+                Authentication
+                <select id="linuxInstallAuthMode">
+                  <option value="credentials">Stored Linux credentials</option>
+                  <option value="key">SSH key</option>
+                  <option value="ad">Use global AD settings</option>
+                </select>
+              </label>
+              <label id="linuxInstallCredentialsField" class="install-user-field hidden">
+                Linux user
+                <input id="linuxInstallUsername" type="text" autocomplete="username" placeholder="root">
+              </label>
+              <label id="linuxInstallPasswordField" class="install-password-field hidden">
+                Linux password
+                <input id="linuxInstallPassword" type="password" autocomplete="current-password">
+              </label>
+              <label id="linuxInstallKeyField" class="install-user-field hidden">
+                SSH key path
+                <input id="linuxInstallKeyPath" type="text" placeholder="C:\path\to\private-key.pem">
+              </label>
+              <button id="linuxInstallButton" class="primary-button install-submit-field" type="button">Install client</button>
+            </div>
+          </div>
+          <div id="linuxInstallStatus" class="install-status empty">No install job started.</div>
+          <div id="linuxInstallHistory" class="install-history empty">No saved client action logs.</div>
         </section>
 
         <section id="clientsView" aria-label="Client inventory">

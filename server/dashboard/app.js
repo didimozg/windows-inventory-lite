@@ -93,18 +93,20 @@
     if (hash === 'linux-software') return 'linuxSoftware';
     if (hash === 'linux-hardware') return 'linuxHardware';
     if (hash === 'admin-password' || hash === 'admin') return 'admin';
+    if (hash === 'linux-client-actions') return 'linuxInstall';
     return 'dashboard';
   }
 
   function setView(view) {
     state.view = view;
-    const hash = view === 'install' ? 'client-actions' : view === 'package' ? 'client-package' : view === 'updates' ? 'client-updates' : view === 'admin' ? 'admin-password' : view === 'linux' ? 'linux-clients' : view === 'linuxSoftware' ? 'linux-software' : view === 'linuxHardware' ? 'linux-hardware' : view;
+    const hash = view === 'install' ? 'client-actions' : view === 'linuxInstall' ? 'linux-client-actions' : view === 'package' ? 'client-package' : view === 'updates' ? 'client-updates' : view === 'admin' ? 'admin-password' : view === 'linux' ? 'linux-clients' : view === 'linuxSoftware' ? 'linux-software' : view === 'linuxHardware' ? 'linux-hardware' : view;
     if (window.location.hash.replace(/^#/, '') !== hash) {
       window.location.hash = hash;
       return;
     }
     render();
     if (view === 'install') loadInstallHistory();
+    if (view === 'linuxInstall') loadLinuxInstallHistory();
     if (view === 'package') loadPackageStatus();
     if (view === 'updates') loadClientUpdates();
     if (view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
@@ -934,6 +936,152 @@
       })
       .catch(error => {
         byId(statusElementId).textContent = `Install job status is not available: ${error.message}`;
+      });
+  }
+
+  function pollLinuxInstallJob(jobId, statusElementId = 'linuxInstallStatus', onComplete = loadLinuxInstallHistory, timerKey = 'linuxInstallPollTimer') {
+    fetch(`/api/v1/linux-client-install/${encodeURIComponent(jobId)}`, { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(job => {
+        renderInstallJob(job, statusElementId);
+        if (job.status === 'completed' && state[timerKey]) {
+          window.clearInterval(state[timerKey]);
+          state[timerKey] = null;
+          onComplete();
+        }
+      })
+      .catch(error => {
+        byId(statusElementId).textContent = `Install job status is not available: ${error.message}`;
+      });
+  }
+
+  // Parameterized (not hardcoded to the Linux Client actions page's own
+  // element ids) so the Linux Client updates page's own auth-mode selector
+  // (Task 10) can reuse this instead of duplicating it - the established
+  // pattern this project uses for this exact 3-way-select shape (see
+  // updateScheduleFieldVisibility).
+  function updateLinuxAuthModeFieldsUi(selectElementId, credentialsUserFieldId, passwordFieldId, keyFieldId) {
+    const mode = byId(selectElementId).value;
+    byId(credentialsUserFieldId).classList.toggle('hidden', mode === 'ad');
+    byId(passwordFieldId).classList.toggle('hidden', mode !== 'credentials');
+    byId(keyFieldId).classList.toggle('hidden', mode !== 'key');
+  }
+
+  function updateLinuxClientActionUi() {
+    const action = byId('linuxClientAction').value;
+    const isInstall = action === 'install';
+    document.querySelectorAll('#linuxInstallView .install-only').forEach(element => {
+      element.classList.toggle('hidden', !isInstall);
+    });
+    byId('linuxInstallButton').textContent = isInstall ? 'Install client' : 'Uninstall client';
+  }
+
+  function loadLinuxInstallHistory() {
+    fetch('/api/v1/linux-client-install', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.linuxInstallJobs = data.jobs || [];
+        renderLinuxInstallHistory();
+      })
+      .catch(error => {
+        byId('linuxInstallHistory').classList.add('empty');
+        byId('linuxInstallHistory').textContent = `Saved client action logs are not available: ${error.message}`;
+      });
+  }
+
+  function renderLinuxInstallHistory() {
+    const jobs = state.linuxInstallJobs || [];
+    if (jobs.length === 0) {
+      byId('linuxInstallHistory').classList.add('empty');
+      byId('linuxInstallHistory').textContent = 'No saved client action logs.';
+      return;
+    }
+
+    const rows = jobs.map(job => `<tr>
+      <td><button class="link-button" type="button" data-linux-install-job="${escapeHtml(job.id)}">${escapeHtml(job.id)}</button></td>
+      <td>${escapeHtml(job.action || 'install')}</td>
+      <td>${escapeHtml(job.status)}</td>
+      <td>${escapeHtml(formatDateTime(job.createdAt))}</td>
+      <td>${escapeHtml(formatDateTime(job.completedAt))}</td>
+      <td>${escapeHtml(job.targetCount)}</td>
+      <td>${escapeHtml(job.failedCount)}</td>
+    </tr>`).join('');
+
+    byId('linuxInstallHistory').classList.remove('empty');
+    byId('linuxInstallHistory').innerHTML = `<h2>Saved client action logs</h2>
+      <div class="install-history-results">
+        <table class="nested-table install-history-table">
+          <thead><tr><th>Job</th><th>Action</th><th>Status</th><th>Started</th><th>Completed</th><th>Targets</th><th>Failed</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+
+    document.querySelectorAll('[data-linux-install-job]').forEach(button => {
+      button.addEventListener('click', () => {
+        state.linuxInstallJobId = button.dataset.linuxInstallJob;
+        pollLinuxInstallJob(state.linuxInstallJobId);
+      });
+    });
+  }
+
+  function startLinuxClientActionJob() {
+    const action = byId('linuxClientAction').value;
+    const targets = byId('linuxInstallTargets').value.trim();
+    const serverUrl = byId('linuxInstallServerUrl').value.trim();
+    const token = byId('linuxInstallToken').value.trim();
+    const intervalHours = Number(byId('linuxInstallIntervalHours').value) || 6;
+    const installPath = byId('linuxInstallPath').value.trim() || '/opt/windows-inventory-lite';
+    const authMode = byId('linuxInstallAuthMode').value;
+    const username = authMode === 'ad' ? '' : byId('linuxInstallUsername').value.trim();
+    const password = authMode === 'credentials' ? byId('linuxInstallPassword').value : '';
+    const keyPath = authMode === 'key' ? byId('linuxInstallKeyPath').value.trim() : '';
+
+    if (!targets) {
+      window.alert('Enter at least one target.');
+      return;
+    }
+    if (action === 'install' && !serverUrl) {
+      window.alert('Enter server URL.');
+      return;
+    }
+
+    if (action === 'uninstall') {
+      const confirmed = window.confirm('Uninstall the client service from the selected Linux targets?');
+      if (!confirmed) return;
+    }
+
+    byId('linuxInstallButton').disabled = true;
+    byId('linuxInstallStatus').classList.add('empty');
+    byId('linuxInstallStatus').textContent = `Starting ${action} job...`;
+
+    fetch(action === 'uninstall' ? '/api/v1/linux-client-uninstall' : '/api/v1/linux-client-install', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targets, serverUrl, token, intervalHours, installPath, authMode, username, password, keyPath })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
+      .then(({ ok, status, data }) => {
+        if (!ok) throw new Error(data.error || `HTTP ${status}`);
+        return data;
+      })
+      .then(data => {
+        state.linuxInstallJobId = data.jobId;
+        if (state.linuxInstallPollTimer) window.clearInterval(state.linuxInstallPollTimer);
+        pollLinuxInstallJob(state.linuxInstallJobId);
+        state.linuxInstallPollTimer = window.setInterval(() => pollLinuxInstallJob(state.linuxInstallJobId), 3000);
+      })
+      .catch(error => {
+        byId('linuxInstallStatus').textContent = `Failed to start ${action} job: ${error.message}`;
+      })
+      .finally(() => {
+        byId('linuxInstallButton').disabled = false;
       });
   }
 
@@ -3059,6 +3207,7 @@
     byId('softwareView').classList.toggle('hidden', state.view !== 'software');
     byId('hardwareView').classList.toggle('hidden', state.view !== 'hardware');
     byId('installView').classList.toggle('hidden', state.view !== 'install');
+    byId('linuxInstallView').classList.toggle('hidden', state.view !== 'linuxInstall');
     byId('packageView').classList.toggle('hidden', state.view !== 'package');
     byId('updatesView').classList.toggle('hidden', state.view !== 'updates');
     byId('generalView').classList.toggle('hidden', state.view !== 'general');
@@ -3074,6 +3223,7 @@
     byId('softwareTab').classList.toggle('active', state.view === 'software');
     byId('hardwareTab').classList.toggle('active', state.view === 'hardware');
     byId('installTab').classList.toggle('active', state.view === 'install');
+    byId('linuxInstallTab').classList.toggle('active', state.view === 'linuxInstall');
     byId('packageTab').classList.toggle('active', state.view === 'package');
     byId('updatesTab').classList.toggle('active', state.view === 'updates');
     byId('generalTab').classList.toggle('active', state.view === 'general');
@@ -3306,10 +3456,12 @@
   byId('installTab').addEventListener('click', () => {
     setView('install');
   });
+  byId('linuxInstallTab').addEventListener('click', () => setView('linuxInstall'));
   window.addEventListener('hashchange', () => {
     state.view = getInitialView();
     render();
     if (state.view === 'install') loadInstallHistory();
+    if (state.view === 'linuxInstall') loadLinuxInstallHistory();
     if (state.view === 'package') loadPackageStatus();
     if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
     if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
@@ -3320,6 +3472,9 @@
   });
   byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
   byId('clientAction').addEventListener('change', updateClientActionUi);
+  byId('linuxClientAction').addEventListener('change', updateLinuxClientActionUi);
+  byId('linuxInstallAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField', 'linuxInstallKeyField'));
+  byId('linuxInstallButton').addEventListener('click', startLinuxClientActionJob);
   byId('installUseAdCredentials').addEventListener('change', updateInstallCredentialFieldsUi);
   byId('updatesUseAdCredentials').addEventListener('change', updateUpdatesCredentialFieldsUi);
   byId('installButton').addEventListener('click', startClientActionJob);
@@ -3509,4 +3664,7 @@
   if (state.view === 'admin') loadAdminPasswordStatus();
   updateClientActionUi();
   loadInstallHistory();
+  updateLinuxClientActionUi();
+  updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField', 'linuxInstallKeyField');
+  if (state.view === 'linuxInstall') loadLinuxInstallHistory();
 }());
