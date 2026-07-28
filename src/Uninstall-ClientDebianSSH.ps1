@@ -82,10 +82,25 @@ function Get-LinuxUninstallCommand {
         "${SudoPrefix}systemctl daemon-reload"
 }
 
+# Native commands merged via 2>&1 under this script's $ErrorActionPreference
+# = 'Stop' turn ANY stderr line into a terminating error - even benign
+# success output (systemctl's own confirmation text on success is written
+# to stderr). Temporarily relaxing to 'Continue' for the duration of the
+# native call is required so a successful systemctl disable/daemon-reload
+# doesn't get reported as a failure - same fix Install-ClientDebianSSH.ps1
+# already applies for the identical reason (found via live testing against
+# this project's real Debian test fleet).
 function Invoke-NativeAllowingStderr {
     param([scriptblock]$ScriptBlock)
-    $output = & $ScriptBlock
-    return $output
+
+    $previousEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $ScriptBlock
+    }
+    finally {
+        $ErrorActionPreference = $previousEap
+    }
 }
 
 function Invoke-PlinkWithPasswordFile {
