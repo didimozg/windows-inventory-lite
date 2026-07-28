@@ -107,7 +107,7 @@
     if (view === 'install') loadInstallHistory();
     if (view === 'package') loadPackageStatus();
     if (view === 'updates') loadClientUpdates();
-    if (view === 'general') loadGeneralSettings();
+    if (view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); }
     if (view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (view === 'licenses') loadLicenses();
     if (view === 'linux' || view === 'linuxSoftware' || view === 'linuxHardware') loadLinuxClients();
@@ -1924,6 +1924,53 @@
       });
   }
 
+  function loadIngestionTokenStatus() {
+    fetch('/api/v1/server/ingestion-token', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('ingestionTokenStatusText').textContent = data.configured
+          ? 'A token is configured. It cannot be viewed here - regenerate it if a client needs a value you can give it.'
+          : 'No token configured - inventory ingestion is unauthenticated. Regenerate to set one.';
+      })
+      .catch(error => {
+        showSavedMessage(byId('ingestionTokenMessage'), `Status unavailable: ${error.message}`, true);
+      });
+  }
+
+  // Deliberately does NOT use showSavedMessage - that helper auto-hides
+  // success messages after 30s, but this one shows the only copy of a
+  // freshly generated secret the admin will ever get from this page.
+  // isError styling (red) would also be semantically wrong for a
+  // successful generation, so this sets the message classes directly.
+  function regenerateIngestionToken() {
+    const confirmed = window.confirm('Regenerate the ingestion token? Every already-installed client will stop reporting until it is reinstalled or reconfigured with the new token. This cannot be undone.');
+    if (!confirmed) return;
+
+    byId('ingestionTokenRegenerateButton').disabled = true;
+
+    fetch('/api/v1/server/ingestion-token/regenerate', {
+      method: 'POST',
+      cache: 'no-store'
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Regenerate failed');
+        const messageEl = byId('ingestionTokenMessage');
+        messageEl.textContent = `New token (copy this now, it will not be shown again): ${data.token}`;
+        messageEl.className = 'pkg-message';
+        loadIngestionTokenStatus();
+      })
+      .catch(error => {
+        showSavedMessage(byId('ingestionTokenMessage'), `Regenerate failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('ingestionTokenRegenerateButton').disabled = false;
+      });
+  }
+
   function changeAdminPassword() {
     const configured = !!state.adminPasswordConfigured;
     const newUsername = byId('adminUsername').value.trim();
@@ -3162,7 +3209,7 @@
     if (state.view === 'install') loadInstallHistory();
     if (state.view === 'package') loadPackageStatus();
     if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
-    if (state.view === 'general') loadGeneralSettings();
+    if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); }
     if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (state.view === 'licenses') loadLicenses();
     if (state.view === 'linux' || state.view === 'linuxSoftware' || state.view === 'linuxHardware') loadLinuxClients();
@@ -3345,11 +3392,12 @@
   });
   byId('adminPasswordTab').addEventListener('click', () => setView('admin'));
   byId('adminPasswordSaveButton').addEventListener('click', changeAdminPassword);
+  byId('ingestionTokenRegenerateButton').addEventListener('click', regenerateIngestionToken);
   byId('themeToggle').addEventListener('click', toggleTheme);
   updateThemeToggle();
   if (state.view === 'package') loadPackageStatus();
   if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
-  if (state.view === 'general') loadGeneralSettings();
+  if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); }
   if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
   if (state.view === 'licenses') loadLicenses();
   if (state.view === 'linux' || state.view === 'linuxSoftware' || state.view === 'linuxHardware') loadLinuxClients();

@@ -281,6 +281,14 @@
             <p class="cert-hint">"Configure AD User" makes the domain/credentials below available to Client actions, Client updates, and AD Computer Import. "Sync Description from AD" additionally writes each computer's Active Directory description into its inventory record, read-only in the Clients table while it's on. Turn it off to edit Description manually instead - re-enabling it later overwrites any manual edits on the next sync. Reading the description attribute is allowed to any authenticated domain user by default AD ACLs, so the service account identity usually needs no special AD delegation.</p>
           </div>
           <div class="settings-block">
+            <h2 class="settings-block-title">Ingestion Token</h2>
+            <p id="ingestionTokenStatusText" class="pkg-status">Loading status...</p>
+            <div class="pkg-buttons">
+              <button id="ingestionTokenRegenerateButton" class="danger-button" type="button">Regenerate</button>
+            </div>
+            <div id="ingestionTokenMessage" class="pkg-message hidden"></div>
+          </div>
+          <div class="settings-block">
             <h2 class="settings-block-title">Diagnostics</h2>
             <div class="pkg-grid general-grid">
               <label class="check-label">
