@@ -21,7 +21,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.27.0";
+        internal const string ProductVersion = "0.27.1";
 
         private static int Main(string[] args)
         {
@@ -4424,6 +4424,14 @@ namespace WindowsInventoryLite
             string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
             string token = Convert.ToString(payload.ContainsKey("token") ? payload["token"] : "");
             string installPath = Convert.ToString(payload.ContainsKey("installPath") ? payload["installPath"] : "/opt/windows-inventory-lite");
+            // An explicit but blank/whitespace installPath in the payload (e.g. "") bypasses
+            // the ContainsKey default above - apply the same default here so the generated
+            // units/install.sh and saved settings never end up with an empty install path,
+            // matching what SendLinuxClientPackageStatus already defaults to on read.
+            if (String.IsNullOrWhiteSpace(installPath))
+            {
+                installPath = "/opt/windows-inventory-lite";
+            }
             int intervalHours = 6;
             if (payload.ContainsKey("intervalHours"))
             {
@@ -4451,7 +4459,7 @@ namespace WindowsInventoryLite
             }
             catch (ArgumentException ex)
             {
-                SendText(stream, "{\"error\":\"" + ex.Message.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                SendText(stream, "{\"error\":\"" + ex.Message.Replace("\\", "\\\\").Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
                 return;
             }
 
@@ -4462,7 +4470,10 @@ namespace WindowsInventoryLite
 
             File.WriteAllLines(Path.Combine(options.LinuxClientPackagePath, "wil-linux-client.service"), serviceLines, new UTF8Encoding(false));
             File.WriteAllLines(Path.Combine(options.LinuxClientPackagePath, "wil-linux-client.timer"), timerLines, new UTF8Encoding(false));
-            File.WriteAllLines(Path.Combine(options.LinuxClientPackagePath, "install.sh"), installScriptLines, new UTF8Encoding(false));
+            // install.sh runs on Linux via its shebang and relies on "set -e" - Environment.NewLine
+            // (WriteAllLines' default) is \r\n on Windows, which breaks the shebang interpreter lookup
+            // and turns "set -e" into the literal token "-e\r", silently disabling errexit. Force bare \n.
+            File.WriteAllText(Path.Combine(options.LinuxClientPackagePath, "install.sh"), String.Join("\n", installScriptLines) + "\n", new UTF8Encoding(false));
 
             Dictionary<string, object> settingsToSave = new Dictionary<string, object>();
             settingsToSave["serverUrl"] = serverUrl;
