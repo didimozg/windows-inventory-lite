@@ -1443,6 +1443,18 @@ namespace WindowsInventoryLite
                     {
                         SendLinuxSshToolsStatus(stream);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-package")
+                    {
+                        SendLinuxClientPackageStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-package/configure")
+                    {
+                        ConfigureLinuxClientPackage(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-package/download")
+                    {
+                        DownloadLinuxClientPackage(stream);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/server/certificate")
                     {
                         SendCertificateStatus(stream);
@@ -4350,6 +4362,164 @@ namespace WindowsInventoryLite
             SendBytes(stream, zipBytes, "application/zip", "windows-inventory-lite-client.zip");
         }
 
+        private void SendLinuxClientPackageStatus(Stream stream)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["packagePath"] = options.LinuxClientPackagePath;
+            result["packagePresent"] = Directory.Exists(options.LinuxClientPackagePath);
+
+            string binaryPath = Path.Combine(options.LinuxClientPackagePath, "wil-linux-client");
+            result["binaryPresent"] = File.Exists(binaryPath);
+            result["binaryVersion"] = GetLinuxClientPackageVersion();
+
+            string configPath = Path.Combine(options.LinuxClientPackagePath, "linux-package-settings.json");
+            if (File.Exists(configPath))
+            {
+                try
+                {
+                    Dictionary<string, object> saved = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(configPath, Encoding.UTF8));
+                    result["serverUrl"] = GetStringValue(saved, "serverUrl");
+                    result["token"] = GetStringValue(saved, "token");
+                    result["intervalHours"] = GetIntValue(saved, "intervalHours", 6);
+                    result["installPath"] = String.IsNullOrEmpty(GetStringValue(saved, "installPath")) ? "/opt/windows-inventory-lite" : GetStringValue(saved, "installPath");
+                }
+                catch
+                {
+                    result["serverUrl"] = null;
+                    result["token"] = null;
+                    result["intervalHours"] = 6;
+                    result["installPath"] = "/opt/windows-inventory-lite";
+                }
+            }
+            else
+            {
+                result["serverUrl"] = null;
+                result["token"] = null;
+                result["intervalHours"] = 6;
+                result["installPath"] = "/opt/windows-inventory-lite";
+            }
+
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void ConfigureLinuxClientPackage(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
+            string token = Convert.ToString(payload.ContainsKey("token") ? payload["token"] : "");
+            string installPath = Convert.ToString(payload.ContainsKey("installPath") ? payload["installPath"] : "/opt/windows-inventory-lite");
+            int intervalHours = 6;
+            if (payload.ContainsKey("intervalHours"))
+            {
+                if (!Int32.TryParse(Convert.ToString(payload["intervalHours"]), out intervalHours) || intervalHours < 1 || intervalHours > 24)
+                {
+                    SendText(stream, "{\"error\":\"intervalHours must be between 1 and 24\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
+
+            if (String.IsNullOrEmpty(serverUrl))
+            {
+                SendText(stream, "{\"error\":\"serverUrl is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string[] serviceLines;
+            string[] timerLines;
+            string[] installScriptLines;
+            try
+            {
+                serviceLines = GenerateSystemdUnitLines(installPath, serverUrl, token);
+                timerLines = GenerateSystemdTimerLines(intervalHours);
+                installScriptLines = GenerateLinuxInstallScriptLines(installPath);
+            }
+            catch (ArgumentException ex)
+            {
+                SendText(stream, "{\"error\":\"" + ex.Message.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            if (!Directory.Exists(options.LinuxClientPackagePath))
+            {
+                Directory.CreateDirectory(options.LinuxClientPackagePath);
+            }
+
+            File.WriteAllLines(Path.Combine(options.LinuxClientPackagePath, "wil-linux-client.service"), serviceLines, new UTF8Encoding(false));
+            File.WriteAllLines(Path.Combine(options.LinuxClientPackagePath, "wil-linux-client.timer"), timerLines, new UTF8Encoding(false));
+            File.WriteAllLines(Path.Combine(options.LinuxClientPackagePath, "install.sh"), installScriptLines, new UTF8Encoding(false));
+
+            Dictionary<string, object> settingsToSave = new Dictionary<string, object>();
+            settingsToSave["serverUrl"] = serverUrl;
+            settingsToSave["token"] = token;
+            settingsToSave["intervalHours"] = intervalHours;
+            settingsToSave["installPath"] = installPath;
+            File.WriteAllText(Path.Combine(options.LinuxClientPackagePath, "linux-package-settings.json"), serializer.Serialize(settingsToSave), new UTF8Encoding(false));
+
+            SendLinuxClientPackageStatus(stream);
+        }
+
+        private void DownloadLinuxClientPackage(Stream stream)
+        {
+            if (!Directory.Exists(options.LinuxClientPackagePath))
+            {
+                SendText(stream, "Linux client package directory not found.", "text/plain; charset=utf-8", 404);
+                return;
+            }
+
+            string binaryPath = Path.Combine(options.LinuxClientPackagePath, "wil-linux-client");
+            if (!File.Exists(binaryPath))
+            {
+                SendText(stream, "{\"error\":\"No Linux client binary found - run Build-LinuxClient.ps1 and place the output in the Linux client package directory first.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string installScriptPath = Path.Combine(options.LinuxClientPackagePath, "install.sh");
+            if (!File.Exists(installScriptPath))
+            {
+                SendText(stream, "{\"error\":\"Configure the server URL on this page and save before downloading - install.sh has not been generated yet.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string[] includeNames = {
+                "wil-linux-client",
+                "wil-linux-client.service",
+                "wil-linux-client.timer",
+                "install.sh"
+            };
+
+            List<string> names = new List<string>();
+            List<byte[]> contents = new List<byte[]>();
+
+            foreach (string name in includeNames)
+            {
+                string path = Path.Combine(options.LinuxClientPackagePath, name);
+                if (File.Exists(path))
+                {
+                    names.Add(name);
+                    contents.Add(File.ReadAllBytes(path));
+                }
+            }
+
+            byte[] zipBytes = BuildZip(names, contents);
+            SendBytes(stream, zipBytes, "application/zip", "windows-inventory-lite-linux-client.zip");
+        }
+
         private Dictionary<string, object> BuildCertificateStatusPayload()
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
@@ -6036,6 +6206,137 @@ namespace WindowsInventoryLite
             return lines.ToArray();
         }
 
+        // Must stay byte-for-byte in sync with New-SystemdUnitFiles
+        // (Install-ClientDebianSSH.ps1) - same two independent generators,
+        // one per runtime, that this project already maintains for the
+        // Windows GPO cmd-generation pair (GenerateCmdLines here vs.
+        // New-ClientGpoPackage.ps1's own copy). Cross-checked by
+        // TestGenerateSystemdUnitLinesMatchesPowerShellFormat below.
+        private static string[] GenerateSystemdUnitLines(string installDirectory, string url, string sharedToken)
+        {
+            ValidatePosixShellSafe(installDirectory, "installDirectory");
+            ValidatePosixShellSafe(url, "url");
+            ValidatePosixShellSafe(sharedToken, "sharedToken");
+
+            string execStart = installDirectory + "/wil-linux-client --server-url \"" + url + "\"";
+            if (!String.IsNullOrEmpty(sharedToken))
+            {
+                execStart += " --token \"" + sharedToken + "\"";
+            }
+
+            List<string> lines = new List<string>();
+            lines.Add("[Unit]");
+            lines.Add("Description=Windows Inventory Lite - Linux client (one-shot report)");
+            lines.Add("");
+            lines.Add("[Service]");
+            lines.Add("Type=oneshot");
+            lines.Add("ExecStart=" + execStart);
+            return lines.ToArray();
+        }
+
+        private static string[] GenerateSystemdTimerLines(int hours)
+        {
+            List<string> lines = new List<string>();
+            lines.Add("[Unit]");
+            lines.Add("Description=Runs the Windows Inventory Lite Linux client every " + hours + " hour(s)");
+            lines.Add("");
+            lines.Add("[Timer]");
+            lines.Add("OnBootSec=5min");
+            lines.Add("OnUnitActiveSec=" + hours + "h");
+            lines.Add("Unit=wil-linux-client.service");
+            lines.Add("");
+            lines.Add("[Install]");
+            lines.Add("WantedBy=timers.target");
+            return lines.ToArray();
+        }
+
+        // Mirrors Get-LinuxUninstallCommand (Task 3) as closely as the
+        // install-vs-uninstall difference allows: same
+        // systemctl/InstallPath shape, generated for local (not SSH)
+        // execution by whoever deploys this package.
+        private static string[] GenerateLinuxInstallScriptLines(string installPath)
+        {
+            ValidatePosixShellSafe(installPath, "installPath");
+
+            List<string> lines = new List<string>();
+            lines.Add("#!/bin/sh");
+            lines.Add("set -e");
+            lines.Add("");
+            lines.Add("SCRIPT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"");
+            lines.Add("INSTALL_PATH=\"" + installPath + "\"");
+            lines.Add("");
+            lines.Add("sudo mkdir -p \"$INSTALL_PATH\"");
+            lines.Add("sudo cp \"$SCRIPT_DIR/wil-linux-client\" \"$INSTALL_PATH/wil-linux-client\"");
+            lines.Add("sudo chmod 755 \"$INSTALL_PATH/wil-linux-client\"");
+            lines.Add("sudo cp \"$SCRIPT_DIR/wil-linux-client.service\" /etc/systemd/system/wil-linux-client.service");
+            lines.Add("sudo cp \"$SCRIPT_DIR/wil-linux-client.timer\" /etc/systemd/system/wil-linux-client.timer");
+            lines.Add("sudo systemctl daemon-reload");
+            lines.Add("sudo systemctl enable --now wil-linux-client.timer");
+            lines.Add("");
+            lines.Add("echo \"Windows Inventory Lite Linux client installed to $INSTALL_PATH.\"");
+            return lines.ToArray();
+        }
+
+        private static string TestGenerateSystemdUnitLinesMatchesPowerShellFormat()
+        {
+            string[] serviceLines = GenerateSystemdUnitLines("/opt/windows-inventory-lite", "https://example.local/api/v1/linux/inventory", "");
+            string serviceContent = String.Join("\n", serviceLines);
+            if (!serviceContent.Contains("Type=oneshot"))
+            {
+                return "expected service content to contain 'Type=oneshot'";
+            }
+            if (!serviceContent.Contains("ExecStart=/opt/windows-inventory-lite/wil-linux-client --server-url \"https://example.local/api/v1/linux/inventory\""))
+            {
+                return "expected ExecStart line to match the PowerShell generator's format exactly, got: " + serviceContent;
+            }
+            if (serviceContent.Contains("--token"))
+            {
+                return "expected no --token when sharedToken is empty";
+            }
+
+            string[] serviceLinesWithToken = GenerateSystemdUnitLines("/opt/windows-inventory-lite", "https://example.local/api/v1/linux/inventory", "secret-token");
+            if (!String.Join("\n", serviceLinesWithToken).Contains("--token \"secret-token\""))
+            {
+                return "expected --token \"secret-token\" when sharedToken is provided";
+            }
+
+            string[] timerLines = GenerateSystemdTimerLines(12);
+            string timerContent = String.Join("\n", timerLines);
+            if (!timerContent.Contains("OnUnitActiveSec=12h") || !timerContent.Contains("Unit=wil-linux-client.service"))
+            {
+                return "expected timer content to match the PowerShell generator's format exactly, got: " + timerContent;
+            }
+            return null;
+        }
+
+        private static string TestGenerateSystemdUnitLinesRejectsUnsafeCharacters()
+        {
+            try
+            {
+                GenerateSystemdUnitLines("/opt/wil; rm -rf /", "https://example.local", "");
+                return "expected an unsafe installDirectory to be rejected";
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+        }
+
+        private static string TestGenerateLinuxInstallScriptLinesProducesValidShellSyntax()
+        {
+            string[] lines = GenerateLinuxInstallScriptLines("/opt/windows-inventory-lite");
+            string content = String.Join("\n", lines);
+            if (!content.StartsWith("#!/bin/sh"))
+            {
+                return "expected a #!/bin/sh shebang as the first line";
+            }
+            if (!content.Contains("systemctl enable --now wil-linux-client.timer"))
+            {
+                return "expected the script to enable the timer";
+            }
+            return null;
+        }
+
         // 0x4a21 (used for both the local file header and the matching
         // central directory entry below) is a fixed DOS date/time stamp -
         // no real per-file timestamp is tracked or needed for this
@@ -6210,6 +6511,9 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "GenerateRandomToken returns a 64-character lowercase hex string, different each call", TestGenerateRandomTokenShape);
             allPassed &= SelfTestCheck(output, "Ingestion token configured-state reflects whether options.Token is set", TestSendIngestionTokenStatusReflectsConfiguredState);
             allPassed &= SelfTestCheck(output, "Linux SSH tools status reflects plink.exe/pscp.exe file presence", TestSendLinuxSshToolsStatusReflectsFilePresence);
+            allPassed &= SelfTestCheck(output, "GenerateSystemdUnitLines matches the PowerShell New-SystemdUnitFiles format", TestGenerateSystemdUnitLinesMatchesPowerShellFormat);
+            allPassed &= SelfTestCheck(output, "GenerateSystemdUnitLines rejects shell-unsafe installDirectory", TestGenerateSystemdUnitLinesRejectsUnsafeCharacters);
+            allPassed &= SelfTestCheck(output, "GenerateLinuxInstallScriptLines produces a script with a valid shebang and enable step", TestGenerateLinuxInstallScriptLinesProducesValidShellSyntax);
             return allPassed;
         }
 
