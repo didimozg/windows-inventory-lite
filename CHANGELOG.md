@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.27.0] - 2026-07-27
+
+### Added
+
+- Settings > General gains an "Ingestion Token" section: shows whether an ingestion token is configured and lets an admin regenerate it. Write-only, matching the Admin Password page - the current value is never displayed, only shown once immediately after a regenerate action.
+
+### Fixed
+
+- `_licenses/licenses.json` is now restricted to Administrators+SYSTEM, matching the protection `server-config.json` already had - the license form's "License" field can hold a real product key, not just a category label.
+- `Install-Server.ps1` now actually auto-generates a random ingestion token when none is provided and none was previously saved, matching what the wizard's own prompt text has always claimed ("leave blank to auto-generate"). Previously, leaving the token blank left inventory ingestion completely unauthenticated instead of protected by an unseen random value - affected every install that used the Quick Install path (W9), since the ingestion token is not one of its 4 asked questions.
+
 ## [0.26.0] - 2026-07-23
 
 ### Added
