@@ -43,6 +43,30 @@ $ErrorActionPreference = 'Stop'
 
 $script:usingPassword = $PSCmdlet.ParameterSetName -eq 'Password'
 
+# POSIX shell metacharacters - InstallPath/ServerUrl/Token end up
+# interpolated into a remote shell command string built in this script
+# (see Invoke-RemoteCommand's callers), so a value containing any of
+# these could inject additional commands on the TARGET machine. Rejects
+# rather than attempts to safely quote/escape, matching this project's
+# existing ValidateBatchSafe convention for the Windows GPO cmd path.
+function Test-PosixShellSafe {
+    param(
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$Value,
+        [string]$FieldName
+    )
+    if ([string]::IsNullOrEmpty($Value)) {
+        return
+    }
+    $unsafeChars = '`', '$', '"', "'", '\', ';', '|', '&', '<', '>', '(', ')', "`r", "`n"
+    foreach ($char in $unsafeChars) {
+        if ($Value.Contains($char)) {
+            throw "$FieldName contains a character that is not allowed here (``, `$, `", ', \, ;, |, &, <, >, (, ), or a line break)."
+        }
+    }
+}
+
 function ConvertTo-PlainText {
     param([System.Security.SecureString]$Secure)
     $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)

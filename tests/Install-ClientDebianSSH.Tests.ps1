@@ -8,6 +8,20 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
         . $script:ScriptPath -ComputerName 'unused-for-dot-source-test' -ServerUrl 'https://example.local/api/v1/linux/inventory' -CredentialUsername 'root' -CredentialPassword $securePassword
     }
 
+    It 'Test-PosixShellSafe throws on POSIX shell metacharacters' {
+        $unsafeValues = @('/opt/wil; rm -rf /', '$(rm -rf /)', '`rm -rf /`', 'a|b', 'a&b', "line1`nline2")
+        foreach ($value in $unsafeValues) {
+            { Test-PosixShellSafe -Value $value -FieldName 'testField' } | Should -Throw
+        }
+    }
+
+    It 'Test-PosixShellSafe does not throw on safe values, empty, or null' {
+        $safeValues = @('/opt/windows-inventory-lite', 'https://server.example.local:8080/api/v1/linux/inventory', 'a1b2c3', '', $null)
+        foreach ($value in $safeValues) {
+            { Test-PosixShellSafe -Value $value -FieldName 'testField' } | Should -Not -Throw
+        }
+    }
+
     It 'New-SystemdUnitFiles writes a oneshot service with the correct ExecStart' {
         $dir = Join-Path -Path $TestDrive -ChildPath 'units1'
         New-Item -Path $dir -ItemType Directory -Force | Out-Null

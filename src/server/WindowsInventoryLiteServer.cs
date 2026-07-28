@@ -4980,6 +4980,26 @@ namespace WindowsInventoryLite
             }
         }
 
+        // POSIX shell metacharacters - these values are interpolated into a
+        // generated remote SSH command (Invoke-RemoteCommand's -Command
+        // argument, on the TARGET Linux machine), a generated systemd unit
+        // file, or a generated install.sh for the downloadable Linux
+        // package. Unlike ValidateBatchSafe's cmd.exe set above, POSIX
+        // shells also treat $, `, single/double quotes, backslash, and
+        // parentheses as live metacharacters - all rejected here rather
+        // than attempting to safely quote/escape them, matching this
+        // project's existing reject-rather-than-escape convention for the
+        // Windows GPO cmd-generation path.
+        private static readonly char[] PosixShellUnsafeChars = { '`', '$', '"', '\'', '\\', ';', '|', '&', '<', '>', '(', ')', '\r', '\n' };
+
+        private static void ValidatePosixShellSafe(string value, string fieldName)
+        {
+            if (!String.IsNullOrEmpty(value) && value.IndexOfAny(PosixShellUnsafeChars) >= 0)
+            {
+                throw new ArgumentException(fieldName + " contains a character that is not allowed here (`, $, \", ', \\, ;, |, &, <, >, (, ), or a line break).");
+            }
+        }
+
         private static string[] GenerateCmdLines(string serverUrl, string token, int intervalHours, string packageSharePath)
         {
             ValidateBatchSafe(serverUrl, "serverUrl");
@@ -5167,6 +5187,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "NeedsMigration flags a plaintext value", TestNeedsMigrationPlaintextValue);
             allPassed &= SelfTestCheck(output, "NeedsMigration does not flag an already-encrypted or empty value", TestNeedsMigrationAlreadyEncryptedOrEmpty);
             allPassed &= SelfTestCheck(output, "GenerateCmdLines rejects serverUrl/token/packageSharePath containing batch-unsafe characters", TestGenerateCmdLinesRejectsUnsafeCharacters);
+            allPassed &= SelfTestCheck(output, "ValidatePosixShellSafe rejects POSIX shell metacharacters", TestValidatePosixShellSafeRejectsUnsafeCharacters);
+            allPassed &= SelfTestCheck(output, "ValidatePosixShellSafe accepts safe values including null/empty", TestValidatePosixShellSafeAcceptsSafeValues);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent matches either package version", TestIsClientVersionCurrentMatchesEitherPackage);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent is outdated when it matches neither package", TestIsClientVersionCurrentOutdatedWhenMatchesNeither);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent treats an empty clientVersion as outdated", TestIsClientVersionCurrentTreatsEmptyAsOutdated);
@@ -5828,6 +5850,41 @@ namespace WindowsInventoryLite
                 catch (ArgumentException)
                 {
                     // expected
+                }
+            }
+            return null;
+        }
+
+        private static string TestValidatePosixShellSafeRejectsUnsafeCharacters()
+        {
+            string[] unsafeValues = { "/opt/wil; rm -rf /", "$(rm -rf /)", "`rm -rf /`", "path\"with\"quotes", "path'with'quotes", "path\\with\\backslash", "a|b", "a&b", "a<b", "a>b", "a(b)", "line1\nline2", "line1\rline2" };
+            foreach (string unsafeValue in unsafeValues)
+            {
+                try
+                {
+                    ValidatePosixShellSafe(unsafeValue, "testField");
+                    return "expected value '" + unsafeValue + "' to be rejected, but ValidatePosixShellSafe accepted it";
+                }
+                catch (ArgumentException)
+                {
+                    // expected
+                }
+            }
+            return null;
+        }
+
+        private static string TestValidatePosixShellSafeAcceptsSafeValues()
+        {
+            string[] safeValues = { "/opt/windows-inventory-lite", "https://server.example.local:8080/api/v1/linux/inventory", "a1b2c3d4e5f6", "" , null };
+            foreach (string safeValue in safeValues)
+            {
+                try
+                {
+                    ValidatePosixShellSafe(safeValue, "testField");
+                }
+                catch (ArgumentException ex)
+                {
+                    return "expected value '" + safeValue + "' to be accepted, but ValidatePosixShellSafe rejected it: " + ex.Message;
                 }
             }
             return null;
