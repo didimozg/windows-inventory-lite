@@ -798,6 +798,64 @@
           <div id="linuxInstallHistory" class="install-history empty">No saved client action logs.</div>
         </section>
 
+        <section id="linuxUpdatesView" class="install-panel hidden" aria-label="Linux client updates">
+          <div class="settings-block">
+            <h2 class="settings-block-title">Authentication</h2>
+            <p class="cert-hint">Uses the credentials saved in Settings &gt; General &gt; Linux Client update credentials, unless "Use global AD settings" is selected below.</p>
+            <label class="pkg-token-field">
+              Authentication
+              <select id="linuxUpdatesAuthMode">
+                <option value="credentials">Stored Linux credentials</option>
+                <option value="key">SSH key</option>
+                <option value="ad">Use global AD settings</option>
+              </select>
+            </label>
+          </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Schedule</h2>
+            <p class="cert-hint">Automatically pushes to whichever Linux clients are outdated when the schedule fires - independent of the Windows Client updates schedule. Uses the saved Linux credentials above (AD reuse is not available for the scheduled path, only for a manual "Update selected" push).</p>
+            <div class="pkg-grid client-update-schedule-panel">
+              <label class="pkg-token-field">
+                Schedule
+                <select id="linuxUpdatesScheduleMode">
+                  <option value="off">Off</option>
+                  <option value="once">Run once</option>
+                  <option value="interval">Every N hours</option>
+                </select>
+              </label>
+              <label id="linuxUpdatesScheduleOnceField" class="pkg-token-field hidden">
+                Run at
+                <input id="linuxUpdatesScheduleOnceAt" type="datetime-local">
+              </label>
+              <label id="linuxUpdatesScheduleIntervalField" class="pkg-token-field hidden">
+                Every (hours)
+                <input id="linuxUpdatesScheduleIntervalHours" type="number" min="1" max="8760" value="24">
+              </label>
+              <div class="pkg-buttons">
+                <button id="linuxUpdatesScheduleSaveButton" class="primary-button" type="button">Save</button>
+              </div>
+            </div>
+            <div id="linuxUpdatesScheduleMessage" class="pkg-message hidden"></div>
+          </div>
+          <p id="linuxUpdatesPackageStatus" class="pkg-status">Loading client update status...</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Hostname</th>
+                  <th>Current version</th>
+                  <th>Available version</th>
+                  <th>Last collected</th>
+                  <th><input id="linuxUpdatesSelectAll" type="checkbox" title="Select all"></th>
+                </tr>
+              </thead>
+              <tbody id="linuxUpdatesBody"></tbody>
+            </table>
+          </div>
+          <button id="linuxUpdatesPushButton" class="primary-button" type="button" disabled>Update selected</button>
+          <div id="linuxUpdatesStatus" class="install-status empty">No update job started.</div>
+        </section>
+
         <section id="clientsView" aria-label="Client inventory">
           <div class="view-toolbar">
             <button id="exportClientsBtn" class="export-button" type="button">Export CSV</button>

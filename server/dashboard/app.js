@@ -94,12 +94,13 @@
     if (hash === 'linux-hardware') return 'linuxHardware';
     if (hash === 'admin-password' || hash === 'admin') return 'admin';
     if (hash === 'linux-client-actions') return 'linuxInstall';
+    if (hash === 'linux-client-updates') return 'linuxUpdates';
     return 'dashboard';
   }
 
   function setView(view) {
     state.view = view;
-    const hash = view === 'install' ? 'client-actions' : view === 'linuxInstall' ? 'linux-client-actions' : view === 'package' ? 'client-package' : view === 'updates' ? 'client-updates' : view === 'admin' ? 'admin-password' : view === 'linux' ? 'linux-clients' : view === 'linuxSoftware' ? 'linux-software' : view === 'linuxHardware' ? 'linux-hardware' : view;
+    const hash = view === 'install' ? 'client-actions' : view === 'linuxInstall' ? 'linux-client-actions' : view === 'linuxUpdates' ? 'linux-client-updates' : view === 'package' ? 'client-package' : view === 'updates' ? 'client-updates' : view === 'admin' ? 'admin-password' : view === 'linux' ? 'linux-clients' : view === 'linuxSoftware' ? 'linux-software' : view === 'linuxHardware' ? 'linux-hardware' : view;
     if (window.location.hash.replace(/^#/, '') !== hash) {
       window.location.hash = hash;
       return;
@@ -107,6 +108,7 @@
     render();
     if (view === 'install') loadInstallHistory();
     if (view === 'linuxInstall') loadLinuxInstallHistory();
+    if (view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
     if (view === 'package') loadPackageStatus();
     if (view === 'updates') loadClientUpdates();
     if (view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
@@ -1353,6 +1355,155 @@
 
     byId('updatesBody').innerHTML = rows.join('');
     updateUpdatesBadge(data.outdatedCount);
+  }
+
+  function loadLinuxClientUpdates() {
+    fetch('/api/v1/linux-client-updates', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.linuxClientUpdates = data;
+        renderLinuxClientUpdates(data);
+      })
+      .catch(error => {
+        byId('linuxUpdatesPackageStatus').textContent = `Client update status unavailable: ${error.message}`;
+      });
+  }
+
+  function updateLinuxUpdatesBadge(count) {
+    const badge = byId('linuxUpdatesBadge');
+    if (count > 0) {
+      badge.textContent = String(count);
+      badge.classList.remove('hidden');
+    } else {
+      badge.classList.add('hidden');
+    }
+  }
+
+  function renderLinuxClientUpdates(data) {
+    if (!data.packageAvailable) {
+      byId('linuxUpdatesPackageStatus').textContent = 'No Linux client package is available yet - build one on the Client package tab first.';
+      byId('linuxUpdatesBody').innerHTML = '';
+      updateLinuxUpdatesBadge(0);
+      return;
+    }
+
+    const updates = data.updates || [];
+    updateLinuxUpdatesBadge(updates.length);
+    byId('linuxUpdatesPackageStatus').textContent = `Current package version: v${escapeHtml(data.currentVersion)}. ${updates.length} client(s) outdated.`;
+
+    if (updates.length === 0) {
+      byId('linuxUpdatesBody').innerHTML = '<tr><td colspan="5" class="empty">All Linux clients are up to date.</td></tr>';
+      byId('linuxUpdatesPushButton').disabled = true;
+      return;
+    }
+
+    byId('linuxUpdatesBody').innerHTML = updates.map(entry => `<tr>
+      <td>${escapeHtml(entry.hostname)}</td>
+      <td>${escapeHtml(entry.clientVersion || 'unknown')}</td>
+      <td>v${escapeHtml(data.currentVersion)}</td>
+      <td>${escapeHtml(formatDateTime(entry.sourceUpdatedAt))}</td>
+      <td><input type="checkbox" class="linux-update-select" value="${escapeHtml(entry.hostname)}"></td>
+    </tr>`).join('');
+
+    document.querySelectorAll('.linux-update-select').forEach(checkbox => {
+      checkbox.addEventListener('change', updateLinuxUpdatesPushButtonState);
+    });
+    updateLinuxUpdatesPushButtonState();
+  }
+
+  function updateLinuxUpdatesPushButtonState() {
+    const anyChecked = document.querySelectorAll('.linux-update-select:checked').length > 0;
+    byId('linuxUpdatesPushButton').disabled = !anyChecked;
+  }
+
+  function startLinuxUpdatesPush() {
+    const selected = Array.from(document.querySelectorAll('.linux-update-select:checked')).map(cb => cb.value);
+    if (selected.length === 0) return;
+
+    const authMode = byId('linuxUpdatesAuthMode').value;
+    byId('linuxUpdatesPushButton').disabled = true;
+    byId('linuxUpdatesStatus').classList.add('empty');
+    byId('linuxUpdatesStatus').textContent = 'Starting update job...';
+
+    fetch('/api/v1/linux-client-install', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targets: selected.join('\n'), authMode })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
+      .then(({ ok, status, data }) => {
+        if (!ok) throw new Error(data.error || `HTTP ${status}`);
+        return data;
+      })
+      .then(data => {
+        state.linuxUpdatesJobId = data.jobId;
+        if (state.linuxUpdatesPollTimer) window.clearInterval(state.linuxUpdatesPollTimer);
+        pollLinuxInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', loadLinuxClientUpdates, 'linuxUpdatesPollTimer');
+        state.linuxUpdatesPollTimer = window.setInterval(() => pollLinuxInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', loadLinuxClientUpdates, 'linuxUpdatesPollTimer'), 3000);
+      })
+      .catch(error => {
+        byId('linuxUpdatesStatus').textContent = `Failed to start update job: ${error.message}`;
+      })
+      .finally(() => {
+        byId('linuxUpdatesPushButton').disabled = false;
+      });
+  }
+
+  function updateLinuxUpdatesScheduleFieldVisibility() {
+    const mode = byId('linuxUpdatesScheduleMode').value;
+    byId('linuxUpdatesScheduleOnceField').classList.toggle('hidden', mode !== 'once');
+    byId('linuxUpdatesScheduleIntervalField').classList.toggle('hidden', mode !== 'interval');
+  }
+
+  function loadLinuxUpdateSchedule() {
+    fetch('/api/v1/linux-client-updates/schedule', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('linuxUpdatesScheduleMode').value = data.mode || 'off';
+        if (data.onceAtUtc) byId('linuxUpdatesScheduleOnceAt').value = data.onceAtUtc.slice(0, 16);
+        byId('linuxUpdatesScheduleIntervalHours').value = data.intervalHours || 24;
+        updateLinuxUpdatesScheduleFieldVisibility();
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxUpdatesScheduleMessage'), `Schedule status unavailable: ${error.message}`, true);
+      });
+  }
+
+  function saveLinuxUpdateSchedule() {
+    const mode = byId('linuxUpdatesScheduleMode').value;
+    const body = { mode };
+    if (mode === 'once') {
+      body.onceAtUtc = byId('linuxUpdatesScheduleOnceAt').value;
+    }
+    if (mode === 'interval') {
+      body.intervalHours = Number(byId('linuxUpdatesScheduleIntervalHours').value) || 24;
+    }
+
+    byId('linuxUpdatesScheduleSaveButton').disabled = true;
+    fetch('/api/v1/linux-client-updates/schedule', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        showSavedMessage(byId('linuxUpdatesScheduleMessage'), 'Saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxUpdatesScheduleMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('linuxUpdatesScheduleSaveButton').disabled = false;
+      });
   }
 
   // Shared by the initial page-load badge fetch and pollForUpdates()'s own
@@ -3208,6 +3359,7 @@
     byId('hardwareView').classList.toggle('hidden', state.view !== 'hardware');
     byId('installView').classList.toggle('hidden', state.view !== 'install');
     byId('linuxInstallView').classList.toggle('hidden', state.view !== 'linuxInstall');
+    byId('linuxUpdatesView').classList.toggle('hidden', state.view !== 'linuxUpdates');
     byId('packageView').classList.toggle('hidden', state.view !== 'package');
     byId('updatesView').classList.toggle('hidden', state.view !== 'updates');
     byId('generalView').classList.toggle('hidden', state.view !== 'general');
@@ -3224,6 +3376,7 @@
     byId('hardwareTab').classList.toggle('active', state.view === 'hardware');
     byId('installTab').classList.toggle('active', state.view === 'install');
     byId('linuxInstallTab').classList.toggle('active', state.view === 'linuxInstall');
+    byId('linuxUpdatesTab').classList.toggle('active', state.view === 'linuxUpdates');
     byId('packageTab').classList.toggle('active', state.view === 'package');
     byId('updatesTab').classList.toggle('active', state.view === 'updates');
     byId('generalTab').classList.toggle('active', state.view === 'general');
@@ -3462,6 +3615,7 @@
     render();
     if (state.view === 'install') loadInstallHistory();
     if (state.view === 'linuxInstall') loadLinuxInstallHistory();
+    if (state.view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
     if (state.view === 'package') loadPackageStatus();
     if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
     if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
@@ -3475,6 +3629,16 @@
   byId('linuxClientAction').addEventListener('change', updateLinuxClientActionUi);
   byId('linuxInstallAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField', 'linuxInstallKeyField'));
   byId('linuxInstallButton').addEventListener('click', startLinuxClientActionJob);
+  byId('linuxUpdatesAuthMode').addEventListener('change', () => {});
+  byId('linuxUpdatesSelectAll').addEventListener('change', () => {
+    const checked = byId('linuxUpdatesSelectAll').checked;
+    document.querySelectorAll('.linux-update-select').forEach(cb => { cb.checked = checked; });
+    updateLinuxUpdatesPushButtonState();
+  });
+  byId('linuxUpdatesPushButton').addEventListener('click', startLinuxUpdatesPush);
+  byId('linuxUpdatesScheduleMode').addEventListener('change', updateLinuxUpdatesScheduleFieldVisibility);
+  byId('linuxUpdatesScheduleSaveButton').addEventListener('click', saveLinuxUpdateSchedule);
+  byId('linuxUpdatesTab').addEventListener('click', () => setView('linuxUpdates'));
   byId('installUseAdCredentials').addEventListener('change', updateInstallCredentialFieldsUi);
   byId('updatesUseAdCredentials').addEventListener('change', updateUpdatesCredentialFieldsUi);
   byId('installButton').addEventListener('click', startClientActionJob);
@@ -3656,6 +3820,7 @@
   byId('themeToggle').addEventListener('click', toggleTheme);
   updateThemeToggle();
   if (state.view === 'package') loadPackageStatus();
+  if (state.view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
   if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
   if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
   if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
