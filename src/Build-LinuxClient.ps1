@@ -52,5 +52,15 @@ finally {
     Remove-Item Env:\CGO_ENABLED -ErrorAction SilentlyContinue
 }
 
+# The built binary is a Linux ELF executable - the Windows-hosted server
+# cannot read a PE version resource from it (that's how GetExeVersion
+# reads the Windows client's own version) and should not try to execute a
+# foreign-OS binary just to ask its version. This sidecar file is the
+# server's only source of truth for "what version is currently built" for
+# the Linux client update-detection endpoint.
+$versionSidecarPath = "$OutputPath.version"
+[System.IO.File]::WriteAllText($versionSidecarPath, $Version, (New-Object System.Text.UTF8Encoding($false)))
+
 Write-Host "Linux client built: $OutputPath"
 Write-Host "Version: $Version"
+Write-Host "Version sidecar: $versionSidecarPath"
