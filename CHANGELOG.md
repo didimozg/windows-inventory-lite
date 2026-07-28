@@ -6,12 +6,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
-## [0.27.1] - 2026-07-28
-
-### Fixed
-
-- Task 7 review fixes for the Linux client package feature: `ConfigureLinuxClientPackage`'s 400 error handler now escapes backslashes before quotes in `ex.Message` (previously only quotes were escaped, so any `ValidatePosixShellSafe` rejection - which always lists `\` among the disallowed characters - produced invalid JSON on every single rejection). The generated `install.sh` is now written with forced `\n` line endings instead of `Environment.NewLine`, which was `\r\n` on Windows and broke the script's shebang and silently disabled `set -e` on the Linux target. An empty/whitespace-only `installPath` in the configure request is now defaulted to `/opt/windows-inventory-lite` before being used to generate the systemd units/install.sh and before being saved, matching the default the status endpoint already applied on read - previously the dashboard could show the correct-looking default while the actually-shipped package had an empty install path baked in.
-
 ## [0.27.0] - 2026-07-27
 
 ### Added
