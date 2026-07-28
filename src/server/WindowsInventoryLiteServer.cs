@@ -654,7 +654,7 @@ namespace WindowsInventoryLite
         // know their own job.Id locally, from the response of the request
         // that created them) - only the schedule timer sets this.
         private volatile string lastScheduledUpdateJobId;
-        private string lastScheduledLinuxUpdateJobId;
+        private volatile string lastScheduledLinuxUpdateJobId;
         private readonly object licensesLock = new object();
         private readonly object certificateHistoryLock = new object();
         private readonly object listenerRestartLock = new object();
