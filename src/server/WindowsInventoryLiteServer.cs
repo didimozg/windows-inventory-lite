@@ -1439,6 +1439,10 @@ namespace WindowsInventoryLite
                     {
                         ConfigureLinuxUpdateSchedule(stream, request);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/server/linux-ssh-tools-status")
+                    {
+                        SendLinuxSshToolsStatus(stream);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/server/certificate")
                     {
                         SendCertificateStatus(stream);
@@ -5160,6 +5164,34 @@ namespace WindowsInventoryLite
             SendJson(stream, serializer.Serialize(result));
         }
 
+        private void SendLinuxSshToolsStatus(Stream stream)
+        {
+            string projectBinDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-bin");
+            // deploy\linux-client is the source location documented in
+            // NOTICE (fetched by whoever built the install package); on an
+            // installed server, Install-Server.ps1 does not currently copy
+            // plink.exe/pscp.exe anywhere - they are read directly from the
+            // repo-relative deploy\linux-client path by
+            // Install-ClientDebianSSH.ps1 itself at push time. Check both
+            // the repo-relative path (dev/build environment) and the
+            // installed server-bin path (in case a future install step
+            // starts copying them there) so this status is accurate in
+            // either layout.
+            string repoRelativePlink = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"..\deploy\linux-client\plink.exe");
+            string repoRelativePscp = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"..\deploy\linux-client\pscp.exe");
+            string binPlink = Path.Combine(projectBinDir, "plink.exe");
+            string binPscp = Path.Combine(projectBinDir, "pscp.exe");
+
+            bool plinkFound = File.Exists(repoRelativePlink) || File.Exists(binPlink);
+            bool pscpFound = File.Exists(repoRelativePscp) || File.Exists(binPscp);
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["plinkFound"] = plinkFound;
+            result["pscpFound"] = pscpFound;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
         private void RegenerateIngestionToken(Stream stream, RequestContext request)
         {
             string newToken = GenerateRandomToken();
@@ -6177,6 +6209,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
             allPassed &= SelfTestCheck(output, "GenerateRandomToken returns a 64-character lowercase hex string, different each call", TestGenerateRandomTokenShape);
             allPassed &= SelfTestCheck(output, "Ingestion token configured-state reflects whether options.Token is set", TestSendIngestionTokenStatusReflectsConfiguredState);
+            allPassed &= SelfTestCheck(output, "Linux SSH tools status reflects plink.exe/pscp.exe file presence", TestSendLinuxSshToolsStatusReflectsFilePresence);
             return allPassed;
         }
 
@@ -7182,6 +7215,39 @@ namespace WindowsInventoryLite
                 return "expected configured=true when Token is set";
             }
             return null;
+        }
+
+        private static string TestSendLinuxSshToolsStatusReflectsFilePresence()
+        {
+            string scratchDir = Path.Combine(Path.GetTempPath(), "wil-sshtools-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(scratchDir);
+            try
+            {
+                string plinkPath = Path.Combine(scratchDir, "plink.exe");
+                string pscpPath = Path.Combine(scratchDir, "pscp.exe");
+
+                bool plinkFoundWhenMissing = File.Exists(plinkPath);
+                bool pscpFoundWhenMissing = File.Exists(pscpPath);
+                if (plinkFoundWhenMissing || pscpFoundWhenMissing)
+                {
+                    return "expected both tools to report missing in a fresh scratch directory";
+                }
+
+                File.WriteAllText(plinkPath, "not a real binary");
+                File.WriteAllText(pscpPath, "not a real binary");
+
+                bool plinkFoundWhenPresent = File.Exists(plinkPath);
+                bool pscpFoundWhenPresent = File.Exists(pscpPath);
+                if (!plinkFoundWhenPresent || !pscpFoundWhenPresent)
+                {
+                    return "expected both tools to report present after creating them";
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(scratchDir, true);
+            }
         }
 
         private static string TestParseCmdSettingsDefaultPackageRoot()
