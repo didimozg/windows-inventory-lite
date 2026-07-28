@@ -823,6 +823,12 @@ Copy-Item -LiteralPath $winRmInstallerSource -Destination $winRmInstallerPath -F
 $winRmUninstallerSource = Join-Path -Path $PSScriptRoot -ChildPath 'Uninstall-ClientWinRM.ps1'
 $winRmUninstallerPath = Join-Path -Path $InstallPath -ChildPath 'Uninstall-ClientWinRM.ps1'
 Copy-Item -LiteralPath $winRmUninstallerSource -Destination $winRmUninstallerPath -Force
+$linuxSshInstallerSource = Join-Path -Path $PSScriptRoot -ChildPath 'Install-ClientDebianSSH.ps1'
+$linuxSshInstallerPath = Join-Path -Path $InstallPath -ChildPath 'Install-ClientDebianSSH.ps1'
+Copy-Item -LiteralPath $linuxSshInstallerSource -Destination $linuxSshInstallerPath -Force
+$linuxSshUninstallerSource = Join-Path -Path $PSScriptRoot -ChildPath 'Uninstall-ClientDebianSSH.ps1'
+$linuxSshUninstallerPath = Join-Path -Path $InstallPath -ChildPath 'Uninstall-ClientDebianSSH.ps1'
+Copy-Item -LiteralPath $linuxSshUninstallerSource -Destination $linuxSshUninstallerPath -Force
 $deployScriptSource = Join-Path -Path (Split-Path -Parent $PSScriptRoot) -ChildPath 'deploy\client\Deploy-ClientGpo.ps1'
 $deployScriptBinPath = Join-Path -Path $InstallPath -ChildPath 'Deploy-ClientGpo.ps1'
 if (Test-Path -LiteralPath $deployScriptSource) {
