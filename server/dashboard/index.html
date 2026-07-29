@@ -776,31 +776,31 @@
                 </label>
               </div>
             </div>
-            <div class="install-right-fields">
-              <label class="install-action-field">
+            <div class="linux-install-right-fields">
+              <label>
                 Action
                 <select id="linuxClientAction">
                   <option value="install">Install client</option>
                   <option value="uninstall">Uninstall client</option>
                 </select>
               </label>
-              <label class="install-server-field install-only">
+              <label class="install-only">
                 Server URL
                 <input id="linuxInstallServerUrl" type="text" placeholder="http://192.168.1.1:8080/api/v1/linux/inventory">
               </label>
-              <label class="install-server-field install-only">
+              <label class="install-only">
                 Ingestion token
-                <input id="linuxInstallToken" type="text" autocomplete="off" placeholder="leave empty if not used">
+                <input id="linuxInstallToken" type="text" autocomplete="off" placeholder="leave empty to use the server's current token">
               </label>
-              <label class="install-server-field install-only">
+              <label class="install-only">
                 Interval (hours)
                 <input id="linuxInstallIntervalHours" type="number" min="1" max="24" value="6">
               </label>
-              <label class="install-server-field">
+              <label>
                 Install path
                 <input id="linuxInstallPath" type="text" value="/opt/windows-inventory-lite">
               </label>
-              <label class="install-action-field">
+              <label>
                 Authentication
                 <select id="linuxInstallAuthMode">
                   <option value="credentials">Stored Linux credentials</option>
@@ -808,15 +808,15 @@
                   <option value="ad">Use global AD settings</option>
                 </select>
               </label>
-              <label id="linuxInstallCredentialsField" class="install-user-field hidden">
+              <label id="linuxInstallCredentialsField" class="hidden">
                 Linux user
                 <input id="linuxInstallUsername" type="text" autocomplete="username" placeholder="root">
               </label>
-              <label id="linuxInstallPasswordField" class="install-password-field hidden">
+              <label id="linuxInstallPasswordField" class="hidden">
                 Linux password
                 <input id="linuxInstallPassword" type="password" autocomplete="current-password">
               </label>
-              <label id="linuxInstallKeyField" class="install-user-field hidden">
+              <label id="linuxInstallKeyField" class="hidden">
                 SSH key path
                 <input id="linuxInstallKeyPath" type="text" placeholder="C:\path\to\private-key.pem">
               </label>

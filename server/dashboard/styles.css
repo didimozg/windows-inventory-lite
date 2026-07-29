@@ -844,6 +844,37 @@ select {
   justify-self: end;
 }
 
+/* Linux Client actions has more fields (9) than .install-right-fields'
+   explicit 5-row grid was ever designed for (Windows: Action/ServerUrl/
+   User/Password + 2 checkbox rows + submit). Reusing that grid's
+   fixed-position classes (.install-action-field/.install-server-field/
+   .install-user-field/.install-password-field) on more fields than it has
+   distinct cells for made several land in the SAME cell, rendering as
+   overlapping text/inputs - a real bug live-reported by a user, invisible
+   to every prior DOM-state (classList/hidden) check in this project's own
+   testing, since the elements were all correctly present and toggled,
+   just visually stacked on top of each other.
+   This container flows its children naturally instead (no per-field
+   position class needed) - each field just takes the next of 2 columns
+   in DOM order, so it can't collide regardless of field count, and a
+   .hidden field (auth-mode toggling) is removed from grid flow entirely,
+   leaving no gap. */
+.linux-install-right-fields {
+  grid-column: 3 / span 2;
+  grid-row: 1 / span 2;
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(140px, 0.6fr);
+  gap: 12px;
+  align-self: start;
+}
+
+.linux-install-right-fields .install-submit-field {
+  grid-column: 1 / span 2;
+  grid-row: auto;
+  justify-self: end;
+  margin-top: 8px;
+}
+
 .check-label {
   min-height: 40px;
   grid-template-columns: auto 1fr;
