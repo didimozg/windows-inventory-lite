@@ -2394,6 +2394,14 @@ namespace WindowsInventoryLite
                 DebugLogger.Log(options, "Schedule", "Scheduled Linux client update push skipped: no server URL saved yet - configure it on the Client package tab's Linux package section first.");
                 return;
             }
+            // The saved package settings' own token can be stale (e.g. the
+            // package was configured before a later regenerate) - the
+            // server's live options.Token is always the current, correct
+            // value, so prefer it whenever the saved one is blank.
+            if (String.IsNullOrEmpty(token))
+            {
+                token = options.Token;
+            }
 
             string authMode = !String.IsNullOrEmpty(options.LinuxUpdateKeyPath) ? "key" : "credentials";
             string username = options.LinuxUpdateUsername;
@@ -2858,6 +2866,21 @@ namespace WindowsInventoryLite
 
             string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
             string token = Convert.ToString(payload.ContainsKey("token") ? payload["token"] : "");
+            // Blank means "use the server's current ingestion token", not
+            // "install with no token" - a form left at its default (the
+            // field's own placeholder used to say "leave empty if not
+            // used", which is actively wrong on a server that actually
+            // enforces a token) must not silently ship a client that can
+            // never authenticate its own inventory reports. Mirrors the
+            // fix already applied to the Windows WinRM push
+            // (BuildPowerShellInstallArguments) for the identical failure
+            // mode, reported live: "clients stopped connecting after
+            // regenerating the token, reinstalling via the UI doesn't
+            // help" - true here too, for the same reason.
+            if (String.IsNullOrEmpty(token))
+            {
+                token = options.Token;
+            }
             string installPath = Convert.ToString(payload.ContainsKey("installPath") ? payload["installPath"] : "/opt/windows-inventory-lite");
             int intervalHours = 6;
             if (payload.ContainsKey("intervalHours"))
@@ -2907,10 +2930,13 @@ namespace WindowsInventoryLite
                         JavaScriptSerializer settingsSerializer = CreateJsonSerializer();
                         Dictionary<string, object> savedSettings = settingsSerializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(packageSettingsPath, Encoding.UTF8));
                         serverUrl = GetStringValue(savedSettings, "serverUrl");
-                        if (!payload.ContainsKey("token"))
-                        {
-                            token = GetStringValue(savedSettings, "token");
-                        }
+                        // token is deliberately NOT re-read from the saved
+                        // package settings here - it already defaulted to
+                        // the server's own live options.Token above, which
+                        // is always current; a token saved in this file
+                        // could be stale (e.g. from before a regenerate)
+                        // and would be a strictly worse value to fall back
+                        // to than the live one already resolved.
                         if (!payload.ContainsKey("installPath"))
                         {
                             string savedInstallPath = GetStringValue(savedSettings, "installPath");
@@ -3772,16 +3798,27 @@ namespace WindowsInventoryLite
             return diff == 0;
         }
 
+        // Dashboard files are served straight from disk with no build step
+        // (see this project's own established pattern) - a server update
+        // can replace app.js/index.html/styles.css on disk at any time,
+        // but neither Content-Length nor Last-Modified/ETag were ever set
+        // here, so a browser had nothing forcing it to notice. no-cache
+        // (not no-store) still lets the browser keep a local copy, it just
+        // has to ask "is this still current?" on every request - cheap for
+        // files this small, and it closes off exactly the "dashboard still
+        // shows an old build after an update, only a hard refresh fixes
+        // it" class of report a live user hit after this project's own
+        // Linux-client-actions view shipped.
         private void SendDashboardFile(Stream stream, string fileName, string fallback, string contentType)
         {
             string path = Path.Combine(options.ContentPath, fileName);
             if (File.Exists(path))
             {
-                SendText(stream, File.ReadAllText(path, Encoding.UTF8), contentType, 200);
+                SendText(stream, File.ReadAllText(path, Encoding.UTF8), contentType, 200, "no-cache");
                 return;
             }
 
-            SendText(stream, fallback, contentType, 200);
+            SendText(stream, fallback, contentType, 200, "no-cache");
         }
 
         private ArrayList LoadClientReports()
@@ -3956,6 +3993,11 @@ namespace WindowsInventoryLite
 
         private static void SendText(Stream stream, string text, string contentType, int statusCode)
         {
+            SendText(stream, text, contentType, statusCode, null);
+        }
+
+        private static void SendText(Stream stream, string text, string contentType, int statusCode, string cacheControl)
+        {
             byte[] body = Encoding.UTF8.GetBytes(text);
             string status = statusCode == 200 ? "OK" : (statusCode == 400 ? "Bad Request" : (statusCode == 401 ? "Unauthorized" : (statusCode == 404 ? "Not Found" : "Error")));
             string header = "HTTP/1.1 " + statusCode + " " + status +
@@ -3964,6 +4006,7 @@ namespace WindowsInventoryLite
                 "\r\nX-Content-Type-Options: nosniff" +
                 "\r\nX-Frame-Options: DENY" +
                 "\r\nContent-Security-Policy: " + ContentSecurityPolicy +
+                (String.IsNullOrEmpty(cacheControl) ? "" : "\r\nCache-Control: " + cacheControl) +
                 "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
