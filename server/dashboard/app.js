@@ -109,7 +109,7 @@
     if (view === 'install') loadInstallHistory();
     if (view === 'linuxInstall') loadLinuxInstallHistory();
     if (view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
-    if (view === 'package') loadPackageStatus();
+    if (view === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
     if (view === 'updates') loadClientUpdates();
     if (view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
@@ -1813,6 +1813,59 @@
       })
       .catch(error => {
         byId('pkgStatus').textContent = `Package status unavailable: ${error.message}`;
+      });
+  }
+
+  function loadLinuxPackageStatus() {
+    fetch('/api/v1/linux-client-package', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        const statusText = data.binaryPresent
+          ? `Linux client binary present (v${escapeHtml(data.binaryVersion || 'unknown')}).`
+          : 'No Linux client binary found - run Build-LinuxClient.ps1 and place the output in the Linux client package directory first.';
+        byId('linuxPkgStatus').textContent = statusText;
+        byId('linuxPkgServerUrl').value = data.serverUrl || '';
+        byId('linuxPkgToken').value = data.token || '';
+        byId('linuxPkgIntervalHours').value = data.intervalHours || 6;
+        byId('linuxPkgInstallPath').value = data.installPath || '/opt/windows-inventory-lite';
+      })
+      .catch(error => {
+        byId('linuxPkgStatus').textContent = `Linux package status unavailable: ${error.message}`;
+      });
+  }
+
+  function saveLinuxPackageConfig() {
+    const serverUrl = byId('linuxPkgServerUrl').value.trim();
+    const token = byId('linuxPkgToken').value.trim();
+    const intervalHours = Number(byId('linuxPkgIntervalHours').value) || 6;
+    const installPath = byId('linuxPkgInstallPath').value.trim() || '/opt/windows-inventory-lite';
+
+    if (!serverUrl) {
+      window.alert('Enter server URL.');
+      return;
+    }
+
+    byId('linuxPkgSaveButton').disabled = true;
+    fetch('/api/v1/linux-client-package/configure', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ serverUrl, token, intervalHours, installPath })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        showSavedMessage(byId('linuxPkgMessage'), 'Saved.', false);
+        loadLinuxPackageStatus();
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxPkgMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('linuxPkgSaveButton').disabled = false;
       });
   }
 
@@ -3616,7 +3669,7 @@
     if (state.view === 'install') loadInstallHistory();
     if (state.view === 'linuxInstall') loadLinuxInstallHistory();
     if (state.view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
-    if (state.view === 'package') loadPackageStatus();
+    if (state.view === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
     if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
     if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
@@ -3778,6 +3831,10 @@
     }
   });
   byId('pkgSaveButton').addEventListener('click', savePackageConfig);
+  byId('linuxPkgSaveButton').addEventListener('click', saveLinuxPackageConfig);
+  byId('linuxPkgDownloadButton').addEventListener('click', () => {
+    window.location.href = '/api/v1/linux-client-package/download';
+  });
   byId('pkgDownloadButton').addEventListener('click', () => {
     window.location.href = '/api/v1/client-package/download';
   });
@@ -3819,7 +3876,7 @@
   byId('linuxCredsClearButton').addEventListener('click', clearLinuxUpdateCredentials);
   byId('themeToggle').addEventListener('click', toggleTheme);
   updateThemeToggle();
-  if (state.view === 'package') loadPackageStatus();
+  if (state.view === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
   if (state.view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
   if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
   if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
