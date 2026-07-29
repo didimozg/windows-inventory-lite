@@ -2888,6 +2888,49 @@ namespace WindowsInventoryLite
 
             if (action == "install" && String.IsNullOrEmpty(serverUrl))
             {
+                // The dashboard's "Linux Client updates" push (Task 11's "Update
+                // selected" button) intentionally does not resend serverUrl/token/
+                // installPath/intervalHours - it targets already-installed clients
+                // and expects the same values used for the original install/package
+                // configuration. Fall back to linux-package-settings.json, the exact
+                // file StartScheduledLinuxClientUpdatePush already reads for the same
+                // reason. Only fields the caller did not explicitly supply are filled
+                // in, so the Task 9 manual push form (which always sends these fields)
+                // is never overridden by a stale saved value.
+                string packageSettingsPath = Path.Combine(options.LinuxClientPackagePath, "linux-package-settings.json");
+                if (File.Exists(packageSettingsPath))
+                {
+                    try
+                    {
+                        JavaScriptSerializer settingsSerializer = CreateJsonSerializer();
+                        Dictionary<string, object> savedSettings = settingsSerializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(packageSettingsPath, Encoding.UTF8));
+                        serverUrl = GetStringValue(savedSettings, "serverUrl");
+                        if (!payload.ContainsKey("token"))
+                        {
+                            token = GetStringValue(savedSettings, "token");
+                        }
+                        if (!payload.ContainsKey("installPath"))
+                        {
+                            string savedInstallPath = GetStringValue(savedSettings, "installPath");
+                            if (!String.IsNullOrEmpty(savedInstallPath))
+                            {
+                                installPath = savedInstallPath;
+                            }
+                        }
+                        if (!payload.ContainsKey("intervalHours"))
+                        {
+                            intervalHours = GetIntValue(savedSettings, "intervalHours", intervalHours);
+                        }
+                    }
+                    catch
+                    {
+                        serverUrl = null;
+                    }
+                }
+            }
+
+            if (action == "install" && String.IsNullOrEmpty(serverUrl))
+            {
                 SendText(stream, "{\"error\":\"serverUrl is required\"}", "application/json; charset=utf-8", 400);
                 return;
             }
@@ -2982,6 +3025,11 @@ namespace WindowsInventoryLite
             argsBuilder.Append(" -ServerUrl ").Append(QuotePowerShellLiteral(serverUrl));
             argsBuilder.Append(" -IntervalHours ").Append(intervalHours);
             argsBuilder.Append(" -InstallPath ").Append(QuotePowerShellLiteral(installPath));
+            // On an installed server the script's own repo-relative default
+            // (build\wil-linux-client) does not resolve - point it at the
+            // well-known package location DownloadLinuxClientPackage already
+            // requires an operator to place the binary at.
+            argsBuilder.Append(" -ClientBinaryPath ").Append(QuotePowerShellLiteral(Path.Combine(options.LinuxClientPackagePath, "wil-linux-client")));
             if (!String.IsNullOrEmpty(token))
             {
                 argsBuilder.Append(" -Token ").Append(QuotePowerShellLiteral(token));
@@ -5347,24 +5395,26 @@ namespace WindowsInventoryLite
 
         private void SendLinuxSshToolsStatus(Stream stream)
         {
-            string projectBinDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-bin");
             // deploy\linux-client is the source location documented in
-            // NOTICE (fetched by whoever built the install package); on an
-            // installed server, Install-Server.ps1 does not currently copy
-            // plink.exe/pscp.exe anywhere - they are read directly from the
-            // repo-relative deploy\linux-client path by
-            // Install-ClientDebianSSH.ps1 itself at push time. Check both
-            // the repo-relative path (dev/build environment) and the
-            // installed server-bin path (in case a future install step
-            // starts copying them there) so this status is accurate in
-            // either layout.
+            // NOTICE (fetched by whoever built the install package).
+            // Install-ClientDebianSSH.ps1 resolves $projectRoot as the
+            // parent of its own directory and looks for the tools at
+            // $projectRoot\deploy\linux-client - on an installed server
+            // that script lives in server-bin, so $projectRoot is the
+            // WindowsInventoryLite root and the tools must sit in a
+            // deploy\linux-client folder that is a SIBLING of server-bin
+            // (which Install-Server.ps1 now populates conditionally, same
+            // as it does for Deploy-ClientGpo.ps1). Check both that
+            // installed-server location and the repo-relative path (dev/
+            // build-tree environment) so this status is accurate either way.
+            string installedDeployDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\deploy\linux-client");
             string repoRelativePlink = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"..\deploy\linux-client\plink.exe");
             string repoRelativePscp = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"..\deploy\linux-client\pscp.exe");
-            string binPlink = Path.Combine(projectBinDir, "plink.exe");
-            string binPscp = Path.Combine(projectBinDir, "pscp.exe");
+            string installedPlink = Path.Combine(installedDeployDir, "plink.exe");
+            string installedPscp = Path.Combine(installedDeployDir, "pscp.exe");
 
-            bool plinkFound = File.Exists(repoRelativePlink) || File.Exists(binPlink);
-            bool pscpFound = File.Exists(repoRelativePscp) || File.Exists(binPscp);
+            bool plinkFound = File.Exists(repoRelativePlink) || File.Exists(installedPlink);
+            bool pscpFound = File.Exists(repoRelativePscp) || File.Exists(installedPscp);
 
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["plinkFound"] = plinkFound;

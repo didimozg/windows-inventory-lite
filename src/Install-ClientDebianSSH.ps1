@@ -91,6 +91,10 @@ function New-SystemdUnitFiles {
         [int]$Hours
     )
 
+    Test-PosixShellSafe -Value $InstallDirectory -FieldName 'InstallPath'
+    Test-PosixShellSafe -Value $Url -FieldName 'ServerUrl'
+    Test-PosixShellSafe -Value $SharedToken -FieldName 'Token'
+
     $execStart = "$InstallDirectory/wil-linux-client --server-url `"$Url`""
     if ($SharedToken) {
         $execStart += " --token `"$SharedToken`""
@@ -324,6 +328,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                 Copy-FileToRemote -TargetComputer $computer -LocalPath $units.TimerPath -RemotePath "$remoteTmpDir/wil-linux-client.timer"
 
                 Write-Host "Installing service: $computer"
+                Test-PosixShellSafe -Value $InstallPath -FieldName 'InstallPath'
                 $installCommand = "${sudoPrefix}mv $remoteTmpDir/wil-linux-client $InstallPath/wil-linux-client && " +
                     "${sudoPrefix}chmod 755 $InstallPath/wil-linux-client && " +
                     "${sudoPrefix}mv $remoteTmpDir/wil-linux-client.service /etc/systemd/system/wil-linux-client.service && " +

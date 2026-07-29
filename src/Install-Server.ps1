@@ -829,6 +829,26 @@ Copy-Item -LiteralPath $linuxSshInstallerSource -Destination $linuxSshInstallerP
 $linuxSshUninstallerSource = Join-Path -Path $PSScriptRoot -ChildPath 'Uninstall-ClientDebianSSH.ps1'
 $linuxSshUninstallerPath = Join-Path -Path $InstallPath -ChildPath 'Uninstall-ClientDebianSSH.ps1'
 Copy-Item -LiteralPath $linuxSshUninstallerSource -Destination $linuxSshUninstallerPath -Force
+
+# Install-ClientDebianSSH.ps1 resolves $projectRoot as the parent of its own
+# directory and looks for plink.exe/pscp.exe at $projectRoot\deploy\linux-client.
+# On an installed server the script lives in server-bin (i.e. $InstallPath), so
+# $projectRoot is the WindowsInventoryLite root - the tools must land in a
+# deploy\linux-client folder that is a SIBLING of server-bin. Per
+# deploy\linux-client\NOTICE these binaries are never tracked in the repo (each
+# deployer fetches their own), so the copy is skipped silently when absent.
+$linuxSshToolsSourceDir = Join-Path -Path (Split-Path -Parent $PSScriptRoot) -ChildPath 'deploy\linux-client'
+$linuxSshToolsDestDir = Join-Path -Path (Split-Path -Parent $InstallPath) -ChildPath 'deploy\linux-client'
+foreach ($linuxSshToolName in @('plink.exe', 'pscp.exe')) {
+    $linuxSshToolSource = Join-Path -Path $linuxSshToolsSourceDir -ChildPath $linuxSshToolName
+    if (Test-Path -LiteralPath $linuxSshToolSource) {
+        if (-not (Test-Path -LiteralPath $linuxSshToolsDestDir)) {
+            New-Item -ItemType Directory -Path $linuxSshToolsDestDir -Force | Out-Null
+        }
+        Copy-Item -LiteralPath $linuxSshToolSource -Destination (Join-Path -Path $linuxSshToolsDestDir -ChildPath $linuxSshToolName) -Force
+    }
+}
+
 $deployScriptSource = Join-Path -Path (Split-Path -Parent $PSScriptRoot) -ChildPath 'deploy\client\Deploy-ClientGpo.ps1'
 $deployScriptBinPath = Join-Path -Path $InstallPath -ChildPath 'Deploy-ClientGpo.ps1'
 if (Test-Path -LiteralPath $deployScriptSource) {
