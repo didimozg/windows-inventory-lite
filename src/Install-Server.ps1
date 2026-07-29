@@ -32,6 +32,20 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
+    [string]$LinuxClientPackagePath,
+
+    # Mirrors ClientPackageSourcePath's own "copy in if present" contract for
+    # the Linux client. There is no ClientNet35/40ExecutablePath equivalent
+    # here (an always-present, server-bundled fallback binary) because the Go
+    # binary is never part of the .NET server build - if this path (and its
+    # OutputPath.version sidecar, see Build-LinuxClient.ps1) is absent, the
+    # copy is skipped silently and whatever is already deployed is left as-is.
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$LinuxClientBinarySourcePath,
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
     [string]$ConfigPath,
 
     [Parameter()]
@@ -527,6 +541,24 @@ if (-not $ClientPackageSourcePath) {
     }
 }
 
+if (-not $LinuxClientPackagePath) {
+    $savedLinuxClientPackagePath = Get-ConfigValue -Config $existingConfig -Name 'LinuxClientPackagePath'
+    if ($savedLinuxClientPackagePath) {
+        $LinuxClientPackagePath = $savedLinuxClientPackagePath
+    }
+    else {
+        $LinuxClientPackagePath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\linux-client-package'
+    }
+}
+
+if (-not $LinuxClientBinarySourcePath) {
+    $projectRoot = Split-Path -Parent $PSScriptRoot
+    $defaultLinuxClientBinarySourcePath = Join-Path -Path $projectRoot -ChildPath 'build\wil-linux-client'
+    if (Test-Path -LiteralPath $defaultLinuxClientBinarySourcePath) {
+        $LinuxClientBinarySourcePath = $defaultLinuxClientBinarySourcePath
+    }
+}
+
 if (-not $PSBoundParameters.ContainsKey('ListenPrefix')) {
     $savedListenPrefix = Get-ConfigValue -Config $existingConfig -Name 'ListenPrefix'
     if ($savedListenPrefix) {
@@ -789,7 +821,7 @@ elseif (-not (Test-Path -LiteralPath $ClientNet40ExecutablePath)) {
     & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Client.ps1') -OutputPath $ClientNet40ExecutablePath -TargetFramework Net40
 }
 
-foreach ($path in @($InstallPath, $DataPath, $ContentPath, $ClientPackagePath)) {
+foreach ($path in @($InstallPath, $DataPath, $ContentPath, $ClientPackagePath, $LinuxClientPackagePath)) {
     if (-not (Test-Path -LiteralPath $path)) {
         New-Item -Path $path -ItemType Directory -Force | Out-Null
     }
@@ -846,6 +878,21 @@ foreach ($linuxSshToolName in @('plink.exe', 'pscp.exe')) {
             New-Item -ItemType Directory -Path $linuxSshToolsDestDir -Force | Out-Null
         }
         Copy-Item -LiteralPath $linuxSshToolSource -Destination (Join-Path -Path $linuxSshToolsDestDir -ChildPath $linuxSshToolName) -Force
+    }
+}
+
+# Mirrors the ClientPackageSourcePath copy below: an install/reinstall that
+# finds a Linux client binary at LinuxClientBinarySourcePath (default
+# build\wil-linux-client, produced by Build-LinuxClient.ps1) copies it - and
+# its .version sidecar - into LinuxClientPackagePath, the same folder
+# RunLinuxClientInstallTarget's -ClientBinaryPath already points at
+# server-side. Absent, this is skipped silently and whatever is already
+# deployed there is left untouched, same contract as the Windows GPO copy.
+if ($LinuxClientBinarySourcePath -and (Test-Path -LiteralPath $LinuxClientBinarySourcePath)) {
+    Copy-Item -LiteralPath $LinuxClientBinarySourcePath -Destination (Join-Path -Path $LinuxClientPackagePath -ChildPath 'wil-linux-client') -Force
+    $linuxClientBinaryVersionSourcePath = "$LinuxClientBinarySourcePath.version"
+    if (Test-Path -LiteralPath $linuxClientBinaryVersionSourcePath) {
+        Copy-Item -LiteralPath $linuxClientBinaryVersionSourcePath -Destination (Join-Path -Path $LinuxClientPackagePath -ChildPath 'wil-linux-client.version') -Force
     }
 }
 
@@ -946,7 +993,7 @@ function Set-RestrictedFileAcl {
 # silently revert to whatever port was set at install time. The server reads
 # ListenPrefix/HttpsPort/EnableHttp from --config on every startup instead,
 # same as WebUsername, UseHttps, and the other dashboard-only settings.
-$serviceCommand = '"' + (ConvertTo-ServiceArgValue $servicePath) + '" --data "' + (ConvertTo-ServiceArgValue $DataPath) + '" --content "' + (ConvertTo-ServiceArgValue $ContentPath) + '" --client-package "' + (ConvertTo-ServiceArgValue $ClientPackagePath) + '" --winrm-installer "' + (ConvertTo-ServiceArgValue $winRmInstallerPath) + '" --winrm-uninstaller "' + (ConvertTo-ServiceArgValue $winRmUninstallerPath) + '" --linux-ssh-installer "' + (ConvertTo-ServiceArgValue $linuxSshInstallerPath) + '" --linux-ssh-uninstaller "' + (ConvertTo-ServiceArgValue $linuxSshUninstallerPath) + '"'
+$serviceCommand = '"' + (ConvertTo-ServiceArgValue $servicePath) + '" --data "' + (ConvertTo-ServiceArgValue $DataPath) + '" --content "' + (ConvertTo-ServiceArgValue $ContentPath) + '" --client-package "' + (ConvertTo-ServiceArgValue $ClientPackagePath) + '" --linux-client-package "' + (ConvertTo-ServiceArgValue $LinuxClientPackagePath) + '" --winrm-installer "' + (ConvertTo-ServiceArgValue $winRmInstallerPath) + '" --winrm-uninstaller "' + (ConvertTo-ServiceArgValue $winRmUninstallerPath) + '" --linux-ssh-installer "' + (ConvertTo-ServiceArgValue $linuxSshInstallerPath) + '" --linux-ssh-uninstaller "' + (ConvertTo-ServiceArgValue $linuxSshUninstallerPath) + '"'
 $serviceCommand += ' --install-log-retention-days ' + $InstallLogRetentionDays
 $serviceCommand += ' --config "' + (ConvertTo-ServiceArgValue $ConfigPath) + '"'
 
@@ -964,6 +1011,7 @@ $config.DataPath                = $DataPath
 $config.InstallPath             = $InstallPath
 $config.ContentPath             = $ContentPath
 $config.ClientPackagePath       = $ClientPackagePath
+$config.LinuxClientPackagePath  = $LinuxClientPackagePath
 $config.InstallLogRetentionDays = $InstallLogRetentionDays
 $config.Token                   = Protect-Secret -PlainText $Token
 $config.WebUsername             = $WebUsername

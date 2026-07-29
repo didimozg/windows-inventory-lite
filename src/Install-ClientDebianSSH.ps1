@@ -283,7 +283,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         $ClientBinaryPath = Join-Path -Path $projectRoot -ChildPath 'build\wil-linux-client'
     }
     if (-not (Test-Path -LiteralPath $ClientBinaryPath)) {
-        throw "Linux client binary was not found: $ClientBinaryPath. Run Build-LinuxClient.ps1 first."
+        throw "Linux client binary was not found: $ClientBinaryPath. Run Build-LinuxClient.ps1, then re-run Install-Server.ps1 to copy the result into the Linux client package folder (done automatically when the build output is at build\wil-linux-client)."
     }
 
     $plinkPath = Join-Path -Path $projectRoot -ChildPath 'deploy\linux-client\plink.exe'
