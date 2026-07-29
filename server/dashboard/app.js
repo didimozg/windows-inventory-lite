@@ -848,16 +848,23 @@
   function renderInstallJob(job, statusElementId = 'installStatus') {
     const results = job.results || [];
     const rows = results.map(result => {
+      // Trust-and-retry only makes sense on the Linux Client Actions panel:
+      // it submits the Actions tab's own install-form fields (server URL,
+      // token, path, auth mode), which don't exist/apply on the Updates
+      // panel's already-installed-clients flow. The Updates panel still
+      // shows the hostKeyBadge below so the operator sees why it failed.
       let trustControl = '';
-      if (result.hostKeyStatus && result.hostKeyFingerprint) {
-        trustControl = `<button class="link-button trust-host-key-button" type="button"
-             data-trust-host="${escapeHtml(result.target)}"
-             data-trust-fingerprint="${escapeHtml(result.hostKeyFingerprint)}">Trust and retry</button>`;
-      } else if (result.hostKeyStatus) {
-        trustControl = `<span class="trust-host-key-manual">
-             <input type="text" class="trust-fingerprint-input" placeholder="SHA256:..." data-trust-host-input="${escapeHtml(result.target)}">
-             <button class="link-button trust-host-key-button" type="button" data-trust-host-manual="${escapeHtml(result.target)}">Trust and retry</button>
-           </span>`;
+      if (statusElementId === 'linuxInstallStatus') {
+        if (result.hostKeyStatus && result.hostKeyFingerprint) {
+          trustControl = `<button class="link-button trust-host-key-button" type="button"
+               data-trust-host="${escapeHtml(result.target)}"
+               data-trust-fingerprint="${escapeHtml(result.hostKeyFingerprint)}">Trust and retry</button>`;
+        } else if (result.hostKeyStatus) {
+          trustControl = `<span class="trust-host-key-manual">
+               <input type="text" class="trust-fingerprint-input" placeholder="SHA256:..." data-trust-host-input="${escapeHtml(result.target)}">
+               <button class="link-button trust-host-key-button" type="button" data-trust-host-manual="${escapeHtml(result.target)}">Trust and retry</button>
+             </span>`;
+        }
       }
       const hostKeyBadge = result.hostKeyStatus === 'changed'
         ? '<span class="usb-badge">HOST KEY CHANGED</span>'
@@ -884,10 +891,10 @@
         </table>
       </div>`;
 
-    document.querySelectorAll('[data-trust-host]').forEach(button => {
+    statusElement.querySelectorAll('[data-trust-host]').forEach(button => {
       button.addEventListener('click', () => trustHostKeyAndRetry(button.dataset.trustHost, button.dataset.trustFingerprint, statusElementId));
     });
-    document.querySelectorAll('[data-trust-host-manual]').forEach(button => {
+    statusElement.querySelectorAll('[data-trust-host-manual]').forEach(button => {
       button.addEventListener('click', () => {
         const host = button.dataset.trustHostManual;
         const input = statusElement.querySelector(`[data-trust-host-input="${CSS.escape(host)}"]`);
@@ -1179,7 +1186,7 @@
   function updateClientActionUi() {
     const action = byId('clientAction').value;
     const isInstall = action === 'install';
-    document.querySelectorAll('.install-only').forEach(element => {
+    document.querySelectorAll('#installView .install-only').forEach(element => {
       element.classList.toggle('hidden', !isInstall);
     });
     byId('installButton').textContent = isInstall ? 'Install client' : 'Uninstall client';
