@@ -1501,7 +1501,7 @@
       <td>${escapeHtml(entry.clientVersion || 'unknown')}</td>
       <td>v${escapeHtml(data.currentVersion)}</td>
       <td>${escapeHtml(formatDateTime(entry.sourceUpdatedAt))}</td>
-      <td><input type="checkbox" class="linux-update-select" value="${escapeHtml(entry.hostname)}"></td>
+      <td><input type="checkbox" class="linux-update-select" value="${escapeHtml(entry.target || entry.hostname)}"></td>
     </tr>`).join('');
 
     document.querySelectorAll('.linux-update-select').forEach(checkbox => {

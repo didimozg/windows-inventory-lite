@@ -2116,6 +2116,11 @@ namespace WindowsInventoryLite
 
                 Dictionary<string, object> entry = new Dictionary<string, object>();
                 entry["hostname"] = GetStringValue(client, "hostname");
+                // The push target: prefers a real IPv4 address over the
+                // (often unresolvable) self-reported hostname - see
+                // GetLinuxClientUpdateTarget's own comment. "hostname" above
+                // is kept separately for the dashboard's display column.
+                entry["target"] = GetLinuxClientUpdateTarget(client);
                 entry["clientVersion"] = clientVersion;
                 entry["sourceUpdatedAt"] = GetStringValue(client, "sourceUpdatedAt");
                 updates.Add(entry);
@@ -2347,10 +2352,10 @@ namespace WindowsInventoryLite
                 {
                     continue;
                 }
-                string hostname = GetStringValue(client, "hostname");
-                if (!String.IsNullOrEmpty(hostname))
+                string target = GetLinuxClientUpdateTarget(client);
+                if (!String.IsNullOrEmpty(target))
                 {
-                    targets.Add(hostname);
+                    targets.Add(target);
                 }
             }
             if (targets.Count == 0)
@@ -3822,6 +3827,40 @@ namespace WindowsInventoryLite
                 return value;
             }
             return fallback;
+        }
+
+        // A Linux client's self-reported "hostname" is frequently NOT
+        // resolvable from the server's network - short local/container names
+        // (e.g. "docker", "grafana", a Docker container's own hostname) have
+        // no DNS entry, unlike a Windows AD computerName, which is the
+        // Windows-side equivalent this pattern was originally mirrored from.
+        // The client's own report already includes its real network
+        // IP address(es) (linux-client/report.go's "ipAddresses", collected
+        // via CollectIPAddresses() - up/non-loopback interfaces only, but
+        // possibly including IPv6/container-bridge addresses too). Prefer
+        // the first IPv4 address found, since that's what an operator
+        // reaches a target with in practice - fall back to the hostname
+        // only when no IPv4 address was ever reported (e.g. an older client
+        // build, or a report that predates this field).
+        private static string GetLinuxClientUpdateTarget(Dictionary<string, object> client)
+        {
+            if (client != null && client.ContainsKey("ipAddresses"))
+            {
+                ArrayList addresses = client["ipAddresses"] as ArrayList;
+                if (addresses != null)
+                {
+                    foreach (object candidate in addresses)
+                    {
+                        string candidateText = Convert.ToString(candidate);
+                        IPAddress parsed;
+                        if (IPAddress.TryParse(candidateText, out parsed) && parsed.AddressFamily == AddressFamily.InterNetwork)
+                        {
+                            return candidateText;
+                        }
+                    }
+                }
+            }
+            return GetStringValue(client, "hostname");
         }
 
         // One OU Distinguished Name per line - not reused with
@@ -7028,6 +7067,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent is outdated when it matches neither package", TestIsClientVersionCurrentOutdatedWhenMatchesNeither);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent treats an empty clientVersion as outdated", TestIsClientVersionCurrentTreatsEmptyAsOutdated);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent ignores a missing package instead of false-matching it", TestIsClientVersionCurrentIgnoresMissingPackage);
+            allPassed &= SelfTestCheck(output, "GetLinuxClientUpdateTarget prefers a reported IPv4 address over the (often unresolvable) hostname", TestGetLinuxClientUpdateTargetPrefersIPv4OverHostname);
+            allPassed &= SelfTestCheck(output, "GetLinuxClientUpdateTarget falls back to hostname when no IPv4 address is available", TestGetLinuxClientUpdateTargetFallsBackToHostnameWithNoIPv4);
             allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials falls back to the saved account when blank", TestResolveUpdateCredentialsFallsBackToSavedWhenBlank);
             allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials prefers a typed per-push override over the saved account", TestResolveUpdateCredentialsPrefersTypedOverride);
             allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials is a no-op for Client actions (useSavedCredentials=false)", TestResolveUpdateCredentialsIgnoredWhenFlagIsFalse);
@@ -7807,6 +7848,48 @@ namespace WindowsInventoryLite
             if (!IsClientVersionCurrent("0.16.0", null, "0.16.0"))
             {
                 return "expected a version matching the only present package (net40) to be current";
+            }
+            return null;
+        }
+
+        private static string TestGetLinuxClientUpdateTargetPrefersIPv4OverHostname()
+        {
+            Dictionary<string, object> client = new Dictionary<string, object>();
+            client["hostname"] = "docker";
+            ArrayList addresses = new ArrayList();
+            addresses.Add("fe80::1");
+            addresses.Add("192.168.4.110");
+            addresses.Add("10.0.0.5");
+            client["ipAddresses"] = addresses;
+
+            string target = GetLinuxClientUpdateTarget(client);
+            if (target != "192.168.4.110")
+            {
+                return "expected the first IPv4 address ('192.168.4.110'), skipping the leading IPv6 entry, got '" + target + "'";
+            }
+            return null;
+        }
+
+        private static string TestGetLinuxClientUpdateTargetFallsBackToHostnameWithNoIPv4()
+        {
+            Dictionary<string, object> client = new Dictionary<string, object>();
+            client["hostname"] = "docker";
+            ArrayList addresses = new ArrayList();
+            addresses.Add("fe80::1");
+            client["ipAddresses"] = addresses;
+
+            string target = GetLinuxClientUpdateTarget(client);
+            if (target != "docker")
+            {
+                return "expected fallback to hostname 'docker' when no IPv4 address is present, got '" + target + "'";
+            }
+
+            Dictionary<string, object> clientWithNoAddressesAtAll = new Dictionary<string, object>();
+            clientWithNoAddressesAtAll["hostname"] = "legacy-report";
+            string targetForOlderReport = GetLinuxClientUpdateTarget(clientWithNoAddressesAtAll);
+            if (targetForOlderReport != "legacy-report")
+            {
+                return "expected fallback to hostname for a report with no ipAddresses field at all (older client), got '" + targetForOlderReport + "'";
             }
             return null;
         }
