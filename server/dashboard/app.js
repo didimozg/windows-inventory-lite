@@ -1132,7 +1132,7 @@
         byId('linuxInstallStatus').textContent = `Failed to start ${action} job: ${error.message}`;
       })
       .finally(() => {
-        byId('linuxInstallButton').disabled = false;
+        updateLinuxTrustNewHostKeysUi();
       });
   }
 
