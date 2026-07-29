@@ -19,6 +19,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - The existing "Client actions"/"Client updates" tabs are now labeled "Windows Client actions"/"Windows Client updates" - label text only, no behavior change.
+- `plink.exe`/`pscp.exe` (PuTTY, MIT-licensed) are now bundled directly in `deploy\linux-client\` and tracked in the repository - Authenticode signature and SHA-256 verified against the official 0.84 release before being added (recorded in `deploy\linux-client\NOTICE`) - instead of requiring every deployer to download them separately before password-based Linux SSH push would work at all.
 
 ### Fixed
 
@@ -29,6 +30,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - The Windows WinRM client push (manual "Windows Client actions" push and the scheduled "Windows Client updates" push) now sends the server's current ingestion token to every install/reinstall - it never did before, so any client (re)installed through either push has been getting no token at all since ingestion authentication was introduced. Harmless while the server's own token was never actually enforced; once a real token is configured (auto-generated or regenerated), every such push left the target unable to authenticate its inventory reports, with no indication why - reported live as "clients stopped connecting after regenerating the token, reinstalling via the UI doesn't help."
 - The Linux SSH push (manual "Linux Client actions" and the scheduled "Linux Client updates" push) had the identical gap: a blank "Ingestion token" field (the default state - its placeholder used to say "leave empty if not used") or a stale token saved with an older Linux package now falls back to the server's current live token instead of silently installing/reinstalling with none.
 - Dashboard static files (`app.js`, `index.html`, `styles.css`, `favicon.svg`) are now served with `Cache-Control: no-cache`, so a browser revalidates before using a cached copy instead of potentially showing a stale dashboard build after a server update until a hard refresh.
+- `Install-Server.ps1` now mirrors the Windows GPO client's own "copy in if present" behavior for the Linux client binary: new `-LinuxClientPackagePath`/`-LinuxClientBinarySourcePath` parameters (the latter defaulting to `build\wil-linux-client`, `Build-LinuxClient.ps1`'s own default output) copy the binary and its version sidecar into the Linux client package folder on every install/reinstall. Previously nothing populated that folder at all, so every dashboard-driven Linux install/update push failed with "Linux client binary was not found" on every server, even freshly installed ones - reported live after hitting the error on the first real install attempt through the new Linux Client actions tab. The script's own error message now also explains where to place the built binary.
 
 ## [0.27.0] - 2026-07-27
 
