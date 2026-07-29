@@ -7705,6 +7705,22 @@ namespace WindowsInventoryLite
             }
         }
 
+        // SaveLinuxKnownHosts applies a restrictive Administrators+SYSTEM-only ACL to the
+        // known-hosts file (matching SaveLicenses/SaveConfig). Under UAC split-token behavior,
+        // this test process runs non-elevated, so it cannot read the file back through the
+        // normal FILE_READ_DATA path even though its account is an Administrators member.
+        // The test created the file, so it is the file's owner and retains WRITE_DAC even
+        // without FILE_READ_DATA - this helper uses that to grant itself an explicit ALLOW
+        // rule after each write, purely so the test can observe what it just wrote. It does
+        // not touch or weaken SaveLinuxKnownHosts/ApplyRestrictedConfigAcl in any way.
+        private static void GrantCurrentUserAccessForTest(string path)
+        {
+            FileSecurity acl = File.GetAccessControl(path);
+            SecurityIdentifier currentUser = WindowsIdentity.GetCurrent().User;
+            acl.AddAccessRule(new FileSystemAccessRule(currentUser, FileSystemRights.FullControl, AccessControlType.Allow));
+            File.SetAccessControl(path, acl);
+        }
+
         private static string TestLinuxKnownHostsRoundTrip()
         {
             string tempDataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
@@ -7714,6 +7730,7 @@ namespace WindowsInventoryLite
                 ServerOptions options = new ServerOptions();
                 options.DataPath = tempDataPath;
                 InventoryServer server = new InventoryServer(options);
+                string knownHostsPath = server.GetLinuxKnownHostsFilePath();
 
                 Dictionary<string, object> before = server.FindLinuxKnownHost("192.168.4.112", 22);
                 if (before != null)
@@ -7722,6 +7739,7 @@ namespace WindowsInventoryLite
                 }
 
                 server.UpsertLinuxKnownHost("192.168.4.112", 22, "ssh-ed25519", "SHA256:hXNM4oXACpM336pm8Tv/f3mA/2X1tq6ocXcl7TmFvtA", "manual");
+                GrantCurrentUserAccessForTest(knownHostsPath);
                 Dictionary<string, object> after = server.FindLinuxKnownHost("192.168.4.112", 22);
                 if (after == null || GetStringValue(after, "Fingerprint") != "SHA256:hXNM4oXACpM336pm8Tv/f3mA/2X1tq6ocXcl7TmFvtA" || GetStringValue(after, "TrustMethod") != "manual")
                 {
@@ -7729,6 +7747,7 @@ namespace WindowsInventoryLite
                 }
 
                 server.UpsertLinuxKnownHost("192.168.4.112", 22, "ssh-ed25519", "SHA256:DIFFERENTvalueDIFFERENTvalueDIFFERENTvalueA", "bulk-auto");
+                GrantCurrentUserAccessForTest(knownHostsPath);
                 Dictionary<string, object> overwritten = server.FindLinuxKnownHost("192.168.4.112", 22);
                 if (overwritten == null || GetStringValue(overwritten, "Fingerprint") != "SHA256:DIFFERENTvalueDIFFERENTvalueDIFFERENTvalueA" || GetStringValue(overwritten, "TrustMethod") != "bulk-auto")
                 {
