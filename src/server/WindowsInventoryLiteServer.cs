@@ -1062,6 +1062,7 @@ namespace WindowsInventoryLite
             job.Targets = targets;
             job.Results = new ArrayList();
             job.ServerUrl = serverUrl;
+            job.Token = options.Token;
             job.Username = username;
             job.Password = password;
             job.Force = false;
@@ -2646,6 +2647,7 @@ namespace WindowsInventoryLite
             job.Targets = targets;
             job.Results = new ArrayList();
             job.ServerUrl = serverUrl;
+            job.Token = options.Token;
             job.Username = username;
             job.Password = password;
             job.Force = force;
@@ -2766,7 +2768,7 @@ namespace WindowsInventoryLite
             {
                 Dictionary<string, object> result = job.Action == "uninstall"
                     ? RunClientUninstallTarget(target, job.Username, job.Password, job.AddToTrustedHosts)
-                    : RunClientInstallTarget(target, job.ServerUrl, job.Username, job.Password, job.Force, job.AddToTrustedHosts);
+                    : RunClientInstallTarget(target, job.ServerUrl, job.Token, job.Username, job.Password, job.Force, job.AddToTrustedHosts);
                 lock (installJobsLock)
                 {
                     job.Results.Add(result);
@@ -3257,7 +3259,7 @@ namespace WindowsInventoryLite
         // transport, so it doesn't protect against something actively
         // attached as a debugger - but that already implies far deeper
         // compromise than reading a process list.
-        private Dictionary<string, object> RunClientInstallTarget(string target, string serverUrl, string username, string password, bool force, bool addToTrustedHosts)
+        private Dictionary<string, object> RunClientInstallTarget(string target, string serverUrl, string token, string username, string password, bool force, bool addToTrustedHosts)
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["target"] = target;
@@ -3281,7 +3283,7 @@ namespace WindowsInventoryLite
             string commandBody = "[Console]::OutputEncoding = [System.Text.Encoding]::Default; $OutputEncoding = [Console]::OutputEncoding; "
                 + BuildCredentialReaderSnippet(hasCredential)
                 + "& " + QuotePowerShellLiteral(options.WinRmInstallerPath) + " "
-                + BuildPowerShellInstallArguments(target, serverUrl, hasCredential, force, addToTrustedHosts, options.ClientPackagePath);
+                + BuildPowerShellInstallArguments(target, serverUrl, token, hasCredential, force, addToTrustedHosts, options.ClientPackagePath);
 
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = "powershell.exe";
@@ -3659,11 +3661,15 @@ namespace WindowsInventoryLite
                 + "$__wilCredential = New-Object System.Management.Automation.PSCredential($__wilUser, (ConvertTo-SecureString -String $__wilPass -AsPlainText -Force)); ";
         }
 
-        private static string BuildPowerShellInstallArguments(string target, string serverUrl, bool hasCredential, bool force, bool addToTrustedHosts, string packagePath)
+        private static string BuildPowerShellInstallArguments(string target, string serverUrl, string token, bool hasCredential, bool force, bool addToTrustedHosts, string packagePath)
         {
             StringBuilder builder = new StringBuilder();
             builder.Append("-ComputerName ").Append(QuotePowerShellLiteral(target));
             builder.Append(" -ServerUrl ").Append(QuotePowerShellLiteral(serverUrl));
+            if (!String.IsNullOrEmpty(token))
+            {
+                builder.Append(" -Token ").Append(QuotePowerShellLiteral(token));
+            }
             builder.Append(" -PackagePath ").Append(QuotePowerShellLiteral(packagePath));
             if (hasCredential)
             {
@@ -4028,6 +4034,7 @@ namespace WindowsInventoryLite
             public ArrayList Targets;
             public ArrayList Results;
             public string ServerUrl;
+            public string Token;
             public string Username;
             public string Password;
             public bool Force;
@@ -6546,6 +6553,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "SecretProtector.Unprotect passes through a legacy plaintext value", TestSecretProtectorLegacyPlaintext);
             allPassed &= SelfTestCheck(output, "NeedsMigration flags a plaintext value", TestNeedsMigrationPlaintextValue);
             allPassed &= SelfTestCheck(output, "NeedsMigration does not flag an already-encrypted or empty value", TestNeedsMigrationAlreadyEncryptedOrEmpty);
+            allPassed &= SelfTestCheck(output, "BuildPowerShellInstallArguments includes -Token when a token is set, omits it when empty", TestBuildPowerShellInstallArgumentsIncludesToken);
             allPassed &= SelfTestCheck(output, "GenerateCmdLines rejects serverUrl/token/packageSharePath containing batch-unsafe characters", TestGenerateCmdLinesRejectsUnsafeCharacters);
             allPassed &= SelfTestCheck(output, "ValidatePosixShellSafe rejects POSIX shell metacharacters", TestValidatePosixShellSafeRejectsUnsafeCharacters);
             allPassed &= SelfTestCheck(output, "ValidatePosixShellSafe accepts safe values including null/empty", TestValidatePosixShellSafeAcceptsSafeValues);
@@ -7179,6 +7187,31 @@ namespace WindowsInventoryLite
             if (NeedsMigration(""))
             {
                 return "expected an empty value to not need migration";
+            }
+            return null;
+        }
+
+        // BuildPowerShellInstallArguments never included -Token, so a
+        // WinRM push (manual "Client actions" or the scheduled "Client
+        // updates" push) always installed/reinstalled a client with no
+        // ingestion token - harmless while the server's own token was
+        // never actually enforced, but once a real token is configured
+        // (auto-generated or regenerated) every such push/reinstall left
+        // the target unable to authenticate its own inventory reports.
+        // Found via a live user report: "clients stopped connecting after
+        // regenerating the token, reinstalling via the UI doesn't help."
+        private static string TestBuildPowerShellInstallArgumentsIncludesToken()
+        {
+            string argsWithToken = BuildPowerShellInstallArguments("PC-001", "https://server/api/v1/inventory", "real-token-value", false, false, false, @"C:\package");
+            if (!argsWithToken.Contains("-Token 'real-token-value'"))
+            {
+                return "expected -Token 'real-token-value' in the built arguments, got: " + argsWithToken;
+            }
+
+            string argsWithoutToken = BuildPowerShellInstallArguments("PC-001", "https://server/api/v1/inventory", "", false, false, false, @"C:\package");
+            if (argsWithoutToken.Contains("-Token"))
+            {
+                return "expected no -Token when the token is empty, got: " + argsWithoutToken;
             }
             return null;
         }
