@@ -2,6 +2,10 @@
 
 Notes on shipped features/fixes not yet folded into README.md/README_RU.md. Clear each entry out once its content has been merged into both READMEs during release prep.
 
+## Linux SSH host-key trust (v0.28.0, 2026-07-29)
+
+Password-based Linux pushes now handle SSH host-key trust explicitly instead of relying on PuTTY's per-Windows-account registry cache (which the `LocalSystem` service identity has no practical way to populate interactively). First push to a new target surfaces the offered fingerprint with a "Trust and retry" action in the job log; an explicit, risk-acknowledged "trust new host keys automatically" checkbox on the Linux Client actions form skips that manual step for a whole push. A key that changes after being trusted always hard-fails. The README's existing Linux Client section should get a short paragraph on this - currently says nothing about host-key trust at all, so a first-time reader hitting this failure has no context for why or what to do, beyond what the error message itself now says.
+
 ## Linux client install/update via dashboard UI (v0.28.0, 2026-07-29)
 
 Linux clients can now be installed, uninstalled, and updated directly from the dashboard, matching the existing Windows Client actions/Client updates experience - two new "Linux Client actions"/"Linux Client updates" tabs under Installation, pushing over SSH (stored credentials, SSH key, or reused AD credentials - AD service-identity mode is rejected with a clear error since it has no SSH equivalent) via `Install-ClientDebianSSH.ps1`/the new `Uninstall-ClientDebianSSH.ps1`. Linux Client updates has its own independent schedule, separate from the Windows one. New Settings > General > "Linux Client update credentials" block stores the SSH username/password/key path, and shows whether `plink.exe`/`pscp.exe` are present (needed for password auth only - key-based auth uses Windows' built-in `ssh.exe`).
