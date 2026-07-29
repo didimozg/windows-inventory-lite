@@ -5881,25 +5881,7 @@ namespace WindowsInventoryLite
             // different key than the operator actually trusted - integrity,
             // not confidentiality, is what this ACL protects (same reasoning
             // as licenses.json, reusing the identical helper).
-            // Only apply ACL if running with sufficient privilege (as SYSTEM
-            // in production, or Administrator in elevation); in test
-            // environments running as a regular user, the file inherits
-            // directory permissions which provide sufficient protection.
-            try
-            {
-                WindowsPrincipal principal = new WindowsPrincipal(WindowsIdentity.GetCurrent());
-                bool isElevated = principal.IsInRole(WindowsBuiltInRole.Administrator);
-                if (isElevated)
-                {
-                    ApplyRestrictedConfigAcl(path);
-                }
-            }
-            catch
-            {
-                // If privilege check fails, still try to apply ACL anyway
-                // (e.g., if WindowsIdentity.GetCurrent() throws for some reason)
-                ApplyRestrictedConfigAcl(path);
-            }
+            ApplyRestrictedConfigAcl(path);
         }
 
         private Dictionary<string, object> FindLinuxKnownHost(string host, int port)
