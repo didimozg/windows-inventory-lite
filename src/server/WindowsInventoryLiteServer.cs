@@ -3044,7 +3044,7 @@ namespace WindowsInventoryLite
                 SendText(stream, "{\"error\":\"host is required\"}", "application/json; charset=utf-8", 400);
                 return;
             }
-            if (String.IsNullOrEmpty(fingerprint) || !Regex.IsMatch(fingerprint, @"^SHA256:[A-Za-z0-9+/]+=*$"))
+            if (!IsValidHostKeyFingerprint(fingerprint))
             {
                 SendText(stream, "{\"error\":\"fingerprint must look like 'SHA256:...'\"}", "application/json; charset=utf-8", 400);
                 return;
@@ -3174,43 +3174,85 @@ namespace WindowsInventoryLite
 
             result = RunLinuxSshProcess(commandBody, authMode, username, password, keyPath, result);
 
+            string hostKeyClassification = null;
             if (!usingKey && GetStringValue(result, "status") == "failed")
             {
                 string combinedOutput = GetStringValue(result, "output") + "\n" + GetStringValue(result, "error");
                 string parsedKeyType, parsedFingerprint;
                 bool parsedOk = TryParseHostKeyDetails(combinedOutput, out parsedKeyType, out parsedFingerprint);
 
-                if (!String.IsNullOrEmpty(expectedHostKey) && combinedOutput.IndexOf("host key", StringComparison.OrdinalIgnoreCase) >= 0)
+                hostKeyClassification = ClassifyHostKeyFailure(expectedHostKey, combinedOutput, parsedOk, trustNewHostKeys, isBulkAutoRetry);
+                switch (hostKeyClassification)
                 {
-                    // We supplied -ExpectedHostKey and the connection still
-                    // failed on a host-key-related message - the target's
-                    // real key changed since it was trusted. Never
-                    // auto-accepted, regardless of trustNewHostKeys.
-                    result["hostKeyStatus"] = "changed";
-                    if (parsedOk)
-                    {
+                    case "changed":
+                        // expectedHostKey was set (a record already existed) and
+                        // the connection still failed on a host-key-related
+                        // message - the target's real key changed since it was
+                        // trusted. Never auto-accepted, regardless of trustNewHostKeys.
+                        result["hostKeyStatus"] = "changed";
+                        if (parsedOk)
+                        {
+                            result["hostKeyFingerprint"] = parsedFingerprint;
+                        }
+                        result.Remove("hostKeyTrust");
+                        break;
+                    case "bulk-auto":
+                        UpsertLinuxKnownHost(target, 22, parsedKeyType, parsedFingerprint, "bulk-auto");
+                        return RunLinuxClientInstallTarget(target, serverUrl, token, intervalHours, installPath, authMode, username, password, keyPath, trustNewHostKeys, true);
+                    case "unknown":
+                        result["hostKeyStatus"] = "unknown";
                         result["hostKeyFingerprint"] = parsedFingerprint;
-                    }
-                    result.Remove("hostKeyTrust");
-                }
-                else if (parsedOk && trustNewHostKeys && !isBulkAutoRetry)
-                {
-                    UpsertLinuxKnownHost(target, 22, parsedKeyType, parsedFingerprint, "bulk-auto");
-                    return RunLinuxClientInstallTarget(target, serverUrl, token, intervalHours, installPath, authMode, username, password, keyPath, trustNewHostKeys, true);
-                }
-                else if (parsedOk)
-                {
-                    result["hostKeyStatus"] = "unknown";
-                    result["hostKeyFingerprint"] = parsedFingerprint;
+                        break;
                 }
             }
 
-            if (isBulkAutoRetry)
+            // isBulkAutoRetry marks a result that came from a connection made
+            // right after a bulk-auto trust upsert. Skip the label when this
+            // same attempt just reclassified as "changed" above - that means
+            // the freshly-stored record itself didn't match what the target
+            // presented, and "changed" must never be paired with "bulk-auto".
+            if (isBulkAutoRetry && hostKeyClassification != "changed")
             {
                 result["hostKeyTrust"] = "bulk-auto";
             }
 
             return result;
+        }
+
+        // Decides how a failed non-key SSH attempt should be classified from
+        // its host-key evidence alone - no I/O, so it's directly unit-testable
+        // without spinning up a real plink/pscp process. Returns:
+        //   "changed"   - a prior trusted record existed (expectedHostKey set)
+        //                 and the failure text mentions a host key. The target's
+        //                 real key no longer matches what was trusted. Must
+        //                 NEVER be auto-accepted, regardless of trustNewHostKeys.
+        //   "bulk-auto" - no prior record existed, the failure fingerprint
+        //                 parsed cleanly, bulk auto-trust is enabled, and this
+        //                 isn't already a bulk-auto retry. Safe to trust and retry once.
+        //   "unknown"   - the failure fingerprint parsed but neither of the
+        //                 above applies (no prior record, auto-trust unavailable
+        //                 or already used) - needs an explicit manual trust decision.
+        //   null        - not a host-key failure at all (or nothing to classify).
+        // String.IsNullOrEmpty(expectedHostKey) gates the "bulk-auto" case
+        // structurally: a prior record existing is enough, by itself, to rule
+        // out ever silently overwriting it via this path - independent of
+        // whatever wording plink/pscp happens to produce.
+        internal static string ClassifyHostKeyFailure(string expectedHostKey, string combinedOutput, bool parsedOk, bool trustNewHostKeys, bool isBulkAutoRetry)
+        {
+            bool hasHostKeyText = !String.IsNullOrEmpty(combinedOutput) && combinedOutput.IndexOf("host key", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (!String.IsNullOrEmpty(expectedHostKey) && hasHostKeyText)
+            {
+                return "changed";
+            }
+            if (String.IsNullOrEmpty(expectedHostKey) && parsedOk && trustNewHostKeys && !isBulkAutoRetry)
+            {
+                return "bulk-auto";
+            }
+            if (parsedOk)
+            {
+                return "unknown";
+            }
+            return null;
         }
 
         private Dictionary<string, object> RunLinuxClientUninstallTarget(string target, string authMode, string username, string password, string keyPath, string installPath)
@@ -3284,6 +3326,16 @@ namespace WindowsInventoryLite
 
             result["completedAt"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
             return result;
+        }
+
+        private static readonly Regex HostKeyFingerprintFormatPattern = new Regex(@"^SHA256:[A-Za-z0-9+/]+=*$");
+
+        // Shared by the trust-host-key endpoint and its self-test, so the test
+        // exercises the exact validation the endpoint applies rather than a
+        // hand-copied duplicate of the pattern.
+        private static bool IsValidHostKeyFingerprint(string fingerprint)
+        {
+            return !String.IsNullOrEmpty(fingerprint) && HostKeyFingerprintFormatPattern.IsMatch(fingerprint);
         }
 
         private static readonly Regex HostKeyFingerprintPattern = new Regex(
@@ -6872,6 +6924,10 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
             allPassed &= SelfTestCheck(output, "Linux known-hosts store round-trips and overwrites by host:port", TestLinuxKnownHostsRoundTrip);
             allPassed &= SelfTestCheck(output, "TryParseHostKeyDetails extracts type+fingerprint from a real captured plink failure, ignores unrelated failures", TestParseHostKeyFingerprintFromRealCapturedOutput);
+            allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns 'changed' for a prior record even when trustNewHostKeys=true, never auto-accepting a changed key", TestClassifyHostKeyFailureChangedNeverAutoAcceptedEvenWithTrustEnabled);
+            allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns 'bulk-auto' for a brand-new target with auto-trust enabled", TestClassifyHostKeyFailureBulkAutoForNewTarget);
+            allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns 'unknown' for a brand-new target when auto-trust is disabled", TestClassifyHostKeyFailureUnknownWhenAutoTrustDisabled);
+            allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns null for a failure unrelated to host keys", TestClassifyHostKeyFailureNullForNonHostKeyFailure);
             allPassed &= SelfTestCheck(output, "trust-host-key fingerprint format validation accepts SHA256:... and rejects everything else", TestTrustLinuxHostKeyRejectsMalformedFingerprint);
             allPassed &= SelfTestCheck(output, "GenerateRandomToken returns a 64-character lowercase hex string, different each call", TestGenerateRandomTokenShape);
             allPassed &= SelfTestCheck(output, "Ingestion token configured-state reflects whether options.Token is set", TestSendIngestionTokenStatusReflectsConfiguredState);
@@ -7971,21 +8027,83 @@ namespace WindowsInventoryLite
             return null;
         }
 
+        private static string TestClassifyHostKeyFailureChangedNeverAutoAcceptedEvenWithTrustEnabled()
+        {
+            // The exact condition Finding 1 was about: a prior trusted
+            // record exists (expectedHostKey set) and the failure text
+            // mentions a host key. trustNewHostKeys=true and
+            // isBulkAutoRetry=false here specifically, to prove the
+            // structural fix holds even when those flags would otherwise
+            // steer toward "bulk-auto".
+            string result = ClassifyHostKeyFailure(
+                "SHA256:hXNM4oXACpM336pm8Tv/f3mA/2X1tq6ocXcl7TmFvtA",
+                "WARNING - POTENTIAL SECURITY BREACH! The host key does not match the one cached.",
+                parsedOk: false,
+                trustNewHostKeys: true,
+                isBulkAutoRetry: false);
+            if (result != "changed")
+            {
+                return "expected 'changed', got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestClassifyHostKeyFailureBulkAutoForNewTarget()
+        {
+            string result = ClassifyHostKeyFailure(
+                null,
+                "The host key is not cached for this server",
+                parsedOk: true,
+                trustNewHostKeys: true,
+                isBulkAutoRetry: false);
+            if (result != "bulk-auto")
+            {
+                return "expected 'bulk-auto', got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestClassifyHostKeyFailureUnknownWhenAutoTrustDisabled()
+        {
+            string result = ClassifyHostKeyFailure(
+                null,
+                "The host key is not cached for this server",
+                parsedOk: true,
+                trustNewHostKeys: false,
+                isBulkAutoRetry: false);
+            if (result != "unknown")
+            {
+                return "expected 'unknown', got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestClassifyHostKeyFailureNullForNonHostKeyFailure()
+        {
+            string result = ClassifyHostKeyFailure(
+                null,
+                "plink: Network error: Connection timed out",
+                parsedOk: false,
+                trustNewHostKeys: true,
+                isBulkAutoRetry: false);
+            if (result != null)
+            {
+                return "expected null (not a host-key failure), got '" + result + "'";
+            }
+            return null;
+        }
+
         private static string TestTrustLinuxHostKeyRejectsMalformedFingerprint()
         {
-            // Exercise the same fingerprint-format check the endpoint uses
-            // directly against the regex, since spinning up a real HTTP
-            // request/response round-trip is out of scope for this
-            // self-test style (match whatever this project's existing
-            // endpoint self-tests already do for input validation - if an
-            // existing test already drives a full request/response for a
-            // comparable endpoint, follow that pattern instead of testing
-            // the regex in isolation).
-            if (Regex.IsMatch("not-a-fingerprint", @"^SHA256:[A-Za-z0-9+/]+=*$"))
+            // Calls the same IsValidHostKeyFingerprint helper the endpoint
+            // calls, rather than a hand-copied regex, since spinning up a
+            // real HTTP request/response round-trip is out of scope for this
+            // self-test style.
+            if (IsValidHostKeyFingerprint("not-a-fingerprint"))
             {
                 return "malformed fingerprint incorrectly matched the validation pattern";
             }
-            if (!Regex.IsMatch("SHA256:hXNM4oXACpM336pm8Tv/f3mA/2X1tq6ocXcl7TmFvtA", @"^SHA256:[A-Za-z0-9+/]+=*$"))
+            if (!IsValidHostKeyFingerprint("SHA256:hXNM4oXACpM336pm8Tv/f3mA/2X1tq6ocXcl7TmFvtA"))
             {
                 return "a real, valid fingerprint failed the validation pattern";
             }
