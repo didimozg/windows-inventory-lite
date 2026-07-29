@@ -6,6 +6,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.28.0] - 2026-07-29
+
+### Added
+
+- Two new dashboard tabs, "Linux Client actions" and "Linux Client updates", bring Linux client deployment to full parity with the existing Windows flow: SSH-based install/uninstall, automatic outdated-client detection, and an independent push schedule separate from the Windows one.
+- Three SSH authentication modes for Linux pushes: stored Linux credentials, an SSH key, or a reused AD account. AD service-identity mode (the server's own running identity) is rejected with a clear error, since there is no SSH equivalent of "run as the service's own identity" - an explicit AD account works fine.
+- New `Uninstall-ClientDebianSSH.ps1` script - Linux clients previously had no scripted uninstall path at all.
+- Settings > General gains a "Linux Client update credentials" block (username/password/SSH key path) and a `plink.exe`/`pscp.exe` presence check (checked in both an installed-server layout and a dev/build-tree layout), so a missing SSH tool is caught before a push is attempted rather than mid-job. Password-based auth needs `plink.exe`/`pscp.exe`; key-based auth uses Windows' built-in `ssh.exe` and needs neither.
+- The Client package tab gains a "Linux package" section: a downloadable zip (client binary, systemd unit files, a self-contained `install.sh`) for environments without SSH connectivity from the dashboard server. This path never shells out to `plink.exe`/`pscp.exe`.
+
+### Changed
+
+- The existing "Client actions"/"Client updates" tabs are now labeled "Windows Client actions"/"Windows Client updates" - label text only, no behavior change.
+
+### Fixed
+
+- Every field that reaches a generated SSH command, a generated systemd unit file, or a generated `install.sh` is validated against a POSIX shell-metacharacter denylist (`ValidatePosixShellSafe`/`Test-PosixShellSafe`, shared with the existing Windows-side validator's design) before it's used to build a string, closing off shell-injection via hostnames, paths, or other operator-supplied values in the new Linux SSH job pipeline.
+- SSH credentials (password, SSH key path) are passed to `ssh.exe`/`plink.exe` over redirected stdin, never as child-process command-line arguments, matching the existing Windows WinRM push path's own approach - keeps secrets out of process listings and command-line-based logging.
+- The new `LinuxUpdatePassword` setting is DPAPI-encrypted at rest (`server-config.json` stores a `dpapi:`-prefixed value, never plaintext) and round-trips correctly across a server restart, matching how the existing AD/WebUI/ingestion-token/Windows-update passwords are already protected.
+- The generated `install.sh` is written with forced LF line endings (not the .NET default `Environment.NewLine`, which produced CRLF and broke the script's shebang/`set -e` behavior on the actual Linux target); the paired `GenerateSystemdUnitLines`/`New-SystemdUnitFiles` (C#/PowerShell) generators produce character-for-character identical `ExecStart`/`OnUnitActiveSec` output for the same inputs.
+
 ## [0.27.0] - 2026-07-27
 
 ### Added
