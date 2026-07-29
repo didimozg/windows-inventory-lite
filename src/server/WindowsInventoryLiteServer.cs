@@ -3211,11 +3211,15 @@ namespace WindowsInventoryLite
                         // the connection still failed on a host-key-related
                         // message - the target's real key changed since it was
                         // trusted. Never auto-accepted, regardless of trustNewHostKeys.
+                        // hostKeyFingerprint is deliberately never set here, even
+                        // if parsedOk is true: the dashboard renders a pre-filled
+                        // one-click "Trust and retry" button whenever a fingerprint
+                        // is present, and a changed key must always force the
+                        // manual-entry path so the operator types the new
+                        // fingerprint deliberately - this must hold even if a
+                        // future plink build's mismatch wording happens to also
+                        // include a parseable fingerprint.
                         result["hostKeyStatus"] = "changed";
-                        if (parsedOk)
-                        {
-                            result["hostKeyFingerprint"] = parsedFingerprint;
-                        }
                         result.Remove("hostKeyTrust");
                         break;
                     case "bulk-auto":
@@ -3226,8 +3230,13 @@ namespace WindowsInventoryLite
                         // requiring an explicit manual decision instead.
                         if (!IsValidHostKeyFingerprint(parsedFingerprint))
                         {
+                            // hostKeyFingerprint is deliberately not set here: the
+                            // dashboard renders a pre-filled one-click button
+                            // whenever it's present, and resubmitting this same
+                            // value would just get rejected again by the
+                            // trust-host-key endpoint's own validation. Fall back
+                            // to requiring an explicit manual decision instead.
                             result["hostKeyStatus"] = "unknown";
-                            result["hostKeyFingerprint"] = parsedFingerprint;
                             break;
                         }
                         try
@@ -6100,9 +6109,25 @@ namespace WindowsInventoryLite
 
         private static readonly object linuxKnownHostsLock = new object();
 
+        // Stored under a subfolder (same convention as _licenses/, _logs/,
+        // _linux-client-install-jobs/) so it never lands in the client-report
+        // filename namespace: per-client inventory reports are written as
+        // SanitizeFileName(computerName) + ".json" directly under DataPath's
+        // top level, and SanitizeFileName passes letters/digits/hyphens
+        // through unchanged. A client POSTing computerName "linux-ssh-known-hosts"
+        // to /api/v1/inventory - an endpoint gated only by the ingestion
+        // token, not admin auth - would otherwise overwrite this trust store
+        // outright (or DELETE /api/v1/clients/linux-ssh-known-hosts could
+        // remove it), corrupting the file and hard-failing every
+        // password-based Linux push.
+        private string GetLinuxSshDirectory()
+        {
+            return Path.Combine(options.DataPath, "_linux-ssh");
+        }
+
         private string GetLinuxKnownHostsFilePath()
         {
-            return Path.Combine(options.DataPath, "linux-ssh-known-hosts.json");
+            return Path.Combine(GetLinuxSshDirectory(), "linux-ssh-known-hosts.json");
         }
 
         // Deliberately does NOT swallow read/parse errors into an empty list:
@@ -6145,6 +6170,12 @@ namespace WindowsInventoryLite
 
         private void SaveLinuxKnownHosts(List<Dictionary<string, object>> hosts)
         {
+            string directory = GetLinuxSshDirectory();
+            if (!Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
             JavaScriptSerializer serializer = CreateJsonSerializer();
             string json = serializer.Serialize(hosts);
             string path = GetLinuxKnownHostsFilePath();
@@ -6176,7 +6207,10 @@ namespace WindowsInventoryLite
             List<Dictionary<string, object>> hosts;
             try
             {
-                hosts = LoadLinuxKnownHosts();
+                lock (linuxKnownHostsLock)
+                {
+                    hosts = LoadLinuxKnownHosts();
+                }
             }
             catch (Exception ex)
             {
@@ -8097,6 +8131,7 @@ namespace WindowsInventoryLite
                 options.DataPath = tempDataPath;
                 InventoryServer server = new InventoryServer(options);
                 string knownHostsPath = server.GetLinuxKnownHostsFilePath();
+                Directory.CreateDirectory(Path.GetDirectoryName(knownHostsPath));
                 File.WriteAllText(knownHostsPath, "{this is not valid known-hosts JSON at all", new UTF8Encoding(false));
 
                 bool threw = false;
