@@ -127,4 +127,49 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
                 Should -Throw '*host key*'
         }
     }
+
+    Context 'Invoke-PlinkWithPasswordFile host key handling' {
+        It 'passes -hostkey when ExpectedHostKey is supplied' {
+            $fakeExe = Join-Path -Path $TestDrive -ChildPath 'fake-plink-hostkey-arg.cmd'
+            Set-Content -LiteralPath $fakeExe -Value '@echo off' -Encoding ASCII
+            Add-Content -LiteralPath $fakeExe -Value 'echo ARGS: %*' -Encoding ASCII
+            Add-Content -LiteralPath $fakeExe -Value 'exit /b 0' -Encoding ASCII
+
+            $output = Invoke-PlinkWithPasswordFile -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'true') -PlainPassword 'unused-test-password' -ExpectedHostKey 'SHA256:abc123'
+
+            $output | Should -Match ([regex]::Escape('-hostkey'))
+            $output | Should -Match ([regex]::Escape('SHA256:abc123'))
+        }
+
+        It 'does not pass -hostkey when ExpectedHostKey is empty' {
+            $fakeExe = Join-Path -Path $TestDrive -ChildPath 'fake-plink-no-hostkey-arg.cmd'
+            Set-Content -LiteralPath $fakeExe -Value '@echo off' -Encoding ASCII
+            Add-Content -LiteralPath $fakeExe -Value 'echo ARGS: %*' -Encoding ASCII
+            Add-Content -LiteralPath $fakeExe -Value 'exit /b 0' -Encoding ASCII
+
+            $output = Invoke-PlinkWithPasswordFile -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'true') -PlainPassword 'unused-test-password' -ExpectedHostKey ''
+
+            $output | Should -Not -Match ([regex]::Escape('-hostkey'))
+        }
+
+        It 'throws an UNKNOWN-key message when ExpectedHostKey was not supplied and plink reports a host-key failure' {
+            $fakeExe = Join-Path -Path $TestDrive -ChildPath 'fake-plink-hostkey-fail-unknown.cmd'
+            Set-Content -LiteralPath $fakeExe -Value '@echo off' -Encoding ASCII
+            Add-Content -LiteralPath $fakeExe -Value 'echo The server''s host key is not cached and -batch prevents interactive prompting 1>&2' -Encoding ASCII
+            Add-Content -LiteralPath $fakeExe -Value 'exit /b 1' -Encoding ASCII
+
+            { Invoke-PlinkWithPasswordFile -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'true') -PlainPassword 'unused-test-password' -ExpectedHostKey '' } |
+                Should -Throw '*is not yet trusted by this machine*'
+        }
+
+        It 'throws a CHANGED-key message when ExpectedHostKey was supplied and plink still reports a host-key failure' {
+            $fakeExe = Join-Path -Path $TestDrive -ChildPath 'fake-plink-hostkey-fail-changed.cmd'
+            Set-Content -LiteralPath $fakeExe -Value '@echo off' -Encoding ASCII
+            Add-Content -LiteralPath $fakeExe -Value 'echo WARNING - POTENTIAL SECURITY BREACH! The server''s host key does not match the one PuTTY has cached 1>&2' -Encoding ASCII
+            Add-Content -LiteralPath $fakeExe -Value 'exit /b 1' -Encoding ASCII
+
+            { Invoke-PlinkWithPasswordFile -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'true') -PlainPassword 'unused-test-password' -ExpectedHostKey 'SHA256:abc123' } |
+                Should -Throw '*has CHANGED since it was last trusted here*'
+        }
+    }
 }

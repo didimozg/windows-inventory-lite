@@ -26,6 +26,10 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$ClientBinaryPath,
 
+    [Parameter()]
+    [AllowEmptyString()]
+    [string]$ExpectedHostKey,
+
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
     [string]$CredentialUsername,
@@ -186,7 +190,8 @@ function Invoke-PlinkWithPasswordFile {
     param(
         [string]$ExePath,
         [string[]]$Arguments,
-        [string]$PlainPassword
+        [string]$PlainPassword,
+        [string]$ExpectedHostKey
     )
 
     $pwFile = [System.IO.Path]::GetTempFileName()
@@ -200,13 +205,20 @@ function Invoke-PlinkWithPasswordFile {
 
         [System.IO.File]::WriteAllText($pwFile, $PlainPassword, (New-Object System.Text.UTF8Encoding($false)))
 
-        $fullArgs = @('-pwfile', $pwFile, '-batch') + $Arguments
+        $fullArgs = @('-pwfile', $pwFile, '-batch')
+        if ($ExpectedHostKey) {
+            $fullArgs += @('-hostkey', $ExpectedHostKey)
+        }
+        $fullArgs += $Arguments
         $output = Invoke-NativeAllowingStderr { & $ExePath @fullArgs 2>&1 }
 
         if ($LASTEXITCODE -ne 0) {
             $joined = $output -join "`n"
             if ($joined -match '(?i)host key') {
-                throw ("plink/pscp failed (exit {0}): the target's SSH host key is not yet trusted by this machine (PuTTY caches trusted keys separately from Windows' own OpenSSH known_hosts). -batch refuses to prompt for an unknown host key rather than risk silently trusting the wrong one. Connect once with -KeyPath, or run plink/pscp interactively against this target once to accept its host key, then retry. Raw output: {1}" -f $LASTEXITCODE, $joined)
+                if ($ExpectedHostKey) {
+                    throw ("plink/pscp failed (exit {0}): the target's SSH host key has CHANGED since it was last trusted here. This can mean the server was reinstalled or reimaged, or that something is intercepting the connection - only proceed if you can confirm this change is expected. Trust the new key from the Linux Client actions job log to update the stored fingerprint. Raw output: {1}" -f $LASTEXITCODE, $joined)
+                }
+                throw ("plink/pscp failed (exit {0}): the target's SSH host key is not yet trusted by this machine (PuTTY caches trusted keys separately from Windows' own OpenSSH known_hosts). -batch refuses to prompt for an unknown host key rather than risk silently trusting the wrong one. Trust this host key from the Linux Client actions job log, or connect once with -KeyPath instead. Raw output: {1}" -f $LASTEXITCODE, $joined)
             }
             throw ("plink/pscp failed (exit {0}): {1}" -f $LASTEXITCODE, $joined)
         }
@@ -225,12 +237,12 @@ function Invoke-PlinkWithPasswordFile {
 # Windows 10/Server 2019+, zero new dependency); password auth uses
 # bundled plink.exe (PuTTY, MIT-licensed - see deploy\linux-client\NOTICE).
 function Invoke-RemoteCommand {
-    param([string]$TargetComputer, [string]$Command)
+    param([string]$TargetComputer, [string]$Command, [string]$ExpectedHostKey)
 
     if ($script:usingPassword) {
         $plainPassword = ConvertTo-PlainText -Secure $script:CredentialPassword
         try {
-            $output = Invoke-PlinkWithPasswordFile -ExePath $script:plinkPath -Arguments @('-ssh', "$script:CredentialUsername@$TargetComputer", $Command) -PlainPassword $plainPassword
+            $output = Invoke-PlinkWithPasswordFile -ExePath $script:plinkPath -Arguments @('-ssh', "$script:CredentialUsername@$TargetComputer", $Command) -PlainPassword $plainPassword -ExpectedHostKey $ExpectedHostKey
         }
         finally {
             $plainPassword = $null
@@ -247,12 +259,12 @@ function Invoke-RemoteCommand {
 }
 
 function Copy-FileToRemote {
-    param([string]$TargetComputer, [string]$LocalPath, [string]$RemotePath)
+    param([string]$TargetComputer, [string]$LocalPath, [string]$RemotePath, [string]$ExpectedHostKey)
 
     if ($script:usingPassword) {
         $plainPassword = ConvertTo-PlainText -Secure $script:CredentialPassword
         try {
-            Invoke-PlinkWithPasswordFile -ExePath $script:pscpPath -Arguments @($LocalPath, "${script:CredentialUsername}@${TargetComputer}:$RemotePath") -PlainPassword $plainPassword | Out-Null
+            Invoke-PlinkWithPasswordFile -ExePath $script:pscpPath -Arguments @($LocalPath, "${script:CredentialUsername}@${TargetComputer}:$RemotePath") -PlainPassword $plainPassword -ExpectedHostKey $ExpectedHostKey | Out-Null
         }
         finally {
             $plainPassword = $null
@@ -320,12 +332,12 @@ if ($MyInvocation.InvocationName -ne '.') {
             try {
                 Write-Host "Connecting: $computer"
                 $remoteTmpDir = "/tmp/wil-linux-client-install"
-                Invoke-RemoteCommand -TargetComputer $computer -Command "${sudoPrefix}mkdir -p $InstallPath $remoteTmpDir && ${sudoPrefix}chmod 755 $remoteTmpDir" | Out-Null
+                Invoke-RemoteCommand -TargetComputer $computer -Command "${sudoPrefix}mkdir -p $InstallPath $remoteTmpDir && ${sudoPrefix}chmod 755 $remoteTmpDir" -ExpectedHostKey $ExpectedHostKey | Out-Null
 
                 Write-Host "Copying client binary: $computer"
-                Copy-FileToRemote -TargetComputer $computer -LocalPath $ClientBinaryPath -RemotePath "$remoteTmpDir/wil-linux-client"
-                Copy-FileToRemote -TargetComputer $computer -LocalPath $units.ServicePath -RemotePath "$remoteTmpDir/wil-linux-client.service"
-                Copy-FileToRemote -TargetComputer $computer -LocalPath $units.TimerPath -RemotePath "$remoteTmpDir/wil-linux-client.timer"
+                Copy-FileToRemote -TargetComputer $computer -LocalPath $ClientBinaryPath -RemotePath "$remoteTmpDir/wil-linux-client" -ExpectedHostKey $ExpectedHostKey
+                Copy-FileToRemote -TargetComputer $computer -LocalPath $units.ServicePath -RemotePath "$remoteTmpDir/wil-linux-client.service" -ExpectedHostKey $ExpectedHostKey
+                Copy-FileToRemote -TargetComputer $computer -LocalPath $units.TimerPath -RemotePath "$remoteTmpDir/wil-linux-client.timer" -ExpectedHostKey $ExpectedHostKey
 
                 Write-Host "Installing service: $computer"
                 Test-PosixShellSafe -Value $InstallPath -FieldName 'InstallPath'
@@ -336,7 +348,7 @@ if ($MyInvocation.InvocationName -ne '.') {
                     "${sudoPrefix}rm -rf $remoteTmpDir && " +
                     "${sudoPrefix}systemctl daemon-reload && " +
                     "${sudoPrefix}systemctl enable --now wil-linux-client.timer"
-                Invoke-RemoteCommand -TargetComputer $computer -Command $installCommand | Out-Null
+                Invoke-RemoteCommand -TargetComputer $computer -Command $installCommand -ExpectedHostKey $ExpectedHostKey | Out-Null
 
                 Write-Host "Client installed: $computer"
             }
