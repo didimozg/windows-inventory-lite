@@ -3036,7 +3036,15 @@ namespace WindowsInventoryLite
             int port = 22;
             if (payload.ContainsKey("port"))
             {
-                Int32.TryParse(Convert.ToString(payload["port"]), out port);
+                // Parse into a separate local: Int32.TryParse writes 0 to
+                // its out parameter on failure, which would otherwise
+                // silently clobber the port=22 default for a malformed/null
+                // "port" value instead of keeping it.
+                int parsedPort;
+                if (Int32.TryParse(Convert.ToString(payload["port"]), out parsedPort))
+                {
+                    port = parsedPort;
+                }
             }
 
             if (String.IsNullOrEmpty(host))
@@ -3131,7 +3139,21 @@ namespace WindowsInventoryLite
             string expectedHostKey = null;
             if (!usingKey)
             {
-                Dictionary<string, object> knownHost = FindLinuxKnownHost(target, 22);
+                Dictionary<string, object> knownHost;
+                try
+                {
+                    knownHost = FindLinuxKnownHost(target, 22);
+                }
+                catch (Exception ex)
+                {
+                    // A failure to read the trust store must never be treated
+                    // as "no record, safe to auto-trust" - report the push as
+                    // failed instead of silently proceeding as if this target
+                    // were brand-new (see FindLinuxKnownHost).
+                    result["status"] = "failed";
+                    result["message"] = "Could not read the Linux SSH known-hosts trust store: " + ex.Message;
+                    return result;
+                }
                 if (knownHost != null)
                 {
                     expectedHostKey = GetStringValue(knownHost, "Fingerprint");
@@ -3197,7 +3219,31 @@ namespace WindowsInventoryLite
                         result.Remove("hostKeyTrust");
                         break;
                     case "bulk-auto":
-                        UpsertLinuxKnownHost(target, 22, parsedKeyType, parsedFingerprint, "bulk-auto");
+                        // Same format validation the manual trust-host-key
+                        // endpoint applies (IsValidHostKeyFingerprint) - a
+                        // parsedFingerprint that doesn't look like a real
+                        // fingerprint must not be auto-trusted; fall back to
+                        // requiring an explicit manual decision instead.
+                        if (!IsValidHostKeyFingerprint(parsedFingerprint))
+                        {
+                            result["hostKeyStatus"] = "unknown";
+                            result["hostKeyFingerprint"] = parsedFingerprint;
+                            break;
+                        }
+                        try
+                        {
+                            UpsertLinuxKnownHost(target, 22, parsedKeyType, parsedFingerprint, "bulk-auto");
+                        }
+                        catch (Exception ex)
+                        {
+                            // A write failure here must surface as a failed
+                            // push, not be silently swallowed - this is the
+                            // write-side counterpart to the read-failure
+                            // handling above (see FindLinuxKnownHost).
+                            result["status"] = "failed";
+                            result["message"] = "Could not update the Linux SSH known-hosts trust store: " + ex.Message;
+                            return result;
+                        }
                         return RunLinuxClientInstallTarget(target, serverUrl, token, intervalHours, installPath, authMode, username, password, keyPath, trustNewHostKeys, true);
                     case "unknown":
                         result["hostKeyStatus"] = "unknown";
@@ -3230,13 +3276,19 @@ namespace WindowsInventoryLite
         //                 parsed cleanly, bulk auto-trust is enabled, and this
         //                 isn't already a bulk-auto retry. Safe to trust and retry once.
         //   "unknown"   - the failure fingerprint parsed but neither of the
-        //                 above applies (no prior record, auto-trust unavailable
-        //                 or already used) - needs an explicit manual trust decision.
-        //   null        - not a host-key failure at all (or nothing to classify).
-        // String.IsNullOrEmpty(expectedHostKey) gates the "bulk-auto" case
-        // structurally: a prior record existing is enough, by itself, to rule
-        // out ever silently overwriting it via this path - independent of
-        // whatever wording plink/pscp happens to produce.
+        //                 above applies AND no prior record existed - needs
+        //                 an explicit manual trust decision.
+        //   null        - not a host-key failure at all (or nothing to classify;
+        //                 also covers a prior record existing but the failure
+        //                 text not matching "changed" - see below).
+        // String.IsNullOrEmpty(expectedHostKey) gates BOTH the "bulk-auto"
+        // case and the "unknown" case structurally: a prior record existing
+        // is enough, by itself, to rule out ever silently overwriting it via
+        // "bulk-auto" AND to rule out ever mislabeling its failure as
+        // "unknown" (which the dashboard renders as a pre-filled, un-warned
+        // trust button) - independent of whatever wording plink/pscp happens
+        // to produce. With a prior record present, the only possible
+        // outcomes are "changed" or null - never "unknown", never "bulk-auto".
         internal static string ClassifyHostKeyFailure(string expectedHostKey, string combinedOutput, bool parsedOk, bool trustNewHostKeys, bool isBulkAutoRetry)
         {
             bool hasHostKeyText = !String.IsNullOrEmpty(combinedOutput) && combinedOutput.IndexOf("host key", StringComparison.OrdinalIgnoreCase) >= 0;
@@ -3248,7 +3300,7 @@ namespace WindowsInventoryLite
             {
                 return "bulk-auto";
             }
-            if (parsedOk)
+            if (String.IsNullOrEmpty(expectedHostKey) && parsedOk)
             {
                 return "unknown";
             }
@@ -6053,6 +6105,18 @@ namespace WindowsInventoryLite
             return Path.Combine(options.DataPath, "linux-ssh-known-hosts.json");
         }
 
+        // Deliberately does NOT swallow read/parse errors into an empty list:
+        // concurrent Linux install jobs (each dispatched via
+        // ThreadPool.QueueUserWorkItem) and the manual trust-host-key
+        // endpoint can all read/write this file at the same time, so a
+        // transient sharing violation is real, not theoretical. Silently
+        // returning "no records" here would make a host that DOES have a
+        // pinned trust record look brand-new to FindLinuxKnownHost, and a
+        // trustNewHostKeys push could then overwrite the pin via the
+        // bulk-auto path - exactly the failure-looks-like-empty bug this
+        // method must not reintroduce. Let the exception propagate;
+        // FindLinuxKnownHost/UpsertLinuxKnownHost's callers are responsible
+        // for treating it as a failure rather than "no record".
         private List<Dictionary<string, object>> LoadLinuxKnownHosts()
         {
             string path = GetLinuxKnownHostsFilePath();
@@ -6062,25 +6126,19 @@ namespace WindowsInventoryLite
                 return hosts;
             }
 
-            try
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            string json = File.ReadAllText(path, Encoding.UTF8);
+            ArrayList raw = serializer.Deserialize<ArrayList>(json);
+            if (raw != null)
             {
-                JavaScriptSerializer serializer = CreateJsonSerializer();
-                string json = File.ReadAllText(path, Encoding.UTF8);
-                ArrayList raw = serializer.Deserialize<ArrayList>(json);
-                if (raw != null)
+                foreach (object item in raw)
                 {
-                    foreach (object item in raw)
+                    Dictionary<string, object> record = item as Dictionary<string, object>;
+                    if (record != null)
                     {
-                        Dictionary<string, object> record = item as Dictionary<string, object>;
-                        if (record != null)
-                        {
-                            hosts.Add(record);
-                        }
+                        hosts.Add(record);
                     }
                 }
-            }
-            catch
-            {
             }
             return hosts;
         }
@@ -6090,7 +6148,22 @@ namespace WindowsInventoryLite
             JavaScriptSerializer serializer = CreateJsonSerializer();
             string json = serializer.Serialize(hosts);
             string path = GetLinuxKnownHostsFilePath();
-            File.WriteAllText(path, json, new UTF8Encoding(false));
+            // Write to a temp file then swap it into place (same idiom as
+            // SaveConfig's ConfigPath write) instead of File.WriteAllText
+            // directly on the real path - a crash or service stop mid-write
+            // could otherwise leave a truncated/corrupt file, which then
+            // reads back as "no records" and silently loses every
+            // previously trusted host's pin.
+            string tempPath = path + ".tmp";
+            File.WriteAllText(tempPath, json, new UTF8Encoding(false));
+            if (File.Exists(path))
+            {
+                File.Replace(tempPath, path, null);
+            }
+            else
+            {
+                File.Move(tempPath, path);
+            }
             // A tampered fingerprint here would let a pinned push accept a
             // different key than the operator actually trusted - integrity,
             // not confidentiality, is what this ACL protects (same reasoning
@@ -6100,7 +6173,22 @@ namespace WindowsInventoryLite
 
         private Dictionary<string, object> FindLinuxKnownHost(string host, int port)
         {
-            foreach (Dictionary<string, object> record in LoadLinuxKnownHosts())
+            List<Dictionary<string, object>> hosts;
+            try
+            {
+                hosts = LoadLinuxKnownHosts();
+            }
+            catch (Exception ex)
+            {
+                // Explicitly re-thrown (not swallowed into "no record found")
+                // so RunLinuxClientInstallTarget can distinguish "genuinely
+                // no trust record" from "couldn't read the trust store right
+                // now" and treat the latter as a failed push instead of
+                // silently proceeding as if the host were brand-new.
+                throw new IOException("Could not read the Linux SSH known-hosts trust store: " + ex.Message, ex);
+            }
+
+            foreach (Dictionary<string, object> record in hosts)
             {
                 if (String.Equals(GetStringValue(record, "Host"), host, StringComparison.OrdinalIgnoreCase)
                     && GetIntValue(record, "Port", 22) == port)
@@ -6923,9 +7011,10 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields is a no-op for a brand-new computer with sync disabled", TestComputeAdSyncFieldsNoOpForNewComputerWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
             allPassed &= SelfTestCheck(output, "Linux known-hosts store round-trips and overwrites by host:port", TestLinuxKnownHostsRoundTrip);
+            allPassed &= SelfTestCheck(output, "A malformed known-hosts file surfaces as a read error from FindLinuxKnownHost, not as 'no record found'", TestLinuxKnownHostsReadFailureSurfacesAsError);
             allPassed &= SelfTestCheck(output, "TryParseHostKeyDetails extracts type+fingerprint from a real captured plink failure, ignores unrelated failures", TestParseHostKeyFingerprintFromRealCapturedOutput);
             allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns 'changed' for a prior record even when trustNewHostKeys=true, never auto-accepting a changed key", TestClassifyHostKeyFailureChangedNeverAutoAcceptedEvenWithTrustEnabled);
-            allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure never returns 'bulk-auto' with a prior trusted record, even if the failure text doesn't say 'host key'", TestClassifyHostKeyFailureNeverBulkAutoWithPriorRecordRegardlessOfWording);
+            allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure never returns 'bulk-auto' or 'unknown' with a prior trusted record, even if the failure text doesn't say 'host key'", TestClassifyHostKeyFailureNeverBulkAutoWithPriorRecordRegardlessOfWording);
             allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns 'bulk-auto' for a brand-new target with auto-trust enabled", TestClassifyHostKeyFailureBulkAutoForNewTarget);
             allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns 'unknown' for a brand-new target when auto-trust is disabled", TestClassifyHostKeyFailureUnknownWhenAutoTrustDisabled);
             allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns null for a failure unrelated to host keys", TestClassifyHostKeyFailureNullForNonHostKeyFailure);
@@ -7989,6 +8078,49 @@ namespace WindowsInventoryLite
             }
         }
 
+        // Proves the fix for the "read failure looks like no record" bug: a
+        // genuinely malformed/truncated known-hosts file (what a crash
+        // mid-write could leave behind pre-Fix-4b, or what a concurrent
+        // reader could observe mid-write without atomic replace) must
+        // surface as an error from FindLinuxKnownHost, NOT silently look
+        // like "no record found" - the latter is unsafe because a
+        // trustNewHostKeys push would then treat a host that actually HAS a
+        // pinned record as brand-new and silently overwrite the pin via the
+        // bulk-auto path.
+        private static string TestLinuxKnownHostsReadFailureSurfacesAsError()
+        {
+            string tempDataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = tempDataPath;
+                InventoryServer server = new InventoryServer(options);
+                string knownHostsPath = server.GetLinuxKnownHostsFilePath();
+                File.WriteAllText(knownHostsPath, "{this is not valid known-hosts JSON at all", new UTF8Encoding(false));
+
+                bool threw = false;
+                try
+                {
+                    server.FindLinuxKnownHost("192.168.4.112", 22);
+                }
+                catch
+                {
+                    threw = true;
+                }
+
+                if (!threw)
+                {
+                    return "FindLinuxKnownHost returned normally instead of surfacing the malformed-file read failure - a real trust record could be indistinguishable from 'no record' and get silently overwritten";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDataPath, true); } catch { }
+            }
+        }
+
         private static string TestParseHostKeyFingerprintFromRealCapturedOutput()
         {
             // Captured verbatim from a real live failure against 192.168.4.112
@@ -8058,7 +8190,13 @@ namespace WindowsInventoryLite
             // Here parsedOk is TRUE and the failure text does NOT contain
             // "host key" at all (e.g. a future reworded/localized plink
             // build) - the only thing that can still stop this from
-            // returning "bulk-auto" is the expectedHostKey conjunct itself.
+            // returning "bulk-auto" (or, per a later review pass, "unknown")
+            // is the expectedHostKey conjunct itself. With a prior record
+            // present and the text not matching the "changed" branch's own
+            // "host key" requirement, the correct result is null - never
+            // "bulk-auto" and never "unknown" (an "unknown" badge renders a
+            // pre-filled, un-warned trust button, which is wrong for a host
+            // that already has a pinned record).
             string result = ClassifyHostKeyFailure(
                 "SHA256:hXNM4oXACpM336pm8Tv/f3mA/2X1tq6ocXcl7TmFvtA",
                 "The server's ssh-ed25519 key fingerprint is:\n  ssh-ed25519 255 SHA256:DIFFERENTvalueDIFFERENTvalueDIFFERENTvalueA",
@@ -8069,9 +8207,13 @@ namespace WindowsInventoryLite
             {
                 return "returned 'bulk-auto' with a prior trusted record present - the never-auto-accept invariant is broken";
             }
-            if (result != "unknown")
+            if (result == "unknown")
             {
-                return "expected 'unknown' (parses but text lacks the literal 'host key', so classification falls through), got '" + result + "'";
+                return "returned 'unknown' with a prior trusted record present - the operator would see a pre-filled, un-warned trust button for what may be a changed key";
+            }
+            if (result != null)
+            {
+                return "expected null (parses but text lacks the literal 'host key', so classification falls through without matching 'changed'), got '" + result + "'";
             }
             return null;
         }
