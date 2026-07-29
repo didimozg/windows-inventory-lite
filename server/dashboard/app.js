@@ -847,12 +847,28 @@
 
   function renderInstallJob(job, statusElementId = 'installStatus') {
     const results = job.results || [];
-    const rows = results.map(result => `<tr>
+    const rows = results.map(result => {
+      let trustControl = '';
+      if (result.hostKeyStatus && result.hostKeyFingerprint) {
+        trustControl = `<button class="link-button trust-host-key-button" type="button"
+             data-trust-host="${escapeHtml(result.target)}"
+             data-trust-fingerprint="${escapeHtml(result.hostKeyFingerprint)}">Trust and retry</button>`;
+      } else if (result.hostKeyStatus) {
+        trustControl = `<span class="trust-host-key-manual">
+             <input type="text" class="trust-fingerprint-input" placeholder="SHA256:..." data-trust-host-input="${escapeHtml(result.target)}">
+             <button class="link-button trust-host-key-button" type="button" data-trust-host-manual="${escapeHtml(result.target)}">Trust and retry</button>
+           </span>`;
+      }
+      const hostKeyBadge = result.hostKeyStatus === 'changed'
+        ? '<span class="usb-badge">HOST KEY CHANGED</span>'
+        : (result.hostKeyStatus === 'unknown' ? '<span class="usb-badge">HOST KEY UNKNOWN</span>' : '');
+      return `<tr>
       <td>${escapeHtml(result.target)}</td>
-      <td>${escapeHtml(result.status)}</td>
+      <td>${escapeHtml(result.status)}${hostKeyBadge}</td>
       <td>${escapeHtml(result.message)}</td>
-      <td><pre class="install-output">${escapeHtml((result.error || result.output || '').trim())}</pre></td>
-    </tr>`).join('');
+      <td><pre class="install-output">${escapeHtml((result.error || result.output || '').trim())}</pre>${trustControl}</td>
+    </tr>`;
+    }).join('');
 
     const statusElement = byId(statusElementId);
     statusElement.classList.remove('empty');
@@ -867,6 +883,22 @@
           <tbody>${rows || '<tr><td colspan="4" class="empty">Waiting for results.</td></tr>'}</tbody>
         </table>
       </div>`;
+
+    document.querySelectorAll('[data-trust-host]').forEach(button => {
+      button.addEventListener('click', () => trustHostKeyAndRetry(button.dataset.trustHost, button.dataset.trustFingerprint, statusElementId));
+    });
+    document.querySelectorAll('[data-trust-host-manual]').forEach(button => {
+      button.addEventListener('click', () => {
+        const host = button.dataset.trustHostManual;
+        const input = statusElement.querySelector(`[data-trust-host-input="${CSS.escape(host)}"]`);
+        const fingerprint = input ? input.value.trim() : '';
+        if (!fingerprint) {
+          window.alert('Enter the host key fingerprint (e.g. SHA256:...) before trusting it.');
+          return;
+        }
+        trustHostKeyAndRetry(host, fingerprint, statusElementId);
+      });
+    });
   }
 
   function renderInstallHistory() {
@@ -979,6 +1011,21 @@
       element.classList.toggle('hidden', !isInstall);
     });
     byId('linuxInstallButton').textContent = isInstall ? 'Install client' : 'Uninstall client';
+    if (!isInstall) {
+      byId('linuxTrustNewHostKeys').checked = false;
+      byId('linuxAcknowledgeHostKeyRisk').checked = false;
+    }
+    updateLinuxTrustNewHostKeysUi();
+  }
+
+  function updateLinuxTrustNewHostKeysUi() {
+    const trustChecked = byId('linuxTrustNewHostKeys').checked;
+    byId('linuxAcknowledgeHostKeyRiskField').classList.toggle('hidden', !trustChecked);
+    if (!trustChecked) {
+      byId('linuxAcknowledgeHostKeyRisk').checked = false;
+    }
+    const acknowledgeChecked = byId('linuxAcknowledgeHostKeyRisk').checked;
+    byId('linuxInstallButton').disabled = trustChecked && !acknowledgeChecked;
   }
 
   function loadLinuxInstallHistory() {
@@ -1043,6 +1090,8 @@
     const username = authMode === 'ad' ? '' : byId('linuxInstallUsername').value.trim();
     const password = authMode === 'credentials' ? byId('linuxInstallPassword').value : '';
     const keyPath = authMode === 'key' ? byId('linuxInstallKeyPath').value.trim() : '';
+    const trustNewHostKeys = action === 'install' && byId('linuxTrustNewHostKeys').checked;
+    const acknowledgeHostKeyRisk = action === 'install' && byId('linuxAcknowledgeHostKeyRisk').checked;
 
     if (!targets) {
       window.alert('Enter at least one target.');
@@ -1066,7 +1115,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets, serverUrl, token, intervalHours, installPath, authMode, username, password, keyPath })
+      body: JSON.stringify({ targets, serverUrl, token, intervalHours, installPath, authMode, username, password, keyPath, trustNewHostKeys, acknowledgeHostKeyRisk })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
@@ -1084,6 +1133,46 @@
       })
       .finally(() => {
         byId('linuxInstallButton').disabled = false;
+      });
+  }
+
+  function trustHostKeyAndRetry(host, fingerprint, statusElementId) {
+    fetch('/api/v1/linux-client-install/trust-host-key', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, port: 22, fingerprint })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
+      .then(({ ok, status, data }) => {
+        if (!ok) throw new Error(data.error || `HTTP ${status}`);
+
+        const serverUrl = byId('linuxInstallServerUrl').value.trim();
+        const token = byId('linuxInstallToken').value.trim();
+        const intervalHours = Number(byId('linuxInstallIntervalHours').value) || 6;
+        const installPath = byId('linuxInstallPath').value.trim() || '/opt/windows-inventory-lite';
+        const authMode = byId('linuxInstallAuthMode').value;
+        const username = authMode === 'ad' ? '' : byId('linuxInstallUsername').value.trim();
+        const password = authMode === 'credentials' ? byId('linuxInstallPassword').value : '';
+        const keyPath = authMode === 'key' ? byId('linuxInstallKeyPath').value.trim() : '';
+
+        return fetch('/api/v1/linux-client-install', {
+          method: 'POST',
+          cache: 'no-store',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ targets: host, serverUrl, token, intervalHours, installPath, authMode, username, password, keyPath, trustNewHostKeys: false, acknowledgeHostKeyRisk: false })
+        });
+      })
+      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
+      .then(({ ok, status, data }) => {
+        if (!ok) throw new Error(data.error || `HTTP ${status}`);
+        state.linuxInstallJobId = data.jobId;
+        if (state.linuxInstallPollTimer) window.clearInterval(state.linuxInstallPollTimer);
+        pollLinuxInstallJob(state.linuxInstallJobId);
+        state.linuxInstallPollTimer = window.setInterval(() => pollLinuxInstallJob(state.linuxInstallJobId), 3000);
+      })
+      .catch(error => {
+        byId(statusElementId).textContent = `Trust and retry failed: ${error.message}`;
       });
   }
 
@@ -3683,6 +3772,8 @@
   byId('linuxClientAction').addEventListener('change', updateLinuxClientActionUi);
   byId('linuxInstallAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField', 'linuxInstallKeyField'));
   byId('linuxInstallButton').addEventListener('click', startLinuxClientActionJob);
+  byId('linuxTrustNewHostKeys').addEventListener('change', updateLinuxTrustNewHostKeysUi);
+  byId('linuxAcknowledgeHostKeyRisk').addEventListener('change', updateLinuxTrustNewHostKeysUi);
   byId('linuxUpdatesAuthMode').addEventListener('change', () => {});
   byId('linuxUpdatesSelectAll').addEventListener('change', () => {
     const checked = byId('linuxUpdatesSelectAll').checked;

@@ -820,6 +820,14 @@
                 SSH key path
                 <input id="linuxInstallKeyPath" type="text" placeholder="C:\path\to\private-key.pem">
               </label>
+              <label id="linuxTrustNewHostKeysField" class="check-label install-only">
+                <input id="linuxTrustNewHostKeys" type="checkbox">
+                Trust new host keys automatically (skip verification)
+              </label>
+              <label id="linuxAcknowledgeHostKeyRiskField" class="check-label install-only hidden">
+                <input id="linuxAcknowledgeHostKeyRisk" type="checkbox">
+                I understand this accepts an unverified SSH host key on first connection
+              </label>
               <button id="linuxInstallButton" class="primary-button install-submit-field" type="button">Install client</button>
             </div>
           </div>

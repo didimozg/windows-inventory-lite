@@ -1002,6 +1002,24 @@ pre {
   white-space: nowrap;
 }
 
+.trust-host-key-button {
+  margin-top: 6px;
+}
+
+.trust-host-key-manual {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.trust-fingerprint-input {
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 6px;
+  width: 220px;
+}
+
 tr.usb-row td {
   background: var(--usb-row-bg);
 }
