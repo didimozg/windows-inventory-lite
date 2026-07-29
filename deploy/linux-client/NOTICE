@@ -25,10 +25,14 @@ following conditions: the above copyright notice and this permission
 notice shall be included in all copies or substantial portions of the
 Software.
 
-Download plink.exe/pscp.exe for the matching architecture from the
-official release page:
+plink.exe and pscp.exe are bundled in this directory and tracked in the
+repository as of 2026-07-29. Both were verified before being added:
+Authenticode signature valid (signed by Simon Tatham, issued by Sectigo
+Public Code Signing CA R36, chain valid through 2027-09-28), FileVersion
+"Release 0.84" for both.
+SHA-256 plink.exe: 8AFECC0DC0A87272D302585FF6CED864A1D1F399B54E44CD2B690876452D1D0F
+SHA-256 pscp.exe:  D7534E6AD0228877ABBEDEB221345845F3237898E07273D8A186241744895EB6
+Re-verify signature and hash before replacing either file with a newer
+release - do not update plink.exe/pscp.exe here without repeating that
+check against the official release page:
 https://www.chiark.greenend.org.uk/~sgtatham/putty/latest.html
-Place both files in this directory (deploy\linux-client\). They are not
-tracked in this repository - each user/build should fetch and verify
-their own copy directly from the official source rather than trust a
-third-party redistribution.
