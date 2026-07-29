@@ -6925,6 +6925,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "Linux known-hosts store round-trips and overwrites by host:port", TestLinuxKnownHostsRoundTrip);
             allPassed &= SelfTestCheck(output, "TryParseHostKeyDetails extracts type+fingerprint from a real captured plink failure, ignores unrelated failures", TestParseHostKeyFingerprintFromRealCapturedOutput);
             allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns 'changed' for a prior record even when trustNewHostKeys=true, never auto-accepting a changed key", TestClassifyHostKeyFailureChangedNeverAutoAcceptedEvenWithTrustEnabled);
+            allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure never returns 'bulk-auto' with a prior trusted record, even if the failure text doesn't say 'host key'", TestClassifyHostKeyFailureNeverBulkAutoWithPriorRecordRegardlessOfWording);
             allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns 'bulk-auto' for a brand-new target with auto-trust enabled", TestClassifyHostKeyFailureBulkAutoForNewTarget);
             allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns 'unknown' for a brand-new target when auto-trust is disabled", TestClassifyHostKeyFailureUnknownWhenAutoTrustDisabled);
             allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns null for a failure unrelated to host keys", TestClassifyHostKeyFailureNullForNonHostKeyFailure);
@@ -8044,6 +8045,33 @@ namespace WindowsInventoryLite
             if (result != "changed")
             {
                 return "expected 'changed', got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestClassifyHostKeyFailureNeverBulkAutoWithPriorRecordRegardlessOfWording()
+        {
+            // The case that actually discriminates fixed from unfixed code
+            // (unlike the sibling test above, which uses parsedOk: false and
+            // so would already avoid the bulk-auto branch on the OLD,
+            // unstructural guard too - a prior review caught that gap).
+            // Here parsedOk is TRUE and the failure text does NOT contain
+            // "host key" at all (e.g. a future reworded/localized plink
+            // build) - the only thing that can still stop this from
+            // returning "bulk-auto" is the expectedHostKey conjunct itself.
+            string result = ClassifyHostKeyFailure(
+                "SHA256:hXNM4oXACpM336pm8Tv/f3mA/2X1tq6ocXcl7TmFvtA",
+                "The server's ssh-ed25519 key fingerprint is:\n  ssh-ed25519 255 SHA256:DIFFERENTvalueDIFFERENTvalueDIFFERENTvalueA",
+                parsedOk: true,
+                trustNewHostKeys: true,
+                isBulkAutoRetry: false);
+            if (result == "bulk-auto")
+            {
+                return "returned 'bulk-auto' with a prior trusted record present - the never-auto-accept invariant is broken";
+            }
+            if (result != "unknown")
+            {
+                return "expected 'unknown' (parses but text lacks the literal 'host key', so classification falls through), got '" + result + "'";
             }
             return null;
         }
