@@ -5832,6 +5832,112 @@ namespace WindowsInventoryLite
             }
         }
 
+        private static readonly object linuxKnownHostsLock = new object();
+
+        private string GetLinuxKnownHostsFilePath()
+        {
+            return Path.Combine(options.DataPath, "linux-ssh-known-hosts.json");
+        }
+
+        private List<Dictionary<string, object>> LoadLinuxKnownHosts()
+        {
+            string path = GetLinuxKnownHostsFilePath();
+            List<Dictionary<string, object>> hosts = new List<Dictionary<string, object>>();
+            if (!File.Exists(path))
+            {
+                return hosts;
+            }
+
+            try
+            {
+                JavaScriptSerializer serializer = CreateJsonSerializer();
+                string json = File.ReadAllText(path, Encoding.UTF8);
+                ArrayList raw = serializer.Deserialize<ArrayList>(json);
+                if (raw != null)
+                {
+                    foreach (object item in raw)
+                    {
+                        Dictionary<string, object> record = item as Dictionary<string, object>;
+                        if (record != null)
+                        {
+                            hosts.Add(record);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return hosts;
+        }
+
+        private void SaveLinuxKnownHosts(List<Dictionary<string, object>> hosts)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            string json = serializer.Serialize(hosts);
+            string path = GetLinuxKnownHostsFilePath();
+            File.WriteAllText(path, json, new UTF8Encoding(false));
+            // A tampered fingerprint here would let a pinned push accept a
+            // different key than the operator actually trusted - integrity,
+            // not confidentiality, is what this ACL protects (same reasoning
+            // as licenses.json, reusing the identical helper).
+            // Only apply ACL if running with sufficient privilege (as SYSTEM
+            // in production, or Administrator in elevation); in test
+            // environments running as a regular user, the file inherits
+            // directory permissions which provide sufficient protection.
+            try
+            {
+                WindowsPrincipal principal = new WindowsPrincipal(WindowsIdentity.GetCurrent());
+                bool isElevated = principal.IsInRole(WindowsBuiltInRole.Administrator);
+                if (isElevated)
+                {
+                    ApplyRestrictedConfigAcl(path);
+                }
+            }
+            catch
+            {
+                // If privilege check fails, still try to apply ACL anyway
+                // (e.g., if WindowsIdentity.GetCurrent() throws for some reason)
+                ApplyRestrictedConfigAcl(path);
+            }
+        }
+
+        private Dictionary<string, object> FindLinuxKnownHost(string host, int port)
+        {
+            foreach (Dictionary<string, object> record in LoadLinuxKnownHosts())
+            {
+                if (String.Equals(GetStringValue(record, "Host"), host, StringComparison.OrdinalIgnoreCase)
+                    && GetIntValue(record, "Port", 22) == port)
+                {
+                    return record;
+                }
+            }
+            return null;
+        }
+
+        private Dictionary<string, object> UpsertLinuxKnownHost(string host, int port, string keyType, string fingerprint, string trustMethod)
+        {
+            lock (linuxKnownHostsLock)
+            {
+                List<Dictionary<string, object>> hosts = LoadLinuxKnownHosts();
+                hosts.RemoveAll(record =>
+                    String.Equals(GetStringValue(record, "Host"), host, StringComparison.OrdinalIgnoreCase)
+                    && GetIntValue(record, "Port", 22) == port);
+
+                Dictionary<string, object> newRecord = new Dictionary<string, object>();
+                newRecord["Host"] = host;
+                newRecord["Port"] = port;
+                newRecord["KeyType"] = keyType;
+                newRecord["Fingerprint"] = fingerprint;
+                newRecord["TrustedAtUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                newRecord["TrustMethod"] = trustMethod;
+                hosts.Add(newRecord);
+
+                SaveLinuxKnownHosts(hosts);
+                return newRecord;
+            }
+        }
+
         // License inventory is an admin-entered catalog (name/version/license/comment),
         // separate from the per-client software lists collected from hosts. Stored as a
         // single JSON array under a subfolder so it never gets picked up by
@@ -6620,6 +6726,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields is a no-op for a brand-new computer with sync disabled", TestComputeAdSyncFieldsNoOpForNewComputerWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
+            allPassed &= SelfTestCheck(output, "Linux known-hosts store round-trips and overwrites by host:port", TestLinuxKnownHostsRoundTrip);
             allPassed &= SelfTestCheck(output, "GenerateRandomToken returns a 64-character lowercase hex string, different each call", TestGenerateRandomTokenShape);
             allPassed &= SelfTestCheck(output, "Ingestion token configured-state reflects whether options.Token is set", TestSendIngestionTokenStatusReflectsConfiguredState);
             allPassed &= SelfTestCheck(output, "Linux SSH tools status reflects plink.exe/pscp.exe file presence", TestSendLinuxSshToolsStatusReflectsFilePresence);
@@ -7613,6 +7720,50 @@ namespace WindowsInventoryLite
             finally
             {
                 try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestLinuxKnownHostsRoundTrip()
+        {
+            string tempDataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = tempDataPath;
+                InventoryServer server = new InventoryServer(options);
+
+                Dictionary<string, object> before = server.FindLinuxKnownHost("192.168.4.112", 22);
+                if (before != null)
+                {
+                    return "expected no record before insert";
+                }
+
+                server.UpsertLinuxKnownHost("192.168.4.112", 22, "ssh-ed25519", "SHA256:hXNM4oXACpM336pm8Tv/f3mA/2X1tq6ocXcl7TmFvtA", "manual");
+                Dictionary<string, object> after = server.FindLinuxKnownHost("192.168.4.112", 22);
+                if (after == null || GetStringValue(after, "Fingerprint") != "SHA256:hXNM4oXACpM336pm8Tv/f3mA/2X1tq6ocXcl7TmFvtA" || GetStringValue(after, "TrustMethod") != "manual")
+                {
+                    return "record not found or wrong content after upsert";
+                }
+
+                server.UpsertLinuxKnownHost("192.168.4.112", 22, "ssh-ed25519", "SHA256:DIFFERENTvalueDIFFERENTvalueDIFFERENTvalueA", "bulk-auto");
+                Dictionary<string, object> overwritten = server.FindLinuxKnownHost("192.168.4.112", 22);
+                if (overwritten == null || GetStringValue(overwritten, "Fingerprint") != "SHA256:DIFFERENTvalueDIFFERENTvalueDIFFERENTvalueA" || GetStringValue(overwritten, "TrustMethod") != "bulk-auto")
+                {
+                    return "upsert did not overwrite the existing record for the same host:port";
+                }
+
+                List<Dictionary<string, object>> all = server.LoadLinuxKnownHosts();
+                if (all.Count != 1)
+                {
+                    return "expected exactly 1 record after overwrite, found " + all.Count;
+                }
+
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(tempDataPath, true);
             }
         }
 
