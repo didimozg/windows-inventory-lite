@@ -140,6 +140,7 @@ namespace WindowsInventoryLite
         // makes the Clients table's Description column manually editable
         // without losing AD credentials elsewhere.
         public bool AdDescriptionSyncEnabled;
+        public bool RequireIngestionToken;
         public string AdSyncMode;
         public int AdSyncIntervalHours;
         public string AdDomain;
@@ -387,6 +388,7 @@ namespace WindowsInventoryLite
                 {
                     options.Token = SecretProtector.Unprotect(GetConfigString(config, "Token"));
                 }
+                options.RequireIngestionToken = ResolveRequireIngestionToken(GetConfigString(config, "RequireIngestionToken"), !String.IsNullOrEmpty(options.Token));
                 if (String.IsNullOrEmpty(options.WebUsername))
                 {
                     options.WebUsername = GetConfigString(config, "WebUsername");
@@ -637,6 +639,26 @@ namespace WindowsInventoryLite
                 return String.Equals(configValueText, "true", StringComparison.OrdinalIgnoreCase);
             }
             return adSyncEnabledResolved;
+        }
+
+        // Migration for upgrades from before RequireIngestionToken existed:
+        // if the config file has no explicit value yet, preserve today's
+        // real-world behavior exactly - enforcement was always implicitly
+        // "on" whenever a token happened to be configured (see the old
+        // ReceiveInventory/ReceiveLinuxInventory guard this replaces), so an
+        // existing deployment keeps behaving the same way after the upgrade
+        // with no admin action required. A fresh install always resolves
+        // this to true with zero special-case code, since Install-Server.ps1
+        // always configures a real token by the time this ever runs - no
+        // separate "fresh install default" branch is needed. Pure - no I/O,
+        // self-tested directly.
+        internal static bool ResolveRequireIngestionToken(string configValueText, bool tokenIsConfigured)
+        {
+            if (!String.IsNullOrEmpty(configValueText))
+            {
+                return String.Equals(configValueText, "true", StringComparison.OrdinalIgnoreCase);
+            }
+            return tokenIsConfigured;
         }
     }
 
@@ -1589,7 +1611,7 @@ namespace WindowsInventoryLite
         private void ReceiveInventory(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (!String.IsNullOrEmpty(options.Token) && !FixedTimeEquals(token, options.Token))
+            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
             {
                 DebugLogger.Log(options, "Client", "Rejected inventory report: invalid or missing token");
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -1987,7 +2009,7 @@ namespace WindowsInventoryLite
         private void ReceiveLinuxInventory(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (!String.IsNullOrEmpty(options.Token) && !FixedTimeEquals(token, options.Token))
+            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
             {
                 DebugLogger.Log(options, "Client", "Rejected Linux inventory report: invalid or missing token");
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -4108,6 +4130,14 @@ namespace WindowsInventoryLite
                 diff |= x ^ y;
             }
             return diff == 0;
+        }
+
+        // Extracted from ReceiveInventory/ReceiveLinuxInventory's shared
+        // guard shape so the security-relevant decision itself is directly
+        // unit-testable, not only reachable through a full HTTP round-trip.
+        private static bool IsIngestionTokenRejected(bool requireIngestionToken, string suppliedToken, string configuredToken)
+        {
+            return requireIngestionToken && !FixedTimeEquals(suppliedToken, configuredToken);
         }
 
         // Dashboard files are served straight from disk with no build step
@@ -7082,6 +7112,10 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' custom package share path", TestParseCmdSettingsCustomPackageSharePath);
             allPassed &= SelfTestCheck(output, "ResolveAdDescriptionSyncEnabled uses the explicit config value when present", TestResolveAdDescriptionSyncEnabledUsesExplicitConfigValue);
             allPassed &= SelfTestCheck(output, "ResolveAdDescriptionSyncEnabled migrates from AdSyncEnabled when the config key is absent", TestResolveAdDescriptionSyncEnabledMigratesFromAdSyncEnabledWhenUnset);
+            allPassed &= SelfTestCheck(output, "ResolveRequireIngestionToken uses the explicit config value when present", TestResolveRequireIngestionTokenUsesExplicitConfigValue);
+            allPassed &= SelfTestCheck(output, "ResolveRequireIngestionToken migrates from whether a token is configured when the config key is absent", TestResolveRequireIngestionTokenMigratesFromTokenPresenceWhenUnset);
+            allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected requires a matching token when enforcement is on", TestIsIngestionTokenRejectedRequiresMatchWhenEnforced);
+            allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected always accepts when enforcement is off, regardless of the supplied token", TestIsIngestionTokenRejectedAlwaysAcceptsWhenNotEnforced);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields is a no-op for a brand-new computer with sync disabled", TestComputeAdSyncFieldsNoOpForNewComputerWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
@@ -8033,6 +8067,71 @@ namespace WindowsInventoryLite
             if (result2 != false)
             {
                 return "expected a missing config value to inherit adSyncEnabledResolved=false, got " + result2;
+            }
+            return null;
+        }
+
+        private static string TestResolveRequireIngestionTokenUsesExplicitConfigValue()
+        {
+            bool result = ServerOptions.ResolveRequireIngestionToken("false", true);
+            if (result != false)
+            {
+                return "expected an explicit 'false' config value to win over tokenIsConfigured=true, got " + result;
+            }
+            bool result2 = ServerOptions.ResolveRequireIngestionToken("true", false);
+            if (result2 != true)
+            {
+                return "expected an explicit 'true' config value to win over tokenIsConfigured=false, got " + result2;
+            }
+            return null;
+        }
+
+        private static string TestResolveRequireIngestionTokenMigratesFromTokenPresenceWhenUnset()
+        {
+            bool result = ServerOptions.ResolveRequireIngestionToken(null, true);
+            if (result != true)
+            {
+                return "expected a missing config value to migrate to true when a token is configured, got " + result;
+            }
+            bool result2 = ServerOptions.ResolveRequireIngestionToken(null, false);
+            if (result2 != false)
+            {
+                return "expected a missing config value to migrate to false when no token is configured, got " + result2;
+            }
+            bool result3 = ServerOptions.ResolveRequireIngestionToken("", true);
+            if (result3 != true)
+            {
+                return "expected an empty-string config value (same as missing) to migrate to true when a token is configured, got " + result3;
+            }
+            return null;
+        }
+
+        private static string TestIsIngestionTokenRejectedRequiresMatchWhenEnforced()
+        {
+            if (InventoryServer.IsIngestionTokenRejected(true, "correct-token", "correct-token"))
+            {
+                return "expected a matching token to be accepted when enforcement is on";
+            }
+            if (!InventoryServer.IsIngestionTokenRejected(true, "wrong-token", "correct-token"))
+            {
+                return "expected a non-matching token to be rejected when enforcement is on";
+            }
+            if (!InventoryServer.IsIngestionTokenRejected(true, null, "correct-token"))
+            {
+                return "expected a missing token to be rejected when enforcement is on";
+            }
+            return null;
+        }
+
+        private static string TestIsIngestionTokenRejectedAlwaysAcceptsWhenNotEnforced()
+        {
+            if (InventoryServer.IsIngestionTokenRejected(false, "wrong-token", "correct-token"))
+            {
+                return "expected a non-matching token to be accepted when enforcement is off";
+            }
+            if (InventoryServer.IsIngestionTokenRejected(false, null, "correct-token"))
+            {
+                return "expected a missing token to be accepted when enforcement is off";
             }
             return null;
         }
