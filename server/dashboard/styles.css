@@ -682,15 +682,15 @@ tr.stale td {
 .install-grid {
   display: grid;
   grid-template-columns: minmax(320px, 1.4fr) minmax(180px, 0.8fr) minmax(180px, 0.8fr) minmax(140px, 0.6fr);
-  gap: 12px;
+  gap: var(--space-md);
   align-items: end;
 }
 
 .install-grid label {
   display: grid;
-  gap: 6px;
+  gap: var(--space-sm);
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
 }
 
 /* Client updates' "Use global AD settings" checkbox sits outside
@@ -706,7 +706,7 @@ tr.stale td {
    property alone even though font-size still applied correctly. */
 .check-label.updates-use-ad-field {
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
 }
 
 textarea,
@@ -783,7 +783,7 @@ input[type="number"] {
   min-height: 0;
   display: grid;
   grid-template-rows: auto 1fr;
-  gap: 6px;
+  gap: var(--space-sm);
 }
 
 .install-targets-field textarea {
@@ -821,7 +821,7 @@ input[type="number"] {
   grid-row: 1 / span 2;
   display: grid;
   grid-template-columns: minmax(180px, 0.8fr) minmax(140px, 0.6fr);
-  gap: 12px;
+  gap: var(--space-md);
   align-self: start;
 }
 
@@ -890,7 +890,7 @@ input[type="number"] {
   grid-row: 1 / span 2;
   display: grid;
   grid-template-columns: minmax(180px, 0.8fr) minmax(140px, 0.6fr);
-  gap: 12px;
+  gap: var(--space-md);
   align-self: start;
 }
 
@@ -1234,14 +1234,14 @@ th.sort-desc::after {
 
 .pkg-status {
   margin: 0 0 14px;
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   color: var(--muted);
 }
 
 .pkg-grid {
   display: grid;
   grid-template-columns: minmax(240px, 2fr) minmax(160px, 1fr) 110px auto;
-  gap: 12px;
+  gap: var(--space-md);
   align-items: end;
 }
 
@@ -1262,14 +1262,14 @@ th.sort-desc::after {
 
 .pkg-grid label {
   display: grid;
-  gap: 6px;
+  gap: var(--space-sm);
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
 }
 
 .pkg-buttons {
   display: flex;
-  gap: 8px;
+  gap: var(--space-sm);
   flex-wrap: nowrap;
   align-items: end;
 }
@@ -1285,12 +1285,12 @@ th.sort-desc::after {
 
 .pkg-message {
   margin-top: 12px;
-  padding: 8px 12px;
+  padding: var(--space-sm) var(--space-md);
   border-radius: 6px;
   background: var(--success-bg);
   border: 1px solid var(--success-border);
   color: var(--success-text);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   /* Every other .pkg-message caller is single-line; AD Computer Import's
      "Loaded N computer(s)..." plus per-OU warnings joins multiple lines
      with \n - without this, normal white-space collapses them into one
@@ -1306,7 +1306,7 @@ th.sort-desc::after {
 
 .cert-hint {
   margin-top: 12px;
-  font-size: 12px;
+  font-size: var(--font-size-xs);
 }
 
 .admin-password-grid {
@@ -1334,7 +1334,7 @@ th.sort-desc::after {
 .ad-sync-mode-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: var(--space-md);
 }
 
 /* Domain/identity/username/password are credential-shaped fields that
