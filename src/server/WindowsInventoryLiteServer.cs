@@ -140,6 +140,8 @@ namespace WindowsInventoryLite
         // makes the Clients table's Description column manually editable
         // without losing AD credentials elsewhere.
         public bool AdDescriptionSyncEnabled;
+        // Gates the ingestion endpoints - resolved by ResolveRequireIngestionToken
+        // below to preserve upgrade compatibility (defaults to token presence).
         public bool RequireIngestionToken;
         public string AdSyncMode;
         public int AdSyncIntervalHours;
@@ -4135,9 +4137,21 @@ namespace WindowsInventoryLite
         // Extracted from ReceiveInventory/ReceiveLinuxInventory's shared
         // guard shape so the security-relevant decision itself is directly
         // unit-testable, not only reachable through a full HTTP round-trip.
+        // Fails closed: when enforcement is on, rejects if no token is
+        // configured (preventing accidental unauthenticated access if an
+        // admin explicitly sets RequireIngestionToken: true without also
+        // configuring a token).
         private static bool IsIngestionTokenRejected(bool requireIngestionToken, string suppliedToken, string configuredToken)
         {
-            return requireIngestionToken && !FixedTimeEquals(suppliedToken, configuredToken);
+            if (!requireIngestionToken)
+            {
+                return false;
+            }
+            if (String.IsNullOrEmpty(configuredToken))
+            {
+                return true;
+            }
+            return !FixedTimeEquals(suppliedToken, configuredToken);
         }
 
         // Dashboard files are served straight from disk with no build step
@@ -7116,6 +7130,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ResolveRequireIngestionToken migrates from whether a token is configured when the config key is absent", TestResolveRequireIngestionTokenMigratesFromTokenPresenceWhenUnset);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected requires a matching token when enforcement is on", TestIsIngestionTokenRejectedRequiresMatchWhenEnforced);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected always accepts when enforcement is off, regardless of the supplied token", TestIsIngestionTokenRejectedAlwaysAcceptsWhenNotEnforced);
+            allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected fails closed when enforcement is on but no token is configured", TestIsIngestionTokenRejectedFailsClosedWhenEnforcedButNoTokenConfigured);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields is a no-op for a brand-new computer with sync disabled", TestComputeAdSyncFieldsNoOpForNewComputerWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
@@ -8132,6 +8147,27 @@ namespace WindowsInventoryLite
             if (InventoryServer.IsIngestionTokenRejected(false, null, "correct-token"))
             {
                 return "expected a missing token to be accepted when enforcement is off";
+            }
+            return null;
+        }
+
+        private static string TestIsIngestionTokenRejectedFailsClosedWhenEnforcedButNoTokenConfigured()
+        {
+            if (!InventoryServer.IsIngestionTokenRejected(true, null, null))
+            {
+                return "expected rejection when enforcement is on but no token is configured (null supplied, null configured)";
+            }
+            if (!InventoryServer.IsIngestionTokenRejected(true, null, ""))
+            {
+                return "expected rejection when enforcement is on but no token is configured (null supplied, empty configured)";
+            }
+            if (!InventoryServer.IsIngestionTokenRejected(true, "", null))
+            {
+                return "expected rejection when enforcement is on but no token is configured (empty supplied, null configured)";
+            }
+            if (!InventoryServer.IsIngestionTokenRejected(true, "", ""))
+            {
+                return "expected rejection when enforcement is on but no token is configured (empty supplied, empty configured)";
             }
             return null;
         }
