@@ -200,7 +200,6 @@
       .then(data => {
         state.linuxClients = data.clients || [];
         state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
-        renderLinuxSummary(state.linuxClients);
         renderLinuxClientsTable(state.linuxClients);
         renderLinuxSoftwareTable(state.linuxClients);
         renderLinuxHardwarePage(state.linuxClients);
@@ -240,7 +239,6 @@
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         state.linuxClients = state.linuxClients.filter(client => client.hostname !== hostname);
-        renderLinuxSummary(state.linuxClients);
         renderLinuxClientsTable(state.linuxClients);
       })
       .catch(error => {
@@ -2479,7 +2477,6 @@
         state.generalLoadedPort = data.port || 8080;
         state.generalLoadedEnableHttp = data.enableHttp !== false;
         state.adDescriptionSyncEnabled = byId('generalAdDescriptionSyncEnabled').checked;
-        renderSummary(state.clients);
         renderDashboardTiles();
         renderConnectionStatus(data);
         byId('generalAdPassword').value = '';
@@ -3209,26 +3206,6 @@
     return haystack.indexOf(query.toLowerCase()) !== -1;
   }
 
-  function renderSummary(clients) {
-    byId('clientCount').textContent = clients.length;
-    byId('windowsActivated').textContent = clients.filter(client => client.activation && client.activation.windows && client.activation.windows.activated).length;
-    byId('officeActivated').textContent = clients.filter(client => client.activation && client.activation.office && client.activation.office.activated).length;
-    const staleCount = clients.filter(isStale).length;
-    byId('staleCount').textContent = staleCount;
-    byId('staleLabel').textContent = `Stale >${state.staleHours}h`;
-    byId('staleTile').classList.toggle('tile-alert', staleCount > 0);
-  }
-
-  // Mirrors renderSummary (Windows) - Clients/Stale only, no Windows/Office
-  // activation concepts on the Linux side.
-  function renderLinuxSummary(clients) {
-    byId('linuxClientCount').textContent = clients.length;
-    const staleCount = clients.filter(isStale).length;
-    byId('linuxStaleCount').textContent = staleCount;
-    byId('linuxStaleLabel').textContent = `Stale >${state.staleHours}h`;
-    byId('linuxStaleTile').classList.toggle('tile-alert', staleCount > 0);
-  }
-
   function renderDashboardTiles() {
     const clients = state.clients;
     byId('dashClientCount').textContent = clients.length;
@@ -3586,7 +3563,6 @@
 
   function render() {
     renderDashboardTiles();
-    renderSummary(state.clients);
     renderSortHeaders();
     renderTable(state.clients);
     renderSoftwareTable(state.clients);
@@ -3628,8 +3604,6 @@
     byId('adminPasswordTab').classList.toggle('active', state.view === 'admin');
     const isInventoryView = inventoryViews.includes(state.view);
     const isLinuxInventoryView = linuxInventoryViews.includes(state.view);
-    byId('summarySection').classList.toggle('hidden', !isInventoryView);
-    byId('linuxSummarySection').classList.toggle('hidden', !isLinuxInventoryView);
     byId('searchInput').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
     byId('generatedAt').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
     recalculateActivePagination();
