@@ -1904,8 +1904,23 @@
         renderPackageStatus(data);
         if (data.cmdServerUrl) byId('pkgServerUrl').value = data.cmdServerUrl;
         if (data.cmdIntervalHours) byId('pkgIntervalHours').value = data.cmdIntervalHours;
-        if (data.cmdToken) byId('pkgToken').value = data.cmdToken;
         byId('pkgSharePath').value = data.cmdPackageSharePath || '';
+        // Only pre-fill from the last-built package's own baked-in token if
+        // it still matches the server's current live token - otherwise a
+        // regenerate leaves this field silently showing a stale value that
+        // looks correct but isn't, and resubmitting it would also defeat
+        // ResolveEffectiveToken's blank-means-use-live-token fallback
+        // (Task 3), since the field would never actually be blank.
+        if (data.cmdToken) {
+          fetch('/api/v1/server/ingestion-token', { cache: 'no-store' })
+            .then(response => (response.ok ? response.json() : null))
+            .then(tokenStatus => {
+              if (tokenStatus && tokenStatus.token === data.cmdToken) {
+                byId('pkgToken').value = data.cmdToken;
+              }
+            })
+            .catch(() => {});
+        }
       })
       .catch(error => {
         byId('pkgStatus').textContent = `Package status unavailable: ${error.message}`;
@@ -1924,9 +1939,22 @@
           : 'No Linux client binary found - run Build-LinuxClient.ps1 and place the output in the Linux client package directory first.';
         byId('linuxPkgStatus').textContent = statusText;
         byId('linuxPkgServerUrl').value = data.serverUrl || '';
-        byId('linuxPkgToken').value = data.token || '';
         byId('linuxPkgIntervalHours').value = data.intervalHours || 6;
         byId('linuxPkgInstallPath').value = data.installPath || '/opt/windows-inventory-lite';
+        // Only pre-fill from the last-saved settings' token if it still
+        // matches the server's current live token - see the identical
+        // guard in loadPackageStatus for why a stale baked token must
+        // never silently resurface here.
+        if (data.token) {
+          fetch('/api/v1/server/ingestion-token', { cache: 'no-store' })
+            .then(response => (response.ok ? response.json() : null))
+            .then(tokenStatus => {
+              if (tokenStatus && tokenStatus.token === data.token) {
+                byId('linuxPkgToken').value = data.token;
+              }
+            })
+            .catch(() => {});
+        }
       })
       .catch(error => {
         byId('linuxPkgStatus').textContent = `Linux package status unavailable: ${error.message}`;
@@ -2479,7 +2507,16 @@
         return response.json();
       })
       .then(data => {
-        if (!data.configured) {
+        if (!data.configured && data.requireIngestionToken) {
+          // Reachable only via a hand-edited config (RequireIngestionToken
+          // explicitly set to true with no Token key) - the server's own
+          // guard fails closed in this state (see IsIngestionTokenRejected),
+          // so ingestion is rejecting every request, not merely
+          // unauthenticated. Worth its own message: an admin debugging
+          // "all my clients stopped reporting" needs the opposite of what
+          // the token-presence-only message below would tell them.
+          byId('ingestionTokenStatusText').textContent = 'No token configured, but enforcement is on - inventory ingestion is currently rejecting every request. Regenerate to set a token.';
+        } else if (!data.configured) {
           byId('ingestionTokenStatusText').textContent = 'No token configured - inventory ingestion is unauthenticated. Regenerate to set one.';
         } else if (!data.requireIngestionToken) {
           byId('ingestionTokenStatusText').textContent = 'A token is configured, but enforcement is off - inventory ingestion currently accepts requests with no token.';

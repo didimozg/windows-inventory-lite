@@ -4178,9 +4178,9 @@ namespace WindowsInventoryLite
         // the existing HTTPS-certificate-risk gate works inline in
         // ConfigureServerSettings but has no equivalent direct test today -
         // this one gets one, rather than repeating that gap.
-        private static bool RequiresIngestionTokenRiskAcknowledgment(bool currentRequireIngestionToken, bool desiredRequireIngestionToken, bool acknowledgeRisks)
+        private static bool RequiresIngestionTokenRiskAcknowledgment(bool currentRequireIngestionToken, bool desiredRequireIngestionToken, bool acknowledgeIngestionTokenRisk)
         {
-            return currentRequireIngestionToken && !desiredRequireIngestionToken && !acknowledgeRisks;
+            return currentRequireIngestionToken && !desiredRequireIngestionToken && !acknowledgeIngestionTokenRisk;
         }
 
         // Dashboard files are served straight from disk with no build step
@@ -8270,11 +8270,11 @@ namespace WindowsInventoryLite
         {
             if (!RequiresIngestionTokenRiskAcknowledgment(true, false, false))
             {
-                return "expected turning enforcement off without acknowledgeRisks to require acknowledgment";
+                return "expected turning enforcement off without acknowledgeIngestionTokenRisk to require acknowledgment";
             }
             if (RequiresIngestionTokenRiskAcknowledgment(true, false, true))
             {
-                return "expected turning enforcement off WITH acknowledgeRisks=true to not require it again";
+                return "expected turning enforcement off WITH acknowledgeIngestionTokenRisk=true to not require it again";
             }
             if (RequiresIngestionTokenRiskAcknowledgment(false, false, false))
             {
@@ -8289,21 +8289,22 @@ namespace WindowsInventoryLite
                 return "expected leaving enforcement on (no actual change) to never require acknowledgment";
             }
             // Remaining 3 of the 8 boolean combinations not covered above:
-            // acknowledgeRisks=true on the three transitions that were
-            // already never-require-acknowledgment with acknowledgeRisks=
-            // false. Included so every combination of the 3 booleans is
-            // exercised, not just the ones where the flag flips the result.
+            // acknowledgeIngestionTokenRisk=true on the three transitions
+            // that were already never-require-acknowledgment with
+            // acknowledgeIngestionTokenRisk=false. Included so every
+            // combination of the 3 booleans is exercised, not just the
+            // ones where the flag flips the result.
             if (RequiresIngestionTokenRiskAcknowledgment(false, false, true))
             {
-                return "expected leaving enforcement off with acknowledgeRisks=true (irrelevant flag) to never require acknowledgment";
+                return "expected leaving enforcement off with acknowledgeIngestionTokenRisk=true (irrelevant flag) to never require acknowledgment";
             }
             if (RequiresIngestionTokenRiskAcknowledgment(false, true, true))
             {
-                return "expected turning enforcement ON with acknowledgeRisks=true (irrelevant flag) to never require acknowledgment";
+                return "expected turning enforcement ON with acknowledgeIngestionTokenRisk=true (irrelevant flag) to never require acknowledgment";
             }
             if (RequiresIngestionTokenRiskAcknowledgment(true, true, true))
             {
-                return "expected leaving enforcement on with acknowledgeRisks=true (irrelevant flag) to never require acknowledgment";
+                return "expected leaving enforcement on with acknowledgeIngestionTokenRisk=true (irrelevant flag) to never require acknowledgment";
             }
             return null;
         }
