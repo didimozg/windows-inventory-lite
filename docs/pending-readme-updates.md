@@ -2,6 +2,14 @@
 
 Notes on shipped features/fixes not yet folded into README.md/README_RU.md. Clear each entry out once its content has been merged into both READMEs during release prep.
 
+## Ingestion token: always-visible value + explicit enforcement toggle (v0.29.0, 2026-07-30)
+
+Settings > General's "Ingestion Token" section now shows the current token value in plaintext at all times, not just once immediately after a Regenerate - this supersedes the v0.27.0 entry below, which described the old write-only-except-just-after-regenerate behavior. Whether the token is actually checked on inventory ingestion is now a separate, explicit "Require ingestion token" checkbox, decoupled from the token's own value - previously enforcement was an implicit side effect of whether a token happened to be configured at all. Turning enforcement off requires confirming a warning that ingestion becomes fully unauthenticated while it's off. Existing installs upgrading to this version keep their current real-world behavior automatically (enforced, since essentially every install has had an auto-generated token since v0.27.0) with no admin action required.
+
+The two Client Package generator downloads (Windows GPO `.cmd`, Linux systemd/`install.sh`) now correctly fall back to the server's live token when the token field is left blank when building a package - previously this silently produced a package with no token at all, which would be rejected by the server forever until manually rebuilt with the token typed in by hand. This was a real, previously-unfixed gap distinct from the WinRM/SSH direct-push paths, which already had the correct fallback.
+
+The README's existing Ingestion Token paragraph (added for v0.27.0, see that entry below) needs a rewrite at release time to reflect: the token is now always visible (not just once after Regenerate), enforcement is now a separate on/off setting rather than implied by whether a token exists, and the Client Package generators no longer need the token typed in manually to get a working package.
+
 ## Linux SSH host-key trust (v0.28.0, 2026-07-29)
 
 Password-based Linux pushes now handle SSH host-key trust explicitly instead of relying on PuTTY's per-Windows-account registry cache (which the `LocalSystem` service identity has no practical way to populate interactively). First push to a new target surfaces the offered fingerprint with a "Trust and retry" action in the job log; an explicit, risk-acknowledged "trust new host keys automatically" checkbox on the Linux Client actions form skips that manual step for a whole push. A key that changes after being trusted always hard-fails. The README's existing Linux Client section should get a short paragraph on this - currently says nothing about host-key trust at all, so a first-time reader hitting this failure has no context for why or what to do, beyond what the error message itself now says.
