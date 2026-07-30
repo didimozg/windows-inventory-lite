@@ -4154,6 +4154,16 @@ namespace WindowsInventoryLite
             return !FixedTimeEquals(suppliedToken, configuredToken);
         }
 
+        // Extracted so the "should this save be rejected pending an explicit
+        // risk acknowledgment" decision is directly testable, mirroring how
+        // the existing HTTPS-certificate-risk gate works inline in
+        // ConfigureServerSettings but has no equivalent direct test today -
+        // this one gets one, rather than repeating that gap.
+        private static bool RequiresIngestionTokenRiskAcknowledgment(bool currentRequireIngestionToken, bool desiredRequireIngestionToken, bool acknowledgeRisks)
+        {
+            return currentRequireIngestionToken && !desiredRequireIngestionToken && !acknowledgeRisks;
+        }
+
         // Dashboard files are served straight from disk with no build step
         // (see this project's own established pattern) - a server update
         // can replace app.js/index.html/styles.css on disk at any time,
@@ -5766,6 +5776,24 @@ namespace WindowsInventoryLite
                 updates["DebugLogEnabled"] = options.DebugLogEnabled ? "true" : "false";
             }
 
+            if (payload.ContainsKey("requireIngestionToken"))
+            {
+                bool desiredRequireIngestionToken = Convert.ToBoolean(payload["requireIngestionToken"]);
+                bool acknowledgeRisks = payload.ContainsKey("acknowledgeRisks") && Convert.ToBoolean(payload["acknowledgeRisks"]);
+                if (RequiresIngestionTokenRiskAcknowledgment(options.RequireIngestionToken, desiredRequireIngestionToken, acknowledgeRisks))
+                {
+                    List<string> risks = new List<string>();
+                    risks.Add("Anyone who can reach this server's port will be able to submit inventory reports with no token at all - both /api/v1/inventory and /api/v1/linux/inventory accept any request unauthenticated while this is off.");
+                    Dictionary<string, object> riskResponse = new Dictionary<string, object>();
+                    riskResponse["error"] = "disabling ingestion token enforcement removes authentication from inventory ingestion. Confirm to proceed anyway.";
+                    riskResponse["risks"] = risks;
+                    SendText(stream, serializer.Serialize(riskResponse), "application/json; charset=utf-8", 409);
+                    return;
+                }
+                options.RequireIngestionToken = desiredRequireIngestionToken;
+                updates["RequireIngestionToken"] = options.RequireIngestionToken ? "true" : "false";
+            }
+
             if (updates.Count > 0)
             {
                 SaveServerConfigValues(updates);
@@ -5797,6 +5825,8 @@ namespace WindowsInventoryLite
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["configured"] = !String.IsNullOrEmpty(options.Token);
+            result["token"] = options.Token;
+            result["requireIngestionToken"] = options.RequireIngestionToken;
             JavaScriptSerializer serializer = CreateJsonSerializer();
             SendJson(stream, serializer.Serialize(result));
         }
@@ -7131,6 +7161,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected requires a matching token when enforcement is on", TestIsIngestionTokenRejectedRequiresMatchWhenEnforced);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected always accepts when enforcement is off, regardless of the supplied token", TestIsIngestionTokenRejectedAlwaysAcceptsWhenNotEnforced);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected fails closed when enforcement is on but no token is configured", TestIsIngestionTokenRejectedFailsClosedWhenEnforcedButNoTokenConfigured);
+            allPassed &= SelfTestCheck(output, "RequiresIngestionTokenRiskAcknowledgment only fires on an actual on-to-off transition without prior acknowledgment", TestRequiresIngestionTokenRiskAcknowledgmentOnlyWhenTurningEnforcementOff);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields is a no-op for a brand-new computer with sync disabled", TestComputeAdSyncFieldsNoOpForNewComputerWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
@@ -8168,6 +8199,48 @@ namespace WindowsInventoryLite
             if (!InventoryServer.IsIngestionTokenRejected(true, "", ""))
             {
                 return "expected rejection when enforcement is on but no token is configured (empty supplied, empty configured)";
+            }
+            return null;
+        }
+
+        private static string TestRequiresIngestionTokenRiskAcknowledgmentOnlyWhenTurningEnforcementOff()
+        {
+            if (!RequiresIngestionTokenRiskAcknowledgment(true, false, false))
+            {
+                return "expected turning enforcement off without acknowledgeRisks to require acknowledgment";
+            }
+            if (RequiresIngestionTokenRiskAcknowledgment(true, false, true))
+            {
+                return "expected turning enforcement off WITH acknowledgeRisks=true to not require it again";
+            }
+            if (RequiresIngestionTokenRiskAcknowledgment(false, false, false))
+            {
+                return "expected leaving enforcement off (no actual change) to never require acknowledgment";
+            }
+            if (RequiresIngestionTokenRiskAcknowledgment(false, true, false))
+            {
+                return "expected turning enforcement ON to never require acknowledgment (only turning it off is risky)";
+            }
+            if (RequiresIngestionTokenRiskAcknowledgment(true, true, false))
+            {
+                return "expected leaving enforcement on (no actual change) to never require acknowledgment";
+            }
+            // Remaining 3 of the 8 boolean combinations not covered above:
+            // acknowledgeRisks=true on the three transitions that were
+            // already never-require-acknowledgment with acknowledgeRisks=
+            // false. Included so every combination of the 3 booleans is
+            // exercised, not just the ones where the flag flips the result.
+            if (RequiresIngestionTokenRiskAcknowledgment(false, false, true))
+            {
+                return "expected leaving enforcement off with acknowledgeRisks=true (irrelevant flag) to never require acknowledgment";
+            }
+            if (RequiresIngestionTokenRiskAcknowledgment(false, true, true))
+            {
+                return "expected turning enforcement ON with acknowledgeRisks=true (irrelevant flag) to never require acknowledgment";
+            }
+            if (RequiresIngestionTokenRiskAcknowledgment(true, true, true))
+            {
+                return "expected leaving enforcement on with acknowledgeRisks=true (irrelevant flag) to never require acknowledgment";
             }
             return null;
         }
