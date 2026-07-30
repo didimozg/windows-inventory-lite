@@ -858,6 +858,14 @@
                 <option value="ad">Use global AD settings</option>
               </select>
             </label>
+            <label class="check-label">
+              <input id="linuxUpdatesTrustNewHostKeys" type="checkbox">
+              Trust new host keys automatically (skip verification)
+            </label>
+            <label id="linuxUpdatesAcknowledgeHostKeyRiskField" class="check-label hidden">
+              <input id="linuxUpdatesAcknowledgeHostKeyRisk" type="checkbox">
+              I understand this accepts an unverified SSH host key on first connection
+            </label>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Schedule</h2>

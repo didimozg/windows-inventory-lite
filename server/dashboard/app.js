@@ -1512,7 +1512,23 @@
 
   function updateLinuxUpdatesPushButtonState() {
     const anyChecked = document.querySelectorAll('.linux-update-select:checked').length > 0;
-    byId('linuxUpdatesPushButton').disabled = !anyChecked;
+    const trustChecked = byId('linuxUpdatesTrustNewHostKeys').checked;
+    const acknowledgeChecked = byId('linuxUpdatesAcknowledgeHostKeyRisk').checked;
+    byId('linuxUpdatesPushButton').disabled = !anyChecked || (trustChecked && !acknowledgeChecked);
+  }
+
+  // Mirrors updateLinuxTrustNewHostKeysUi (Linux Client actions) - same
+  // pairing (risk-ack field only shown/required once "trust new host keys"
+  // is checked), reusing this panel's own combined button-state function
+  // instead of a bare disabled=false so the trust/ack pairing is still
+  // enforced client-side after the checkbox toggles.
+  function updateLinuxUpdatesTrustNewHostKeysUi() {
+    const trustChecked = byId('linuxUpdatesTrustNewHostKeys').checked;
+    byId('linuxUpdatesAcknowledgeHostKeyRiskField').classList.toggle('hidden', !trustChecked);
+    if (!trustChecked) {
+      byId('linuxUpdatesAcknowledgeHostKeyRisk').checked = false;
+    }
+    updateLinuxUpdatesPushButtonState();
   }
 
   function startLinuxUpdatesPush() {
@@ -1520,6 +1536,8 @@
     if (selected.length === 0) return;
 
     const authMode = byId('linuxUpdatesAuthMode').value;
+    const trustNewHostKeys = byId('linuxUpdatesTrustNewHostKeys').checked;
+    const acknowledgeHostKeyRisk = byId('linuxUpdatesAcknowledgeHostKeyRisk').checked;
     byId('linuxUpdatesPushButton').disabled = true;
     byId('linuxUpdatesStatus').classList.add('empty');
     byId('linuxUpdatesStatus').textContent = 'Starting update job...';
@@ -1528,7 +1546,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets: selected.join('\n'), authMode })
+      body: JSON.stringify({ targets: selected.join('\n'), authMode, trustNewHostKeys, acknowledgeHostKeyRisk })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
@@ -1545,7 +1563,7 @@
         byId('linuxUpdatesStatus').textContent = `Failed to start update job: ${error.message}`;
       })
       .finally(() => {
-        byId('linuxUpdatesPushButton').disabled = false;
+        updateLinuxUpdatesPushButtonState();
       });
   }
 
@@ -3861,6 +3879,8 @@
     updateLinuxUpdatesPushButtonState();
   });
   byId('linuxUpdatesPushButton').addEventListener('click', startLinuxUpdatesPush);
+  byId('linuxUpdatesTrustNewHostKeys').addEventListener('change', updateLinuxUpdatesTrustNewHostKeysUi);
+  byId('linuxUpdatesAcknowledgeHostKeyRisk').addEventListener('change', updateLinuxUpdatesTrustNewHostKeysUi);
   byId('linuxUpdatesScheduleMode').addEventListener('change', updateLinuxUpdatesScheduleFieldVisibility);
   byId('linuxUpdatesScheduleSaveButton').addEventListener('click', saveLinuxUpdateSchedule);
   byId('linuxUpdatesTab').addEventListener('click', () => setView('linuxUpdates'));
