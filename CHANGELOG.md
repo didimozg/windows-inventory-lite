@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.30.0] - 2026-07-30
+
+### Added
+
+- Linux Client updates gained the same "Trust new host keys automatically" checkbox (paired with a required risk-acknowledgment checkbox) that Linux Client actions already had - previously, recovering from an untrusted-SSH-host-key failure during an update push required switching to the Linux Client actions tab, even though both panels already share the same push pipeline and the same on-disk trust store.
+
 ## [0.29.0] - 2026-07-30
 
 ### Added
