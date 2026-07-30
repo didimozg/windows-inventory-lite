@@ -1,6 +1,17 @@
 :root {
   color-scheme: light;
   --font-mono: "JetBrains Mono", Consolas, "Courier New", monospace;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+  --space-2xl: 32px;
+  --font-size-xs: 12px;
+  --font-size-sm: 13px;
+  --font-size-base: 14px;
+  --font-size-lg: 16px;
+  --font-size-display: 28px;
   --bg: #f8f9fa;
   --panel: #ffffff;
   --text: #2d3748;
@@ -701,11 +712,25 @@ tr.stale td {
 textarea,
 input[type="text"],
 input[type="password"],
-input[type="number"],
 input[type="file"],
 select {
   width: 100%;
-  padding: 10px 12px;
+  padding: var(--space-md) var(--space-md);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+}
+
+/* Split from the shared rule above: a number input's own content is
+   never longer than a handful of digits (stale-hours, retention-days,
+   ports all cap at 4-5 characters), so unlike text/password/file/select
+   it should never stretch to its full grid-column width - confirmed live
+   this session that "48" and "30" were rendering in ~470px/~940px boxes
+   because this rule inherited width:100% with nothing capping it. */
+input[type="number"] {
+  width: 100%;
+  max-width: 120px;
+  padding: var(--space-md) var(--space-md);
   border: 1px solid var(--line);
   border-radius: 6px;
   font: inherit;
@@ -732,7 +757,8 @@ select {
   grid-row: 1 / span 2;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-md);
+  align-self: start;
 }
 
 .install-targets-textarea-wrap {
