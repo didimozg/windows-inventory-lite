@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.28.0";
+        internal const string ProductVersion = "0.28.1";
 
         private static int Main(string[] args)
         {
@@ -370,6 +370,13 @@ namespace WindowsInventoryLite
                 }
             }
 
+            // Matches the pre-branch guard's real-world behavior for a
+            // config-less invocation ("--token X" with no --config, or a
+            // --config path that doesn't exist yet): a token supplied on
+            // the command line is enforced by default. LoadConfigFile below
+            // still overrides this from an explicit RequireIngestionToken
+            // key whenever a real config file exists.
+            options.RequireIngestionToken = !String.IsNullOrEmpty(options.Token);
             LoadConfigFile(options);
             return options;
         }
@@ -4154,12 +4161,13 @@ namespace WindowsInventoryLite
             return !FixedTimeEquals(suppliedToken, configuredToken);
         }
 
-        // Shared by every endpoint that accepts an optional per-request
-        // token override and must fall back to the server's own live token
-        // when the caller leaves it blank - StartClientAction and
-        // StartLinuxClientAction already do this inline; ConfigureClientPackage
-        // and ConfigureLinuxClientPackage pick it up here instead of a third
-        // and fourth copy of the same three lines.
+        // Shared by the two Client Package generator endpoints below
+        // (ConfigureClientPackage, ConfigureLinuxClientPackage), which had
+        // no token fallback at all before this fix. StartClientAction and
+        // StartLinuxClientAction have their own equivalent inline fallback
+        // logic, added earlier and deliberately left as-is here (same
+        // behavior, different call sites, not worth the churn of
+        // consolidating four already-working call sites into one).
         private static string ResolveEffectiveToken(string requestedToken, string liveToken)
         {
             return String.IsNullOrEmpty(requestedToken) ? liveToken : requestedToken;
@@ -5655,6 +5663,30 @@ namespace WindowsInventoryLite
                 return;
             }
 
+            // Validated here, in the pure-validation phase alongside the
+            // HTTPS/HTTP checks above - deliberately BEFORE any of the
+            // ApplySlotState calls below, which take effect on the live
+            // listeners immediately. A 409 return after this point but
+            // before SaveServerConfigValues would otherwise leave listener
+            // state already changed on the live server with nothing
+            // persisted to disk, reverting silently on the next restart.
+            bool desiredRequireIngestionToken = options.RequireIngestionToken;
+            if (payload.ContainsKey("requireIngestionToken"))
+            {
+                desiredRequireIngestionToken = Convert.ToBoolean(payload["requireIngestionToken"]);
+                bool acknowledgeIngestionTokenRisk = payload.ContainsKey("acknowledgeIngestionTokenRisk") && Convert.ToBoolean(payload["acknowledgeIngestionTokenRisk"]);
+                if (RequiresIngestionTokenRiskAcknowledgment(options.RequireIngestionToken, desiredRequireIngestionToken, acknowledgeIngestionTokenRisk))
+                {
+                    List<string> ingestionRisks = new List<string>();
+                    ingestionRisks.Add("Anyone who can reach this server's port will be able to submit inventory reports with no token at all - both /api/v1/inventory and /api/v1/linux/inventory accept any request unauthenticated while this is off.");
+                    Dictionary<string, object> ingestionRiskResponse = new Dictionary<string, object>();
+                    ingestionRiskResponse["error"] = "disabling ingestion token enforcement removes authentication from inventory ingestion. Confirm to proceed anyway.";
+                    ingestionRiskResponse["risks"] = ingestionRisks;
+                    SendText(stream, serializer.Serialize(ingestionRiskResponse), "application/json; charset=utf-8", 409);
+                    return;
+                }
+            }
+
             // HTTPS is applied before HTTP, not just validated before HTTP -
             // deliberately, and in this order for a reason: the dashboard's
             // General Settings form always submits port/enableHttp/useHttps/
@@ -5789,18 +5821,6 @@ namespace WindowsInventoryLite
 
             if (payload.ContainsKey("requireIngestionToken"))
             {
-                bool desiredRequireIngestionToken = Convert.ToBoolean(payload["requireIngestionToken"]);
-                bool acknowledgeRisks = payload.ContainsKey("acknowledgeRisks") && Convert.ToBoolean(payload["acknowledgeRisks"]);
-                if (RequiresIngestionTokenRiskAcknowledgment(options.RequireIngestionToken, desiredRequireIngestionToken, acknowledgeRisks))
-                {
-                    List<string> risks = new List<string>();
-                    risks.Add("Anyone who can reach this server's port will be able to submit inventory reports with no token at all - both /api/v1/inventory and /api/v1/linux/inventory accept any request unauthenticated while this is off.");
-                    Dictionary<string, object> riskResponse = new Dictionary<string, object>();
-                    riskResponse["error"] = "disabling ingestion token enforcement removes authentication from inventory ingestion. Confirm to proceed anyway.";
-                    riskResponse["risks"] = risks;
-                    SendText(stream, serializer.Serialize(riskResponse), "application/json; charset=utf-8", 409);
-                    return;
-                }
                 options.RequireIngestionToken = desiredRequireIngestionToken;
                 updates["RequireIngestionToken"] = options.RequireIngestionToken ? "true" : "false";
             }
@@ -7169,6 +7189,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ResolveAdDescriptionSyncEnabled migrates from AdSyncEnabled when the config key is absent", TestResolveAdDescriptionSyncEnabledMigratesFromAdSyncEnabledWhenUnset);
             allPassed &= SelfTestCheck(output, "ResolveRequireIngestionToken uses the explicit config value when present", TestResolveRequireIngestionTokenUsesExplicitConfigValue);
             allPassed &= SelfTestCheck(output, "ResolveRequireIngestionToken migrates from whether a token is configured when the config key is absent", TestResolveRequireIngestionTokenMigratesFromTokenPresenceWhenUnset);
+            allPassed &= SelfTestCheck(output, "Parse defaults RequireIngestionToken from CLI --token presence when no config file exists", TestParseDefaultsRequireIngestionTokenFromCliTokenWhenNoConfigFile);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected requires a matching token when enforcement is on", TestIsIngestionTokenRejectedRequiresMatchWhenEnforced);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected always accepts when enforcement is off, regardless of the supplied token", TestIsIngestionTokenRejectedAlwaysAcceptsWhenNotEnforced);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected fails closed when enforcement is on but no token is configured", TestIsIngestionTokenRejectedFailsClosedWhenEnforcedButNoTokenConfigured);
@@ -8160,6 +8181,16 @@ namespace WindowsInventoryLite
             if (result3 != true)
             {
                 return "expected an empty-string config value (same as missing) to migrate to true when a token is configured, got " + result3;
+            }
+            return null;
+        }
+
+        private static string TestParseDefaultsRequireIngestionTokenFromCliTokenWhenNoConfigFile()
+        {
+            ServerOptions options = ServerOptions.Parse(new string[] { "--token", "test-cli-token-value", "--config", Path.Combine(Path.GetTempPath(), "wil-nonexistent-config-" + Guid.NewGuid().ToString("N") + ".json") });
+            if (!options.RequireIngestionToken)
+            {
+                return "expected RequireIngestionToken to default to true when --token is supplied and no config file exists, got false";
             }
             return null;
         }

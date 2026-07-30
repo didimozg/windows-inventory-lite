@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.28.1] - 2026-07-30
+
+### Fixed
+
+- `ServerOptions.Parse` now defaults `RequireIngestionToken` to `true` whenever a token is supplied on the command line (`--token`) and no config file exists yet (no `--config`, or a `--config` path that hasn't been written yet) - previously this left enforcement off in that scenario, so `--token` had no effect and ingestion was unauthenticated even though a token was explicitly requested. `LoadConfigFile` still overrides this from an explicit `RequireIngestionToken` key once a real config file exists.
+- The ingestion-token risk gate in `ConfigureServerSettings` now runs in the pure-validation phase, before any listener/AD state is applied to the live server - previously a rejected (409) request could leave HTTP/HTTPS listeners already rebound and AD settings already changed in memory with nothing persisted to disk, silently reverting on the next restart.
+- The General Settings save no longer shares a single `acknowledgeRisks` flag between the unrelated HTTPS-certificate risk gate and the ingestion-token risk gate - acknowledging one no longer silently bypasses the other when both are toggled in the same save. The ingestion-token gate now reads its own `acknowledgeIngestionTokenRisk` field.
+- Regenerating the ingestion token now blanks the Client Package tab's token fields, so an immediate rebuild (without reloading the page first) correctly falls back to the fresh live token instead of resubmitting the token that was just replaced.
+- The ingestion status text on the General Settings page now distinguishes "configured", "configured but not enforced", and "configured and required", instead of only reporting whether a token exists.
+- The Regenerate confirmation now only shows the shorter "enforcement is off" warning when enforcement is known to be off - previously it also showed that weaker warning while the enforcement status had failed to load (unknown), which could understate the impact of regenerating.
+- The token value on the General Settings page now renders in the app's monospace `.mono` style, consistent with every other machine-fact value (IPs, versions, certificate thumbprints).
+- Corrected an inaccurate comment above `ResolveEffectiveToken` that claimed it was shared by every token-accepting endpoint; only the two Client Package generator endpoints call it.
+
 ## [0.28.0] - 2026-07-29
 
 ### Added

@@ -2359,7 +2359,7 @@
     showSavedMessage(byId('generalMessage'), msg, isError);
   }
 
-  function saveGeneralSettings(acknowledgeRisks, confirmedDisruption) {
+  function saveGeneralSettings(acknowledgeRisks, confirmedDisruption, acknowledgeIngestionTokenRisk) {
     const staleHours = Number.parseInt(byId('generalStaleHours').value, 10) || 48;
     const installLogRetentionDays = Number.parseInt(byId('generalInstallLogRetentionDays').value, 10) || 30;
     const port = Number.parseInt(byId('generalPort').value, 10) || 8080;
@@ -2382,13 +2382,13 @@
     }
 
     const disablingIngestionToken = state.generalLoadedRequireIngestionToken && !requireIngestionToken;
-    if (disablingIngestionToken && !acknowledgeRisks) {
+    if (disablingIngestionToken && !acknowledgeIngestionTokenRisk) {
       const confirmed = window.confirm(
         "Turning this off means anyone who can reach this server's port can submit inventory reports with no token at all - "
           + 'both /api/v1/inventory and /api/v1/linux/inventory will accept any request, unauthenticated. Continue?'
       );
       if (!confirmed) return;
-      acknowledgeRisks = true;
+      acknowledgeIngestionTokenRisk = true;
     }
 
     byId('generalSaveButton').disabled = true;
@@ -2399,7 +2399,8 @@
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        staleHours, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, requireIngestionToken, acknowledgeRisks: !!acknowledgeRisks,
+        staleHours, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, requireIngestionToken,
+        acknowledgeRisks: !!acknowledgeRisks, acknowledgeIngestionTokenRisk: !!acknowledgeIngestionTokenRisk,
         adSyncEnabled: byId('generalAdSyncEnabled').checked,
         adDescriptionSyncEnabled: byId('generalAdDescriptionSyncEnabled').checked,
         adSyncMode: byId('generalAdSyncMode').value,
@@ -2478,9 +2479,13 @@
         return response.json();
       })
       .then(data => {
-        byId('ingestionTokenStatusText').textContent = data.configured
-          ? 'A token is configured.'
-          : 'No token configured - inventory ingestion is unauthenticated. Regenerate to set one.';
+        if (!data.configured) {
+          byId('ingestionTokenStatusText').textContent = 'No token configured - inventory ingestion is unauthenticated. Regenerate to set one.';
+        } else if (!data.requireIngestionToken) {
+          byId('ingestionTokenStatusText').textContent = 'A token is configured, but enforcement is off - inventory ingestion currently accepts requests with no token.';
+        } else {
+          byId('ingestionTokenStatusText').textContent = 'A token is configured and required for inventory ingestion.';
+        }
         byId('ingestionTokenValue').value = data.token || '';
         byId('generalRequireIngestionToken').checked = !!data.requireIngestionToken;
         state.generalLoadedRequireIngestionToken = !!data.requireIngestionToken;
@@ -2501,7 +2506,7 @@
   // isError styling (red) would also be semantically wrong for a
   // successful generation, so this sets the message classes directly.
   function regenerateIngestionToken() {
-    const warningText = state.generalLoadedRequireIngestionToken
+    const warningText = state.generalLoadedRequireIngestionToken !== false
       ? 'Regenerate the ingestion token? Every already-installed client will stop reporting until it is reconfigured with the new token - and any not-yet-deployed GPO package still has the OLD token baked in, so it must be rebuilt from the Client package tab, not just redeployed. This cannot be undone.'
       : "Regenerate the ingestion token? Already-installed clients are unaffected right now since 'Require ingestion token' is off - but any package rebuilt after this uses the new value, and turning enforcement back on later will require every client to have this value. Continue?";
     const confirmed = window.confirm(warningText);
@@ -2528,9 +2533,22 @@
       .then(({ ok, data, statusText }) => {
         if (!ok) throw new Error((data && data.error) || statusText || 'Regenerate failed');
         const messageEl = byId('ingestionTokenMessage');
-        messageEl.textContent = `New token (copy this now, it will not be shown again): ${data.token}`;
+        // The token is now always visible in the "Current token" field above
+        // (populated by loadIngestionTokenStatus below), so this message no
+        // longer needs to be the one-and-only place to see it - it just
+        // confirms the regenerate happened and shows the new value inline.
+        messageEl.textContent = `Token regenerated: ${data.token}`;
         messageEl.className = 'pkg-message';
         loadIngestionTokenStatus();
+        // Client Package tab fields were pre-filled from the last-built
+        // package's own baked-in token, which is now stale - blank them so
+        // an immediate Save on that tab (without reloading first) correctly
+        // falls back to the fresh live token via ResolveEffectiveToken,
+        // instead of silently resubmitting the token that was just replaced.
+        const pkgTokenEl = byId('pkgToken');
+        if (pkgTokenEl) pkgTokenEl.value = '';
+        const linuxPkgTokenEl = byId('linuxPkgToken');
+        if (linuxPkgTokenEl) linuxPkgTokenEl.value = '';
       })
       .catch(error => {
         showSavedMessage(byId('ingestionTokenMessage'), `Regenerate failed: ${error.message}`, true);
