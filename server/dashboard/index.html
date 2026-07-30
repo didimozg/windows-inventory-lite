@@ -316,6 +316,14 @@
           <div class="settings-block">
             <h2 class="settings-block-title">Ingestion Token</h2>
             <p id="ingestionTokenStatusText" class="pkg-status">Loading status...</p>
+            <label>
+              Current token
+              <input id="ingestionTokenValue" type="text" readonly value="">
+            </label>
+            <label class="check-label">
+              <input id="generalRequireIngestionToken" type="checkbox" checked>
+              Require ingestion token
+            </label>
             <div class="pkg-buttons">
               <button id="ingestionTokenRegenerateButton" class="danger-button" type="button">Regenerate</button>
             </div>

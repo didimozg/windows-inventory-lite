@@ -2366,6 +2366,7 @@
     const enableHttp = byId('generalEnableHttp').checked;
     const httpsPort = Number.parseInt(byId('generalHttpsPort').value, 10) || 8443;
     const useHttps = byId('generalUseHttps').checked;
+    const requireIngestionToken = byId('generalRequireIngestionToken').checked;
 
     // Only the HTTP port and the Enable HTTP switch can actually move this
     // browser's own connection out from under it - staleHours/httpsPort/
@@ -2380,6 +2381,16 @@
       if (!confirmed) return;
     }
 
+    const disablingIngestionToken = state.generalLoadedRequireIngestionToken && !requireIngestionToken;
+    if (disablingIngestionToken && !acknowledgeRisks) {
+      const confirmed = window.confirm(
+        "Turning this off means anyone who can reach this server's port can submit inventory reports with no token at all - "
+          + 'both /api/v1/inventory and /api/v1/linux/inventory will accept any request, unauthenticated. Continue?'
+      );
+      if (!confirmed) return;
+      acknowledgeRisks = true;
+    }
+
     byId('generalSaveButton').disabled = true;
     byId('generalMessage').className = 'pkg-message hidden';
 
@@ -2388,7 +2399,7 @@
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        staleHours, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, acknowledgeRisks: !!acknowledgeRisks,
+        staleHours, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, requireIngestionToken, acknowledgeRisks: !!acknowledgeRisks,
         adSyncEnabled: byId('generalAdSyncEnabled').checked,
         adDescriptionSyncEnabled: byId('generalAdDescriptionSyncEnabled').checked,
         adSyncMode: byId('generalAdSyncMode').value,
@@ -2426,6 +2437,7 @@
         renderConnectionStatus(data);
         byId('generalAdPassword').value = '';
         showGeneralMessage('Settings saved.', false);
+        loadIngestionTokenStatus();
       })
       .catch(error => {
         showGeneralMessage(`Save failed: ${error.message}`, true);
@@ -2467,8 +2479,11 @@
       })
       .then(data => {
         byId('ingestionTokenStatusText').textContent = data.configured
-          ? 'A token is configured. It cannot be viewed here - regenerate it if a client needs a value you can give it.'
+          ? 'A token is configured.'
           : 'No token configured - inventory ingestion is unauthenticated. Regenerate to set one.';
+        byId('ingestionTokenValue').value = data.token || '';
+        byId('generalRequireIngestionToken').checked = !!data.requireIngestionToken;
+        state.generalLoadedRequireIngestionToken = !!data.requireIngestionToken;
       })
       .catch(error => {
         // Deliberately writes to the status line, not ingestionTokenMessage -
@@ -2486,7 +2501,10 @@
   // isError styling (red) would also be semantically wrong for a
   // successful generation, so this sets the message classes directly.
   function regenerateIngestionToken() {
-    const confirmed = window.confirm('Regenerate the ingestion token? Every already-installed client will stop reporting until it is reconfigured with the new token - and any not-yet-deployed GPO package still has the OLD token baked in, so it must be rebuilt from the Client package tab, not just redeployed. This cannot be undone.');
+    const warningText = state.generalLoadedRequireIngestionToken
+      ? 'Regenerate the ingestion token? Every already-installed client will stop reporting until it is reconfigured with the new token - and any not-yet-deployed GPO package still has the OLD token baked in, so it must be rebuilt from the Client package tab, not just redeployed. This cannot be undone.'
+      : "Regenerate the ingestion token? Already-installed clients are unaffected right now since 'Require ingestion token' is off - but any package rebuilt after this uses the new value, and turning enforcement back on later will require every client to have this value. Continue?";
+    const confirmed = window.confirm(warningText);
     if (!confirmed) return;
 
     byId('ingestionTokenRegenerateButton').disabled = true;
