@@ -4154,6 +4154,17 @@ namespace WindowsInventoryLite
             return !FixedTimeEquals(suppliedToken, configuredToken);
         }
 
+        // Shared by every endpoint that accepts an optional per-request
+        // token override and must fall back to the server's own live token
+        // when the caller leaves it blank - StartClientAction and
+        // StartLinuxClientAction already do this inline; ConfigureClientPackage
+        // and ConfigureLinuxClientPackage pick it up here instead of a third
+        // and fourth copy of the same three lines.
+        private static string ResolveEffectiveToken(string requestedToken, string liveToken)
+        {
+            return String.IsNullOrEmpty(requestedToken) ? liveToken : requestedToken;
+        }
+
         // Extracted so the "should this save be rejected pending an explicit
         // risk acknowledgment" decision is directly testable, mirroring how
         // the existing HTTPS-certificate-risk gate works inline in
@@ -4722,7 +4733,7 @@ namespace WindowsInventoryLite
                 return;
             }
             string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
-            string token = Convert.ToString(payload.ContainsKey("token") ? payload["token"] : "");
+            string token = ResolveEffectiveToken(Convert.ToString(payload.ContainsKey("token") ? payload["token"] : ""), options.Token);
             // Only when the GPO startup script and the package files (client
             // exes, Deploy-ClientGpo.ps1) are deployed to different
             // locations - e.g. the script runs from SYSVOL but the files
@@ -4888,7 +4899,7 @@ namespace WindowsInventoryLite
             }
 
             string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
-            string token = Convert.ToString(payload.ContainsKey("token") ? payload["token"] : "");
+            string token = ResolveEffectiveToken(Convert.ToString(payload.ContainsKey("token") ? payload["token"] : ""), options.Token);
             string installPath = Convert.ToString(payload.ContainsKey("installPath") ? payload["installPath"] : "/opt/windows-inventory-lite");
             // An explicit but blank/whitespace installPath in the payload (e.g. "") bypasses
             // the ContainsKey default above - apply the same default here so the generated
@@ -7161,6 +7172,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected requires a matching token when enforcement is on", TestIsIngestionTokenRejectedRequiresMatchWhenEnforced);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected always accepts when enforcement is off, regardless of the supplied token", TestIsIngestionTokenRejectedAlwaysAcceptsWhenNotEnforced);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected fails closed when enforcement is on but no token is configured", TestIsIngestionTokenRejectedFailsClosedWhenEnforcedButNoTokenConfigured);
+            allPassed &= SelfTestCheck(output, "ResolveEffectiveToken falls back to the live server token when the request supplies none", TestResolveEffectiveTokenFallsBackToLiveTokenWhenBlank);
             allPassed &= SelfTestCheck(output, "RequiresIngestionTokenRiskAcknowledgment only fires on an actual on-to-off transition without prior acknowledgment", TestRequiresIngestionTokenRiskAcknowledgmentOnlyWhenTurningEnforcementOff);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields is a no-op for a brand-new computer with sync disabled", TestComputeAdSyncFieldsNoOpForNewComputerWhenSyncDisabled);
@@ -8199,6 +8211,26 @@ namespace WindowsInventoryLite
             if (!InventoryServer.IsIngestionTokenRejected(true, "", ""))
             {
                 return "expected rejection when enforcement is on but no token is configured (empty supplied, empty configured)";
+            }
+            return null;
+        }
+
+        private static string TestResolveEffectiveTokenFallsBackToLiveTokenWhenBlank()
+        {
+            string result = ResolveEffectiveToken("", "live-token-value");
+            if (result != "live-token-value")
+            {
+                return "expected a blank requested token to fall back to the live token, got '" + result + "'";
+            }
+            string result2 = ResolveEffectiveToken(null, "live-token-value");
+            if (result2 != "live-token-value")
+            {
+                return "expected a null requested token to fall back to the live token, got '" + result2 + "'";
+            }
+            string result3 = ResolveEffectiveToken("explicit-override", "live-token-value");
+            if (result3 != "explicit-override")
+            {
+                return "expected an explicitly supplied token to win over the live token, got '" + result3 + "'";
             }
             return null;
         }
