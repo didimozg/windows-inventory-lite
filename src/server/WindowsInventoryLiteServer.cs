@@ -2177,7 +2177,7 @@ namespace WindowsInventoryLite
             string keyPath = GetLinuxSshKeyFilePath();
             bool hasStoredKey = File.Exists(keyPath);
             Dictionary<string, object> result = new Dictionary<string, object>();
-            result["configured"] = hasStoredCredentials || hasStoredKey;
+            result["configured"] = hasStoredCredentials || (!String.IsNullOrEmpty(options.LinuxUpdateUsername) && hasStoredKey);
             result["username"] = String.IsNullOrEmpty(options.LinuxUpdateUsername) ? null : options.LinuxUpdateUsername;
             result["hasPassword"] = !String.IsNullOrEmpty(options.LinuxUpdatePassword);
             result["hasStoredKey"] = hasStoredKey;
@@ -2238,7 +2238,7 @@ namespace WindowsInventoryLite
             result["onceAtUtc"] = String.IsNullOrEmpty(options.LinuxUpdateScheduleOnceAtUtc) ? null : options.LinuxUpdateScheduleOnceAtUtc;
             result["intervalHours"] = options.LinuxUpdateScheduleIntervalHours;
             result["lastRunUtc"] = String.IsNullOrEmpty(options.LinuxUpdateScheduleLastRunUtc) ? null : options.LinuxUpdateScheduleLastRunUtc;
-            result["hasSavedCredentials"] = !String.IsNullOrEmpty(options.LinuxUpdateUsername) && (!String.IsNullOrEmpty(options.LinuxUpdatePassword) || !String.IsNullOrEmpty(options.LinuxUpdateKeyPath));
+            result["hasSavedCredentials"] = !String.IsNullOrEmpty(options.LinuxUpdateUsername) && (!String.IsNullOrEmpty(options.LinuxUpdatePassword) || File.Exists(GetLinuxSshKeyFilePath()));
             JavaScriptSerializer serializer = CreateJsonSerializer();
             SendJson(stream, serializer.Serialize(result));
         }
@@ -6369,6 +6369,7 @@ namespace WindowsInventoryLite
             }
 
             string keyPath = GetLinuxSshKeyFilePath();
+            string tempPath = keyPath + ".tmp";
             try
             {
                 string directory = GetLinuxSshDirectory();
@@ -6376,8 +6377,11 @@ namespace WindowsInventoryLite
                 {
                     Directory.CreateDirectory(directory);
                 }
-                string tempPath = keyPath + ".tmp";
                 File.WriteAllBytes(tempPath, keyBytes);
+                // Restrict the temp file's ACL immediately - it holds the plaintext
+                // private key and would otherwise inherit the directory's default
+                // (broader) permissions for the whole window before the replace/move.
+                ApplyRestrictedKeyFileAcl(tempPath);
                 if (File.Exists(keyPath))
                 {
                     File.Replace(tempPath, keyPath, null);
@@ -6392,6 +6396,24 @@ namespace WindowsInventoryLite
             {
                 SendText(stream, "{\"error\":\"could not save the key file to disk\"}", "application/json; charset=utf-8", 500);
                 return;
+            }
+            finally
+            {
+                // File.Replace/File.Move already consumed tempPath on the success
+                // path, so this is a no-op then; it only matters when something
+                // above threw, to avoid leaving an orphaned key file on disk.
+                try
+                {
+                    if (File.Exists(tempPath))
+                    {
+                        File.Delete(tempPath);
+                    }
+                }
+                catch (Exception)
+                {
+                    // Best-effort cleanup only - do not let a failure here mask
+                    // the original error or crash a successful save.
+                }
             }
 
             ArrayList risks = new ArrayList();
@@ -6422,6 +6444,22 @@ namespace WindowsInventoryLite
                 SendText(stream, "{\"error\":\"could not delete the key file\"}", "application/json; charset=utf-8", 500);
                 return;
             }
+
+            // Best-effort cleanup of any orphaned temp file left behind by a
+            // prior failed upload (see ConfigureLinuxSshKey). A failure here
+            // must not turn a successful delete of the real key into a 500.
+            try
+            {
+                string tempPath = keyPath + ".tmp";
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+            }
+            catch (Exception)
+            {
+            }
+
             SendJson(stream, "{\"status\":\"deleted\"}");
         }
 
@@ -6583,7 +6621,7 @@ namespace WindowsInventoryLite
                 }
                 File.Copy(options.LinuxUpdateKeyPath, managedPath);
                 ApplyRestrictedKeyFileAcl(managedPath);
-                DebugLogger.Log(options, "Config", "Migrated legacy LinuxUpdateKeyPath into the managed linux-update-key store.");
+                DebugLogger.Log(options, "Config", "Migrated legacy LinuxUpdateKeyPath ('" + DebugLogger.SanitizeForLog(options.LinuxUpdateKeyPath) + "') into the managed linux-update-key store. The original file is no longer used and can be removed.");
             }
             catch (Exception ex)
             {

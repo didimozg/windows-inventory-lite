@@ -1259,6 +1259,8 @@
       })
       .catch(error => {
         showSavedMessage(byId('linuxCredsMessage'), `Status unavailable: ${error.message}`, true);
+        byId('linuxSshKeyStatus').textContent = 'Status unavailable.';
+        byId('linuxSshKeyDeleteButton').disabled = true;
       });
   }
 
