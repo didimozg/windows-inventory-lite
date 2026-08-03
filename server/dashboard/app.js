@@ -91,6 +91,22 @@
     updateThemeToggle();
   }
 
+  // Basic Auth has no server-side session to invalidate, so this is a
+  // best-effort client-side clear: an explicit, deliberately-wrong
+  // Authorization header gives the browser a chance to drop the real
+  // cached credentials, but not every browser honors it. The overlay text
+  // says so - closing the tab/window is the only guaranteed way out.
+  function handleLogout() {
+    if (!window.confirm('Log out of Windows Inventory Lite? On some browsers you may need to close this tab to fully clear your saved sign-in.')) return;
+    stopPolling();
+    fetch('/api/v1/clients', {
+      cache: 'no-store',
+      headers: { Authorization: 'Basic ' + btoa('logout:' + Math.random().toString(36).slice(2)) }
+    }).catch(() => {}).then(() => {
+      byId('logoutOverlay').classList.remove('hidden');
+    });
+  }
+
   function getInitialView() {
     const hash = window.location.hash.replace(/^#/, '').toLowerCase();
     if (hash === 'clients') return 'clients';
@@ -4057,6 +4073,8 @@
   byId('linuxCredsSaveButton').addEventListener('click', saveLinuxUpdateCredentials);
   byId('linuxCredsClearButton').addEventListener('click', clearLinuxUpdateCredentials);
   byId('themeToggle').addEventListener('click', toggleTheme);
+  byId('logoutButton').addEventListener('click', handleLogout);
+  byId('logoutReloadButton').addEventListener('click', () => window.location.reload());
   updateThemeToggle();
   if (state.view === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
   if (state.view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }

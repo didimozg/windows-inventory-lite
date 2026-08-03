@@ -139,6 +139,7 @@
     <div class="content-area">
       <header class="topbar">
         <input id="searchInput" type="search" placeholder="Filter computers, OS, Office, software, hardware">
+        <button id="logoutButton" class="logout-button" type="button" title="Log out">Log out</button>
       </header>
 
       <main>
@@ -1009,6 +1010,14 @@
           </div>
         </section>
       </main>
+    </div>
+  </div>
+
+  <div id="logoutOverlay" class="logout-overlay hidden" role="alertdialog" aria-label="Logged out">
+    <div class="logout-overlay-card">
+      <h2>Logged out</h2>
+      <p>Your saved sign-in for this tab has been cleared where the browser allows it. Some browsers keep it cached until every tab using this site is closed - for full security on a shared computer, close this browser tab or window.</p>
+      <button id="logoutReloadButton" class="primary-button" type="button">Log back in</button>
     </div>
   </div>
 

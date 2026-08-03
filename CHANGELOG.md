@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.32.0] - 2026-08-03
+
+### Added
+
+- Dashboard gained a "Log out" button in the top bar. Basic Auth (this project's own auth model) has no server-side session to invalidate, so this is a best-effort client-side clear: it sends a request with a deliberately invalid credential so the browser has a chance to drop its cached sign-in, then shows a "Logged out" screen explaining that some browsers only fully clear the cached sign-in once every tab using the site is closed.
+
 ## [0.31.1] - 2026-08-03
 
 ### Fixed
