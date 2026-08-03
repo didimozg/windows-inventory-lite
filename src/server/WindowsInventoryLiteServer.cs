@@ -5530,6 +5530,10 @@ namespace WindowsInventoryLite
             // returned by this endpoint, matching how WebPassword is never
             // echoed back either.
             result["adUsername"] = options.AdUseServiceIdentity ? null : options.AdUsername;
+            // Mirrors LinuxUpdateCredentials'/ClientUpdateCredentials' own
+            // hasPassword field - lets the dashboard show a saved-password
+            // indicator without ever exposing the value itself.
+            result["adPasswordConfigured"] = !String.IsNullOrEmpty(options.AdPassword);
             result["adComputerImportOUs"] = options.AdComputerImportOUs;
             result["installLogRetentionDays"] = options.InstallLogRetentionDays;
             result["debugLogEnabled"] = options.DebugLogEnabled;
@@ -5938,6 +5942,7 @@ namespace WindowsInventoryLite
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["configured"] = configured;
             result["username"] = String.IsNullOrEmpty(options.ClientUpdateUsername) ? null : options.ClientUpdateUsername;
+            result["hasPassword"] = !String.IsNullOrEmpty(options.ClientUpdatePassword);
             JavaScriptSerializer serializer = CreateJsonSerializer();
             SendJson(stream, serializer.Serialize(result));
         }

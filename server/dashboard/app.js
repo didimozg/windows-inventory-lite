@@ -55,6 +55,19 @@
     return document.getElementById(id);
   }
 
+  // Shows whether a write-only password field (AD password, Linux update
+  // password, Windows Client updates password) currently has a saved
+  // value, as classic dots - without ever revealing the value or its real
+  // length (the dot count here is fixed, not derived from the actual
+  // password). Only ever touches .placeholder, never .value, so there is
+  // no path where this indicator could itself be submitted and overwrite
+  // the real saved password. emptyPlaceholder is restored when a
+  // previously-saved password is cleared without a full page reload (e.g.
+  // "Delete saved credentials").
+  function applyPasswordPlaceholder(inputId, hasPassword, emptyPlaceholder) {
+    byId(inputId).placeholder = hasPassword ? '••••••••' : emptyPlaceholder;
+  }
+
   function currentTheme() {
     const explicit = document.documentElement.getAttribute('data-theme');
     if (explicit === 'light' || explicit === 'dark') return explicit;
@@ -1218,6 +1231,7 @@
       .then(data => {
         byId('linuxCredsUsername').value = data.username || '';
         byId('linuxCredsKeyPath').value = data.keyPath || '';
+        applyPasswordPlaceholder('linuxCredsPassword', !!data.hasPassword, 'leave blank to keep the current one');
       })
       .catch(error => {
         showSavedMessage(byId('linuxCredsMessage'), `Status unavailable: ${error.message}`, true);
@@ -1759,6 +1773,7 @@
         } else {
           hint.classList.add('hidden');
         }
+        applyPasswordPlaceholder('updatesPassword', !!data.hasPassword, 'leave blank to keep the current one');
       })
       .catch(() => {});
   }
@@ -2355,6 +2370,7 @@
         byId('generalAdUseServiceIdentity').checked = data.adUseServiceIdentity !== false;
         byId('generalAdUsername').value = data.adUsername || '';
         byId('generalAdPassword').value = '';
+        applyPasswordPlaceholder('generalAdPassword', !!data.adPasswordConfigured, 'leave blank to keep the current password');
         byId('generalAdComputerImportOUs').value = data.adComputerImportOUs || '';
         updateAdIdentityFields();
         byId('generalDebugLogEnabled').checked = !!data.debugLogEnabled;
