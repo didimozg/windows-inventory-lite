@@ -1238,6 +1238,39 @@ th.sort-desc::after {
   color: var(--muted);
 }
 
+/* Ingestion Token's "Current token" field is the one place on this page
+   that isn't inside a .pkg-grid/.general-grid row - it's a lone field, so
+   a 3-column grid built for URL/port-shaped rows would leave two empty
+   tracks and awkward math for a single item. Unlike every field wrapped in
+   a real grid, it inherited the bare input[type=text] { width: 100% }
+   rule with nothing to cap it, so it stretched edge-to-edge - a 64-char
+   token doesn't need anywhere near that width. max-width here is sized
+   generously for that fixed-length monospace string. */
+.token-value-field {
+  display: grid;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+  color: var(--muted);
+  font-size: var(--font-size-sm);
+}
+
+.token-value-field input {
+  max-width: 520px;
+}
+
+/* Same root cause as .token-value-field above, for the checkbox right
+   below it: outside a .pkg-grid, .check-label's own grid-template-columns/
+   align-items/min-height (declared further down this file) never actually
+   applied, since nothing set display:grid on it - .pkg-grid label is what
+   normally supplies that. Also gives it a bottom margin, so Regenerate
+   doesn't sit touching it - every other button-after-checkbox pairing on
+   this page gets that gap for free from its grid container's own margin,
+   which this lone field never had. */
+.ingestion-require-token-field {
+  display: grid;
+  margin-bottom: var(--space-md);
+}
+
 .pkg-grid {
   display: grid;
   grid-template-columns: minmax(240px, 2fr) minmax(160px, 1fr) 110px auto;
