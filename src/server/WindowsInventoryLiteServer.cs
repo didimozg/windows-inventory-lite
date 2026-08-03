@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.33.0";
+        internal const string ProductVersion = "0.34.0";
 
         private static int Main(string[] args)
         {
@@ -3581,6 +3581,14 @@ namespace WindowsInventoryLite
                     return;
                 }
                 report["clientVersion"] = installedVersion;
+                // Marks this client as "pushed but not yet confirmed" for the
+                // dashboard (see BuildClientIndex/app.js's awaiting-report
+                // badge) - deliberately NOT preserved across a real report:
+                // ReceiveInventory overwrites the whole file from the
+                // client's own POST body, which never includes this field,
+                // so it disappears the instant a genuine report lands. No
+                // separate "clear" step is needed.
+                report["lastInstalledAtUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
                 File.WriteAllText(path, serializer.Serialize(report), new UTF8Encoding(false));
             }
         }
@@ -7161,6 +7169,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'interval' is due immediately with no previous run", TestShouldRunClientUpdateScheduleIntervalNoPreviousRun);
             allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'interval' respects the interval window", TestShouldRunClientUpdateScheduleIntervalDueAndNotDue);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall updates a target's stored clientVersion", TestPatchClientReportVersionAfterInstallUpdatesVersion);
+            allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall's lastInstalledAtUtc is cleared once a real report overwrites the file", TestPatchClientReportVersionAfterInstallFieldClearedByRealReport);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall is a no-op when the target has no stored report yet", TestPatchClientReportVersionAfterInstallMissingReport);
             allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath defaults under DataPath when unset", TestDebugLoggerResolvePathDefault);
             allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath honors an explicit DebugLogPath", TestDebugLoggerResolvePathOverride);
@@ -7685,6 +7694,48 @@ namespace WindowsInventoryLite
                 if (GetStringValue(report, "computerName") != "PATCH-TEST-01")
                 {
                     return "expected the rest of the report to survive the patch untouched";
+                }
+                if (String.IsNullOrEmpty(GetStringValue(report, "lastInstalledAtUtc")))
+                {
+                    return "expected lastInstalledAtUtc to be set by the patch";
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(dataPath, true);
+            }
+        }
+
+        // A real inventory report overwrites the whole file from the
+        // client's own POST body (see ReceiveInventory), which never
+        // includes lastInstalledAtUtc - simulates that overwrite directly
+        // (no HTTP plumbing needed) to prove the field disappears on its
+        // own, with no separate "clear the awaiting-report flag" step
+        // anywhere in the codebase.
+        private static string TestPatchClientReportVersionAfterInstallFieldClearedByRealReport()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                string computerName = "PATCH-TEST-02";
+                string reportPath = Path.Combine(dataPath, computerName + ".json");
+                File.WriteAllText(reportPath, "{\"computerName\":\"PATCH-TEST-02\",\"clientVersion\":\"0.1.0\"}", new UTF8Encoding(false));
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+                server.PatchClientReportVersionAfterInstall(computerName, "0.2.0", null);
+
+                JavaScriptSerializer serializer = CreateJsonSerializer();
+                string freshClientPayload = "{\"computerName\":\"PATCH-TEST-02\",\"clientVersion\":\"0.2.0\"}";
+                File.WriteAllText(reportPath, freshClientPayload, new UTF8Encoding(false));
+
+                Dictionary<string, object> report = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(reportPath, Encoding.UTF8));
+                if (!String.IsNullOrEmpty(GetStringValue(report, "lastInstalledAtUtc")))
+                {
+                    return "expected lastInstalledAtUtc to be gone once a real report overwrites the file";
                 }
                 return null;
             }

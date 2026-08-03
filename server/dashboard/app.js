@@ -422,6 +422,14 @@
   }
 
   function isStale(client) {
+    // A client just pushed/updated server-side (lastInstalledAtUtc set,
+    // see PatchClientReportVersionAfterInstall) genuinely has an old
+    // stored report timestamp until its own next check-in - but that's
+    // expected, not a problem, so it's deliberately excluded from
+    // staleness everywhere this function is used (dashboard tile count,
+    // CSV export, row highlighting). The field disappears on its own once
+    // a real report lands, so this stops applying automatically too.
+    if (client.lastInstalledAtUtc) return false;
     const date = new Date(client.collectedAt || client.sourceUpdatedAt || 0);
     return Number.isNaN(date.getTime()) || ((Date.now() - date.getTime()) / 36e5) > state.staleHours;
   }
@@ -3288,8 +3296,11 @@
     byId('descriptionColumnHeader').textContent = state.adDescriptionSyncEnabled ? 'AD Description' : 'Description';
     const rows = pageItems.map(client => {
       const stale = isStale(client);
+      const awaitingReport = !!client.lastInstalledAtUtc;
       const staleClass = stale ? ' stale' : '';
-      const staleBadge = stale ? ' <span class="usb-badge">STALE</span>' : '';
+      const staleBadge = awaitingReport
+        ? ` <span class="usb-badge" title="Pushed at ${escapeHtml(formatDateTime(client.lastInstalledAtUtc))}, waiting for this client to report in">AWAITING REPORT</span>`
+        : (stale ? ' <span class="usb-badge">STALE</span>' : '');
       const os = client.os || {};
       const office = client.office || {};
       const activation = client.activation || {};
