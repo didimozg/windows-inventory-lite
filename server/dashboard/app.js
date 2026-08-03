@@ -1039,11 +1039,10 @@
   // (Task 10) can reuse this instead of duplicating it - the established
   // pattern this project uses for this exact 3-way-select shape (see
   // updateScheduleFieldVisibility).
-  function updateLinuxAuthModeFieldsUi(selectElementId, credentialsUserFieldId, passwordFieldId, keyFieldId) {
+  function updateLinuxAuthModeFieldsUi(selectElementId, credentialsUserFieldId, passwordFieldId) {
     const mode = byId(selectElementId).value;
     byId(credentialsUserFieldId).classList.toggle('hidden', mode === 'ad');
     byId(passwordFieldId).classList.toggle('hidden', mode !== 'credentials');
-    byId(keyFieldId).classList.toggle('hidden', mode !== 'key');
   }
 
   function updateLinuxClientActionUi() {
@@ -1131,7 +1130,6 @@
     const authMode = byId('linuxInstallAuthMode').value;
     const username = authMode === 'ad' ? '' : byId('linuxInstallUsername').value.trim();
     const password = authMode === 'credentials' ? byId('linuxInstallPassword').value : '';
-    const keyPath = authMode === 'key' ? byId('linuxInstallKeyPath').value.trim() : '';
     const trustNewHostKeys = action === 'install' && byId('linuxTrustNewHostKeys').checked;
     const acknowledgeHostKeyRisk = action === 'install' && byId('linuxAcknowledgeHostKeyRisk').checked;
 
@@ -1157,7 +1155,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets, serverUrl, token, intervalHours, installPath, authMode, username, password, keyPath, trustNewHostKeys, acknowledgeHostKeyRisk })
+      body: JSON.stringify({ targets, serverUrl, token, intervalHours, installPath, authMode, username, password, trustNewHostKeys, acknowledgeHostKeyRisk })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
@@ -1196,13 +1194,12 @@
         const authMode = byId('linuxInstallAuthMode').value;
         const username = authMode === 'ad' ? '' : byId('linuxInstallUsername').value.trim();
         const password = authMode === 'credentials' ? byId('linuxInstallPassword').value : '';
-        const keyPath = authMode === 'key' ? byId('linuxInstallKeyPath').value.trim() : '';
 
         return fetch('/api/v1/linux-client-install', {
           method: 'POST',
           cache: 'no-store',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ targets: host, serverUrl, token, intervalHours, installPath, authMode, username, password, keyPath, trustNewHostKeys: false, acknowledgeHostKeyRisk: false })
+          body: JSON.stringify({ targets: host, serverUrl, token, intervalHours, installPath, authMode, username, password, trustNewHostKeys: false, acknowledgeHostKeyRisk: false })
         });
       })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
@@ -1254,8 +1251,11 @@
       })
       .then(data => {
         byId('linuxCredsUsername').value = data.username || '';
-        byId('linuxCredsKeyPath').value = data.keyPath || '';
         applyPasswordPlaceholder('linuxCredsPassword', !!data.hasPassword, 'leave blank to keep the current one');
+        byId('linuxSshKeyStatus').textContent = data.hasStoredKey
+          ? `Key configured, uploaded ${formatDateTime(data.keyUploadedAtUtc)}`
+          : 'No key configured.';
+        byId('linuxSshKeyDeleteButton').disabled = !data.hasStoredKey;
       })
       .catch(error => {
         showSavedMessage(byId('linuxCredsMessage'), `Status unavailable: ${error.message}`, true);
@@ -1284,14 +1284,13 @@
   function saveLinuxUpdateCredentials() {
     const username = byId('linuxCredsUsername').value.trim();
     const password = byId('linuxCredsPassword').value;
-    const keyPath = byId('linuxCredsKeyPath').value.trim();
 
     byId('linuxCredsSaveButton').disabled = true;
     fetch('/api/v1/linux-client-updates/credentials', {
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password, keyPath })
+      body: JSON.stringify({ username, password })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, data })))
       .then(({ ok, data }) => {
@@ -1308,7 +1307,7 @@
   }
 
   function clearLinuxUpdateCredentials() {
-    const confirmed = window.confirm('Delete the saved Linux update username/password/key path?');
+    const confirmed = window.confirm('Delete the saved Linux update username/password?');
     if (!confirmed) return;
 
     byId('linuxCredsClearButton').disabled = true;
@@ -1323,7 +1322,6 @@
         if (!ok) throw new Error(data.error || 'Delete failed');
         byId('linuxCredsUsername').value = '';
         byId('linuxCredsPassword').value = '';
-        byId('linuxCredsKeyPath').value = '';
         showSavedMessage(byId('linuxCredsMessage'), 'Deleted.', false);
       })
       .catch(error => {
@@ -1331,6 +1329,71 @@
       })
       .finally(() => {
         byId('linuxCredsClearButton').disabled = false;
+      });
+  }
+
+  function uploadLinuxSshKey() {
+    const fileInput = byId('linuxSshKeyFile');
+    const file = fileInput.files && fileInput.files[0];
+
+    if (!file) {
+      window.alert('Choose a private key file.');
+      return;
+    }
+
+    byId('linuxSshKeyUploadButton').disabled = true;
+    byId('linuxSshKeyMessage').className = 'pkg-message hidden';
+
+    fileToBase64(file)
+      .then(keyBase64 => fetch('/api/v1/server/linux-ssh-key', {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyBase64 })
+      }))
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Upload failed');
+        fileInput.value = '';
+        loadLinuxUpdateCredentials();
+        const risks = data.risks || [];
+        const el = byId('linuxSshKeyMessage');
+        el.textContent = risks.length
+          ? `Key uploaded with ${risks.length} risk(s): ${risks.join(' ')}`
+          : 'Key uploaded.';
+        el.className = 'pkg-message' + (risks.length ? ' error' : '');
+      })
+      .catch(error => {
+        const el = byId('linuxSshKeyMessage');
+        el.textContent = `Upload failed: ${error.message}`;
+        el.className = 'pkg-message error';
+      })
+      .finally(() => {
+        byId('linuxSshKeyUploadButton').disabled = false;
+      });
+  }
+
+  function deleteLinuxSshKey() {
+    const confirmed = window.confirm('Delete the configured SSH key? Pushes using "SSH key" auth mode will fail until a new key is uploaded.');
+    if (!confirmed) return;
+
+    byId('linuxSshKeyDeleteButton').disabled = true;
+    fetch('/api/v1/server/linux-ssh-key', { method: 'DELETE', cache: 'no-store' })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Delete failed');
+        loadLinuxUpdateCredentials();
+        const el = byId('linuxSshKeyMessage');
+        el.textContent = 'Key deleted.';
+        el.className = 'pkg-message';
+      })
+      .catch(error => {
+        const el = byId('linuxSshKeyMessage');
+        el.textContent = `Delete failed: ${error.message}`;
+        el.className = 'pkg-message error';
+      })
+      .finally(() => {
+        byId('linuxSshKeyDeleteButton').disabled = false;
       });
   }
 
@@ -1574,7 +1637,6 @@
     const authMode = byId('linuxUpdatesAuthMode').value;
     const username = authMode === 'ad' ? '' : byId('linuxUpdatesUsername').value.trim();
     const password = authMode === 'credentials' ? byId('linuxUpdatesPassword').value : '';
-    const keyPath = authMode === 'key' ? byId('linuxUpdatesKeyPath').value.trim() : '';
     const trustNewHostKeys = byId('linuxUpdatesTrustNewHostKeys').checked;
     const acknowledgeHostKeyRisk = byId('linuxUpdatesAcknowledgeHostKeyRisk').checked;
     byId('linuxUpdatesPushButton').disabled = true;
@@ -1585,7 +1647,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets: selected.join('\n'), authMode, username, password, keyPath, trustNewHostKeys, acknowledgeHostKeyRisk })
+      body: JSON.stringify({ targets: selected.join('\n'), authMode, username, password, trustNewHostKeys, acknowledgeHostKeyRisk })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
@@ -3888,11 +3950,11 @@
   byId('linuxInstallServerUrl').value = `${window.location.origin}/api/v1/linux/inventory`;
   byId('clientAction').addEventListener('change', updateClientActionUi);
   byId('linuxClientAction').addEventListener('change', updateLinuxClientActionUi);
-  byId('linuxInstallAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField', 'linuxInstallKeyField'));
+  byId('linuxInstallAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField'));
   byId('linuxInstallButton').addEventListener('click', startLinuxClientActionJob);
   byId('linuxTrustNewHostKeys').addEventListener('change', updateLinuxTrustNewHostKeysUi);
   byId('linuxAcknowledgeHostKeyRisk').addEventListener('change', updateLinuxTrustNewHostKeysUi);
-  byId('linuxUpdatesAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField', 'linuxUpdatesKeyField'));
+  byId('linuxUpdatesAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField'));
   byId('linuxUpdatesSelectAll').addEventListener('change', () => {
     const checked = byId('linuxUpdatesSelectAll').checked;
     document.querySelectorAll('.linux-update-select').forEach(cb => { cb.checked = checked; });
@@ -4086,6 +4148,8 @@
   byId('ingestionTokenRegenerateButton').addEventListener('click', regenerateIngestionToken);
   byId('linuxCredsSaveButton').addEventListener('click', saveLinuxUpdateCredentials);
   byId('linuxCredsClearButton').addEventListener('click', clearLinuxUpdateCredentials);
+  byId('linuxSshKeyUploadButton').addEventListener('click', uploadLinuxSshKey);
+  byId('linuxSshKeyDeleteButton').addEventListener('click', deleteLinuxSshKey);
   byId('themeToggle').addEventListener('click', toggleTheme);
   byId('logoutButton').addEventListener('click', handleLogout);
   byId('logoutReloadButton').addEventListener('click', () => window.location.reload());
@@ -4101,7 +4165,7 @@
   updateClientActionUi();
   loadInstallHistory();
   updateLinuxClientActionUi();
-  updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField', 'linuxInstallKeyField');
-  updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField', 'linuxUpdatesKeyField');
+  updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField');
+  updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField');
   if (state.view === 'linuxInstall') loadLinuxInstallHistory();
 }());

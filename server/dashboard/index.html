@@ -282,7 +282,7 @@
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Linux Client update credentials</h2>
-            <p class="cert-hint">Used by Linux Client actions/updates pushes when "Stored Linux credentials" or "SSH key" auth mode is selected on those pages. Leave password/key path blank to keep the currently saved value.</p>
+            <p class="cert-hint">Used by Linux Client actions/updates pushes when "Stored Linux credentials" or "SSH key" auth mode is selected on those pages. Leave password blank to keep the currently saved value.</p>
             <div class="pkg-grid client-update-grid">
               <label class="pkg-token-field">
                 Linux update username
@@ -292,10 +292,6 @@
                 Linux update password
                 <input id="linuxCredsPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current one">
               </label>
-              <label class="pkg-token-field">
-                SSH key path
-                <input id="linuxCredsKeyPath" type="text" autocomplete="off" placeholder="C:\path\to\private-key.pem">
-              </label>
               <div class="pkg-buttons">
                 <button id="linuxCredsSaveButton" class="primary-button" type="button">Save</button>
                 <button id="linuxCredsClearButton" class="danger-button-ghost" type="button">Delete saved credentials</button>
@@ -303,6 +299,19 @@
             </div>
             <p id="linuxSshToolsStatus" class="cert-hint">Checking plink.exe/pscp.exe status...</p>
             <div id="linuxCredsMessage" class="pkg-message hidden"></div>
+            <h2 class="settings-block-title">SSH key</h2>
+            <p id="linuxSshKeyStatus" class="pkg-status">Loading SSH key status...</p>
+            <div class="pkg-grid">
+              <label class="pkg-url-field">
+                Private key file
+                <input id="linuxSshKeyFile" type="file">
+              </label>
+              <div class="pkg-buttons">
+                <button id="linuxSshKeyUploadButton" class="primary-button" type="button">Upload key</button>
+                <button id="linuxSshKeyDeleteButton" class="danger-button-ghost" type="button">Delete key</button>
+              </div>
+            </div>
+            <div id="linuxSshKeyMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Ingestion Token</h2>
@@ -818,10 +827,6 @@
                 Linux password
                 <input id="linuxInstallPassword" type="password" autocomplete="current-password">
               </label>
-              <label id="linuxInstallKeyField" class="hidden">
-                SSH key path
-                <input id="linuxInstallKeyPath" type="text" placeholder="C:\path\to\private-key.pem">
-              </label>
               <label id="linuxTrustNewHostKeysField" class="check-label install-only">
                 <input id="linuxTrustNewHostKeys" type="checkbox">
                 Trust new host keys automatically (skip verification)
@@ -856,10 +861,6 @@
             <label id="linuxUpdatesPasswordField" class="linux-updates-credential-field hidden">
               Linux password (leave blank to use the saved Settings password)
               <input id="linuxUpdatesPassword" type="password" autocomplete="current-password">
-            </label>
-            <label id="linuxUpdatesKeyField" class="linux-updates-credential-field hidden">
-              SSH key path (leave blank to use the saved Settings key path)
-              <input id="linuxUpdatesKeyPath" type="text" placeholder="C:\path\to\private-key.pem">
             </label>
             <label class="check-label">
               <input id="linuxUpdatesTrustNewHostKeys" type="checkbox">
