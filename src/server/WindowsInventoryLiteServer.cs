@@ -1480,6 +1480,14 @@ namespace WindowsInventoryLite
                     {
                         SendLinuxSshToolsStatus(stream);
                     }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/server/linux-ssh-key")
+                    {
+                        ConfigureLinuxSshKey(stream, request);
+                    }
+                    else if (request.Method == "DELETE" && request.Path == "/api/v1/server/linux-ssh-key")
+                    {
+                        DeleteLinuxSshKey(stream);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-package")
                     {
                         SendLinuxClientPackageStatus(stream);
@@ -2165,12 +2173,14 @@ namespace WindowsInventoryLite
         private void SendLinuxUpdateCredentialsStatus(Stream stream)
         {
             bool hasStoredCredentials = !String.IsNullOrEmpty(options.LinuxUpdateUsername) && !String.IsNullOrEmpty(options.LinuxUpdatePassword);
-            bool hasStoredKey = !String.IsNullOrEmpty(options.LinuxUpdateUsername) && !String.IsNullOrEmpty(options.LinuxUpdateKeyPath);
+            string keyPath = GetLinuxSshKeyFilePath();
+            bool hasStoredKey = File.Exists(keyPath);
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["configured"] = hasStoredCredentials || hasStoredKey;
             result["username"] = String.IsNullOrEmpty(options.LinuxUpdateUsername) ? null : options.LinuxUpdateUsername;
             result["hasPassword"] = !String.IsNullOrEmpty(options.LinuxUpdatePassword);
-            result["keyPath"] = String.IsNullOrEmpty(options.LinuxUpdateKeyPath) ? null : options.LinuxUpdateKeyPath;
+            result["hasStoredKey"] = hasStoredKey;
+            result["keyUploadedAtUtc"] = hasStoredKey ? File.GetLastWriteTimeUtc(keyPath).ToString("yyyy-MM-ddTHH:mm:ssZ") : null;
             JavaScriptSerializer serializer = CreateJsonSerializer();
             SendJson(stream, serializer.Serialize(result));
         }
@@ -2196,12 +2206,10 @@ namespace WindowsInventoryLite
             bool clear = payload.ContainsKey("clear") && Convert.ToBoolean(payload["clear"]);
             string username;
             string password;
-            string keyPath;
             if (clear)
             {
                 username = "";
                 password = "";
-                keyPath = "";
             }
             else
             {
@@ -2209,17 +2217,14 @@ namespace WindowsInventoryLite
                 password = payload.ContainsKey("password") && !String.IsNullOrEmpty(Convert.ToString(payload["password"]))
                     ? Convert.ToString(payload["password"])
                     : options.LinuxUpdatePassword;
-                keyPath = payload.ContainsKey("keyPath") ? Convert.ToString(payload["keyPath"]) : options.LinuxUpdateKeyPath;
             }
 
             options.LinuxUpdateUsername = username;
             options.LinuxUpdatePassword = password;
-            options.LinuxUpdateKeyPath = keyPath;
 
             Dictionary<string, string> updates = new Dictionary<string, string>();
             updates["LinuxUpdateUsername"] = username ?? "";
             updates["LinuxUpdatePassword"] = password ?? "";
-            updates["LinuxUpdateKeyPath"] = keyPath ?? "";
             SaveServerConfigValues(updates);
 
             SendLinuxUpdateCredentialsStatus(stream);
@@ -6290,6 +6295,129 @@ namespace WindowsInventoryLite
         private string GetLinuxSshKeyFilePath()
         {
             return Path.Combine(GetLinuxSshDirectory(), "linux-update-key");
+        }
+
+        private void ConfigureLinuxSshKey(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string keyBase64 = Convert.ToString(payload.ContainsKey("keyBase64") ? payload["keyBase64"] : "");
+            if (String.IsNullOrEmpty(keyBase64))
+            {
+                SendText(stream, "{\"error\":\"keyBase64 is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            byte[] keyBytes;
+            try
+            {
+                keyBytes = Convert.FromBase64String(keyBase64);
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"keyBase64 is not valid base64\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            const int MaxKeyBytes = 1024 * 1024;
+            if (keyBytes.Length == 0 || keyBytes.Length > MaxKeyBytes)
+            {
+                SendText(stream, "{\"error\":\"key file must be between 1 byte and 1 MB\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string content;
+            try
+            {
+                content = Encoding.UTF8.GetString(keyBytes);
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"key file is not readable as text\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            if (LooksLikePublicKey(content))
+            {
+                SendText(stream, "{\"error\":\"This looks like a public key (.pub) - upload the matching private key instead.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            if (!LooksLikePrivateKey(content))
+            {
+                SendText(stream, "{\"error\":\"This does not look like a private key file (expected a -----BEGIN ... PRIVATE KEY----- header).\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string keyPath = GetLinuxSshKeyFilePath();
+            try
+            {
+                string directory = GetLinuxSshDirectory();
+                if (!Directory.Exists(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+                string tempPath = keyPath + ".tmp";
+                File.WriteAllBytes(tempPath, keyBytes);
+                if (File.Exists(keyPath))
+                {
+                    File.Replace(tempPath, keyPath, null);
+                }
+                else
+                {
+                    File.Move(tempPath, keyPath);
+                }
+                ApplyRestrictedKeyFileAcl(keyPath);
+            }
+            catch (Exception)
+            {
+                SendText(stream, "{\"error\":\"could not save the key file to disk\"}", "application/json; charset=utf-8", 500);
+                return;
+            }
+
+            ArrayList risks = new ArrayList();
+            if (LooksLikeEncryptedPrivateKey(content))
+            {
+                risks.Add("This key appears to be passphrase-protected. Linux pushes run SSH in batch mode, which cannot prompt for a passphrase - pushes using this key will fail until it's replaced with an unencrypted key.");
+            }
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["status"] = "ok";
+            result["risks"] = risks;
+            JavaScriptSerializer responseSerializer = CreateJsonSerializer();
+            SendJson(stream, responseSerializer.Serialize(result));
+        }
+
+        private void DeleteLinuxSshKey(Stream stream)
+        {
+            string keyPath = GetLinuxSshKeyFilePath();
+            try
+            {
+                if (File.Exists(keyPath))
+                {
+                    File.Delete(keyPath);
+                }
+            }
+            catch (Exception)
+            {
+                SendText(stream, "{\"error\":\"could not delete the key file\"}", "application/json; charset=utf-8", 500);
+                return;
+            }
+            SendJson(stream, "{\"status\":\"deleted\"}");
         }
 
         // Pure string checks, no I/O - self-testable directly. Together
