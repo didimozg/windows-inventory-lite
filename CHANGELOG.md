@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.35.0] - 2026-08-03
+
+### Added
+
+- Linux SSH pushes now use one server-managed private key, uploaded through the dashboard (Settings > General > Linux Client update credentials) instead of a raw file path typed in up to three separate places (global settings, and per-push overrides on both Linux Client actions and Linux Client updates - the latter two are removed by this change). The server validates the upload (rejects a `.pub` file or anything that doesn't look like a private key, warns if the key is passphrase-protected) and enforces both NTFS DACL and Owner on the stored file. Existing installs with a previously-configured key path adopt it automatically on first startup after upgrading, no admin action required.
+
+### Fixed
+
+- Closes the root cause of a live `UNPROTECTED PRIVATE KEY FILE` push failure: the stored key file's NTFS **Owner**, not just its access rules, is now explicitly set to SYSTEM - the DACL-only hardening this project's other "restrict this file" helpers use was confirmed insufficient on its own, since `ssh.exe` checks Owner as an independent condition.
+
 ## [0.34.2] - 2026-08-03
 
 ### Fixed
