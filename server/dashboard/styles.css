@@ -403,6 +403,7 @@ main {
 }
 
 .danger-button {
+  min-height: 40px;
   min-width: 72px;
   padding: var(--space-sm) var(--space-md);
   border: 1px solid var(--danger-border);
@@ -425,6 +426,7 @@ main {
    HTTPS off). Same red only on hover, so the row stays calm at rest but
    still reads as "delete" on interaction. */
 .danger-button-ghost {
+  min-height: 40px;
   min-width: 72px;
   padding: var(--space-sm) var(--space-md);
   border: 1px solid var(--line);
@@ -443,6 +445,7 @@ main {
 }
 
 .edit-button {
+  min-height: 40px;
   min-width: 72px;
   padding: var(--space-sm) var(--space-md);
   border: 1px solid var(--accent);
@@ -1183,10 +1186,13 @@ th.sort-desc::after {
 .view-toolbar {
   display: flex;
   justify-content: flex-end;
+  gap: var(--space-sm);
   margin-bottom: 8px;
 }
 
 .export-button {
+  min-height: 40px;
+  min-width: 72px;
   padding: var(--space-sm) var(--space-lg);
   border: 1px solid var(--line);
   border-radius: 6px;
