@@ -2450,11 +2450,11 @@ namespace WindowsInventoryLite
                 token = options.Token;
             }
 
-            string authMode = !String.IsNullOrEmpty(options.LinuxUpdateKeyPath) ? "key" : "credentials";
+            string keyPath = GetLinuxSshKeyFilePath();
+            string authMode = File.Exists(keyPath) ? "key" : "credentials";
             string username = options.LinuxUpdateUsername;
             string password = options.LinuxUpdatePassword;
-            string keyPath = options.LinuxUpdateKeyPath;
-            if (String.IsNullOrEmpty(username) || (authMode == "credentials" && String.IsNullOrEmpty(password)) || (authMode == "key" && String.IsNullOrEmpty(keyPath)))
+            if (String.IsNullOrEmpty(username) || (authMode == "credentials" && String.IsNullOrEmpty(password)))
             {
                 DebugLogger.Log(options, "Schedule", "Scheduled Linux client update push skipped: no saved Linux credentials configured.");
                 return;
@@ -2873,7 +2873,7 @@ namespace WindowsInventoryLite
 
             string username = Convert.ToString(payload.ContainsKey("username") ? payload["username"] : "");
             string password = Convert.ToString(payload.ContainsKey("password") ? payload["password"] : "");
-            string keyPath = Convert.ToString(payload.ContainsKey("keyPath") ? payload["keyPath"] : "");
+            string keyPath = GetLinuxSshKeyFilePath();
 
             if (authMode == "ad")
             {
@@ -2903,10 +2903,14 @@ namespace WindowsInventoryLite
             else
             {
                 if (String.IsNullOrEmpty(username)) username = options.LinuxUpdateUsername;
-                if (String.IsNullOrEmpty(keyPath)) keyPath = options.LinuxUpdateKeyPath;
-                if (String.IsNullOrEmpty(username) || String.IsNullOrEmpty(keyPath))
+                if (String.IsNullOrEmpty(username))
                 {
-                    SendText(stream, "{\"error\":\"username/keyPath are required for 'key' auth mode (enter them, or save them in Settings > General > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
+                    SendText(stream, "{\"error\":\"username is required for 'key' auth mode (enter it, or save it in Settings > General > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                if (!File.Exists(keyPath))
+                {
+                    SendText(stream, "{\"error\":\"No SSH key is configured - upload one in Settings > General > Linux Client update credentials.\"}", "application/json; charset=utf-8", 400);
                     return;
                 }
             }
