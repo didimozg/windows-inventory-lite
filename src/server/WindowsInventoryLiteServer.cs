@@ -739,6 +739,7 @@ namespace WindowsInventoryLite
                 Directory.CreateDirectory(GetLinuxInstallJobDirectory());
             }
             CleanupInstallJobLogs();
+            MigrateLegacyLinuxSshKey();
 
             if (options.EnableHttp)
             {
@@ -6543,6 +6544,49 @@ namespace WindowsInventoryLite
             }
         }
 
+        // One-time upgrade path: an existing install may already have
+        // LinuxUpdateKeyPath pointing at a real private key file
+        // somewhere on disk (the old "type a path" model). Adopts it
+        // automatically so upgrading needs zero admin action - but only
+        // once (guarded by "the managed file doesn't exist yet"), and
+        // only if the legacy path genuinely looks like a private key;
+        // any failure (unreadable, wrong format, copy error) is logged
+        // and swallowed, never thrown - a failed migration just leaves
+        // the key unconfigured, same as a fresh install, and must never
+        // block server startup.
+        private void MigrateLegacyLinuxSshKey()
+        {
+            try
+            {
+                string managedPath = GetLinuxSshKeyFilePath();
+                if (File.Exists(managedPath))
+                {
+                    return;
+                }
+                if (String.IsNullOrEmpty(options.LinuxUpdateKeyPath) || !File.Exists(options.LinuxUpdateKeyPath))
+                {
+                    return;
+                }
+                string content = File.ReadAllText(options.LinuxUpdateKeyPath, Encoding.UTF8);
+                if (!LooksLikePrivateKey(content))
+                {
+                    return;
+                }
+                string directory = GetLinuxSshDirectory();
+                if (!Directory.Exists(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+                File.Copy(options.LinuxUpdateKeyPath, managedPath);
+                ApplyRestrictedKeyFileAcl(managedPath);
+                DebugLogger.Log(options, "Config", "Migrated legacy LinuxUpdateKeyPath into the managed linux-update-key store.");
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Config", "Could not migrate legacy LinuxUpdateKeyPath: " + DebugLogger.SanitizeForLog(ex.Message));
+            }
+        }
+
         // Deliberately does NOT swallow read/parse errors into an empty list:
         // concurrent Linux install jobs (each dispatched via
         // ThreadPool.QueueUserWorkItem) and the manual trust-host-key
@@ -7489,6 +7533,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "LooksLikeEncryptedPrivateKey detects a legacy PEM Proc-Type header", TestLooksLikeEncryptedPrivateKeyDetectsLegacyPem);
             allPassed &= SelfTestCheck(output, "LooksLikeEncryptedPrivateKey detects an OpenSSH bcrypt KDF marker", TestLooksLikeEncryptedPrivateKeyDetectsOpenSshBcryptKdf);
             allPassed &= SelfTestCheck(output, "ApplyRestrictedKeyFileAcl sets the DACL (and Owner, when elevated)", TestApplyRestrictedKeyFileAclSetsDaclAndOwnerWhenElevated);
+            allPassed &= SelfTestCheck(output, "MigrateLegacyLinuxSshKey adopts a valid legacy LinuxUpdateKeyPath", TestMigrateLegacyLinuxSshKeyAdoptsValidLegacyPath);
+            allPassed &= SelfTestCheck(output, "MigrateLegacyLinuxSshKey is a no-op when the legacy path is missing or invalid", TestMigrateLegacyLinuxSshKeyIgnoresMissingOrInvalidLegacyPath);
             return allPassed;
         }
 
@@ -9211,6 +9257,59 @@ namespace WindowsInventoryLite
             finally
             {
                 File.Delete(tempPath);
+            }
+        }
+
+        private static string TestMigrateLegacyLinuxSshKeyAdoptsValidLegacyPath()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            string legacyKeyPath = Path.Combine(Path.GetTempPath(), "wil-selftest-legacy-key-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            File.WriteAllText(legacyKeyPath, "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEA\n-----END OPENSSH PRIVATE KEY-----\n", new UTF8Encoding(false));
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.LinuxUpdateKeyPath = legacyKeyPath;
+                InventoryServer server = new InventoryServer(options);
+                server.MigrateLegacyLinuxSshKey();
+
+                string managedPath = Path.Combine(dataPath, "_linux-ssh", "linux-update-key");
+                if (!File.Exists(managedPath))
+                {
+                    return "expected the legacy key to be copied to the managed path";
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(dataPath, true);
+                File.Delete(legacyKeyPath);
+            }
+        }
+
+        private static string TestMigrateLegacyLinuxSshKeyIgnoresMissingOrInvalidLegacyPath()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.LinuxUpdateKeyPath = Path.Combine(Path.GetTempPath(), "wil-selftest-does-not-exist-" + Guid.NewGuid().ToString("N"));
+                InventoryServer server = new InventoryServer(options);
+                server.MigrateLegacyLinuxSshKey();
+
+                string managedPath = Path.Combine(dataPath, "_linux-ssh", "linux-update-key");
+                if (File.Exists(managedPath))
+                {
+                    return "expected no managed key to be created when the legacy path does not exist";
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(dataPath, true);
             }
         }
 
