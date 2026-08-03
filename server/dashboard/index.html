@@ -838,7 +838,7 @@
         <section id="linuxUpdatesView" class="install-panel hidden" aria-label="Linux client updates">
           <div class="settings-block">
             <h2 class="settings-block-title">Authentication</h2>
-            <p class="cert-hint">Uses the credentials saved in Settings &gt; General &gt; Linux Client update credentials, unless "Use global AD settings" is selected below.</p>
+            <p class="cert-hint">Uses the credentials saved in Settings &gt; General &gt; Linux Client update credentials by default - enter values below to override them for this push only, or select "Use global AD settings".</p>
             <label class="pkg-token-field">
               Authentication
               <select id="linuxUpdatesAuthMode">
@@ -846,6 +846,18 @@
                 <option value="key">SSH key</option>
                 <option value="ad">Use global AD settings</option>
               </select>
+            </label>
+            <label id="linuxUpdatesCredentialsField" class="linux-updates-credential-field hidden">
+              Linux user (leave blank to use the saved Settings account)
+              <input id="linuxUpdatesUsername" type="text" autocomplete="username" placeholder="root">
+            </label>
+            <label id="linuxUpdatesPasswordField" class="linux-updates-credential-field hidden">
+              Linux password (leave blank to use the saved Settings password)
+              <input id="linuxUpdatesPassword" type="password" autocomplete="current-password">
+            </label>
+            <label id="linuxUpdatesKeyField" class="linux-updates-credential-field hidden">
+              SSH key path (leave blank to use the saved Settings key path)
+              <input id="linuxUpdatesKeyPath" type="text" placeholder="C:\path\to\private-key.pem">
             </label>
             <label class="check-label">
               <input id="linuxUpdatesTrustNewHostKeys" type="checkbox">

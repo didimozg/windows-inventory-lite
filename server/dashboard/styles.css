@@ -1321,6 +1321,17 @@ th.sort-desc::after {
   margin-bottom: var(--space-md);
 }
 
+/* Linux Client updates' per-push credential override fields (L15) - same
+   .pkg-token-field/.check-label root cause as .token-value-field above:
+   outside a .pkg-grid ancestor, nothing sets display:grid on these labels. */
+.linux-updates-credential-field {
+  display: grid;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+  color: var(--muted);
+  font-size: var(--font-size-sm);
+}
+
 .pkg-grid {
   display: grid;
   grid-template-columns: minmax(240px, 2fr) minmax(160px, 1fr) 110px auto;

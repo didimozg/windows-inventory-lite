@@ -1564,6 +1564,9 @@
     if (selected.length === 0) return;
 
     const authMode = byId('linuxUpdatesAuthMode').value;
+    const username = authMode === 'ad' ? '' : byId('linuxUpdatesUsername').value.trim();
+    const password = authMode === 'credentials' ? byId('linuxUpdatesPassword').value : '';
+    const keyPath = authMode === 'key' ? byId('linuxUpdatesKeyPath').value.trim() : '';
     const trustNewHostKeys = byId('linuxUpdatesTrustNewHostKeys').checked;
     const acknowledgeHostKeyRisk = byId('linuxUpdatesAcknowledgeHostKeyRisk').checked;
     byId('linuxUpdatesPushButton').disabled = true;
@@ -1574,7 +1577,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets: selected.join('\n'), authMode, trustNewHostKeys, acknowledgeHostKeyRisk })
+      body: JSON.stringify({ targets: selected.join('\n'), authMode, username, password, keyPath, trustNewHostKeys, acknowledgeHostKeyRisk })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
@@ -3878,7 +3881,7 @@
   byId('linuxInstallButton').addEventListener('click', startLinuxClientActionJob);
   byId('linuxTrustNewHostKeys').addEventListener('change', updateLinuxTrustNewHostKeysUi);
   byId('linuxAcknowledgeHostKeyRisk').addEventListener('change', updateLinuxTrustNewHostKeysUi);
-  byId('linuxUpdatesAuthMode').addEventListener('change', () => {});
+  byId('linuxUpdatesAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField', 'linuxUpdatesKeyField'));
   byId('linuxUpdatesSelectAll').addEventListener('change', () => {
     const checked = byId('linuxUpdatesSelectAll').checked;
     document.querySelectorAll('.linux-update-select').forEach(cb => { cb.checked = checked; });
@@ -4088,5 +4091,6 @@
   loadInstallHistory();
   updateLinuxClientActionUi();
   updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField', 'linuxInstallKeyField');
+  updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField', 'linuxUpdatesKeyField');
   if (state.view === 'linuxInstall') loadLinuxInstallHistory();
 }());
