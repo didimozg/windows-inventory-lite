@@ -6390,16 +6390,28 @@ namespace WindowsInventoryLite
             {
                 SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
                 SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+
+                // DACL first, persisted on its own - this alone matches
+                // ApplyRestrictedConfigAcl's own guarantee (no elevation
+                // needed) and must not be lost if the Owner step below
+                // fails for lack of privilege.
                 FileSecurity acl = File.GetAccessControl(path);
                 acl.SetAccessRuleProtection(true, false);
                 acl.AddAccessRule(new FileSystemAccessRule(adminSid, FileSystemRights.FullControl, AccessControlType.Allow));
                 acl.AddAccessRule(new FileSystemAccessRule(systemSid, FileSystemRights.FullControl, AccessControlType.Allow));
-                acl.SetOwner(systemSid);
                 File.SetAccessControl(path, acl);
+
+                // Owner is a separate persist step - setting it to a SID
+                // other than the caller requires an elevated/SYSTEM
+                // process token, and a failure here must not roll back
+                // the DACL hardening already persisted above.
+                FileSecurity ownerAcl = File.GetAccessControl(path);
+                ownerAcl.SetOwner(systemSid);
+                File.SetAccessControl(path, ownerAcl);
             }
             catch (Exception ex)
             {
-                DebugLogger.Log(options, "Config", "Could not restrict linux-update-key permissions: " + DebugLogger.SanitizeForLog(ex.Message));
+                DebugLogger.Log(options, "Config", "Could not fully restrict linux-update-key permissions: " + DebugLogger.SanitizeForLog(ex.Message));
             }
         }
 
@@ -9041,7 +9053,7 @@ namespace WindowsInventoryLite
                 SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
                 bool hasAdminRule = false;
                 bool hasSystemRule = false;
-                foreach (FileSystemAccessRule rule in acl.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+                foreach (FileSystemAccessRule rule in acl.GetAccessRules(true, false, typeof(SecurityIdentifier)))
                 {
                     if (rule.IdentityReference.Equals(adminSid) && rule.FileSystemRights == FileSystemRights.FullControl)
                     {
