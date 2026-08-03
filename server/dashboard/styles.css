@@ -462,7 +462,7 @@ main {
 .summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(150px, 1fr));
-  gap: 12px;
+  gap: var(--space-md);
   margin-bottom: 18px;
 }
 
@@ -471,7 +471,7 @@ main {
 }
 
 .dashboard-card {
-  padding: 16px;
+  padding: var(--space-lg);
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -485,11 +485,11 @@ main {
 .dash-chart-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 16px;
+  gap: var(--space-lg);
 }
 
 .dash-chart {
-  padding: 12px;
+  padding: var(--space-md);
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -497,7 +497,7 @@ main {
 
 .dash-chart h3 {
   margin: 0 0 10px;
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   font-weight: 650;
   color: var(--muted);
   text-transform: uppercase;
@@ -507,15 +507,15 @@ main {
 .bar-chart {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-sm);
 }
 
 .bar-row {
   display: grid;
   grid-template-columns: minmax(70px, 40%) 1fr auto;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
+  gap: var(--space-sm);
+  font-size: var(--font-size-sm);
 }
 
 .bar-label {
@@ -549,14 +549,14 @@ main {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 16px;
+  padding: var(--space-lg);
 }
 
 .summary span {
   display: block;
   margin-bottom: 4px;
   color: var(--accent);
-  font-size: 28px;
+  font-size: var(--font-size-display);
   font-weight: 700;
 }
 
@@ -564,11 +564,11 @@ main {
    specificity both rule pairs share - same reasoning as .tile-alert
    just below, which relies on the same ordering. */
 .summary-compact div {
-  padding: 7px 10px;
+  padding: var(--space-sm) var(--space-md);
 }
 
 .summary-compact span {
-  font-size: 15px;
+  font-size: var(--font-size-lg);
   margin-bottom: 2px;
 }
 
@@ -602,7 +602,7 @@ table {
 
 th,
 td {
-  padding: 12px 14px;
+  padding: var(--space-md) var(--space-lg);
   border-bottom: 1px solid var(--line);
   text-align: left;
   vertical-align: top;
@@ -610,7 +610,7 @@ td {
 
 th {
   background: var(--table-header-bg);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   color: var(--muted);
   text-transform: uppercase;
 }
@@ -629,13 +629,13 @@ tr.stale td {
 }
 
 .details {
-  padding: 8px 0;
+  padding: var(--space-sm) 0;
 }
 
 .details h2 {
   margin: 0 0 12px;
   color: var(--heading);
-  font-size: 16px;
+  font-size: var(--font-size-lg);
 }
 
 .nested-table {
@@ -645,7 +645,7 @@ tr.stale td {
 .computer-list {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 8px 18px;
+  gap: var(--space-sm) var(--space-lg);
   margin: 0;
   padding-left: 18px;
 }
@@ -655,7 +655,7 @@ tr.stale td {
 }
 
 .empty {
-  padding: 28px;
+  padding: var(--space-xl);
   text-align: center;
   color: var(--muted);
 }
@@ -1124,16 +1124,16 @@ tr.usb-row td {
 .hw-heading {
   margin: 0 0 10px;
   color: var(--heading);
-  font-size: 16px;
+  font-size: var(--font-size-lg);
   font-weight: 650;
 }
 
 .hw-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 8px 18px;
+  gap: var(--space-sm) var(--space-lg);
   margin-bottom: 14px;
-  padding: 10px 14px;
+  padding: var(--space-md) var(--space-lg);
   background: var(--hw-summary-bg);
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -1141,14 +1141,14 @@ tr.usb-row td {
 
 .hw-summary div {
   display: flex;
-  gap: 8px;
+  gap: var(--space-sm);
   align-items: baseline;
 }
 
 .hw-summary strong {
   min-width: 60px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   text-transform: uppercase;
   flex-shrink: 0;
 }
@@ -1156,7 +1156,7 @@ tr.usb-row td {
 .ram-modules-grid {
   display: grid;
   grid-template-columns: repeat(2, auto);
-  gap: 2px 16px;
+  gap: 2px var(--space-lg);
   margin-top: 2px;
 }
 
@@ -1206,7 +1206,7 @@ th.sort-desc::after {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 12px;
+  gap: var(--space-md);
   margin: 12px 0 4px;
 }
 
@@ -1216,14 +1216,14 @@ th.sort-desc::after {
 }
 
 .pager-status {
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   color: var(--muted);
 }
 
 .hw-section-header {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-md);
   margin-bottom: 10px;
 }
 
@@ -1362,7 +1362,7 @@ th.sort-desc::after {
 }
 
 .settings-block {
-  padding-bottom: 18px;
+  padding-bottom: var(--space-lg);
   margin-bottom: 18px;
   border-bottom: 1px solid var(--line);
 }
@@ -1370,14 +1370,14 @@ th.sort-desc::after {
 .settings-block-title {
   margin: 0 0 12px;
   color: var(--heading);
-  font-size: 15px;
+  font-size: var(--font-size-lg);
   font-weight: 650;
 }
 
 .cert-history-heading {
   margin: 24px 0 10px;
   color: var(--heading);
-  font-size: 16px;
+  font-size: var(--font-size-lg);
   font-weight: 650;
 }
 
