@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.30.3] - 2026-08-03
+
+### Fixed
+
+- The Ingestion Token block on Settings > General had unbounded field width (the token input stretched edge-to-edge for a fixed-length string) and cramped, inconsistent spacing before the "Require ingestion token" checkbox and the Regenerate button - the only field group on the page not wrapped in a grid row. Capped the field width and added proper spacing, matching every other field group's rhythm.
+
 ## [0.30.2] - 2026-08-03
 
 ### Fixed
