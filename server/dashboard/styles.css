@@ -370,6 +370,13 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-shrink: 0;
+}
+
 .logout-button {
   flex-shrink: 0;
   min-height: 40px;
