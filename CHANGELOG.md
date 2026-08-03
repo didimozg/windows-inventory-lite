@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.30.2] - 2026-08-03
+
+### Fixed
+
+- Dashboard CSS now draws its spacing (`gap`/`padding`) and font sizes from a shared scale (`--space-xs` through `--space-2xl`, `--font-size-xs` through `--font-size-display`) instead of ad-hoc one-off pixel values accumulated across many past sessions. Fixes two concrete layout bugs found during a design review: the Linux Client actions "Targets" field rendered visibly shifted down with an empty gap above it, and General settings' narrow numeric fields (Stale threshold, retention days, HTTP/HTTPS ports) stretched to their full grid-column width instead of a sensible compact size. Also fixes a truncated placeholder on the Client package tab's "Package share path" field. `border-radius`, `margin`, and small (1-2px) chrome spacing were deliberately left untouched.
+
 ## [0.30.1] - 2026-07-30
 
 ### Fixed
