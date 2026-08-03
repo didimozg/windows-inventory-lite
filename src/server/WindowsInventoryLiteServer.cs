@@ -6287,6 +6287,122 @@ namespace WindowsInventoryLite
             return Path.Combine(GetLinuxSshDirectory(), "linux-ssh-known-hosts.json");
         }
 
+        private string GetLinuxSshKeyFilePath()
+        {
+            return Path.Combine(GetLinuxSshDirectory(), "linux-update-key");
+        }
+
+        // Pure string checks, no I/O - self-testable directly. Together
+        // these close the exact live failure this feature exists to
+        // prevent: a .pub file (the wrong half of a keypair) accepted as
+        // if it were a private key, with nothing catching the mistake
+        // until an actual SSH push failed against a real target.
+        internal static bool LooksLikePrivateKey(string content)
+        {
+            if (String.IsNullOrEmpty(content))
+            {
+                return false;
+            }
+            string trimmed = content.TrimStart();
+            if (!trimmed.StartsWith("-----BEGIN", StringComparison.Ordinal))
+            {
+                return false;
+            }
+            int headerEnd = trimmed.IndexOf('\n');
+            string headerLine = headerEnd >= 0 ? trimmed.Substring(0, headerEnd) : trimmed;
+            return headerLine.IndexOf("PRIVATE KEY-----", StringComparison.Ordinal) >= 0;
+        }
+
+        internal static bool LooksLikePublicKey(string content)
+        {
+            if (String.IsNullOrEmpty(content))
+            {
+                return false;
+            }
+            string trimmed = content.TrimStart();
+            return trimmed.StartsWith("ssh-rsa ", StringComparison.Ordinal)
+                || trimmed.StartsWith("ssh-ed25519 ", StringComparison.Ordinal)
+                || trimmed.StartsWith("ssh-dss ", StringComparison.Ordinal)
+                || trimmed.StartsWith("ecdsa-sha2-", StringComparison.Ordinal);
+        }
+
+        // OpenSSH's own key format (openssh-key-v1) embeds a KDF name
+        // right after a fixed magic preamble in the base64-decoded body:
+        // "none" for an unencrypted key, "bcrypt" for a passphrase-
+        // protected one. Decoding the base64 body and checking for the
+        // literal ASCII substring "bcrypt" is a reliable, parser-free
+        // signal - it does not require walking the full length-prefixed
+        // binary structure to tell "has a passphrase" from "doesn't".
+        // Legacy PEM-format encrypted keys instead carry a plaintext
+        // "Proc-Type: 4,ENCRYPTED" header line, checked first.
+        internal static bool LooksLikeEncryptedPrivateKey(string content)
+        {
+            if (String.IsNullOrEmpty(content))
+            {
+                return false;
+            }
+            if (content.IndexOf("Proc-Type: 4,ENCRYPTED", StringComparison.Ordinal) >= 0)
+            {
+                return true;
+            }
+            const string openSshHeader = "-----BEGIN OPENSSH PRIVATE KEY-----";
+            const string openSshFooter = "-----END OPENSSH PRIVATE KEY-----";
+            int headerIndex = content.IndexOf(openSshHeader, StringComparison.Ordinal);
+            if (headerIndex < 0)
+            {
+                return false;
+            }
+            int bodyStart = headerIndex + openSshHeader.Length;
+            int footerIndex = content.IndexOf(openSshFooter, bodyStart, StringComparison.Ordinal);
+            if (footerIndex < 0)
+            {
+                return false;
+            }
+            string base64Body = content.Substring(bodyStart, footerIndex - bodyStart).Replace("\r", "").Replace("\n", "").Trim();
+            byte[] decoded;
+            try
+            {
+                decoded = Convert.FromBase64String(base64Body);
+            }
+            catch
+            {
+                return false;
+            }
+            string decodedText = Encoding.ASCII.GetString(decoded);
+            return decodedText.IndexOf("bcrypt", StringComparison.Ordinal) >= 0;
+        }
+
+        // Same DACL treatment as ApplyRestrictedConfigAcl, plus explicit
+        // Owner=SYSTEM - the load-bearing difference. ssh.exe's own
+        // private-key permission check inspects Owner as a condition
+        // independent of the DACL; neither ApplyRestrictedConfigAcl nor
+        // Install-Server.ps1's Set-RestrictedFileAcl ever set it, and a
+        // DACL-only fix was confirmed live to still produce the exact
+        // "UNPROTECTED PRIVATE KEY FILE" refusal this method exists to
+        // prevent. Setting Owner to a SID other than the caller requires
+        // an elevated/SYSTEM process token - this matches the real
+        // deployment (the Windows Service runs as LocalSystem) but not
+        // every dev/test environment, so failures here are caught and
+        // logged, never thrown, exactly like ApplyRestrictedConfigAcl.
+        private void ApplyRestrictedKeyFileAcl(string path)
+        {
+            try
+            {
+                SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                FileSecurity acl = File.GetAccessControl(path);
+                acl.SetAccessRuleProtection(true, false);
+                acl.AddAccessRule(new FileSystemAccessRule(adminSid, FileSystemRights.FullControl, AccessControlType.Allow));
+                acl.AddAccessRule(new FileSystemAccessRule(systemSid, FileSystemRights.FullControl, AccessControlType.Allow));
+                acl.SetOwner(systemSid);
+                File.SetAccessControl(path, acl);
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Config", "Could not restrict linux-update-key permissions: " + DebugLogger.SanitizeForLog(ex.Message));
+            }
+        }
+
         // Deliberately does NOT swallow read/parse errors into an empty list:
         // concurrent Linux install jobs (each dispatched via
         // ThreadPool.QueueUserWorkItem) and the manual trust-host-key
@@ -7227,6 +7343,12 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "GenerateSystemdUnitLines matches the PowerShell New-SystemdUnitFiles format", TestGenerateSystemdUnitLinesMatchesPowerShellFormat);
             allPassed &= SelfTestCheck(output, "GenerateSystemdUnitLines rejects shell-unsafe installDirectory", TestGenerateSystemdUnitLinesRejectsUnsafeCharacters);
             allPassed &= SelfTestCheck(output, "GenerateLinuxInstallScriptLines produces a script with a valid shebang and enable step", TestGenerateLinuxInstallScriptLinesProducesValidShellSyntax);
+            allPassed &= SelfTestCheck(output, "LooksLikePrivateKey accepts real OPENSSH/RSA private key headers", TestLooksLikePrivateKeyAcceptsRealHeaders);
+            allPassed &= SelfTestCheck(output, "LooksLikePrivateKey rejects a public key line and garbage", TestLooksLikePrivateKeyRejectsPublicKeyAndGarbage);
+            allPassed &= SelfTestCheck(output, "LooksLikePublicKey recognizes each ssh-*/ecdsa-* prefix", TestLooksLikePublicKeyRecognizesEachPrefix);
+            allPassed &= SelfTestCheck(output, "LooksLikeEncryptedPrivateKey detects a legacy PEM Proc-Type header", TestLooksLikeEncryptedPrivateKeyDetectsLegacyPem);
+            allPassed &= SelfTestCheck(output, "LooksLikeEncryptedPrivateKey detects an OpenSSH bcrypt KDF marker", TestLooksLikeEncryptedPrivateKeyDetectsOpenSshBcryptKdf);
+            allPassed &= SelfTestCheck(output, "ApplyRestrictedKeyFileAcl sets the DACL (and Owner, when elevated)", TestApplyRestrictedKeyFileAclSetsDaclAndOwnerWhenElevated);
             return allPassed;
         }
 
@@ -8798,6 +8920,157 @@ namespace WindowsInventoryLite
             finally
             {
                 Directory.Delete(scratchDir, true);
+            }
+        }
+
+        private static string TestLooksLikePrivateKeyAcceptsRealHeaders()
+        {
+            if (!LooksLikePrivateKey("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEA\n-----END OPENSSH PRIVATE KEY-----\n"))
+            {
+                return "expected an OPENSSH PRIVATE KEY header to be recognized";
+            }
+            if (!LooksLikePrivateKey("-----BEGIN RSA PRIVATE KEY-----\nMIIEow==\n-----END RSA PRIVATE KEY-----\n"))
+            {
+                return "expected an RSA PRIVATE KEY header to be recognized";
+            }
+            return null;
+        }
+
+        private static string TestLooksLikePrivateKeyRejectsPublicKeyAndGarbage()
+        {
+            if (LooksLikePrivateKey("ssh-rsa AAAAB3NzaC1yc2EA user@host"))
+            {
+                return "expected a .pub-style line to NOT look like a private key";
+            }
+            if (LooksLikePrivateKey("this is not a key at all"))
+            {
+                return "expected garbage content to NOT look like a private key";
+            }
+            if (LooksLikePrivateKey(""))
+            {
+                return "expected empty content to NOT look like a private key";
+            }
+            return null;
+        }
+
+        private static string TestLooksLikePublicKeyRecognizesEachPrefix()
+        {
+            if (!LooksLikePublicKey("ssh-rsa AAAAB3NzaC1yc2EA user@host"))
+            {
+                return "expected 'ssh-rsa ' to be recognized as a public key";
+            }
+            if (!LooksLikePublicKey("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 user@host"))
+            {
+                return "expected 'ssh-ed25519 ' to be recognized as a public key";
+            }
+            if (!LooksLikePublicKey("ssh-dss AAAAB3NzaC1kc3MA user@host"))
+            {
+                return "expected 'ssh-dss ' to be recognized as a public key";
+            }
+            if (!LooksLikePublicKey("ecdsa-sha2-nistp256 AAAAE2VjZHNh user@host"))
+            {
+                return "expected 'ecdsa-sha2-' to be recognized as a public key";
+            }
+            if (LooksLikePublicKey("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEA\n-----END OPENSSH PRIVATE KEY-----\n"))
+            {
+                return "expected a real private key header to NOT look like a public key";
+            }
+            return null;
+        }
+
+        private static string TestLooksLikeEncryptedPrivateKeyDetectsLegacyPem()
+        {
+            string encryptedPem = "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,ABCDEF\n\nMIIEow==\n-----END RSA PRIVATE KEY-----\n";
+            if (!LooksLikeEncryptedPrivateKey(encryptedPem))
+            {
+                return "expected a 'Proc-Type: 4,ENCRYPTED' PEM to be detected as encrypted";
+            }
+            string plainPem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow==\n-----END RSA PRIVATE KEY-----\n";
+            if (LooksLikeEncryptedPrivateKey(plainPem))
+            {
+                return "expected a plain PEM with no Proc-Type header to NOT be detected as encrypted";
+            }
+            return null;
+        }
+
+        private static string TestLooksLikeEncryptedPrivateKeyDetectsOpenSshBcryptKdf()
+        {
+            // "bcrypt" as a literal ASCII substring inside the base64-decoded
+            // body is what the real detection checks for - fabricate a
+            // synthetic body containing it rather than a real cryptographic
+            // key, since the function never validates the key structure
+            // itself, only looks for this one substring.
+            byte[] encryptedBody = Encoding.ASCII.GetBytes("openssh-key-v1\0....bcrypt....");
+            string encryptedContent = "-----BEGIN OPENSSH PRIVATE KEY-----\n" + Convert.ToBase64String(encryptedBody) + "\n-----END OPENSSH PRIVATE KEY-----\n";
+            if (!LooksLikeEncryptedPrivateKey(encryptedContent))
+            {
+                return "expected an OpenSSH key body containing 'bcrypt' to be detected as encrypted";
+            }
+
+            byte[] plainBody = Encoding.ASCII.GetBytes("openssh-key-v1\0....none....");
+            string plainContent = "-----BEGIN OPENSSH PRIVATE KEY-----\n" + Convert.ToBase64String(plainBody) + "\n-----END OPENSSH PRIVATE KEY-----\n";
+            if (LooksLikeEncryptedPrivateKey(plainContent))
+            {
+                return "expected an OpenSSH key body containing 'none' (no bcrypt) to NOT be detected as encrypted";
+            }
+            return null;
+        }
+
+        // Owner assignment to a SID other than the caller requires an
+        // elevated/SYSTEM process token - true in the real deployment (the
+        // Windows Service runs as LocalSystem) but not necessarily true of
+        // whatever account runs `--self-test`. The DACL assertion is
+        // unconditional (never needs elevation, matches
+        // ApplyRestrictedConfigAcl's own already-passing self-test
+        // pattern); the Owner assertion only runs when this process is
+        // actually elevated, so this test tells the truth about what it
+        // verified in THIS run rather than silently skipping or falsely
+        // claiming success.
+        private static string TestApplyRestrictedKeyFileAclSetsDaclAndOwnerWhenElevated()
+        {
+            string tempPath = Path.Combine(Path.GetTempPath(), "wil-selftest-key-" + Guid.NewGuid().ToString("N"));
+            File.WriteAllText(tempPath, "test key content", new UTF8Encoding(false));
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                InventoryServer server = new InventoryServer(options);
+                server.ApplyRestrictedKeyFileAcl(tempPath);
+
+                FileSecurity acl = File.GetAccessControl(tempPath);
+                SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                bool hasAdminRule = false;
+                bool hasSystemRule = false;
+                foreach (FileSystemAccessRule rule in acl.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+                {
+                    if (rule.IdentityReference.Equals(adminSid) && rule.FileSystemRights == FileSystemRights.FullControl)
+                    {
+                        hasAdminRule = true;
+                    }
+                    if (rule.IdentityReference.Equals(systemSid) && rule.FileSystemRights == FileSystemRights.FullControl)
+                    {
+                        hasSystemRule = true;
+                    }
+                }
+                if (!hasAdminRule || !hasSystemRule)
+                {
+                    return "expected both Administrators and SYSTEM to have FullControl in the DACL";
+                }
+
+                bool isElevatedAdmin = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
+                if (isElevatedAdmin)
+                {
+                    SecurityIdentifier owner = (SecurityIdentifier)acl.GetOwner(typeof(SecurityIdentifier));
+                    if (!owner.Equals(systemSid))
+                    {
+                        return "expected Owner to be SYSTEM when running elevated, got " + owner.Translate(typeof(NTAccount));
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                File.Delete(tempPath);
             }
         }
 
