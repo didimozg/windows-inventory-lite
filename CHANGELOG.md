@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.37.0] - 2026-08-04
+
+### Added
+
+- The Dashboard's Clients and Stale tiles now count Windows and Linux machines together, and the Hardware card's CPU/RAM/Storage charts span both platforms. Windows activated and Office activated stay Windows-only - neither concept has a Linux equivalent.
+- A new "OS versions" chart on the Dashboard's Software card, covering both platforms in one breakdown (Windows `caption`, Linux `prettyName`). The existing Top software chart is unchanged and stays Windows-only.
+- Linux inventory data is now fetched on page load rather than only when a Linux tab is opened, and is refreshed by the 30-second poll while the Dashboard or Hardware view is open - so a user who lands on the Dashboard first sees the full fleet immediately.
+
+### Changed
+
+- "Hardware" is now a single top-level section covering both platforms, replacing the two separate Hardware entries that lived under Windows Inventory and Linux Inventory. Each configuration row lists every machine that has it, Windows and Linux together, tagged by platform in the expanded row.
+- The merged Hardware tables drop the CPU "Clock" and RAM "Modules" columns: neither field exists on the Linux side, so they cannot honestly describe a row that spans both platforms. Both values are still shown, per machine, in the expanded row. Storage keeps its USB badge, now meaning "at least one machine in this group has this disk over USB".
+- The three hardware CSV exports now cover both platforms and list each computer as `NAME (Platform)`; the Linux-specific hardware exports are gone along with the Linux Hardware tab. The `#linux-hardware` URL still works and lands on the merged section.
+
 ## [0.36.1] - 2026-08-04
 
 ### Fixed
