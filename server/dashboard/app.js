@@ -1127,6 +1127,7 @@
     const serverUrl = byId('linuxInstallServerUrl').value.trim();
     const token = byId('linuxInstallToken').value.trim();
     const intervalHours = Number(byId('linuxInstallIntervalHours').value) || 6;
+    const statusIntervalMinutes = Number(byId('linuxInstallStatusIntervalMinutes').value) || 30;
     const installPath = byId('linuxInstallPath').value.trim() || '/opt/windows-inventory-lite';
     const authMode = byId('linuxInstallAuthMode').value;
     const username = authMode === 'ad' ? '' : byId('linuxInstallUsername').value.trim();
@@ -1156,7 +1157,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets, serverUrl, token, intervalHours, installPath, authMode, username, password, trustNewHostKeys, acknowledgeHostKeyRisk })
+      body: JSON.stringify({ targets, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, authMode, username, password, trustNewHostKeys, acknowledgeHostKeyRisk })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
@@ -1191,6 +1192,7 @@
         const serverUrl = byId('linuxInstallServerUrl').value.trim();
         const token = byId('linuxInstallToken').value.trim();
         const intervalHours = Number(byId('linuxInstallIntervalHours').value) || 6;
+        const statusIntervalMinutes = Number(byId('linuxInstallStatusIntervalMinutes').value) || 30;
         const installPath = byId('linuxInstallPath').value.trim() || '/opt/windows-inventory-lite';
         const authMode = byId('linuxInstallAuthMode').value;
         const username = authMode === 'ad' ? '' : byId('linuxInstallUsername').value.trim();
@@ -1200,7 +1202,7 @@
           method: 'POST',
           cache: 'no-store',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ targets: host, serverUrl, token, intervalHours, installPath, authMode, username, password, trustNewHostKeys: false, acknowledgeHostKeyRisk: false })
+          body: JSON.stringify({ targets: host, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, authMode, username, password, trustNewHostKeys: false, acknowledgeHostKeyRisk: false })
         });
       })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
@@ -2063,6 +2065,7 @@
         byId('linuxPkgStatus').textContent = statusText;
         byId('linuxPkgServerUrl').value = data.serverUrl || '';
         byId('linuxPkgIntervalHours').value = data.intervalHours || 6;
+        byId('linuxPkgStatusIntervalMinutes').value = data.statusIntervalMinutes || 30;
         byId('linuxPkgInstallPath').value = data.installPath || '/opt/windows-inventory-lite';
         // Only pre-fill from the last-saved settings' token if it still
         // matches the server's current live token - see the identical
@@ -2088,6 +2091,7 @@
     const serverUrl = byId('linuxPkgServerUrl').value.trim();
     const token = byId('linuxPkgToken').value.trim();
     const intervalHours = Number(byId('linuxPkgIntervalHours').value) || 6;
+    const statusIntervalMinutes = Number(byId('linuxPkgStatusIntervalMinutes').value) || 30;
     const installPath = byId('linuxPkgInstallPath').value.trim() || '/opt/windows-inventory-lite';
 
     if (!serverUrl) {
@@ -2100,7 +2104,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ serverUrl, token, intervalHours, installPath })
+      body: JSON.stringify({ serverUrl, token, intervalHours, statusIntervalMinutes, installPath })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, data })))
       .then(({ ok, data }) => {

@@ -642,6 +642,10 @@
                 Interval (hours)
                 <input id="linuxPkgIntervalHours" type="number" min="1" max="24" value="6">
               </label>
+              <label class="pkg-interval-field">
+                Status check interval (minutes)
+                <input id="linuxPkgStatusIntervalMinutes" type="number" min="1" max="1440" value="30">
+              </label>
               <div class="pkg-buttons">
                 <button id="linuxPkgSaveButton" class="primary-button" type="button">Save</button>
                 <button id="linuxPkgDownloadButton" class="export-button" type="button">Download Linux package</button>
@@ -806,6 +810,10 @@
               <label class="install-only">
                 Interval (hours)
                 <input id="linuxInstallIntervalHours" type="number" min="1" max="24" value="6">
+              </label>
+              <label class="install-only">
+                Status check interval (minutes)
+                <input id="linuxInstallStatusIntervalMinutes" type="number" min="1" max="1440" value="30">
               </label>
               <label>
                 Install path

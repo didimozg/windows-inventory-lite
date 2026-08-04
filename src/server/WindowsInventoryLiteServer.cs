@@ -2519,6 +2519,7 @@ namespace WindowsInventoryLite
             string token = null;
             string installPath = "/opt/windows-inventory-lite";
             int intervalHours = 6;
+            int statusIntervalMinutes = 30;
             string packageSettingsPath = Path.Combine(options.LinuxClientPackagePath, "linux-package-settings.json");
             if (File.Exists(packageSettingsPath))
             {
@@ -2534,6 +2535,7 @@ namespace WindowsInventoryLite
                         installPath = savedInstallPath;
                     }
                     intervalHours = GetIntValue(savedSettings, "intervalHours", 6);
+                    statusIntervalMinutes = GetIntValue(savedSettings, "statusIntervalMinutes", 30);
                 }
                 catch
                 {
@@ -2576,6 +2578,7 @@ namespace WindowsInventoryLite
             job.Token = token;
             job.InstallPath = installPath;
             job.IntervalHours = intervalHours;
+            job.StatusIntervalMinutes = statusIntervalMinutes;
             job.Username = username;
             job.Password = password;
             job.KeyPath = keyPath;
@@ -3046,6 +3049,15 @@ namespace WindowsInventoryLite
             {
                 intervalHours = 6;
             }
+            int statusIntervalMinutes = 30;
+            if (payload.ContainsKey("statusIntervalMinutes"))
+            {
+                Int32.TryParse(Convert.ToString(payload["statusIntervalMinutes"]), out statusIntervalMinutes);
+            }
+            if (statusIntervalMinutes < 1 || statusIntervalMinutes > 1440)
+            {
+                statusIntervalMinutes = 30;
+            }
 
             try
             {
@@ -3104,6 +3116,10 @@ namespace WindowsInventoryLite
                         {
                             intervalHours = GetIntValue(savedSettings, "intervalHours", intervalHours);
                         }
+                        if (!payload.ContainsKey("statusIntervalMinutes"))
+                        {
+                            statusIntervalMinutes = GetIntValue(savedSettings, "statusIntervalMinutes", statusIntervalMinutes);
+                        }
                     }
                     catch
                     {
@@ -3144,6 +3160,7 @@ namespace WindowsInventoryLite
             job.ServerUrl = serverUrl;
             job.Token = token;
             job.IntervalHours = intervalHours;
+            job.StatusIntervalMinutes = statusIntervalMinutes;
             job.InstallPath = installPath;
             job.RetentionDays = options.InstallLogRetentionDays;
             job.TrustNewHostKeys = trustNewHostKeys;
@@ -3237,7 +3254,7 @@ namespace WindowsInventoryLite
             {
                 Dictionary<string, object> result = job.Action == "uninstall"
                     ? RunLinuxClientUninstallTarget(target, job.AuthMode, job.Username, job.Password, job.KeyPath, job.InstallPath)
-                    : RunLinuxClientInstallTarget(target, job.ServerUrl, job.Token, job.IntervalHours, job.InstallPath, job.AuthMode, job.Username, job.Password, job.KeyPath, job.TrustNewHostKeys);
+                    : RunLinuxClientInstallTarget(target, job.ServerUrl, job.Token, job.IntervalHours, job.StatusIntervalMinutes, job.InstallPath, job.AuthMode, job.Username, job.Password, job.KeyPath, job.TrustNewHostKeys);
                 lock (linuxInstallJobsLock)
                 {
                     job.Results.Add(result);
@@ -3267,12 +3284,12 @@ namespace WindowsInventoryLite
             return "$__wilUser = [Console]::In.ReadLine(); $__wilPass = [Console]::In.ReadLine(); $__wilSecurePass = ConvertTo-SecureString -String $__wilPass -AsPlainText -Force; ";
         }
 
-        private Dictionary<string, object> RunLinuxClientInstallTarget(string target, string serverUrl, string token, int intervalHours, string installPath, string authMode, string username, string password, string keyPath, bool trustNewHostKeys)
+        private Dictionary<string, object> RunLinuxClientInstallTarget(string target, string serverUrl, string token, int intervalHours, int statusIntervalMinutes, string installPath, string authMode, string username, string password, string keyPath, bool trustNewHostKeys)
         {
-            return RunLinuxClientInstallTarget(target, serverUrl, token, intervalHours, installPath, authMode, username, password, keyPath, trustNewHostKeys, false);
+            return RunLinuxClientInstallTarget(target, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, authMode, username, password, keyPath, trustNewHostKeys, false);
         }
 
-        private Dictionary<string, object> RunLinuxClientInstallTarget(string target, string serverUrl, string token, int intervalHours, string installPath, string authMode, string username, string password, string keyPath, bool trustNewHostKeys, bool isBulkAutoRetry)
+        private Dictionary<string, object> RunLinuxClientInstallTarget(string target, string serverUrl, string token, int intervalHours, int statusIntervalMinutes, string installPath, string authMode, string username, string password, string keyPath, bool trustNewHostKeys, bool isBulkAutoRetry)
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["target"] = target;
@@ -3315,6 +3332,7 @@ namespace WindowsInventoryLite
             argsBuilder.Append("-ComputerName ").Append(QuotePowerShellLiteral(target));
             argsBuilder.Append(" -ServerUrl ").Append(QuotePowerShellLiteral(serverUrl));
             argsBuilder.Append(" -IntervalHours ").Append(intervalHours);
+            argsBuilder.Append(" -StatusIntervalMinutes ").Append(statusIntervalMinutes);
             argsBuilder.Append(" -InstallPath ").Append(QuotePowerShellLiteral(installPath));
             // On an installed server the script's own repo-relative default
             // (build\wil-linux-client) does not resolve - point it at the
@@ -3403,7 +3421,7 @@ namespace WindowsInventoryLite
                             result["message"] = "Could not update the Linux SSH known-hosts trust store: " + ex.Message;
                             return result;
                         }
-                        return RunLinuxClientInstallTarget(target, serverUrl, token, intervalHours, installPath, authMode, username, password, keyPath, trustNewHostKeys, true);
+                        return RunLinuxClientInstallTarget(target, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, authMode, username, password, keyPath, trustNewHostKeys, true);
                     case "unknown":
                         result["hostKeyStatus"] = "unknown";
                         result["hostKeyFingerprint"] = parsedFingerprint;
@@ -4628,6 +4646,7 @@ namespace WindowsInventoryLite
             public string ServerUrl;
             public string Token;
             public int IntervalHours;
+            public int StatusIntervalMinutes;
             public string InstallPath;
             public int RetentionDays;
             public bool TrustNewHostKeys;
