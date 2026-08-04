@@ -8,6 +8,7 @@ import (
 func TestParseDpkgStatusIncludesOnlyInstalledPackages(t *testing.T) {
 	input := `Package: bash
 Status: install ok installed
+Priority: required
 Version: 5.1-6ubuntu1
 
 Package: old-removed-package
@@ -26,8 +27,14 @@ Version: 8.32-4.1ubuntu1
 	if packages[0].Name != "bash" || packages[0].Version != "5.1-6ubuntu1" {
 		t.Errorf("packages[0] = %+v", packages[0])
 	}
+	if packages[0].Priority != "required" {
+		t.Errorf("packages[0].Priority = %q, want %q", packages[0].Priority, "required")
+	}
 	if packages[1].Name != "coreutils" || packages[1].Version != "8.32-4.1ubuntu1" {
 		t.Errorf("packages[1] = %+v", packages[1])
+	}
+	if packages[1].Priority != "" {
+		t.Errorf("packages[1].Priority = %q, want empty (coreutils' stanza above has no Priority: line)", packages[1].Priority)
 	}
 }
 

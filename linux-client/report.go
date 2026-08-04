@@ -18,15 +18,15 @@ import (
 var ClientVersion = "dev"
 
 type Report struct {
-	Hostname      string                `json:"hostname"`
-	ClientVersion string                `json:"clientVersion"`
-	OS            collect.OSInfo        `json:"os"`
-	CPU           collect.CPUInfo       `json:"cpu"`
-	RAMTotalMb    int                   `json:"ramTotalMb"`
-	Disks         []collect.DiskInfo    `json:"disks"`
-	IPAddresses   []string              `json:"ipAddresses"`
-	Packages      []collect.PackageInfo `json:"packages"`
-	CollectedAt   string                `json:"collectedAt"`
+	Hostname      string               `json:"hostname"`
+	ClientVersion string               `json:"clientVersion"`
+	OS            collect.OSInfo       `json:"os"`
+	CPU           collect.CPUInfo      `json:"cpu"`
+	RAMTotalMb    int                  `json:"ramTotalMb"`
+	Disks         []collect.DiskInfo   `json:"disks"`
+	IPAddresses   []string             `json:"ipAddresses"`
+	Services      []collect.ServiceInfo `json:"services"`
+	CollectedAt   string               `json:"collectedAt"`
 }
 
 // BuildReport gathers a full inventory snapshot from the real machine.
@@ -63,12 +63,10 @@ func BuildReport() (Report, error) {
 
 	disks := collect.ParseBlockDevices("/sys/block")
 
-	dpkgStatusFile, err := os.Open("/var/lib/dpkg/status")
+	services, err := collect.CollectRunningServices()
 	if err != nil {
-		return Report{}, fmt.Errorf("open /var/lib/dpkg/status: %w", err)
+		return Report{}, fmt.Errorf("collect running services: %w", err)
 	}
-	defer dpkgStatusFile.Close()
-	packages := collect.ParseDpkgStatus(dpkgStatusFile)
 
 	return Report{
 		Hostname:      hostname,
@@ -78,7 +76,7 @@ func BuildReport() (Report, error) {
 		RAMTotalMb:    ramTotalMb,
 		Disks:         disks,
 		IPAddresses:   collect.CollectIPAddresses(),
-		Packages:      packages,
+		Services:      services,
 		CollectedAt:   time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }
