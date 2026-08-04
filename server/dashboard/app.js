@@ -3594,7 +3594,7 @@
     const ramRows = ramPageItems.map(g => {
         const id = safeId('ram:' + g.totalMb);
         const detailsHidden = state.expandedDetails.has('hw:' + id) ? '' : 'hidden';
-        const computers = g.clients.map(c => hardwareComputerItem(c, c.ramModules && c.ramModules.length ? `<small>${c.ramModules.length} modules</small>` : '')).join('');
+        const computers = g.clients.map(c => hardwareComputerItem(c, c.ramModules && c.ramModules.length ? `<small>${c.ramModules.length} module${c.ramModules.length === 1 ? '' : 's'}</small>` : '')).join('');
         return `<tr>
           <td><button class="link-button" type="button" data-hw="${id}">${escapeHtml(g.totalGb)}</button></td>
           <td class="hw-num">${g.clients.length}</td>
@@ -4113,7 +4113,6 @@
   if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
   if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
   if (state.view === 'licenses') loadLicenses();
-  if (state.view === 'linux' || state.view === 'linuxSoftware' || state.view === 'hardware') loadLinuxClients();
   if (state.view === 'admin') loadAdminPasswordStatus();
   updateClientActionUi();
   loadInstallHistory();
