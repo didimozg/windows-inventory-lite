@@ -313,6 +313,7 @@
 
       const serviceRows = services.map(item => `<tr>
         <td>${escapeHtml(item.name)}</td>
+        <td>${escapeHtml(item.unit || '')}</td>
         <td>${escapeHtml(item.version)}</td>
         <td>${item.active === false ? '<span class="usb-badge">INACTIVE</span>' : ''}</td>
       </tr>`).join('');
@@ -334,7 +335,7 @@
         <td>${formatIpAddressesHtml(client)}</td>
         <td>${serviceCount}</td>
         <td>${descriptionCell}</td>
-        <td>${formatDateTime(client.sourceUpdatedAt)}</td>
+        <td>${formatDateTime(client.collectedAt || client.sourceUpdatedAt)}${client.servicesStatusCollectedAt ? `<small>Services checked: ${formatDateTime(client.servicesStatusCollectedAt)}</small>` : ''}</td>
         <td><button class="danger-button-ghost" type="button" data-delete-linux-client="${escapeHtml(client.hostname)}">Delete</button></td>
       </tr>
       <tr class="details-row ${detailsHidden}" data-linux-client-details="${clientId}">
@@ -347,8 +348,8 @@
             </div>
             <h2>${escapeHtml(client.hostname)} services</h2>
             <table class="nested-table">
-              <thead><tr><th>Name</th><th>Version</th><th>Active</th></tr></thead>
-              <tbody>${serviceRows || '<tr><td colspan="3" class="empty">No service records.</td></tr>'}</tbody>
+              <thead><tr><th>Name</th><th>Unit</th><th>Version</th><th>Active</th></tr></thead>
+              <tbody>${serviceRows || '<tr><td colspan="4" class="empty">No service records.</td></tr>'}</tbody>
             </table>
           </div>
         </td>
@@ -554,7 +555,7 @@
       case 'clientVersion': return client.clientVersion || '';
       case 'os': return ((client.os && client.os.prettyName) || '').toLowerCase();
       case 'softwareCount': return Array.isArray(client.services) ? client.services.length : 0;
-      case 'collectedAt': return new Date(client.sourceUpdatedAt || 0).getTime();
+      case 'collectedAt': return new Date(client.collectedAt || client.sourceUpdatedAt || 0).getTime();
       default: return '';
     }
   }
@@ -733,7 +734,7 @@
           c.hostname || '', formatIpAddresses(c), c.clientVersion || '',
           os.prettyName || '', Array.isArray(c.services) ? c.services.length : 0,
           cpu.model || '', ramText, disksText,
-          formatDateTime(c.sourceUpdatedAt),
+          formatDateTime(c.collectedAt || c.sourceUpdatedAt),
           state.adDescriptionSyncEnabled ? (c.adSyncStatus === 'not-found' ? 'Not found in AD' : c.adSyncStatus === 'error' ? 'AD unreachable' : (c.adDescription || '')) : (c.adDescription || '')
         ];
       })

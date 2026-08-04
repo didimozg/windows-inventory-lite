@@ -5008,6 +5008,7 @@ namespace WindowsInventoryLite
                     result["serverUrl"] = GetStringValue(saved, "serverUrl");
                     result["token"] = GetStringValue(saved, "token");
                     result["intervalHours"] = GetIntValue(saved, "intervalHours", 6);
+                    result["statusIntervalMinutes"] = GetIntValue(saved, "statusIntervalMinutes", 30);
                     result["installPath"] = String.IsNullOrEmpty(GetStringValue(saved, "installPath")) ? "/opt/windows-inventory-lite" : GetStringValue(saved, "installPath");
                 }
                 catch
@@ -5015,6 +5016,7 @@ namespace WindowsInventoryLite
                     result["serverUrl"] = null;
                     result["token"] = null;
                     result["intervalHours"] = 6;
+                    result["statusIntervalMinutes"] = 30;
                     result["installPath"] = "/opt/windows-inventory-lite";
                 }
             }
@@ -5023,6 +5025,7 @@ namespace WindowsInventoryLite
                 result["serverUrl"] = null;
                 result["token"] = null;
                 result["intervalHours"] = 6;
+                result["statusIntervalMinutes"] = 30;
                 result["installPath"] = "/opt/windows-inventory-lite";
             }
 

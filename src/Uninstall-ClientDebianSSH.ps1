@@ -76,8 +76,8 @@ function Get-LinuxUninstallCommand {
     )
     Test-PosixShellSafe -Value $InstallPath -FieldName 'InstallPath'
 
-    return "${SudoPrefix}systemctl disable --now wil-linux-client.timer wil-linux-client.service && " +
-        "${SudoPrefix}rm -f /etc/systemd/system/wil-linux-client.service /etc/systemd/system/wil-linux-client.timer && " +
+    return "${SudoPrefix}systemctl disable --now wil-linux-client.timer wil-linux-client.service wil-linux-client-status.timer wil-linux-client-status.service && " +
+        "${SudoPrefix}rm -f /etc/systemd/system/wil-linux-client.service /etc/systemd/system/wil-linux-client.timer /etc/systemd/system/wil-linux-client-status.service /etc/systemd/system/wil-linux-client-status.timer && " +
         "${SudoPrefix}rm -rf $InstallPath && " +
         "${SudoPrefix}systemctl daemon-reload"
 }

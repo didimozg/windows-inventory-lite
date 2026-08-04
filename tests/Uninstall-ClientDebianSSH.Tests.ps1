@@ -10,8 +10,8 @@ Describe 'Windows Inventory Lite Uninstall-ClientDebianSSH' {
 
     It 'Get-LinuxUninstallCommand builds a command that disables, removes unit files, and removes the install directory' {
         $command = Get-LinuxUninstallCommand -InstallPath '/opt/windows-inventory-lite' -SudoPrefix 'sudo '
-        $command | Should -Match ([regex]::Escape('sudo systemctl disable --now wil-linux-client.timer wil-linux-client.service'))
-        $command | Should -Match ([regex]::Escape('sudo rm -f /etc/systemd/system/wil-linux-client.service /etc/systemd/system/wil-linux-client.timer'))
+        $command | Should -Match ([regex]::Escape('sudo systemctl disable --now wil-linux-client.timer wil-linux-client.service wil-linux-client-status.timer wil-linux-client-status.service'))
+        $command | Should -Match ([regex]::Escape('sudo rm -f /etc/systemd/system/wil-linux-client.service /etc/systemd/system/wil-linux-client.timer /etc/systemd/system/wil-linux-client-status.service /etc/systemd/system/wil-linux-client-status.timer'))
         $command | Should -Match ([regex]::Escape('sudo rm -rf /opt/windows-inventory-lite'))
         $command | Should -Match ([regex]::Escape('sudo systemctl daemon-reload'))
     }
