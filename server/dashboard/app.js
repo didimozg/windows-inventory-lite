@@ -601,7 +601,6 @@
   function cpuSortValue(g, key) {
     switch (key) {
       case 'name': return (g.name || '').toLowerCase();
-      case 'cores': return g.cores || 0;
       case 'count': return g.clients.length;
       default: return '';
     }
@@ -766,8 +765,8 @@
       getCpuGroups(getAllClients()).filter(g => hwMatches([g.name].concat(g.clients.map(c => clientDisplayName(c))).join(' '), query)),
       g => cpuSortValue(g, sortKey), sortDir
     );
-    const rows = [['Model', 'Cores', 'Machines', 'Computers']].concat(
-      groups.map(g => [g.name, g.cores != null ? g.cores : '', g.clients.length, g.clients.map(c => `${clientDisplayName(c)} (${clientPlatformLabel(c)})`).join(', ')])
+    const rows = [['Model', 'Machines', 'Computers']].concat(
+      groups.map(g => [g.name, g.clients.length, g.clients.map(c => `${clientDisplayName(c)} (${clientPlatformLabel(c)})`).join(', ')])
     );
     downloadCsv('hardware-cpu-' + csvDate() + '.csv', rows);
   }
@@ -3086,15 +3085,22 @@
   // configurations, and it could not honestly be a group-level column
   // either (a merged group's members would disagree). Clock is rendered
   // per-computer in the expanded row instead.
+  // Grouped by model name only - core count is dropped from the key.
+  // Virtualized fleets routinely allocate different vCPU counts to VMs
+  // sharing the same underlying physical/model CPU, so keying on cores
+  // fragmented "the same processor" into multiple rows. Core count is
+  // shown per-computer in the expanded row instead (see hardwareComputerItem
+  // call sites), matching the clockMhz/moduleCount treatment already used
+  // here for the other platform/instance-specific hardware fields.
   function getCpuGroups(clients) {
     const groups = new Map();
     clients.forEach(client => {
       const cpu = client.cpu || {};
       const name = cpu.name || cpu.model;
       if (!name) return;
-      const key = String(name).toLowerCase() + '\x1f' + (cpu.cores != null ? cpu.cores : '');
+      const key = String(name).toLowerCase();
       if (!groups.has(key)) {
-        groups.set(key, { name, cores: cpu.cores, clients: [], clientKeys: new Set() });
+        groups.set(key, { name, clients: [], clientKeys: new Set() });
       }
       const group = groups.get(key);
       const clientKey = clientGroupKey(client);
@@ -3526,8 +3532,9 @@
   // only) is rendered only when the client actually reports one - piping an
   // absent domain through escapeHtml would print the literal word "Unknown"
   // under every Linux entry. extraHtml carries the per-computer,
-  // platform-specific detail a merged group can no longer show as a table
-  // column (CPU clock, RAM module count).
+  // instance-specific detail a merged group can no longer show as a table
+  // column (CPU cores/clock - VMs sharing a model often have different
+  // vCPU allocations, RAM module count).
   function hardwareComputerItem(client, extraHtml) {
     const domain = client.domain ? `<small>${escapeHtml(client.domain)}</small>` : '';
     return `<li>${escapeHtml(clientDisplayName(client))} <small class="platform-tag">${escapeHtml(clientPlatformLabel(client))}</small>${extraHtml || ''}${domain}</li>`;
@@ -3547,21 +3554,24 @@
     const { items: cpuPageItems, page: cpuPage, totalPages: cpuTotalPages } = paginate(cpuFiltered, state.page.hwCpu, state.pageSize.hwCpu);
     state.page.hwCpu = cpuPage;
     const cpuRows = cpuPageItems.map(g => {
-        // Cores is part of the id because it is now part of the group key -
-        // two groups sharing a model but not a core count must not collide.
-        const id = safeId('cpu:' + g.name + ':' + g.cores);
+        const id = safeId('cpu:' + g.name);
         const detailsHidden = state.expandedDetails.has('hw:' + id) ? '' : 'hidden';
-        const computers = g.clients.map(c => hardwareComputerItem(c, c.cpu && c.cpu.clockMhz ? `<small>${(Number(c.cpu.clockMhz) / 1000).toFixed(2)} GHz</small>` : '')).join('');
+        const computers = g.clients.map(c => {
+          const cpu = c.cpu || {};
+          const coresText = cpu.cores != null ? `${Number(cpu.cores) || 0} cores` : '';
+          const clockText = cpu.clockMhz ? `${(Number(cpu.clockMhz) / 1000).toFixed(2)} GHz` : '';
+          const extra = [coresText, clockText].filter(Boolean).join(', ');
+          return hardwareComputerItem(c, extra ? `<small>${extra}</small>` : '');
+        }).join('');
         return `<tr>
           <td><button class="link-button" type="button" data-hw="${id}">${escapeHtml(g.name)}</button></td>
-          <td class="hw-num">${g.cores != null ? (Number(g.cores) || 0) : 'Unknown'}</td>
           <td class="hw-num">${g.clients.length}</td>
         </tr>
         <tr class="details-row ${detailsHidden}" data-hw-details="${id}">
-          <td colspan="3"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
+          <td colspan="2"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
         </tr>`;
       });
-    byId('hwCpuBody').innerHTML = cpuRows.join('') || '<tr><td colspan="3" class="empty">No CPU data.</td></tr>';
+    byId('hwCpuBody').innerHTML = cpuRows.join('') || '<tr><td colspan="2" class="empty">No CPU data.</td></tr>';
     renderPager('hwCpuPager', 'hwCpu', cpuPage, cpuTotalPages, () => renderHardwarePage(getAllClients()));
 
     const { key: diskSortKey, dir: diskSortDir } = state.sort.hwDisk;
@@ -3569,7 +3579,7 @@
     const { items: diskPageItems, page: diskPage, totalPages: diskTotalPages } = paginate(diskFiltered, state.page.hwDisk, state.pageSize.hwDisk);
     state.page.hwDisk = diskPage;
     const diskRows = diskPageItems.map(g => {
-        const id = safeId('disk:' + g.model + g.sizeGb);
+        const id = safeId('disk:' + g.model + g.type + g.sizeGb);
         const detailsHidden = state.expandedDetails.has('hw:' + id) ? '' : 'hidden';
         const computers = g.clients.map(c => hardwareComputerItem(c, '')).join('');
         const usbBadge = g.usb ? ' <span class="usb-badge">USB</span>' : '';

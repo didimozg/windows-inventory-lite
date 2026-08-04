@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.37.1] - 2026-08-04
+
+### Fixed
+
+- The merged Hardware page's CPU grouping no longer includes core count in its grouping key. Virtualized fleets routinely allocate different vCPU counts to VMs sharing the same underlying physical/model CPU, so keying on cores fragmented "the same processor" into multiple rows (e.g. a single physical Intel N150 host showed as two or more separate entries). CPU rows now group by model name alone; core count (and clock speed, already per-computer) is shown per machine in the expanded row instead of as a group-level column.
+- Fixed a Storage table row id collision: two disk groups sharing a model and size but differing on type (e.g. an SSD and an HDD variant reported under the same model/size) collided on one expand/collapse id, so expanding one row toggled the other's hidden state instead. The id now includes type, matching the table's actual grouping key.
+
 ## [0.37.0] - 2026-08-04
 
 ### Added
