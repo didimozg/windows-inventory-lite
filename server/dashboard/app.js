@@ -579,11 +579,12 @@
     }
   }
 
+  // No 'clockMhz' case: clock is no longer a group-level field (see
+  // getCpuGroups) and the merged CPU table has no Clock column to sort by.
   function cpuSortValue(g, key) {
     switch (key) {
       case 'name': return (g.name || '').toLowerCase();
       case 'cores': return g.cores || 0;
-      case 'clockMhz': return g.clockMhz || 0;
       case 'count': return g.clients.length;
       default: return '';
     }
@@ -599,10 +600,11 @@
     }
   }
 
+  // No 'moduleCount' case: module count is no longer a group-level field
+  // (see getRamGroups) and the merged RAM table has no Modules column.
   function ramSortValue(g, key) {
     switch (key) {
       case 'totalMb': return g.totalMb || 0;
-      case 'moduleCount': return g.moduleCount || 0;
       case 'count': return g.clients.length;
       default: return '';
     }
@@ -3091,17 +3093,55 @@
     });
   }
 
+  // Display name for a client from either platform: Windows clients report
+  // computerName, Linux clients report hostname. Used everywhere merged
+  // cross-platform code needs a computer's name.
+  function clientDisplayName(client) {
+    return client.computerName || client.hostname || 'Unknown';
+  }
+
+  // Which platform a client came from, derived from which name field it
+  // carries. Deliberately not a new explicit `platform` field on the client
+  // objects: computerName vs hostname already disambiguates the two sources
+  // cleanly, and adding a field would mean changing the C# and Go report
+  // shapes for a purely cosmetic dashboard label.
+  function clientPlatformLabel(client) {
+    return client.computerName ? 'Windows' : 'Linux';
+  }
+
+  // Per-client dedupe key inside a hardware group. Platform-prefixed so a
+  // Windows machine and a Linux machine that happen to share a name still
+  // count as two distinct computers in a merged group.
+  function clientGroupKey(client) {
+    return clientPlatformLabel(client) + ':' + String(clientDisplayName(client)).toLowerCase();
+  }
+
+  // Every client from both platforms in one array. The merged Hardware view
+  // and the combined Dashboard tiles/charts read this instead of
+  // state.clients.
+  function getAllClients() {
+    return state.clients.concat(state.linuxClients);
+  }
+
+  // Cross-platform CPU grouping. Windows reports the model as cpu.name,
+  // Linux as cpu.model - the same underlying concept, so both feed one key.
+  // The key is name+cores only: Windows' cpu.clockMhz has no Linux
+  // counterpart, so keying on it would split otherwise-identical
+  // configurations, and it could not honestly be a group-level column
+  // either (a merged group's members would disagree). Clock is rendered
+  // per-computer in the expanded row instead.
   function getCpuGroups(clients) {
     const groups = new Map();
     clients.forEach(client => {
       const cpu = client.cpu || {};
-      if (!cpu.name) return;
-      const key = String(cpu.name).toLowerCase();
+      const name = cpu.name || cpu.model;
+      if (!name) return;
+      const key = String(name).toLowerCase() + '\x1f' + (cpu.cores != null ? cpu.cores : '');
       if (!groups.has(key)) {
-        groups.set(key, { name: cpu.name, cores: cpu.cores, clockMhz: cpu.clockMhz, clients: [], clientKeys: new Set() });
+        groups.set(key, { name, cores: cpu.cores, clients: [], clientKeys: new Set() });
       }
       const group = groups.get(key);
-      const clientKey = String(client.computerName || '').toLowerCase();
+      const clientKey = clientGroupKey(client);
       if (!group.clientKeys.has(clientKey)) {
         group.clientKeys.add(clientKey);
         group.clients.push(client);
@@ -3110,6 +3150,12 @@
     return Array.from(groups.values()).sort((a, b) => a.name.localeCompare(b.name));
   }
 
+  // Cross-platform disk grouping. The key (model+type+sizeGb) is already
+  // identical on both platforms, so it needs no normalization. usb is the
+  // one asymmetric field - only Windows disks ever set it - and is computed
+  // here as "any member disk in this group is a USB disk", which keeps the
+  // existing USB badge and USB-last sort order behaving exactly as before
+  // for Windows-only groups.
   function getDiskGroups(clients) {
     const groups = new Map();
     clients.forEach(client => {
@@ -3117,10 +3163,11 @@
         if (!disk.model) return;
         const key = [disk.model, disk.type, disk.sizeGb].join('\x1f').toLowerCase();
         if (!groups.has(key)) {
-          groups.set(key, { model: disk.model, type: disk.type || 'HDD', sizeGb: disk.sizeGb || 0, usb: disk.usb === true, clients: [], clientKeys: new Set() });
+          groups.set(key, { model: disk.model, type: disk.type || 'HDD', sizeGb: disk.sizeGb || 0, usb: false, clients: [], clientKeys: new Set() });
         }
         const group = groups.get(key);
-        const clientKey = String(client.computerName || '').toLowerCase();
+        if (disk.usb === true) group.usb = true;
+        const clientKey = clientGroupKey(client);
         if (!group.clientKeys.has(clientKey)) {
           group.clientKeys.add(clientKey);
           group.clients.push(client);
@@ -3133,18 +3180,22 @@
     });
   }
 
+  // Cross-platform RAM grouping, keyed on total size only. Windows'
+  // per-module breakdown (ramModules) has no Linux counterpart, so keeping
+  // module count in the key would prevent any cross-platform merge at all.
+  // Module count is rendered per-computer in the expanded row instead, and
+  // the group-level "Modules" column is gone.
   function getRamGroups(clients) {
     const groups = new Map();
     clients.forEach(client => {
       const totalMb = client.ramTotalMb || 0;
-      const modules = client.ramModules || [];
-      const key = `${totalMb}:${modules.length}`;
+      const key = String(totalMb);
       if (!groups.has(key)) {
         const totalGb = totalMb >= 1024 ? `${Math.round(totalMb / 1024)} GB` : `${totalMb} MB`;
-        groups.set(key, { totalMb, totalGb, moduleCount: modules.length, clients: [], clientKeys: new Set() });
+        groups.set(key, { totalMb, totalGb, clients: [], clientKeys: new Set() });
       }
       const group = groups.get(key);
-      const clientKey = String(client.computerName || '').toLowerCase();
+      const clientKey = clientGroupKey(client);
       if (!group.clientKeys.has(clientKey)) {
         group.clientKeys.add(clientKey);
         group.clients.push(client);
