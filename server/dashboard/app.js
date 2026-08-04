@@ -1,10 +1,14 @@
 (function () {
   const inventoryViews = ['clients', 'software', 'hardware'];
-  // 'hardware' is included here (not just in inventoryViews above) so the
-  // background poll timer keeps refetching Linux data every tick while the
-  // merged Hardware view is open, same as it always did for the retired
-  // per-platform Linux Hardware tab.
-  const linuxInventoryViews = ['linux', 'linuxSoftware', 'hardware'];
+  const linuxInventoryViews = ['linux', 'linuxSoftware'];
+  // Views whose rendered content depends on state.linuxClients, so the 30s
+  // poll keeps Linux data fresh while one of them is open. Deliberately a
+  // separate list from linuxInventoryViews, which drives the search box and
+  // the "Generated:" line and must stay limited to the Linux inventory
+  // tables themselves - the Dashboard reads Linux data but is not an
+  // inventory view, and the merged Hardware view is already covered for
+  // search purposes by inventoryViews.
+  const linuxDataViews = ['linux', 'linuxSoftware', 'dashboard', 'hardware'];
   const state = {
     clients: [], linuxClients: [], view: getInitialView(), installJobId: null, installPollTimer: null, installJobs: [],
     updateJobId: null, updatePollTimer: null,
@@ -240,7 +244,11 @@
         state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
         renderLinuxClientsTable(state.linuxClients);
         renderLinuxSoftwareTable(state.linuxClients);
+        // Both of these read Windows and Linux data together, so they have
+        // to be redrawn whenever the Linux half lands - including on the
+        // unconditional page-load call, which can resolve after render().
         renderHardwarePage(getAllClients());
+        renderDashboardTiles();
       })
       .catch(() => {});
   }
@@ -3223,6 +3231,26 @@
       .slice(0, limit);
   }
 
+  // One bar per distinct OS release across both platforms: Windows reports
+  // it as os.caption, Linux as os.prettyName (collect.OSInfo). Same
+  // [{label, count}] shape as getTopCpuModels/getRamBuckets so it can go
+  // straight into renderBarChart. Grouped case-insensitively but displayed
+  // with the first-seen casing, matching getTopSoftwareNames' approach.
+  function getOsVersionBreakdown(clients, limit) {
+    const counts = new Map();
+    clients.forEach(client => {
+      const os = client.os || {};
+      const label = String(os.caption || os.prettyName || '').trim();
+      if (!label) return;
+      const key = label.toLowerCase();
+      if (!counts.has(key)) counts.set(key, { label, count: 0 });
+      counts.get(key).count++;
+    });
+    return Array.from(counts.values())
+      .sort((a, b) => b.count - a.count)
+      .slice(0, limit);
+  }
+
   function renderBarChart(containerId, items) {
     const container = byId(containerId);
     if (!items.length) {
@@ -3261,19 +3289,30 @@
 
   function renderDashboardTiles() {
     const clients = state.clients;
-    byId('dashClientCount').textContent = clients.length;
+    const allClients = getAllClients();
+    byId('dashClientCount').textContent = allClients.length;
+    // Windows-only by design, not an oversight: neither Windows activation
+    // nor Office activation has any Linux equivalent, so these two tiles
+    // stay state.clients-only while Clients/Stale go fleet-wide.
     byId('dashWindowsActivated').textContent = clients.filter(client => client.activation && client.activation.windows && client.activation.windows.activated).length;
     byId('dashOfficeActivated').textContent = clients.filter(client => client.activation && client.activation.office && client.activation.office.activated).length;
-    const dashStaleCount = clients.filter(isStale).length;
+    // isStale needs no platform handling - it reads collectedAt ||
+    // sourceUpdatedAt, both of which Linux client reports also carry.
+    const dashStaleCount = allClients.filter(isStale).length;
     byId('dashStaleCount').textContent = dashStaleCount;
     byId('dashStaleLabel').textContent = `Stale >${state.staleHours}h`;
     byId('dashStaleTile').classList.toggle('tile-alert', dashStaleCount > 0);
     byId('dashLicenseCount').textContent = state.licenses.length;
-    byId('dashUsbCount').textContent = clients.filter(client => client.hasUsbStorage).length;
+    byId('dashUsbCount').textContent = allClients.filter(client => client.hasUsbStorage).length;
+    // Top software stays Windows-only: the Linux client inventories running
+    // services, a different concept that would not mix meaningfully into a
+    // "top installed software" chart. The OS chart below is the cross-
+    // platform Software-card addition.
     renderBarChart('dashSoftwareChart', getTopSoftwareNames(clients, 5));
-    renderBarChart('dashCpuChart', getTopCpuModels(clients, 4));
-    renderBarChart('dashRamChart', getRamBuckets(clients));
-    renderBarChart('dashStorageChart', getStorageTypeBreakdown(clients));
+    renderBarChart('dashOsChart', getOsVersionBreakdown(allClients, 5));
+    renderBarChart('dashCpuChart', getTopCpuModels(allClients, 4));
+    renderBarChart('dashRamChart', getRamBuckets(allClients));
+    renderBarChart('dashStorageChart', getStorageTypeBreakdown(allClients));
   }
 
   // Each module renders as its own grid cell (2 columns) instead of one
@@ -3700,9 +3739,11 @@
     // Linux data has no separate change-fingerprint (its own dataset is
     // much smaller in practice than the Windows fleet this project was
     // built around) - loadLinuxClients() always re-fetches+re-renders on
-    // every 30s tick while any Linux Inventory tab is open, same silent-
-    // on-failure behavior as the Windows poll above.
-    if (linuxInventoryViews.includes(state.view)) {
+    // every 30s tick while a view that reads Linux data is open, same
+    // silent-on-failure behavior as the Windows poll above. That now
+    // includes the Dashboard (combined tiles/charts) and the merged
+    // Hardware view, not just the Linux Inventory tabs.
+    if (linuxDataViews.includes(state.view)) {
       loadLinuxClients();
     }
 
@@ -3813,6 +3854,14 @@
     .catch(() => {
       // Silent - matches pollForUpdates()'s badge fetch.
     });
+
+  // Unconditional, mirroring the initial /api/v1/clients fetch above:
+  // state.linuxClients must be populated regardless of which view the user
+  // lands on, because the Dashboard's combined tiles/charts and the merged
+  // Hardware view both read it. Previously this only ran when a Linux
+  // Inventory tab was opened, so a user landing on the Dashboard saw
+  // Windows-only counts until they clicked into a Linux tab.
+  loadLinuxClients();
 
   loadLicenses();
 
