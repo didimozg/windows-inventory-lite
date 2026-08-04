@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.36.0] - 2026-08-04
+
+### Added
+
+- The Linux client now inventories running systemd services (name, version, active state) instead of every installed dpkg package - base-OS services are filtered out automatically via dpkg's own Priority classification, and each service's version comes from the dpkg package that owns its unit file, where one can be found. This replaces the `packages` field in the Linux client's report with a `services` field; the dashboard's Linux Software view and Linux Clients table now show services accordingly.
+- A second, faster "is it still running" status ping (default every 30 minutes, configurable) now runs independently of the full inventory cadence (default every 6 hours, unchanged) - it updates just the active/inactive state of already-known services via a new `POST /api/v1/linux/inventory/service-status` endpoint, without re-scanning OS/CPU/RAM/disks or re-resolving package versions. Both the Client Package tab and Linux Client actions gained a "Status check interval (minutes)" field alongside the existing "Interval (hours)" field.
+- **Linux client version bumped to 0.1.1** (independent of the server's own version above, per this project's established per-agent versioning convention) - this client-side change (new inventory field, new report mode) is exactly the kind of update that convention calls for bumping the client on its own schedule.
+
 ## [0.35.0] - 2026-08-03
 
 ### Added
