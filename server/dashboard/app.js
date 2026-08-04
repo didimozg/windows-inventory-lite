@@ -238,11 +238,11 @@
 
   // Mirrors clientMatches (Windows) - haystack built from the fields a
   // Linux client actually reports (see linux-client/report.go): hostname,
-  // client version, IP, OS pretty name, CPU model, package name+version,
+  // client version, IP, OS pretty name, CPU model, service name+version,
   // disk model+type. No publisher/office/domain fields exist on this side.
   function linuxClientMatches(client, query) {
     if (!query) return true;
-    const packages = (client.packages || []).map(item => `${item.name} ${item.version}`).join(' ');
+    const services = (client.services || []).map(item => `${item.name} ${item.version}`).join(' ');
     const disks = (client.disks || []).map(d => `${d.model} ${d.type}`).join(' ');
     const haystack = [
       client.hostname,
@@ -250,7 +250,7 @@
       formatIpAddresses(client),
       client.os && client.os.prettyName,
       client.cpu && client.cpu.model,
-      packages,
+      services,
       disks
     ].join(' ').toLowerCase();
     return haystack.indexOf(query.toLowerCase()) !== -1;
@@ -279,8 +279,8 @@
   // safeId(hostname)-based row id (NOT the old positional linux-${index},
   // which would silently misattribute an expanded row's state to a
   // different client after any sort or data change), row-expand with a
-  // CPU/RAM/Disks summary plus a nested packages table (name/version only
-  // - Linux packages carry no publisher or install date), a Delete
+  // CPU/RAM/Disks summary plus a nested services table (name/version only
+  // - Linux services carry no publisher or install date), a Delete
   // button, and the same in-progress-edit-survives-a-rerender handling
   // renderTable already has for the Windows Description editor.
   function renderLinuxClientsTable(clients) {
@@ -307,13 +307,14 @@
         ? formatLinuxAdDescription(client)
         : formatLinuxDescriptionEditor(client, clientId);
       const osName = (client.os && client.os.prettyName) || '';
-      const packages = Array.isArray(client.packages) ? client.packages : [];
-      const packageCount = packages.length;
+      const services = Array.isArray(client.services) ? client.services : [];
+      const serviceCount = services.length;
       const detailsHidden = state.expandedDetails.has('linux-client:' + clientId) ? '' : 'hidden';
 
-      const packageRows = packages.map(item => `<tr>
+      const serviceRows = services.map(item => `<tr>
         <td>${escapeHtml(item.name)}</td>
         <td>${escapeHtml(item.version)}</td>
+        <td>${item.active === false ? '<span class="usb-badge">Inactive</span>' : ''}</td>
       </tr>`).join('');
 
       const cpu = client.cpu || {};
@@ -331,7 +332,7 @@
         <td>${escapeHtml(client.clientVersion)}</td>
         <td>${escapeHtml(osName)}</td>
         <td>${formatIpAddressesHtml(client)}</td>
-        <td>${packageCount}</td>
+        <td>${serviceCount}</td>
         <td>${descriptionCell}</td>
         <td>${formatDateTime(client.sourceUpdatedAt)}</td>
         <td><button class="danger-button-ghost" type="button" data-delete-linux-client="${escapeHtml(client.hostname)}">Delete</button></td>
@@ -344,10 +345,10 @@
               <div><strong>RAM</strong><span>${ramGb}</span></div>
               <div><strong>Storage</strong><span>${disksSummary}</span></div>
             </div>
-            <h2>${escapeHtml(client.hostname)} packages</h2>
+            <h2>${escapeHtml(client.hostname)} services</h2>
             <table class="nested-table">
-              <thead><tr><th>Name</th><th>Version</th></tr></thead>
-              <tbody>${packageRows || '<tr><td colspan="2" class="empty">No package records.</td></tr>'}</tbody>
+              <thead><tr><th>Name</th><th>Version</th><th>Active</th></tr></thead>
+              <tbody>${serviceRows || '<tr><td colspan="3" class="empty">No service records.</td></tr>'}</tbody>
             </table>
           </div>
         </td>
@@ -552,7 +553,7 @@
       case 'hostname': return (client.hostname || '').toLowerCase();
       case 'clientVersion': return client.clientVersion || '';
       case 'os': return ((client.os && client.os.prettyName) || '').toLowerCase();
-      case 'softwareCount': return Array.isArray(client.packages) ? client.packages.length : 0;
+      case 'softwareCount': return Array.isArray(client.services) ? client.services.length : 0;
       case 'collectedAt': return new Date(client.sourceUpdatedAt || 0).getTime();
       default: return '';
     }
@@ -722,7 +723,7 @@
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.linuxClients;
     const items = applySort(state.linuxClients.filter(c => linuxClientMatches(c, query)), c => linuxClientSortValue(c, sortKey), sortDir);
-    const rows = [['Computer', 'IP Addresses', 'Client Version', 'OS', 'Package Count', 'CPU', 'RAM', 'Disks', 'Collected', 'AD Description']].concat(
+    const rows = [['Computer', 'IP Addresses', 'Client Version', 'OS', 'Service Count', 'CPU', 'RAM', 'Disks', 'Collected', 'AD Description']].concat(
       items.map(c => {
         const os = c.os || {};
         const cpu = c.cpu || {};
@@ -730,7 +731,7 @@
         const disksText = (c.disks || []).map(d => (d.type || '') + ' ' + (d.sizeGb ? d.sizeGb + ' GB' : '') + ' ' + (d.model || '')).join(', ').trim();
         return [
           c.hostname || '', formatIpAddresses(c), c.clientVersion || '',
-          os.prettyName || '', Array.isArray(c.packages) ? c.packages.length : 0,
+          os.prettyName || '', Array.isArray(c.services) ? c.services.length : 0,
           cpu.model || '', ramText, disksText,
           formatDateTime(c.sourceUpdatedAt),
           state.adDescriptionSyncEnabled ? (c.adSyncStatus === 'not-found' ? 'Not found in AD' : c.adSyncStatus === 'error' ? 'AD unreachable' : (c.adDescription || '')) : (c.adDescription || '')
@@ -3051,12 +3052,12 @@
   }
 
   // Mirrors getSoftwareGroups (Windows) - groups by name+version only.
-  // Linux PackageInfo (linux-client/collect/packages.go) has no publisher
+  // Linux ServiceInfo (linux-client/collect/services.go) has no publisher
   // field, unlike Windows software entries.
   function getLinuxSoftwareGroups(clients) {
     const groups = new Map();
     clients.forEach(client => {
-      (client.packages || []).forEach(item => {
+      (client.services || []).forEach(item => {
         if (!item.name) return;
         const key = [item.name, item.version || ''].join('\u001f').toLowerCase();
         if (!groups.has(key)) {
@@ -3498,8 +3499,8 @@
   }
 
   // Mirrors renderSoftwareTable (Windows) - row-expand shows which
-  // computers have this package (no License column, no publisher - this
-  // project has no Linux licensing concept and PackageInfo has no
+  // computers have this service (no License column, no publisher - this
+  // project has no Linux licensing concept and ServiceInfo has no
   // publisher field).
   function renderLinuxSoftwareTable(clients) {
     const tbody = byId('linuxSoftwareBody');
