@@ -5048,6 +5048,15 @@ namespace WindowsInventoryLite
                     return;
                 }
             }
+            int statusIntervalMinutes = 30;
+            if (payload.ContainsKey("statusIntervalMinutes"))
+            {
+                if (!Int32.TryParse(Convert.ToString(payload["statusIntervalMinutes"]), out statusIntervalMinutes) || statusIntervalMinutes < 1 || statusIntervalMinutes > 1440)
+                {
+                    SendText(stream, "{\"error\":\"statusIntervalMinutes must be between 1 and 1440\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
 
             if (String.IsNullOrEmpty(serverUrl))
             {
@@ -5055,13 +5064,19 @@ namespace WindowsInventoryLite
                 return;
             }
 
+            string statusUrl = serverUrl.TrimEnd('/') + "/service-status";
+
             string[] serviceLines;
             string[] timerLines;
+            string[] statusServiceLines;
+            string[] statusTimerLines;
             string[] installScriptLines;
             try
             {
                 serviceLines = GenerateSystemdUnitLines(installPath, serverUrl, token);
                 timerLines = GenerateSystemdTimerLines(intervalHours);
+                statusServiceLines = GenerateSystemdStatusUnitLines(installPath, statusUrl, token);
+                statusTimerLines = GenerateSystemdStatusTimerLines(statusIntervalMinutes);
                 installScriptLines = GenerateLinuxInstallScriptLines(installPath);
             }
             catch (ArgumentException ex)
@@ -5077,6 +5092,8 @@ namespace WindowsInventoryLite
 
             File.WriteAllLines(Path.Combine(options.LinuxClientPackagePath, "wil-linux-client.service"), serviceLines, new UTF8Encoding(false));
             File.WriteAllLines(Path.Combine(options.LinuxClientPackagePath, "wil-linux-client.timer"), timerLines, new UTF8Encoding(false));
+            File.WriteAllLines(Path.Combine(options.LinuxClientPackagePath, "wil-linux-client-status.service"), statusServiceLines, new UTF8Encoding(false));
+            File.WriteAllLines(Path.Combine(options.LinuxClientPackagePath, "wil-linux-client-status.timer"), statusTimerLines, new UTF8Encoding(false));
             // install.sh runs on Linux via its shebang and relies on "set -e" - Environment.NewLine
             // (WriteAllLines' default) is \r\n on Windows, which breaks the shebang interpreter lookup
             // and turns "set -e" into the literal token "-e\r", silently disabling errexit. Force bare \n.
@@ -5086,6 +5103,7 @@ namespace WindowsInventoryLite
             settingsToSave["serverUrl"] = serverUrl;
             settingsToSave["token"] = token;
             settingsToSave["intervalHours"] = intervalHours;
+            settingsToSave["statusIntervalMinutes"] = statusIntervalMinutes;
             settingsToSave["installPath"] = installPath;
             File.WriteAllText(Path.Combine(options.LinuxClientPackagePath, "linux-package-settings.json"), serializer.Serialize(settingsToSave), new UTF8Encoding(false));
 
@@ -7388,6 +7406,52 @@ namespace WindowsInventoryLite
             return lines.ToArray();
         }
 
+        // Status-ping counterpart to GenerateSystemdUnitLines/GenerateSystemdTimerLines
+        // above - same structure, but the service execs with --mode status
+        // against the merge-only endpoint, and the timer's interval is in
+        // minutes (short enough that hour granularity would be too coarse),
+        // not hours. Must stay byte-for-byte in sync with
+        // New-SystemdStatusUnitFiles (Install-ClientDebianSSH.ps1) exactly
+        // like its full-inventory sibling - cross-checked by
+        // TestGenerateSystemdStatusUnitLinesMatchesPowerShellFormat below.
+        private static string[] GenerateSystemdStatusUnitLines(string installDirectory, string statusUrl, string sharedToken)
+        {
+            ValidatePosixShellSafe(installDirectory, "installDirectory");
+            ValidatePosixShellSafe(statusUrl, "statusUrl");
+            ValidatePosixShellSafe(sharedToken, "sharedToken");
+
+            string execStart = installDirectory + "/wil-linux-client --server-url \"" + statusUrl + "\" --mode status";
+            if (!String.IsNullOrEmpty(sharedToken))
+            {
+                execStart += " --token \"" + sharedToken + "\"";
+            }
+
+            List<string> lines = new List<string>();
+            lines.Add("[Unit]");
+            lines.Add("Description=Windows Inventory Lite - Linux client service-status ping (one-shot report)");
+            lines.Add("");
+            lines.Add("[Service]");
+            lines.Add("Type=oneshot");
+            lines.Add("ExecStart=" + execStart);
+            return lines.ToArray();
+        }
+
+        private static string[] GenerateSystemdStatusTimerLines(int minutes)
+        {
+            List<string> lines = new List<string>();
+            lines.Add("[Unit]");
+            lines.Add("Description=Runs the Windows Inventory Lite Linux client service-status ping every " + minutes + " minute(s)");
+            lines.Add("");
+            lines.Add("[Timer]");
+            lines.Add("OnBootSec=5min");
+            lines.Add("OnUnitActiveSec=" + minutes + "min");
+            lines.Add("Unit=wil-linux-client-status.service");
+            lines.Add("");
+            lines.Add("[Install]");
+            lines.Add("WantedBy=timers.target");
+            return lines.ToArray();
+        }
+
         // Mirrors Get-LinuxUninstallCommand (Task 3) as closely as the
         // install-vs-uninstall difference allows: same
         // systemctl/InstallPath shape, generated for local (not SSH)
@@ -7408,8 +7472,11 @@ namespace WindowsInventoryLite
             lines.Add("sudo chmod 755 \"$INSTALL_PATH/wil-linux-client\"");
             lines.Add("sudo cp \"$SCRIPT_DIR/wil-linux-client.service\" /etc/systemd/system/wil-linux-client.service");
             lines.Add("sudo cp \"$SCRIPT_DIR/wil-linux-client.timer\" /etc/systemd/system/wil-linux-client.timer");
+            lines.Add("sudo cp \"$SCRIPT_DIR/wil-linux-client-status.service\" /etc/systemd/system/wil-linux-client-status.service");
+            lines.Add("sudo cp \"$SCRIPT_DIR/wil-linux-client-status.timer\" /etc/systemd/system/wil-linux-client-status.timer");
             lines.Add("sudo systemctl daemon-reload");
             lines.Add("sudo systemctl enable --now wil-linux-client.timer");
+            lines.Add("sudo systemctl enable --now wil-linux-client-status.timer");
             lines.Add("");
             lines.Add("echo \"Windows Inventory Lite Linux client installed to $INSTALL_PATH.\"");
             return lines.ToArray();
@@ -7452,6 +7519,41 @@ namespace WindowsInventoryLite
             try
             {
                 GenerateSystemdUnitLines("/opt/wil; rm -rf /", "https://example.local", "");
+                return "expected an unsafe installDirectory to be rejected";
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+        }
+
+        private static string TestGenerateSystemdStatusUnitLinesMatchesPowerShellFormat()
+        {
+            string[] serviceLines = GenerateSystemdStatusUnitLines("/opt/windows-inventory-lite", "https://example.local/api/v1/linux/inventory/service-status", "");
+            string serviceContent = String.Join("\n", serviceLines);
+            if (!serviceContent.Contains("Type=oneshot"))
+            {
+                return "expected status service content to contain 'Type=oneshot'";
+            }
+            if (!serviceContent.Contains("ExecStart=/opt/windows-inventory-lite/wil-linux-client --server-url \"https://example.local/api/v1/linux/inventory/service-status\" --mode status"))
+            {
+                return "expected ExecStart line to include --mode status and match the PowerShell generator's format exactly, got: " + serviceContent;
+            }
+
+            string[] timerLines = GenerateSystemdStatusTimerLines(30);
+            string timerContent = String.Join("\n", timerLines);
+            if (!timerContent.Contains("OnUnitActiveSec=30min") || !timerContent.Contains("Unit=wil-linux-client-status.service"))
+            {
+                return "expected status timer content to use minute granularity and reference wil-linux-client-status.service, got: " + timerContent;
+            }
+            return null;
+        }
+
+        private static string TestGenerateSystemdStatusUnitLinesRejectsUnsafeCharacters()
+        {
+            try
+            {
+                GenerateSystemdStatusUnitLines("/opt/wil; rm -rf /", "https://example.local", "");
                 return "expected an unsafe installDirectory to be rejected";
             }
             catch (ArgumentException)
@@ -7685,6 +7787,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "MergeServiceStatus ignores units not already in the stored services array", TestMergeServiceStatusIgnoresUnknownUnits);
             allPassed &= SelfTestCheck(output, "MergeServiceStatus handles a report with no services array without throwing", TestMergeServiceStatusHandlesMissingServicesArray);
             allPassed &= SelfTestCheck(output, "MergeServiceStatus sets servicesStatusCollectedAt from the incoming payload", TestMergeServiceStatusSetsTimestamp);
+            allPassed &= SelfTestCheck(output, "GenerateSystemdStatusUnitLines matches the PowerShell New-SystemdStatusUnitFiles format", TestGenerateSystemdStatusUnitLinesMatchesPowerShellFormat);
+            allPassed &= SelfTestCheck(output, "GenerateSystemdStatusUnitLines rejects shell-unsafe installDirectory", TestGenerateSystemdStatusUnitLinesRejectsUnsafeCharacters);
             return allPassed;
         }
 

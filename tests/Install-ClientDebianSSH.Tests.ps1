@@ -55,6 +55,39 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
         $timerContent | Should -Match 'Unit=wil-linux-client.service'
     }
 
+    It 'New-SystemdStatusUnitFiles writes a oneshot service with --mode status' {
+        $dir = Join-Path -Path $TestDrive -ChildPath 'status-units1'
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+
+        $result = New-SystemdStatusUnitFiles -Directory $dir -InstallDirectory '/opt/windows-inventory-lite' -Url 'https://example.local/api/v1/linux/inventory/service-status' -SharedToken '' -Minutes 30
+
+        $serviceContent = Get-Content -LiteralPath $result.ServicePath -Raw
+        $serviceContent | Should -Match 'Type=oneshot'
+        $serviceContent | Should -Match ([regex]::Escape('ExecStart=/opt/windows-inventory-lite/wil-linux-client --server-url "https://example.local/api/v1/linux/inventory/service-status" --mode status'))
+        $serviceContent | Should -Not -Match '--token'
+    }
+
+    It 'New-SystemdStatusUnitFiles includes --token when a token is provided' {
+        $dir = Join-Path -Path $TestDrive -ChildPath 'status-units2'
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+
+        $result = New-SystemdStatusUnitFiles -Directory $dir -InstallDirectory '/opt/windows-inventory-lite' -Url 'https://example.local/api/v1/linux/inventory/service-status' -SharedToken 'secret-token' -Minutes 30
+
+        $serviceContent = Get-Content -LiteralPath $result.ServicePath -Raw
+        $serviceContent | Should -Match ([regex]::Escape('--token "secret-token"'))
+    }
+
+    It 'New-SystemdStatusUnitFiles writes a timer matching the requested interval in minutes' {
+        $dir = Join-Path -Path $TestDrive -ChildPath 'status-units3'
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+
+        $result = New-SystemdStatusUnitFiles -Directory $dir -InstallDirectory '/opt/windows-inventory-lite' -Url 'https://example.local/api/v1/linux/inventory/service-status' -SharedToken '' -Minutes 45
+
+        $timerContent = Get-Content -LiteralPath $result.TimerPath -Raw
+        $timerContent | Should -Match 'OnUnitActiveSec=45min'
+        $timerContent | Should -Match 'Unit=wil-linux-client-status.service'
+    }
+
     It 'Invoke-RemoteCommand uses ssh.exe for key auth' {
         Mock ssh.exe { $global:LASTEXITCODE = 0; return 'ok' }
         $script:usingPassword = $false

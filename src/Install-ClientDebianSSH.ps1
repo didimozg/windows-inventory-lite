@@ -19,6 +19,10 @@ param(
     [int]$IntervalHours = 6,
 
     [Parameter()]
+    [ValidateRange(1, 1440)]
+    [int]$StatusIntervalMinutes = 30,
+
+    [Parameter()]
     [ValidateNotNullOrEmpty()]
     [string]$InstallPath = '/opt/windows-inventory-lite',
 
@@ -128,6 +132,59 @@ WantedBy=timers.target
 
     $servicePath = Join-Path -Path $Directory -ChildPath 'wil-linux-client.service'
     $timerPath = Join-Path -Path $Directory -ChildPath 'wil-linux-client.timer'
+    [System.IO.File]::WriteAllText($servicePath, $serviceContent, (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText($timerPath, $timerContent, (New-Object System.Text.UTF8Encoding($false)))
+
+    return @{ ServicePath = $servicePath; TimerPath = $timerPath }
+}
+
+# Status-ping counterpart to New-SystemdUnitFiles above - same structure,
+# but the generated service execs with --mode status against the
+# merge-only endpoint, and the timer's interval is in minutes, not hours.
+# Must stay byte-for-byte in sync with GenerateSystemdStatusUnitLines/
+# GenerateSystemdStatusTimerLines (WindowsInventoryLiteServer.cs).
+function New-SystemdStatusUnitFiles {
+    param(
+        [string]$Directory,
+        [string]$InstallDirectory,
+        [string]$Url,
+        [string]$SharedToken,
+        [int]$Minutes
+    )
+
+    Test-PosixShellSafe -Value $InstallDirectory -FieldName 'InstallPath'
+    Test-PosixShellSafe -Value $Url -FieldName 'ServerUrl'
+    Test-PosixShellSafe -Value $SharedToken -FieldName 'Token'
+
+    $execStart = "$InstallDirectory/wil-linux-client --server-url `"$Url`" --mode status"
+    if ($SharedToken) {
+        $execStart += " --token `"$SharedToken`""
+    }
+
+    $serviceContent = @"
+[Unit]
+Description=Windows Inventory Lite - Linux client service-status ping (one-shot report)
+
+[Service]
+Type=oneshot
+ExecStart=$execStart
+"@
+
+    $timerContent = @"
+[Unit]
+Description=Runs the Windows Inventory Lite Linux client service-status ping every $Minutes minute(s)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=${Minutes}min
+Unit=wil-linux-client-status.service
+
+[Install]
+WantedBy=timers.target
+"@
+
+    $servicePath = Join-Path -Path $Directory -ChildPath 'wil-linux-client-status.service'
+    $timerPath = Join-Path -Path $Directory -ChildPath 'wil-linux-client-status.timer'
     [System.IO.File]::WriteAllText($servicePath, $serviceContent, (New-Object System.Text.UTF8Encoding($false)))
     [System.IO.File]::WriteAllText($timerPath, $timerContent, (New-Object System.Text.UTF8Encoding($false)))
 
@@ -327,6 +384,8 @@ if ($MyInvocation.InvocationName -ne '.') {
     New-Item -Path $stagingDir -ItemType Directory -Force | Out-Null
     try {
         $units = New-SystemdUnitFiles -Directory $stagingDir -InstallDirectory $InstallPath -Url $ServerUrl -SharedToken $Token -Hours $IntervalHours
+        $statusUrl = $ServerUrl.TrimEnd('/') + '/service-status'
+        $statusUnits = New-SystemdStatusUnitFiles -Directory $stagingDir -InstallDirectory $InstallPath -Url $statusUrl -SharedToken $Token -Minutes $StatusIntervalMinutes
 
         foreach ($computer in $ComputerName) {
             try {
@@ -338,6 +397,8 @@ if ($MyInvocation.InvocationName -ne '.') {
                 Copy-FileToRemote -TargetComputer $computer -LocalPath $ClientBinaryPath -RemotePath "$remoteTmpDir/wil-linux-client" -ExpectedHostKey $ExpectedHostKey
                 Copy-FileToRemote -TargetComputer $computer -LocalPath $units.ServicePath -RemotePath "$remoteTmpDir/wil-linux-client.service" -ExpectedHostKey $ExpectedHostKey
                 Copy-FileToRemote -TargetComputer $computer -LocalPath $units.TimerPath -RemotePath "$remoteTmpDir/wil-linux-client.timer" -ExpectedHostKey $ExpectedHostKey
+                Copy-FileToRemote -TargetComputer $computer -LocalPath $statusUnits.ServicePath -RemotePath "$remoteTmpDir/wil-linux-client-status.service" -ExpectedHostKey $ExpectedHostKey
+                Copy-FileToRemote -TargetComputer $computer -LocalPath $statusUnits.TimerPath -RemotePath "$remoteTmpDir/wil-linux-client-status.timer" -ExpectedHostKey $ExpectedHostKey
 
                 Write-Host "Installing service: $computer"
                 Test-PosixShellSafe -Value $InstallPath -FieldName 'InstallPath'
@@ -345,9 +406,12 @@ if ($MyInvocation.InvocationName -ne '.') {
                     "${sudoPrefix}chmod 755 $InstallPath/wil-linux-client && " +
                     "${sudoPrefix}mv $remoteTmpDir/wil-linux-client.service /etc/systemd/system/wil-linux-client.service && " +
                     "${sudoPrefix}mv $remoteTmpDir/wil-linux-client.timer /etc/systemd/system/wil-linux-client.timer && " +
+                    "${sudoPrefix}mv $remoteTmpDir/wil-linux-client-status.service /etc/systemd/system/wil-linux-client-status.service && " +
+                    "${sudoPrefix}mv $remoteTmpDir/wil-linux-client-status.timer /etc/systemd/system/wil-linux-client-status.timer && " +
                     "${sudoPrefix}rm -rf $remoteTmpDir && " +
                     "${sudoPrefix}systemctl daemon-reload && " +
-                    "${sudoPrefix}systemctl enable --now wil-linux-client.timer"
+                    "${sudoPrefix}systemctl enable --now wil-linux-client.timer && " +
+                    "${sudoPrefix}systemctl enable --now wil-linux-client-status.timer"
                 Invoke-RemoteCommand -TargetComputer $computer -Command $installCommand -ExpectedHostKey $ExpectedHostKey | Out-Null
 
                 Write-Host "Client installed: $computer"
