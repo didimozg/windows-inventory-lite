@@ -1583,6 +1583,14 @@
     }
   }
 
+  // Badge-only counterpart to handleClientUpdatesSummary (Windows), used by
+  // the dedicated fetches in pollForUpdates() and the initial page load -
+  // updates just the sidebar count, without the full loadLinuxClientUpdates()/
+  // renderLinuxClientUpdates() table rebuild.
+  function handleLinuxClientUpdatesSummary(data) {
+    updateLinuxUpdatesBadge(data.packageAvailable ? data.outdatedCount : 0);
+  }
+
   function renderLinuxClientUpdates(data) {
     if (!data.packageAvailable) {
       byId('linuxUpdatesPackageStatus').textContent = 'No Linux client package is available yet - build one on the Client package tab first.';
@@ -3833,6 +3841,21 @@
       .catch(() => {
         // Silent - matches the clients-poll fetch above.
       });
+
+    // Same badge-only concern as the Windows fetch above, for the Linux
+    // "Client updates" sidebar count - this was missing entirely, so the
+    // count only ever appeared after the user opened the Linux Client
+    // updates tab directly (which populates it as a side effect of
+    // loadLinuxClientUpdates()).
+    fetch('/api/v1/linux-client-updates', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(handleLinuxClientUpdatesSummary)
+      .catch(() => {
+        // Silent - matches the clients-poll fetch above.
+      });
   }
 
   function startPolling() {
@@ -3892,6 +3915,20 @@
       return response.json();
     })
     .then(handleClientUpdatesSummary)
+    .catch(() => {
+      // Silent - matches pollForUpdates()'s badge fetch.
+    });
+
+  // Same badge-only fetch pollForUpdates() does on every tick, run once
+  // immediately on page load - otherwise the Linux sidebar badge stays
+  // blank until the first 30s poll tick or the user opens Linux Client
+  // updates directly (which populates it as a side effect).
+  fetch('/api/v1/linux-client-updates', { cache: 'no-store' })
+    .then(response => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    })
+    .then(handleLinuxClientUpdatesSummary)
     .catch(() => {
       // Silent - matches pollForUpdates()'s badge fetch.
     });
