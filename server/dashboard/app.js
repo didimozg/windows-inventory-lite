@@ -335,7 +335,7 @@
         <td>${formatIpAddressesHtml(client)}</td>
         <td>${serviceCount}</td>
         <td>${descriptionCell}</td>
-        <td>${formatDateTime(client.collectedAt || client.sourceUpdatedAt)}${client.servicesStatusCollectedAt ? `<small>Services checked: ${formatDateTime(client.servicesStatusCollectedAt)}</small>` : ''}</td>
+        <td>${escapeHtml(formatDateTime(client.collectedAt || client.sourceUpdatedAt))}${client.servicesStatusCollectedAt ? `<small>Services checked: ${escapeHtml(formatDateTime(client.servicesStatusCollectedAt))}</small>` : ''}</td>
         <td><button class="danger-button-ghost" type="button" data-delete-linux-client="${escapeHtml(client.hostname)}">Delete</button></td>
       </tr>
       <tr class="details-row ${detailsHidden}" data-linux-client-details="${clientId}">
