@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.36.1] - 2026-08-04
+
+### Fixed
+
+- The Linux Client updates sidebar badge now populates on page load and on every 30-second poll tick, matching the existing Windows Client-updates badge behavior - previously it only ever appeared as a side effect of opening the Linux Client updates tab directly.
+- Reinstalling the Linux client over an already-running install (via either the Client package ZIP-download path or Linux Client actions' SSH-push) now `systemctl restart`s both the full-inventory and status-ping timers, not just `enable --now`. `enable --now` on a timer that was already active does not reset its `OnUnitActiveSec` countdown, so a freshly deployed binary could silently wait out the rest of the OLD schedule (up to 6 hours for the full-inventory timer) before its first real run - found live, a reinstalled host kept reporting its old version and package list for hours despite the new binary being correctly on disk.
+
 ## [0.36.0] - 2026-08-04
 
 ### Added

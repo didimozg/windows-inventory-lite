@@ -411,7 +411,13 @@ if ($MyInvocation.InvocationName -ne '.') {
                     "${sudoPrefix}rm -rf $remoteTmpDir && " +
                     "${sudoPrefix}systemctl daemon-reload && " +
                     "${sudoPrefix}systemctl enable --now wil-linux-client.timer && " +
-                    "${sudoPrefix}systemctl enable --now wil-linux-client-status.timer"
+                    "${sudoPrefix}systemctl enable --now wil-linux-client-status.timer && " +
+                    # enable --now on a timer that was already active (a reinstall over an
+                    # existing client) does not reset OnUnitActiveSec's countdown - restart
+                    # unconditionally does, so a fresh binary always gets scheduled promptly
+                    # (within OnBootSec) whether this is a fresh install or a reinstall.
+                    "${sudoPrefix}systemctl restart wil-linux-client.timer && " +
+                    "${sudoPrefix}systemctl restart wil-linux-client-status.timer"
                 Invoke-RemoteCommand -TargetComputer $computer -Command $installCommand -ExpectedHostKey $ExpectedHostKey | Out-Null
 
                 Write-Host "Client installed: $computer"

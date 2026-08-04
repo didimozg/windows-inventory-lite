@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.36.0";
+        internal const string ProductVersion = "0.36.1";
 
         private static int Main(string[] args)
         {
@@ -7501,6 +7501,13 @@ namespace WindowsInventoryLite
             lines.Add("sudo systemctl daemon-reload");
             lines.Add("sudo systemctl enable --now wil-linux-client.timer");
             lines.Add("sudo systemctl enable --now wil-linux-client-status.timer");
+            // enable --now on a timer that was already active (a reinstall
+            // over an existing client) does not reset OnUnitActiveSec's
+            // countdown - restart unconditionally does, so a fresh binary
+            // always gets scheduled promptly (within OnBootSec) whether
+            // this is a fresh install or a reinstall.
+            lines.Add("sudo systemctl restart wil-linux-client.timer");
+            lines.Add("sudo systemctl restart wil-linux-client-status.timer");
             lines.Add("");
             lines.Add("echo \"Windows Inventory Lite Linux client installed to $INSTALL_PATH.\"");
             return lines.ToArray();
@@ -7597,6 +7604,17 @@ namespace WindowsInventoryLite
             if (!content.Contains("systemctl enable --now wil-linux-client.timer"))
             {
                 return "expected the script to enable the timer";
+            }
+            // A re-install over an already-enabled timer must still take
+            // effect promptly: `enable --now` on a timer that's already
+            // active is a no-op for its OnUnitActiveSec countdown, so a
+            // fresh binary can silently wait out the rest of the OLD
+            // schedule (up to 6h for the full-inventory timer) before its
+            // first real run - `restart` unconditionally resets the
+            // countdown, whether this is a fresh install or a reinstall.
+            if (!content.Contains("systemctl restart wil-linux-client.timer") || !content.Contains("systemctl restart wil-linux-client-status.timer"))
+            {
+                return "expected the script to restart both timers (not just enable --now) so a reinstall's fresh binary actually gets scheduled promptly, got: " + content;
             }
             return null;
         }
