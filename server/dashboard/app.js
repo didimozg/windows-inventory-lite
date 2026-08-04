@@ -1,6 +1,10 @@
 (function () {
   const inventoryViews = ['clients', 'software', 'hardware'];
-  const linuxInventoryViews = ['linux', 'linuxSoftware', 'linuxHardware'];
+  // 'hardware' is included here (not just in inventoryViews above) so the
+  // background poll timer keeps refetching Linux data every tick while the
+  // merged Hardware view is open, same as it always did for the retired
+  // per-platform Linux Hardware tab.
+  const linuxInventoryViews = ['linux', 'linuxSoftware', 'hardware'];
   const state = {
     clients: [], linuxClients: [], view: getInitialView(), installJobId: null, installPollTimer: null, installJobs: [],
     updateJobId: null, updatePollTimer: null,
@@ -111,7 +115,10 @@
     const hash = window.location.hash.replace(/^#/, '').toLowerCase();
     if (hash === 'clients') return 'clients';
     if (hash === 'software') return 'software';
-    if (hash === 'hardware') return 'hardware';
+    // #linux-hardware is kept as an alias so existing bookmarks/links to the
+    // retired Linux Hardware tab land on the merged view instead of silently
+    // falling through to the Dashboard.
+    if (hash === 'hardware' || hash === 'linux-hardware') return 'hardware';
     if (hash === 'client-actions' || hash === 'actions' || hash === 'install') return 'install';
     if (hash === 'client-package' || hash === 'package') return 'package';
     if (hash === 'client-updates' || hash === 'updates') return 'updates';
@@ -120,7 +127,6 @@
     if (hash === 'licenses') return 'licenses';
     if (hash === 'linux-clients' || hash === 'linux') return 'linux';
     if (hash === 'linux-software') return 'linuxSoftware';
-    if (hash === 'linux-hardware') return 'linuxHardware';
     if (hash === 'admin-password' || hash === 'admin') return 'admin';
     if (hash === 'linux-client-actions') return 'linuxInstall';
     if (hash === 'linux-client-updates') return 'linuxUpdates';
@@ -129,7 +135,7 @@
 
   function setView(view) {
     state.view = view;
-    const hash = view === 'install' ? 'client-actions' : view === 'linuxInstall' ? 'linux-client-actions' : view === 'linuxUpdates' ? 'linux-client-updates' : view === 'package' ? 'client-package' : view === 'updates' ? 'client-updates' : view === 'admin' ? 'admin-password' : view === 'linux' ? 'linux-clients' : view === 'linuxSoftware' ? 'linux-software' : view === 'linuxHardware' ? 'linux-hardware' : view;
+    const hash = view === 'install' ? 'client-actions' : view === 'linuxInstall' ? 'linux-client-actions' : view === 'linuxUpdates' ? 'linux-client-updates' : view === 'package' ? 'client-package' : view === 'updates' ? 'client-updates' : view === 'admin' ? 'admin-password' : view === 'linux' ? 'linux-clients' : view === 'linuxSoftware' ? 'linux-software' : view;
     if (window.location.hash.replace(/^#/, '') !== hash) {
       window.location.hash = hash;
       return;
@@ -143,7 +149,10 @@
     if (view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (view === 'licenses') loadLicenses();
-    if (view === 'linux' || view === 'linuxSoftware' || view === 'linuxHardware') loadLinuxClients();
+    // 'hardware' is in this list because the merged Hardware view reads Linux
+    // data too - opening the tab re-fetches it rather than waiting up to 30s
+    // for the next poll tick.
+    if (view === 'linux' || view === 'linuxSoftware' || view === 'hardware') loadLinuxClients();
     if (view === 'admin') loadAdminPasswordStatus();
   }
 
@@ -3582,7 +3591,6 @@
     byId('licensesView').classList.toggle('hidden', state.view !== 'licenses');
     byId('linuxClientsView').classList.toggle('hidden', state.view !== 'linux');
     byId('linuxSoftwareView').classList.toggle('hidden', state.view !== 'linuxSoftware');
-    byId('linuxHardwareView').classList.toggle('hidden', state.view !== 'linuxHardware');
     byId('adminPasswordView').classList.toggle('hidden', state.view !== 'admin');
     byId('dashboardTab').classList.toggle('active', state.view === 'dashboard');
     byId('clientsTab').classList.toggle('active', state.view === 'clients');
@@ -3598,7 +3606,6 @@
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
     byId('linuxClientsTab').classList.toggle('active', state.view === 'linux');
     byId('linuxSoftwareTab').classList.toggle('active', state.view === 'linuxSoftware');
-    byId('linuxHardwareTab').classList.toggle('active', state.view === 'linuxHardware');
     byId('adminPasswordTab').classList.toggle('active', state.view === 'admin');
     const isInventoryView = inventoryViews.includes(state.view);
     const isLinuxInventoryView = linuxInventoryViews.includes(state.view);
@@ -3857,7 +3864,7 @@
     if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (state.view === 'licenses') loadLicenses();
-    if (state.view === 'linux' || state.view === 'linuxSoftware' || state.view === 'linuxHardware') loadLinuxClients();
+    if (state.view === 'linux' || state.view === 'linuxSoftware' || state.view === 'hardware') loadLinuxClients();
     if (state.view === 'admin') loadAdminPasswordStatus();
   });
   byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
@@ -4025,7 +4032,6 @@
   byId('licensesTab').addEventListener('click', () => setView('licenses'));
   byId('linuxClientsTab').addEventListener('click', () => setView('linux'));
   byId('linuxSoftwareTab').addEventListener('click', () => setView('linuxSoftware'));
-  byId('linuxHardwareTab').addEventListener('click', () => setView('linuxHardware'));
   byId('exportLinuxClientsBtn').addEventListener('click', exportLinuxClients);
   byId('exportLinuxSoftwareBtn').addEventListener('click', exportLinuxSoftware);
   byId('exportLicensesBtn').addEventListener('click', exportLicenses);
@@ -4058,7 +4064,7 @@
   if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
   if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
   if (state.view === 'licenses') loadLicenses();
-  if (state.view === 'linux' || state.view === 'linuxSoftware' || state.view === 'linuxHardware') loadLinuxClients();
+  if (state.view === 'linux' || state.view === 'linuxSoftware' || state.view === 'hardware') loadLinuxClients();
   if (state.view === 'admin') loadAdminPasswordStatus();
   updateClientActionUi();
   loadInstallHistory();
