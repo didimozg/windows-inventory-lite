@@ -18,15 +18,15 @@ import (
 var ClientVersion = "dev"
 
 type Report struct {
-	Hostname      string               `json:"hostname"`
-	ClientVersion string               `json:"clientVersion"`
-	OS            collect.OSInfo       `json:"os"`
-	CPU           collect.CPUInfo      `json:"cpu"`
-	RAMTotalMb    int                  `json:"ramTotalMb"`
-	Disks         []collect.DiskInfo   `json:"disks"`
-	IPAddresses   []string             `json:"ipAddresses"`
+	Hostname      string                `json:"hostname"`
+	ClientVersion string                `json:"clientVersion"`
+	OS            collect.OSInfo        `json:"os"`
+	CPU           collect.CPUInfo       `json:"cpu"`
+	RAMTotalMb    int                   `json:"ramTotalMb"`
+	Disks         []collect.DiskInfo    `json:"disks"`
+	IPAddresses   []string              `json:"ipAddresses"`
 	Services      []collect.ServiceInfo `json:"services"`
-	CollectedAt   string               `json:"collectedAt"`
+	CollectedAt   string                `json:"collectedAt"`
 }
 
 // BuildReport gathers a full inventory snapshot from the real machine.
