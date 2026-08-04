@@ -1361,6 +1361,10 @@ namespace WindowsInventoryLite
                     {
                         ReceiveLinuxInventory(stream, request);
                     }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/linux/inventory/service-status")
+                    {
+                        ReceiveLinuxServiceStatus(stream, request);
+                    }
                     else if (!IsWebRequestAuthorized(request))
                     {
                         SendUnauthorized(stream);
@@ -2078,6 +2082,106 @@ namespace WindowsInventoryLite
             }
             DebugLogger.Log(options, "Client", "Linux inventory report accepted from '" + DebugLogger.SanitizeForLog(hostname) + "'");
             SendJson(stream, "{\"status\":\"ok\"}");
+        }
+
+        private void ReceiveLinuxServiceStatus(Stream stream, RequestContext request)
+        {
+            string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
+            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
+            {
+                DebugLogger.Log(options, "Client", "Rejected Linux service-status report: invalid or missing token");
+                SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+            }
+            catch
+            {
+                DebugLogger.Log(options, "Client", "Rejected Linux service-status report: invalid request body");
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string hostname = Convert.ToString(payload.ContainsKey("hostname") ? payload["hostname"] : "unknown");
+            ArrayList activeUnits = new ArrayList();
+            if (payload.ContainsKey("activeUnits") && payload["activeUnits"] is ArrayList)
+            {
+                activeUnits = (ArrayList)payload["activeUnits"];
+            }
+            string collectedAt = Convert.ToString(payload.ContainsKey("collectedAt") ? payload["collectedAt"] : "");
+
+            string path = Path.Combine(options.LinuxDataPath, SanitizeFileName(hostname) + ".json");
+
+            lock (reportFileLock)
+            {
+                if (!File.Exists(path))
+                {
+                    DebugLogger.Log(options, "Client", "Ignored Linux service-status report from '" + DebugLogger.SanitizeForLog(hostname) + "': no existing inventory report to merge into");
+                    SendJson(stream, "{\"status\":\"ok\"}");
+                    return;
+                }
+
+                Dictionary<string, object> existingReport;
+                try
+                {
+                    existingReport = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                }
+                catch
+                {
+                    DebugLogger.Log(options, "Client", "Ignored Linux service-status report from '" + DebugLogger.SanitizeForLog(hostname) + "': existing report file could not be parsed");
+                    SendJson(stream, "{\"status\":\"ok\"}");
+                    return;
+                }
+
+                Dictionary<string, object> merged = MergeServiceStatus(existingReport, activeUnits, collectedAt);
+
+                string json = serializer.Serialize(merged);
+                File.WriteAllText(path, json, new UTF8Encoding(false));
+            }
+
+            DebugLogger.Log(options, "Client", "Linux service-status report accepted from '" + DebugLogger.SanitizeForLog(hostname) + "'");
+            SendJson(stream, "{\"status\":\"ok\"}");
+        }
+
+        // Pure merge logic, extracted from ReceiveLinuxServiceStatus so it's
+        // directly self-testable without HTTP plumbing. Only ever flips the
+        // `active` field on services the existing report already knows
+        // about (matched by `unit`) and sets a new servicesStatusCollectedAt
+        // timestamp - never adds, removes, or otherwise touches any other
+        // field, unlike ReceiveLinuxInventory's full-overwrite behavior.
+        internal static Dictionary<string, object> MergeServiceStatus(Dictionary<string, object> existingReport, ArrayList activeUnits, string collectedAt)
+        {
+            HashSet<string> activeUnitNames = new HashSet<string>(StringComparer.Ordinal);
+            foreach (object unit in activeUnits)
+            {
+                string unitName = Convert.ToString(unit);
+                if (!String.IsNullOrEmpty(unitName))
+                {
+                    activeUnitNames.Add(unitName);
+                }
+            }
+
+            if (existingReport.ContainsKey("services") && existingReport["services"] is ArrayList)
+            {
+                ArrayList services = (ArrayList)existingReport["services"];
+                foreach (object serviceObj in services)
+                {
+                    if (serviceObj is Dictionary<string, object>)
+                    {
+                        Dictionary<string, object> service = (Dictionary<string, object>)serviceObj;
+                        string unitName = service.ContainsKey("unit") ? Convert.ToString(service["unit"]) : "";
+                        service["active"] = activeUnitNames.Contains(unitName);
+                    }
+                }
+            }
+
+            existingReport["servicesStatusCollectedAt"] = collectedAt;
+            return existingReport;
         }
 
         private ArrayList LoadLinuxClientReports()
@@ -7577,6 +7681,10 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ApplyRestrictedKeyFileAcl sets the DACL (and Owner, when elevated)", TestApplyRestrictedKeyFileAclSetsDaclAndOwnerWhenElevated);
             allPassed &= SelfTestCheck(output, "MigrateLegacyLinuxSshKey adopts a valid legacy LinuxUpdateKeyPath", TestMigrateLegacyLinuxSshKeyAdoptsValidLegacyPath);
             allPassed &= SelfTestCheck(output, "MigrateLegacyLinuxSshKey is a no-op when the legacy path is missing or invalid", TestMigrateLegacyLinuxSshKeyIgnoresMissingOrInvalidLegacyPath);
+            allPassed &= SelfTestCheck(output, "MergeServiceStatus flips active in both directions for known units", TestMergeServiceStatusFlipsActiveBothDirections);
+            allPassed &= SelfTestCheck(output, "MergeServiceStatus ignores units not already in the stored services array", TestMergeServiceStatusIgnoresUnknownUnits);
+            allPassed &= SelfTestCheck(output, "MergeServiceStatus handles a report with no services array without throwing", TestMergeServiceStatusHandlesMissingServicesArray);
+            allPassed &= SelfTestCheck(output, "MergeServiceStatus sets servicesStatusCollectedAt from the incoming payload", TestMergeServiceStatusSetsTimestamp);
             return allPassed;
         }
 
@@ -9353,6 +9461,90 @@ namespace WindowsInventoryLite
             {
                 Directory.Delete(dataPath, true);
             }
+        }
+
+        private static string TestMergeServiceStatusFlipsActiveBothDirections()
+        {
+            Dictionary<string, object> existingReport = new Dictionary<string, object>();
+            ArrayList services = new ArrayList();
+            Dictionary<string, object> serviceA = new Dictionary<string, object>();
+            serviceA["unit"] = "radarr.service";
+            serviceA["active"] = false;
+            services.Add(serviceA);
+            Dictionary<string, object> serviceB = new Dictionary<string, object>();
+            serviceB["unit"] = "qbittorrent-nox.service";
+            serviceB["active"] = true;
+            services.Add(serviceB);
+            existingReport["services"] = services;
+
+            ArrayList activeUnits = new ArrayList();
+            activeUnits.Add("radarr.service");
+
+            Dictionary<string, object> merged = MergeServiceStatus(existingReport, activeUnits, "2026-08-04T12:00:00Z");
+
+            ArrayList mergedServices = (ArrayList)merged["services"];
+            Dictionary<string, object> mergedA = (Dictionary<string, object>)mergedServices[0];
+            Dictionary<string, object> mergedB = (Dictionary<string, object>)mergedServices[1];
+
+            if (!(bool)mergedA["active"])
+            {
+                return "expected radarr.service (present in activeUnits) to become active=true";
+            }
+            if ((bool)mergedB["active"])
+            {
+                return "expected qbittorrent-nox.service (absent from activeUnits) to become active=false";
+            }
+            return null;
+        }
+
+        private static string TestMergeServiceStatusIgnoresUnknownUnits()
+        {
+            Dictionary<string, object> existingReport = new Dictionary<string, object>();
+            ArrayList services = new ArrayList();
+            Dictionary<string, object> serviceA = new Dictionary<string, object>();
+            serviceA["unit"] = "radarr.service";
+            serviceA["active"] = true;
+            services.Add(serviceA);
+            existingReport["services"] = services;
+
+            ArrayList activeUnits = new ArrayList();
+            activeUnits.Add("radarr.service");
+            activeUnits.Add("some-new-unknown-service.service");
+
+            Dictionary<string, object> merged = MergeServiceStatus(existingReport, activeUnits, "2026-08-04T12:00:00Z");
+            ArrayList mergedServices = (ArrayList)merged["services"];
+            if (mergedServices.Count != 1)
+            {
+                return "expected the unknown unit to NOT be added as a new service entry, got " + mergedServices.Count + " entries";
+            }
+            return null;
+        }
+
+        private static string TestMergeServiceStatusHandlesMissingServicesArray()
+        {
+            Dictionary<string, object> existingReport = new Dictionary<string, object>();
+            existingReport["hostname"] = "test-host";
+
+            ArrayList activeUnits = new ArrayList();
+            activeUnits.Add("radarr.service");
+
+            Dictionary<string, object> merged = MergeServiceStatus(existingReport, activeUnits, "2026-08-04T12:00:00Z");
+            if (Convert.ToString(merged["hostname"]) != "test-host")
+            {
+                return "expected unrelated fields to survive untouched when there's no services array";
+            }
+            return null;
+        }
+
+        private static string TestMergeServiceStatusSetsTimestamp()
+        {
+            Dictionary<string, object> existingReport = new Dictionary<string, object>();
+            Dictionary<string, object> merged = MergeServiceStatus(existingReport, new ArrayList(), "2026-08-04T12:00:00Z");
+            if (Convert.ToString(merged["servicesStatusCollectedAt"]) != "2026-08-04T12:00:00Z")
+            {
+                return "expected servicesStatusCollectedAt to be set to the incoming collectedAt value";
+            }
+            return null;
         }
 
         private static string TestParseCmdSettingsDefaultPackageRoot()
