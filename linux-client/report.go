@@ -81,12 +81,62 @@ func BuildReport() (Report, error) {
 	}, nil
 }
 
-// SendReport POSTs report as JSON to serverURL. If token is non-empty, it
-// is sent as X-Inventory-Token, the same header name/semantics the
-// server's existing Windows ingestion path already uses (the Linux
-// ingestion endpoint reuses the server's one shared Token setting).
-func SendReport(serverURL, token string, report Report) error {
-	body, err := json.Marshal(report)
+// StatusReport is the lightweight counterpart to Report, sent on a much
+// faster cadence (see BuildStatusReport). It carries only which systemd
+// units are currently running - no OS/CPU/RAM/disk data, and no
+// per-service package/version resolution (that stays on the full
+// inventory's slower cadence). The server merges this into the existing
+// per-host report rather than treating it as a full replacement - see
+// the new /api/v1/linux/inventory/service-status endpoint added in a
+// later task.
+type StatusReport struct {
+	Hostname      string   `json:"hostname"`
+	ClientVersion string   `json:"clientVersion"`
+	ActiveUnits   []string `json:"activeUnits"`
+	CollectedAt   string   `json:"collectedAt"`
+}
+
+// BuildStatusReport is the lightweight counterpart to BuildReport: it
+// only lists currently-running systemd unit names via
+// collect.ListRunningServiceUnits, skipping OS/CPU/RAM/disk collection
+// and the per-service package/version resolution BuildReport's full
+// Services collection does. No unit test, same reasoning as BuildReport
+// - it depends on a real systemctl, which doesn't exist on this Windows
+// dev machine.
+func BuildStatusReport() (StatusReport, error) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return StatusReport{}, fmt.Errorf("read hostname: %w", err)
+	}
+
+	units, err := collect.ListRunningServiceUnits()
+	if err != nil {
+		return StatusReport{}, fmt.Errorf("list running services: %w", err)
+	}
+
+	activeUnits := make([]string, 0, len(units))
+	for _, u := range units {
+		activeUnits = append(activeUnits, u.Unit)
+	}
+
+	return StatusReport{
+		Hostname:      hostname,
+		ClientVersion: ClientVersion,
+		ActiveUnits:   activeUnits,
+		CollectedAt:   time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
+// SendReport POSTs payload as JSON to serverURL. If token is non-empty,
+// it is sent as X-Inventory-Token, the same header name/semantics the
+// server's existing Windows ingestion path already uses. payload is
+// `any` rather than the concrete Report type so this same function
+// serves both the full inventory (Report) and the lightweight status
+// ping (StatusReport) - it never inspects payload's fields directly,
+// only json.Marshal's it, so widening the type is a pure simplification,
+// not a behavior change for existing Report callers.
+func SendReport(serverURL, token string, payload any) error {
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("encode report: %w", err)
 	}

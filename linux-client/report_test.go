@@ -63,3 +63,29 @@ func TestSendReportServerErrorReturnsError(t *testing.T) {
 		t.Fatal("SendReport() error = nil, want an error for HTTP 400")
 	}
 }
+
+func TestSendReportAcceptsStatusReportPayload(t *testing.T) {
+	var gotBody map[string]interface{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	status := StatusReport{Hostname: "test-host", ClientVersion: "0.1.1", ActiveUnits: []string{"radarr.service"}, CollectedAt: "2026-08-04T12:00:00Z"}
+	err := SendReport(server.URL, "", status)
+
+	if err != nil {
+		t.Fatalf("SendReport() error = %v", err)
+	}
+	if gotBody["hostname"] != "test-host" {
+		t.Errorf("hostname = %v, want %q", gotBody["hostname"], "test-host")
+	}
+	activeUnits, ok := gotBody["activeUnits"].([]interface{})
+	if !ok || len(activeUnits) != 1 || activeUnits[0] != "radarr.service" {
+		t.Errorf("activeUnits = %v, want [\"radarr.service\"]", gotBody["activeUnits"])
+	}
+}
