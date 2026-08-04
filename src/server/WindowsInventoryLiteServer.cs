@@ -5136,6 +5136,8 @@ namespace WindowsInventoryLite
                 "wil-linux-client",
                 "wil-linux-client.service",
                 "wil-linux-client.timer",
+                "wil-linux-client-status.service",
+                "wil-linux-client-status.timer",
                 "install.sh"
             };
 
