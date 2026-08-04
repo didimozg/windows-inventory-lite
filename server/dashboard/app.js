@@ -314,7 +314,7 @@
       const serviceRows = services.map(item => `<tr>
         <td>${escapeHtml(item.name)}</td>
         <td>${escapeHtml(item.version)}</td>
-        <td>${item.active === false ? '<span class="usb-badge">Inactive</span>' : ''}</td>
+        <td>${item.active === false ? '<span class="usb-badge">INACTIVE</span>' : ''}</td>
       </tr>`).join('');
 
       const cpu = client.cpu || {};
