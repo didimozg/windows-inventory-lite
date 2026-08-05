@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.37.3] - 2026-08-05
+
+### Fixed
+
+- The Logout and theme-toggle buttons now stay pinned to the top-right corner on every dashboard view, not just Inventory views (the ones with a search bar). `.topbar-actions` used to rely on `justify-content: space-between` on its parent to stay right-aligned, but that only works with two flex children - once `#searchInput` is hidden on a non-Inventory view, `.topbar-actions` became the sole child and collapsed to the left edge instead. Fixed with `margin-left: auto` on `.topbar-actions`, which keeps it right-pinned regardless of the search box's visibility.
+
 ## [0.37.2] - 2026-08-05
 
 ### Fixed

@@ -375,6 +375,13 @@ body {
   align-items: center;
   gap: var(--space-sm);
   flex-shrink: 0;
+  /* #searchInput (the .topbar's other child) is hidden on non-Inventory
+     views, leaving this as the sole flex child - justify-content:
+     space-between on the parent has no effect with only one item, so it
+     was collapsing to the left edge instead of staying pinned right.
+     margin-left: auto keeps it right-pinned regardless of the sibling's
+     visibility. */
+  margin-left: auto;
 }
 
 .logout-button {
