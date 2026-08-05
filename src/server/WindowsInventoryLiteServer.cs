@@ -6890,35 +6890,63 @@ namespace WindowsInventoryLite
         // Directory counterpart to ApplyRestrictedKeyFileAcl. The _linux-ssh
         // directory holds the private key and the known-hosts trust store, but was
         // created with a bare Directory.CreateDirectory and inherited whatever
-        // ProgramData's defaults are. Same two-step DACL-then-Owner persist, the
-        // same grant set (Administrators + SYSTEM only, nothing else), and the
-        // same swallow-and-log failure handling, as the file version.
+        // ProgramData's defaults are. Same two-step DACL-then-Owner persist and
+        // the same swallow-and-log failure handling as the file version.
         //
-        // Callers MUST only invoke this after every write into the directory for
-        // the current operation has already completed (temp file write, per-file
-        // hardening, move into place) - the same "harden only after the content
-        // is already there" ordering ApplyRestrictedKeyFileAcl uses for
-        // individual files, extended to the directory itself. Applying this
-        // before those writes complete locks the writing identity out of its
-        // own in-progress work whenever the service does not run as SYSTEM -
-        // which is a real, documented deployment mode, not a hypothetical one
-        // (see README.md's guidance to run the service under a least-privileged
-        // domain or managed service account). Widening the grant set to also
-        // include the current identity is not an acceptable workaround for
-        // that: it would leave a permanent extra ACE on the directory holding
-        // the private key for whatever account the service runs under in that
-        // mode, defeating the point of restricting this directory at all.
+        // Grant set: Administrators, SYSTEM, and the identity actually running
+        // this server process (WindowsIdentity.GetCurrent().User) - skipped only
+        // if that identity's SID already equals Administrators or SYSTEM, to
+        // avoid a redundant duplicate rule. This is deliberately NOT
+        // "Administrators and SYSTEM only": there is no way for a non-privileged
+        // identity to repeatedly read/write/rotate/delete files in an
+        // ACL-protected directory across separate operations unless it is
+        // explicitly granted access on the directory itself (or is a member of
+        // a granted group) - a directory locked to Administrators+SYSTEM only is
+        // permanently inaccessible to any other identity, full stop, for as long
+        // as it stays configured that way. Excluding the server's own operating
+        // identity would therefore permanently break the SSH-key upload,
+        // rotation, and delete flow (ConfigureLinuxSshKey, DeleteLinuxSshKey)
+        // after the very first successful hardening, in exactly the
+        // least-privileged domain/managed service account deployment mode the
+        // project's own threat model recommends (docs/threat-model.md) - this is
+        // not a hypothetical edge case, and it is not a no-op even when the
+        // service runs as LocalSystem, because the documented supported
+        // deployment mode is a non-LocalSystem account.
+        //
+        // Granting the operating identity here does not meaningfully widen the
+        // attack surface: it is the SAME account already running the entire
+        // server process, so it already has access to everything else the
+        // server manages (DPAPI-protected secrets, server-config.json, the
+        // Windows client packages, the ingestion token). Restricting this one
+        // directory to "Administrators+SYSTEM only, excluding the server's own
+        // account" would not protect against a compromise of that account - it
+        // already holds the keys to everything else - while the actual threat
+        // this hardening exists to stop (some OTHER local account snooping on or
+        // tampering with the SSH trust store) remains fully addressed, since
+        // every other local identity is still excluded.
+        //
+        // Callers should still only invoke this after every write into the
+        // directory for the current operation has completed (temp file write,
+        // per-file hardening, move into place). That ordering is no longer
+        // required to avoid a lockout (the grant above prevents that on its
+        // own), but it remains good defense-in-depth for the directory's
+        // first-ever hardening pass.
         private void ApplyRestrictedDirectoryAcl(string path)
         {
             try
             {
                 SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
                 SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                SecurityIdentifier currentSid = WindowsIdentity.GetCurrent().User;
 
                 DirectorySecurity acl = Directory.GetAccessControl(path);
                 acl.SetAccessRuleProtection(true, false);
                 acl.AddAccessRule(new FileSystemAccessRule(adminSid, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
                 acl.AddAccessRule(new FileSystemAccessRule(systemSid, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+                if (currentSid != null && !currentSid.Equals(adminSid) && !currentSid.Equals(systemSid))
+                {
+                    acl.AddAccessRule(new FileSystemAccessRule(currentSid, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+                }
                 Directory.SetAccessControl(path, acl);
 
                 DirectorySecurity ownerAcl = Directory.GetAccessControl(path);
@@ -10095,11 +10123,16 @@ namespace WindowsInventoryLite
                 }
                 SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
                 SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                SecurityIdentifier currentSid = WindowsIdentity.GetCurrent().User;
                 bool adminFound = false;
-                // Assert the grant set is EXACTLY {Administrators, SYSTEM} - not
-                // just that Administrators is present. This is what catches a
-                // regression where some other identity (e.g. the current process
-                // identity) gets an extra ACE added to the directory.
+                // Assert the grant set is EXACTLY {Administrators, SYSTEM, the
+                // identity running this test process} - not just that
+                // Administrators is present. The current-identity grant is now
+                // intended, documented behavior (see ApplyRestrictedDirectoryAcl's
+                // doc comment): it's what lets the server's own operating account
+                // keep managing this directory across repeated operations. This
+                // still catches a real regression - some OTHER identity gaining an
+                // extra ACE on the directory.
                 foreach (FileSystemAccessRule rule in acl.GetAccessRules(true, false, typeof(SecurityIdentifier)))
                 {
                     SecurityIdentifier identity = (SecurityIdentifier)rule.IdentityReference;
@@ -10115,7 +10148,11 @@ namespace WindowsInventoryLite
                     {
                         continue;
                     }
-                    return "expected only Administrators and SYSTEM to have access, but found an access rule for " + identity.Value;
+                    if (currentSid != null && identity.Equals(currentSid))
+                    {
+                        continue;
+                    }
+                    return "expected only Administrators, SYSTEM, and the current identity to have access, but found an access rule for " + identity.Value;
                 }
                 if (!adminFound)
                 {
