@@ -25,21 +25,26 @@ type systemctlUnitJSON struct {
 	Description string `json:"description"`
 }
 
-// ParseServiceUnitsJSON parses `systemctl list-units --output=json`'s
-// array shape into the two fields this client actually needs. Malformed
-// input (including non-JSON) returns an empty slice rather than an error
-// - the caller (ListRunningServiceUnits) treats a parse failure the same
-// as "no running services found" rather than crashing the whole report.
-func ParseServiceUnitsJSON(jsonOutput string) []RunningUnit {
+// ParseServiceUnitsJSON parses `systemctl list-units --output=json`'s array
+// shape into the two fields this client actually needs.
+//
+// A genuine parse failure returns an error, deliberately distinct from a
+// successfully-parsed empty array. The two are NOT interchangeable: in
+// --mode=status an empty result becomes an empty activeUnits array, which the
+// server's merge endpoint interprets as "every known service on this host just
+// stopped" - so silently turning a malformed systemctl response into an empty
+// slice manufactures a false total-outage alarm. Callers must treat the error
+// as "don't send this ping", not as "nothing is running".
+func ParseServiceUnitsJSON(jsonOutput string) ([]RunningUnit, error) {
 	var raw []systemctlUnitJSON
 	if err := json.Unmarshal([]byte(jsonOutput), &raw); err != nil {
-		return []RunningUnit{}
+		return nil, fmt.Errorf("parse systemctl list-units JSON: %w", err)
 	}
 	units := make([]RunningUnit, 0, len(raw))
 	for _, u := range raw {
 		units = append(units, RunningUnit{Unit: u.Unit, Description: u.Description})
 	}
-	return units
+	return units, nil
 }
 
 // ParseDpkgSearchOutput parses `dpkg -S <path>`'s output. On success it
@@ -112,17 +117,29 @@ func BuildServiceInfo(unit RunningUnit, ownerPackage string, ownerFound bool, pa
 	}, true
 }
 
-// ListRunningServiceUnits execs `systemctl list-units --output=json` and
-// returns the parsed running units - the shared first step used both by
-// the full inventory pipeline (CollectRunningServices, below) and the
-// lightweight status-only ping (see linux-client's BuildStatusReport,
-// added in a later task).
+// SystemctlPath and DpkgPath are absolute on purpose. This client runs as root
+// under systemd with no User= line, and Debian/Ubuntu's default PATH for root
+// services puts the group-writable /usr/local/bin ahead of /usr/bin - so a bare
+// "systemctl"/"dpkg" resolved through PATH is a local privilege-escalation
+// vector (anyone in the staff group can plant a fake one). Assumes these live at
+// these paths on Debian/Ubuntu, this project's stated target distros.
+const (
+	SystemctlPath = "/usr/bin/systemctl"
+	DpkgPath      = "/usr/bin/dpkg"
+)
+
+// ListRunningServiceUnits execs systemctl list-units and returns the parsed
+// running units - the shared first step used both by the full inventory
+// pipeline (CollectRunningServices, below) and the lightweight status-only
+// ping (BuildStatusReport). A parse failure is returned as an error rather
+// than an empty list; see ParseServiceUnitsJSON for why that distinction
+// matters.
 func ListRunningServiceUnits() ([]RunningUnit, error) {
-	output, err := exec.Command("systemctl", "list-units", "--type=service", "--state=running", "--output=json").Output()
+	output, err := exec.Command(SystemctlPath, "list-units", "--type=service", "--state=running", "--output=json").Output()
 	if err != nil {
 		return nil, fmt.Errorf("systemctl list-units: %w", err)
 	}
-	return ParseServiceUnitsJSON(string(output)), nil
+	return ParseServiceUnitsJSON(string(output))
 }
 
 // CollectRunningServices returns the currently-running systemd services,
@@ -153,14 +170,14 @@ func CollectRunningServices() ([]ServiceInfo, error) {
 	services := []ServiceInfo{}
 	for _, unit := range units {
 		fragmentPath := ""
-		if fragmentPathOutput, err := exec.Command("systemctl", "show", unit.Unit, "--property=FragmentPath", "--value").Output(); err == nil {
+		if fragmentPathOutput, err := exec.Command(SystemctlPath, "show", unit.Unit, "--property=FragmentPath", "--value").Output(); err == nil {
 			fragmentPath = strings.TrimSpace(string(fragmentPathOutput))
 		}
 
 		ownerPackage := ""
 		ownerFound := false
 		if fragmentPath != "" {
-			searchOutput, _ := exec.Command("dpkg", "-S", fragmentPath).CombinedOutput()
+			searchOutput, _ := exec.Command(DpkgPath, "-S", fragmentPath).CombinedOutput()
 			ownerPackage, ownerFound = ParseDpkgSearchOutput(string(searchOutput))
 		}
 

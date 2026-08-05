@@ -7,7 +7,10 @@ func TestParseServiceUnitsJSONExtractsUnitAndDescription(t *testing.T) {
   {"unit":"radarr.service","load":"loaded","active":"active","sub":"running","description":"Radarr","following":"","object_path":"/x","job_id":0,"job_type":"","job_path":"/y"},
   {"unit":"ssh.service","load":"loaded","active":"active","sub":"running","description":"OpenBSD Secure Shell server","following":"","object_path":"/z","job_id":0,"job_type":"","job_path":"/w"}
 ]`
-	units := ParseServiceUnitsJSON(input)
+	units, err := ParseServiceUnitsJSON(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if len(units) != 2 {
 		t.Fatalf("got %d units, want 2: %+v", len(units), units)
 	}
@@ -19,17 +22,35 @@ func TestParseServiceUnitsJSONExtractsUnitAndDescription(t *testing.T) {
 	}
 }
 
-func TestParseServiceUnitsJSONEmptyArray(t *testing.T) {
-	units := ParseServiceUnitsJSON("[]")
+func TestParseServiceUnitsJSONEmptyArrayIsNotAnError(t *testing.T) {
+	// A legitimately empty [] means "nothing is running" and must stay
+	// distinguishable from a parse failure - the server treats an empty
+	// activeUnits list as "every known service on this host just stopped".
+	units, err := ParseServiceUnitsJSON("[]")
+	if err != nil {
+		t.Fatalf("an empty array is a valid answer, not an error: %v", err)
+	}
 	if len(units) != 0 {
 		t.Errorf("got %d units, want 0", len(units))
 	}
 }
 
-func TestParseServiceUnitsJSONMalformedInputReturnsEmpty(t *testing.T) {
-	units := ParseServiceUnitsJSON("not json at all")
-	if len(units) != 0 {
-		t.Errorf("got %d units, want 0 for malformed input", len(units))
+func TestParseServiceUnitsJSONMalformedInputReturnsError(t *testing.T) {
+	// Previously this returned an empty slice, which in --mode=status became an
+	// empty activeUnits array, which the server's merge endpoint reads as "every
+	// known service on this host just stopped" - a total-outage alarm
+	// manufactured from one malformed systemctl response.
+	units, err := ParseServiceUnitsJSON("not json at all")
+	if err == nil {
+		t.Fatalf("expected an error for malformed input, got %d units", len(units))
+	}
+}
+
+func TestParseServiceUnitsJSONTruncatedOutputReturnsError(t *testing.T) {
+	// The realistic failure: systemctl's output gets cut off mid-array.
+	_, err := ParseServiceUnitsJSON(`[{"unit":"radarr.service","description":"Rad`)
+	if err == nil {
+		t.Fatal("expected an error for truncated JSON")
 	}
 }
 

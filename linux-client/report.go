@@ -63,9 +63,14 @@ func BuildReport() (Report, error) {
 
 	disks := collect.ParseBlockDevices("/sys/block")
 
+	// Best-effort, matching every other collector in this file: a failure here
+	// degrades to an empty Services list rather than throwing away a perfectly
+	// good OS/CPU/RAM/disk report. Reported on stderr so systemd's journal shows
+	// why the list is empty.
 	services, err := collect.CollectRunningServices()
 	if err != nil {
-		return Report{}, fmt.Errorf("collect running services: %w", err)
+		fmt.Fprintf(os.Stderr, "Warning: could not collect running services, reporting without them: %v\n", err)
+		services = []collect.ServiceInfo{}
 	}
 
 	return Report{
@@ -109,6 +114,11 @@ func BuildStatusReport() (StatusReport, error) {
 		return StatusReport{}, fmt.Errorf("read hostname: %w", err)
 	}
 
+	// Deliberately NOT best-effort, unlike BuildReport's own services call: a
+	// status ping carries nothing BUT the active-unit list, so sending an empty
+	// one after a collection failure would tell the server every service on this
+	// host just stopped. Failing here means main.go exits without sending, and
+	// the next timer tick tries again.
 	units, err := collect.ListRunningServiceUnits()
 	if err != nil {
 		return StatusReport{}, fmt.Errorf("list running services: %w", err)
