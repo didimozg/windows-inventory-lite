@@ -1,3 +1,7 @@
+# linux-client/prebuilt/ is a deliberate exception to the build-output
+# ignore patterns below - it's the git-tracked fallback Linux client
+# binary Install-Server.ps1 uses on machines without the Go toolchain
+# installed, so a fresh checkout always has a real client to deploy.
 output/
 build/
 dist/
