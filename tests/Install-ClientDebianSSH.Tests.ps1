@@ -205,4 +205,58 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
                 Should -Throw '*has CHANGED since it was last trusted here*'
         }
     }
+
+    Context 'Select-KnownHostsLineByFingerprint' {
+        BeforeAll {
+            # Real ssh-keyscan / ssh-keygen -lf output captured from a live host.
+            # ssh-keygen -lf emits one line per NON-COMMENT known_hosts line, in
+            # the same order, with the fingerprint as whitespace field 2.
+            $script:scanLines = @(
+                '# host.example.local:22 SSH-2.0-OpenSSH_9.2p1',
+                'host.example.local ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrq',
+                'host.example.local ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbml',
+                'host.example.local ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLs'
+            )
+            $script:fingerprintLines = @(
+                '3072 SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s host.example.local (RSA)',
+                '256 SHA256:p2QAMXNIC1TJYWeIOttrVc98/R1BUFWu3/LiyKgUfQM host.example.local (ECDSA)',
+                '256 SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU host.example.local (ED25519)'
+            )
+        }
+
+        It 'returns the single matching line and ignores the other presented keys' {
+            $line = Select-KnownHostsLineByFingerprint -KeyScanLines $script:scanLines -FingerprintLines $script:fingerprintLines -ExpectedHostKey 'SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU'
+            $line | Should -Be 'host.example.local ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLs'
+        }
+
+        It 'matches a non-final key, proving it is not just returning the last line' {
+            $line = Select-KnownHostsLineByFingerprint -KeyScanLines $script:scanLines -FingerprintLines $script:fingerprintLines -ExpectedHostKey 'SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s'
+            $line | Should -Be 'host.example.local ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrq'
+        }
+
+        It 'returns null when no presented key matches the pinned fingerprint' {
+            $line = Select-KnownHostsLineByFingerprint -KeyScanLines $script:scanLines -FingerprintLines $script:fingerprintLines -ExpectedHostKey 'SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+            $line | Should -BeNullOrEmpty
+        }
+
+        It 'returns null when the target presented no keys at all' {
+            $line = Select-KnownHostsLineByFingerprint -KeyScanLines @('# nothing but a comment') -FingerprintLines @() -ExpectedHostKey 'SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU'
+            $line | Should -BeNullOrEmpty
+        }
+    }
+
+    Context 'Get-OpenSshKeyModeOptions' {
+        It 'pins to the supplied known_hosts file with strict checking when a fingerprint was verified' {
+            $options = Get-OpenSshKeyModeOptions -ExpectedHostKey 'SHA256:abc' -KnownHostsPath 'C:\temp\kh.txt'
+            ($options -join ' ') | Should -Match ([regex]::Escape('StrictHostKeyChecking=yes'))
+            ($options -join ' ') | Should -Match ([regex]::Escape('UserKnownHostsFile=C:\temp\kh.txt'))
+            ($options -join ' ') | Should -Not -Match ([regex]::Escape('accept-new'))
+        }
+
+        It 'falls back to first-contact accept-new when no fingerprint is pinned' {
+            $options = Get-OpenSshKeyModeOptions -ExpectedHostKey '' -KnownHostsPath $null
+            ($options -join ' ') | Should -Match ([regex]::Escape('StrictHostKeyChecking=accept-new'))
+            ($options -join ' ') | Should -Not -Match ([regex]::Escape('UserKnownHostsFile'))
+        }
+    }
 }

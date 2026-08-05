@@ -214,6 +214,126 @@ function Invoke-NativeAllowingStderr {
     }
 }
 
+# Windows' OpenSSH client (ssh.exe) has NO command-line option to pin a host
+# key by fingerprint - verified against OpenSSH_for_Windows_10.0p2:
+# "-o ExpectedHostKeyFingerprint=..." is rejected with "Bad configuration
+# option". Pinning requires a known_hosts-format file plus
+# -o UserKnownHostsFile / -o StrictHostKeyChecking=yes. A known_hosts line
+# carries the FULL base64 public key, but this project stores only the
+# SHA256:<base64> fingerprint (that is what plink's -hostkey consumes on the
+# password path, and it is a one-way hash - a known_hosts line cannot be
+# derived from it).
+#
+# So: ask the target for the keys it presents (ssh-keyscan), fingerprint them
+# locally (ssh-keygen -lf), and only trust the one whose fingerprint matches
+# the value the server pinned. Same trust strength as plink's -hostkey - the
+# comparison happens here, before ssh.exe is allowed to trust anything - and
+# it reuses the exact same stored fingerprint value and format the password
+# path already uses, rather than introducing a second trust store.
+#
+# ssh-keygen -lf emits one line per NON-COMMENT known_hosts line, in the same
+# order, with the fingerprint as whitespace-delimited field 2. Pure function
+# of its inputs, no I/O - directly unit-testable, same convention as
+# New-SystemdUnitFiles.
+function Select-KnownHostsLineByFingerprint {
+    param(
+        [string[]]$KeyScanLines,
+        [string[]]$FingerprintLines,
+        [string]$ExpectedHostKey
+    )
+
+    if (-not $ExpectedHostKey) {
+        return $null
+    }
+
+    $keyLines = @()
+    foreach ($line in $KeyScanLines) {
+        if ($line -and -not $line.TrimStart().StartsWith('#')) {
+            $keyLines += $line
+        }
+    }
+
+    $index = 0
+    foreach ($fingerprintLine in $FingerprintLines) {
+        if ($index -ge $keyLines.Count) {
+            break
+        }
+        $fields = $fingerprintLine -split '\s+'
+        if ($fields.Count -ge 2 -and $fields[1] -ceq $ExpectedHostKey) {
+            return $keyLines[$index]
+        }
+        $index++
+    }
+
+    return $null
+}
+
+# Builds the ssh.exe/scp.exe host-key options. With a verified known_hosts
+# file, pin hard to it: GlobalKnownHostsFile is aimed at a path that does not
+# exist so the machine-wide ssh_known_hosts cannot silently satisfy the check,
+# and CheckHostIP=no suppresses the unrelated address-mismatch warning.
+# Without a pinned fingerprint this is a genuine first contact with a
+# brand-new host, so accept-new (TOFU) is kept deliberately - the same trust
+# model the credentials path already applies, not a stricter one. Pure
+# function, unit-testable.
+function Get-OpenSshKeyModeOptions {
+    param(
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$ExpectedHostKey,
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$KnownHostsPath
+    )
+
+    if ($ExpectedHostKey -and $KnownHostsPath) {
+        return @(
+            '-o', "UserKnownHostsFile=$KnownHostsPath",
+            '-o', "GlobalKnownHostsFile=$KnownHostsPath.absent",
+            '-o', 'StrictHostKeyChecking=yes',
+            '-o', 'CheckHostIP=no'
+        )
+    }
+
+    return @('-o', 'StrictHostKeyChecking=accept-new')
+}
+
+# Execs ssh-keyscan/ssh-keygen and returns the path to a temp known_hosts file
+# holding ONLY the key whose fingerprint matches $ExpectedHostKey. Throws if
+# nothing matches. The throw text deliberately contains the literal words
+# "host key": the server's ClassifyHostKeyFailure searches the child process
+# output for that substring to decide "changed" vs "unknown", so a message
+# without it would be misreported to the operator as a generic failure.
+function New-PinnedKnownHostsFile {
+    param(
+        [string]$TargetComputer,
+        [string]$ExpectedHostKey
+    )
+
+    $knownHostsPath = [System.IO.Path]::GetTempFileName()
+    $scanOutput = Invoke-NativeAllowingStderr { & ssh-keyscan.exe -T 10 $TargetComputer 2>$null }
+    $scanLines = @($scanOutput | ForEach-Object { [string]$_ })
+
+    $scanFile = "$knownHostsPath.scan"
+    [System.IO.File]::WriteAllLines($scanFile, $scanLines, (New-Object System.Text.UTF8Encoding($false)))
+    try {
+        $fingerprintOutput = Invoke-NativeAllowingStderr { & ssh-keygen.exe -lf $scanFile 2>$null }
+        $fingerprintLines = @($fingerprintOutput | ForEach-Object { [string]$_ })
+    }
+    finally {
+        Remove-Item -LiteralPath $scanFile -Force -ErrorAction SilentlyContinue
+    }
+
+    $match = Select-KnownHostsLineByFingerprint -KeyScanLines $scanLines -FingerprintLines $fingerprintLines -ExpectedHostKey $ExpectedHostKey
+    if (-not $match) {
+        Remove-Item -LiteralPath $knownHostsPath -Force -ErrorAction SilentlyContinue
+        throw "The target's SSH host key does not match the fingerprint trusted for this host ($ExpectedHostKey). This can mean the server was reinstalled or reimaged, or that something is intercepting the connection - only proceed if you can confirm this change is expected. Trust the new host key from the Linux Client actions job log to update the stored fingerprint."
+    }
+
+    [System.IO.File]::WriteAllLines($knownHostsPath, @($match), (New-Object System.Text.UTF8Encoding($false)))
+    return $knownHostsPath
+}
+
 # Runs plink.exe/pscp.exe with the password supplied via a short-lived,
 # current-user-only temp file (-pwfile) instead of the command line (-pw,
 # visible to any other process/user on this host via Get-CimInstance
@@ -306,7 +426,19 @@ function Invoke-RemoteCommand {
         }
     }
     else {
-        $output = Invoke-NativeAllowingStderr { & ssh.exe -i $script:KeyPath -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "$script:CredentialUsername@$TargetComputer" $Command 2>&1 }
+        $knownHostsPath = $null
+        try {
+            if ($ExpectedHostKey) {
+                $knownHostsPath = New-PinnedKnownHostsFile -TargetComputer $TargetComputer -ExpectedHostKey $ExpectedHostKey
+            }
+            $hostKeyOptions = Get-OpenSshKeyModeOptions -ExpectedHostKey $ExpectedHostKey -KnownHostsPath $knownHostsPath
+            $output = Invoke-NativeAllowingStderr { & ssh.exe -i $script:KeyPath -o BatchMode=yes @hostKeyOptions -o ConnectTimeout=10 "$script:CredentialUsername@$TargetComputer" $Command 2>&1 }
+        }
+        finally {
+            if ($knownHostsPath) {
+                Remove-Item -LiteralPath $knownHostsPath -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 
     if ($LASTEXITCODE -ne 0) {
@@ -328,7 +460,19 @@ function Copy-FileToRemote {
         }
     }
     else {
-        Invoke-NativeAllowingStderr { & scp.exe -i $script:KeyPath -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 $LocalPath "${script:CredentialUsername}@${TargetComputer}:$RemotePath" 2>&1 } | Out-Null
+        $knownHostsPath = $null
+        try {
+            if ($ExpectedHostKey) {
+                $knownHostsPath = New-PinnedKnownHostsFile -TargetComputer $TargetComputer -ExpectedHostKey $ExpectedHostKey
+            }
+            $hostKeyOptions = Get-OpenSshKeyModeOptions -ExpectedHostKey $ExpectedHostKey -KnownHostsPath $knownHostsPath
+            Invoke-NativeAllowingStderr { & scp.exe -i $script:KeyPath -o BatchMode=yes @hostKeyOptions -o ConnectTimeout=10 $LocalPath "${script:CredentialUsername}@${TargetComputer}:$RemotePath" 2>&1 } | Out-Null
+        }
+        finally {
+            if ($knownHostsPath) {
+                Remove-Item -LiteralPath $knownHostsPath -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 
     if ($LASTEXITCODE -ne 0) {
@@ -368,6 +512,17 @@ if ($MyInvocation.InvocationName -ne '.') {
         if (-not (Test-Path -LiteralPath $KeyPath)) {
             throw "SSH private key was not found: $KeyPath"
         }
+        # Host-key pinning on this path needs both of these (see
+        # New-PinnedKnownHostsFile). They ship with Windows' built-in OpenSSH
+        # client alongside ssh.exe, so a missing one means OpenSSH is not
+        # installed - fail with that, not with an opaque error mid-push.
+        if ($ExpectedHostKey) {
+            foreach ($opensshTool in @('ssh-keyscan.exe', 'ssh-keygen.exe')) {
+                if (-not (Get-Command -Name $opensshTool -ErrorAction SilentlyContinue)) {
+                    throw "Required tool was not found on PATH: $opensshTool. It ships with the Windows OpenSSH client feature, which is required for SSH-key-mode pushes to a host with a trusted host key."
+                }
+            }
+        }
     }
 
     # Live testing against this project's real Debian test fleet found a
@@ -391,7 +546,22 @@ if ($MyInvocation.InvocationName -ne '.') {
             try {
                 Write-Host "Connecting: $computer"
                 $remoteTmpDir = "/tmp/wil-linux-client-install"
-                Invoke-RemoteCommand -TargetComputer $computer -Command "${sudoPrefix}mkdir -p $InstallPath $remoteTmpDir && ${sudoPrefix}chmod 755 $remoteTmpDir" -ExpectedHostKey $ExpectedHostKey | Out-Null
+                # Two bugs fixed together here:
+                #
+                # 1. A sudo-created staging dir is root-owned, so the following
+                #    unprivileged scp/pscp copies fail on every file whenever the
+                #    connecting user is not root. /tmp is world-writable, so the
+                #    staging dir is created as the CONNECTING user - which works
+                #    whether that user is root or not. sudo is kept only for
+                #    InstallPath, which genuinely needs root.
+                # 2. /tmp/wil-linux-client-install is a fixed, predictable path.
+                #    A local low-privilege user on the target could pre-create it,
+                #    or symlink it somewhere, and race the push to substitute files
+                #    that then get sudo-mv'd into /etc/systemd/system/ and chmod
+                #    755'd as an executable systemd later runs as root. "rm -rf"
+                #    first removes anything pre-existing (symlink or not), and 700
+                #    keeps other local users out of the fresh one.
+                Invoke-RemoteCommand -TargetComputer $computer -Command "rm -rf $remoteTmpDir && mkdir -p $remoteTmpDir && chmod 700 $remoteTmpDir && ${sudoPrefix}mkdir -p $InstallPath" -ExpectedHostKey $ExpectedHostKey | Out-Null
 
                 Write-Host "Copying client binary: $computer"
                 Copy-FileToRemote -TargetComputer $computer -LocalPath $ClientBinaryPath -RemotePath "$remoteTmpDir/wil-linux-client" -ExpectedHostKey $ExpectedHostKey

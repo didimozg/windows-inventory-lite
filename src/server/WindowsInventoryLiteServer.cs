@@ -3334,28 +3334,30 @@ namespace WindowsInventoryLite
 
             bool usingKey = authMode == "key";
             string expectedHostKey = null;
-            if (!usingKey)
+            // Deliberately NOT gated on authMode. Which credential is used to
+            // AUTHENTICATE the client is unrelated to whether the SERVER's key is
+            // the one we previously trusted. Gating this on !usingKey is exactly
+            // how the key-mode path ended up with no host-key verification at all:
+            // C# never passed -ExpectedHostKey and the script never used it.
+            Dictionary<string, object> knownHost;
+            try
             {
-                Dictionary<string, object> knownHost;
-                try
-                {
-                    knownHost = FindLinuxKnownHost(target, 22);
-                }
-                catch (Exception ex)
-                {
-                    // A failure to read the trust store must never be treated
-                    // as "no record, safe to auto-trust" - report the push as
-                    // failed instead of silently proceeding as if this target
-                    // were brand-new (see FindLinuxKnownHost).
-                    result["status"] = "failed";
-                    result["message"] = "Could not read the Linux SSH known-hosts trust store: " + ex.Message;
-                    return result;
-                }
-                if (knownHost != null)
-                {
-                    expectedHostKey = GetStringValue(knownHost, "Fingerprint");
-                    result["hostKeyTrust"] = "already-trusted";
-                }
+                knownHost = FindLinuxKnownHost(target, 22);
+            }
+            catch (Exception ex)
+            {
+                // A failure to read the trust store must never be treated
+                // as "no record, safe to auto-trust" - report the push as
+                // failed instead of silently proceeding as if this target
+                // were brand-new (see FindLinuxKnownHost).
+                result["status"] = "failed";
+                result["message"] = "Could not read the Linux SSH known-hosts trust store: " + ex.Message;
+                return result;
+            }
+            if (knownHost != null)
+            {
+                expectedHostKey = GetStringValue(knownHost, "Fingerprint");
+                result["hostKeyTrust"] = "already-trusted";
             }
 
             StringBuilder argsBuilder = new StringBuilder();
@@ -3395,7 +3397,7 @@ namespace WindowsInventoryLite
             result = RunLinuxSshProcess(commandBody, authMode, username, password, keyPath, result);
 
             string hostKeyClassification = null;
-            if (!usingKey && GetStringValue(result, "status") == "failed")
+            if (GetStringValue(result, "status") == "failed")
             {
                 string combinedOutput = GetStringValue(result, "output") + "\n" + GetStringValue(result, "error");
                 string parsedKeyType, parsedFingerprint;
@@ -3534,10 +3536,31 @@ namespace WindowsInventoryLite
                 return result;
             }
 
+            string expectedHostKey = null;
+            Dictionary<string, object> knownHost;
+            try
+            {
+                knownHost = FindLinuxKnownHost(target, 22);
+            }
+            catch (Exception ex)
+            {
+                result["status"] = "failed";
+                result["message"] = "Could not read the Linux SSH known-hosts trust store: " + ex.Message;
+                return result;
+            }
+            if (knownHost != null)
+            {
+                expectedHostKey = GetStringValue(knownHost, "Fingerprint");
+            }
+
             bool usingKey = authMode == "key";
             StringBuilder argsBuilder = new StringBuilder();
             argsBuilder.Append("-ComputerName ").Append(QuotePowerShellLiteral(target));
             argsBuilder.Append(" -InstallPath ").Append(QuotePowerShellLiteral(installPath));
+            if (!String.IsNullOrEmpty(expectedHostKey))
+            {
+                argsBuilder.Append(" -ExpectedHostKey ").Append(QuotePowerShellLiteral(expectedHostKey));
+            }
             argsBuilder.Append(" -CredentialUsername $__wilUser");
             if (usingKey)
             {
