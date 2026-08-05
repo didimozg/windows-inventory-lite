@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"strings"
 )
 
@@ -72,6 +73,51 @@ func ParseDpkgSearchOutput(output string) (packageName string, ok bool) {
 		return "", false
 	}
 	return firstName, true
+}
+
+// ParseDpkgSearchBatchOutput parses the output of ONE `dpkg -S path1 path2 ...`
+// invocation covering many paths at once. Success lines look like
+// "packagename: /path/to/file"; unowned paths produce a "no path found matching
+// pattern" line instead, which is skipped rather than recorded.
+//
+// The map is keyed on the unit file's BASE NAME, not the full path: dpkg echoes
+// the path as recorded in its own database, which on a usr-merged Debian/Ubuntu
+// host is frequently /lib/systemd/system/x.service even when the query used
+// /usr/lib/systemd/system/x.service. Keying on the full path would silently miss
+// on exactly those hosts. Unit file base names are unique in practice.
+//
+// Pure - no I/O - directly unit-testable, same as its single-path sibling above.
+func ParseDpkgSearchBatchOutput(output string) map[string]string {
+	owners := make(map[string]string)
+	for _, line := range strings.Split(output, "\n") {
+		packageName, reportedPath, ok := parseDpkgSearchLine(line)
+		if !ok {
+			continue
+		}
+		owners[path.Base(reportedPath)] = packageName
+	}
+	return owners
+}
+
+func parseDpkgSearchLine(line string) (packageName string, reportedPath string, ok bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.Contains(trimmed, "no path found matching pattern") {
+		return "", "", false
+	}
+	colonIndex := strings.Index(trimmed, ":")
+	if colonIndex <= 0 {
+		return "", "", false
+	}
+	namesPart := trimmed[:colonIndex]
+	pathPart := strings.TrimSpace(trimmed[colonIndex+1:])
+	if pathPart == "" {
+		return "", "", false
+	}
+	firstName := strings.TrimSpace(strings.Split(namesPart, ",")[0])
+	if firstName == "" {
+		return "", "", false
+	}
+	return firstName, pathPart, true
 }
 
 // basePriorities are dpkg's own Priority: classification for "part of
@@ -167,18 +213,43 @@ func CollectRunningServices() ([]ServiceInfo, error) {
 		packages[p.Name] = p
 	}
 
+	// Phase 1: resolve every unit's fragment path (one systemctl show per unit -
+	// unavoidable, systemctl show takes one unit at a time for --value output).
+	fragmentPaths := make(map[string]string, len(units))
+	for _, unit := range units {
+		if fragmentPathOutput, err := exec.Command(SystemctlPath, "show", unit.Unit, "--property=FragmentPath", "--value").Output(); err == nil {
+			if trimmed := strings.TrimSpace(string(fragmentPathOutput)); trimmed != "" {
+				fragmentPaths[unit.Unit] = trimmed
+			}
+		}
+	}
+
+	// Phase 2: one batched dpkg -S for ALL of those paths instead of one per
+	// unit. dpkg -S accepts many path arguments in a single invocation, which
+	// halves the process spawns for this collector - on a host with 40-60 running
+	// units the old per-unit pair was 80-120 spawns, plausibly minutes, against
+	// systemd's default 90s start timeout.
+	owners := map[string]string{}
+	if len(fragmentPaths) > 0 {
+		args := make([]string, 0, len(fragmentPaths)+1)
+		args = append(args, "-S")
+		for _, fragmentPath := range fragmentPaths {
+			args = append(args, fragmentPath)
+		}
+		// Exit status is deliberately ignored: dpkg -S exits non-zero when ANY of
+		// the batched paths has no owning package, which is normal (a hand-built
+		// service is exactly what this collector most wants to surface). The
+		// per-path result is read from the output instead.
+		searchOutput, _ := exec.Command(DpkgPath, args...).CombinedOutput()
+		owners = ParseDpkgSearchBatchOutput(string(searchOutput))
+	}
+
 	services := []ServiceInfo{}
 	for _, unit := range units {
-		fragmentPath := ""
-		if fragmentPathOutput, err := exec.Command(SystemctlPath, "show", unit.Unit, "--property=FragmentPath", "--value").Output(); err == nil {
-			fragmentPath = strings.TrimSpace(string(fragmentPathOutput))
-		}
-
 		ownerPackage := ""
 		ownerFound := false
-		if fragmentPath != "" {
-			searchOutput, _ := exec.Command(DpkgPath, "-S", fragmentPath).CombinedOutput()
-			ownerPackage, ownerFound = ParseDpkgSearchOutput(string(searchOutput))
+		if fragmentPath, hasPath := fragmentPaths[unit.Unit]; hasPath {
+			ownerPackage, ownerFound = owners[path.Base(fragmentPath)]
 		}
 
 		if service, include := BuildServiceInfo(unit, ownerPackage, ownerFound, packages); include {

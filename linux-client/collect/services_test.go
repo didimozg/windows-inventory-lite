@@ -138,3 +138,57 @@ func TestBuildServiceInfoFallsBackToUnitNameWhenDescriptionEmpty(t *testing.T) {
 		t.Errorf("got Name %q, want %q (unit name with .service stripped)", service.Name, "my-custom-app")
 	}
 }
+
+func TestParseDpkgSearchBatchOutputMapsEachPathToItsPackage(t *testing.T) {
+	output := "radarr: /lib/systemd/system/radarr.service\n" +
+		"openssh-server: /lib/systemd/system/ssh.service\n" +
+		"cron: /lib/systemd/system/cron.service\n"
+	owners := ParseDpkgSearchBatchOutput(output)
+	if len(owners) != 3 {
+		t.Fatalf("got %d entries, want 3: %+v", len(owners), owners)
+	}
+	if owners["radarr.service"] != "radarr" {
+		t.Errorf("radarr.service -> %q, want %q", owners["radarr.service"], "radarr")
+	}
+	if owners["ssh.service"] != "openssh-server" {
+		t.Errorf("ssh.service -> %q, want %q", owners["ssh.service"], "openssh-server")
+	}
+}
+
+func TestParseDpkgSearchBatchOutputSkipsNotFoundLines(t *testing.T) {
+	// One batched invocation mixes successes with dpkg-query's not-found
+	// complaints for unowned units; the not-found lines must not become entries.
+	output := "radarr: /lib/systemd/system/radarr.service\n" +
+		"dpkg-query: no path found matching pattern /etc/systemd/system/my-custom.service\n"
+	owners := ParseDpkgSearchBatchOutput(output)
+	if len(owners) != 1 {
+		t.Fatalf("got %d entries, want 1: %+v", len(owners), owners)
+	}
+	if _, found := owners["my-custom.service"]; found {
+		t.Error("a not-found line must not produce a map entry")
+	}
+}
+
+func TestParseDpkgSearchBatchOutputUsesFirstPackageWhenSeveralClaimAPath(t *testing.T) {
+	owners := ParseDpkgSearchBatchOutput("pkg1, pkg2: /lib/systemd/system/shared.service\n")
+	if owners["shared.service"] != "pkg1" {
+		t.Errorf("shared.service -> %q, want %q (the first listed)", owners["shared.service"], "pkg1")
+	}
+}
+
+func TestParseDpkgSearchBatchOutputKeysOnBaseNameNotFullPath(t *testing.T) {
+	// dpkg echoes the path as recorded in its database, which on a usr-merged
+	// host is /lib/... even when the query used /usr/lib/... - so lookups key on
+	// the unit file's base name.
+	owners := ParseDpkgSearchBatchOutput("openssh-server: /lib/systemd/system/ssh.service\n")
+	if owners["ssh.service"] != "openssh-server" {
+		t.Errorf("expected the base name to be the key, got map %+v", owners)
+	}
+}
+
+func TestParseDpkgSearchBatchOutputEmptyIsEmpty(t *testing.T) {
+	owners := ParseDpkgSearchBatchOutput("")
+	if len(owners) != 0 {
+		t.Errorf("got %d entries, want 0", len(owners))
+	}
+}
