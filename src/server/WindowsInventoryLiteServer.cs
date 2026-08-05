@@ -2494,10 +2494,20 @@ namespace WindowsInventoryLite
                     continue;
                 }
                 string target = GetLinuxClientUpdateTarget(client);
-                if (!String.IsNullOrEmpty(target))
+                if (String.IsNullOrEmpty(target))
                 {
-                    targets.Add(target);
+                    continue;
                 }
+                // GetLinuxClientUpdateTarget can return a client-reported raw
+                // hostname, which is attacker-influenced on a compromised managed
+                // host. Skip rather than fail the whole scheduled push - one bad
+                // record must not stop the rest of the fleet from updating.
+                if (!IsValidSshTarget(target))
+                {
+                    DebugLogger.Log(options, "Schedule", "Scheduled Linux client update push skipped one target: '" + DebugLogger.SanitizeForLog(target) + "' is not a valid hostname or IPv4 address.");
+                    continue;
+                }
+                targets.Add(target);
             }
             if (targets.Count == 0)
             {
@@ -3077,6 +3087,19 @@ namespace WindowsInventoryLite
                 SendText(stream, "{\"error\":\"at least one target is required\"}", "application/json; charset=utf-8", 400);
                 return;
             }
+            // Reject before a job is created rather than letting each target fail
+            // individually later - a typo'd or hostile target list should be a
+            // clear 400, not a job full of per-target failures. ExpandInstallTargets
+            // itself is deliberately left alone: it is shared with the Windows WinRM
+            // push path, which is out of scope here.
+            foreach (string candidate in targets)
+            {
+                if (!IsValidSshTarget(candidate))
+                {
+                    SendText(stream, "{\"error\":\"one or more targets contain characters that are not valid in a hostname or IPv4 address (only letters, digits, '.' and '-' are allowed)\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
 
             if (action == "install" && String.IsNullOrEmpty(serverUrl))
             {
@@ -3295,6 +3318,13 @@ namespace WindowsInventoryLite
             result["target"] = target;
             result["startedAt"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
+            if (!IsValidSshTarget(target))
+            {
+                result["status"] = "failed";
+                result["message"] = "Target contains characters that are not valid in a hostname or IPv4 address. Only letters, digits, '.' and '-' are allowed.";
+                return result;
+            }
+
             if (!File.Exists(options.LinuxSshInstallerPath))
             {
                 result["status"] = "failed";
@@ -3490,6 +3520,13 @@ namespace WindowsInventoryLite
             result["target"] = target;
             result["startedAt"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
+            if (!IsValidSshTarget(target))
+            {
+                result["status"] = "failed";
+                result["message"] = "Target contains characters that are not valid in a hostname or IPv4 address. Only letters, digits, '.' and '-' are allowed.";
+                return result;
+            }
+
             if (!File.Exists(options.LinuxSshUninstallerPath))
             {
                 result["status"] = "failed";
@@ -3565,6 +3602,23 @@ namespace WindowsInventoryLite
         private static bool IsValidHostKeyFingerprint(string fingerprint)
         {
             return !String.IsNullOrEmpty(fingerprint) && HostKeyFingerprintFormatPattern.IsMatch(fingerprint);
+        }
+
+        // A push target is either a hostname or an IPv4 literal, and it is
+        // embedded into a PowerShell command line (RunLinuxClientInstallTarget's
+        // -ComputerName) and from there into an ssh/plink destination. Unlike
+        // serverUrl/token/installPath it was never validated, and its value can
+        // come straight from a client-reported "hostname" field (see
+        // GetLinuxClientUpdateTarget), which is attacker-influenced on a
+        // compromised managed host. Restrict to what a hostname or IPv4 literal
+        // can legally contain - letters, digits, '.', '-' - rather than trying to
+        // quote/escape, matching this project's existing reject-don't-escape
+        // convention (ValidatePosixShellSafe, Test-BatchSafeValue).
+        private static readonly Regex SshTargetFormatPattern = new Regex(@"^[A-Za-z0-9][A-Za-z0-9.\-]*$");
+
+        internal static bool IsValidSshTarget(string target)
+        {
+            return !String.IsNullOrEmpty(target) && target.Length <= 253 && SshTargetFormatPattern.IsMatch(target);
         }
 
         private static readonly Regex HostKeyFingerprintPattern = new Regex(
@@ -7835,6 +7889,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns 'unknown' for a brand-new target when auto-trust is disabled", TestClassifyHostKeyFailureUnknownWhenAutoTrustDisabled);
             allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns null for a failure unrelated to host keys", TestClassifyHostKeyFailureNullForNonHostKeyFailure);
             allPassed &= SelfTestCheck(output, "trust-host-key fingerprint format validation accepts SHA256:... and rejects everything else", TestTrustLinuxHostKeyRejectsMalformedFingerprint);
+            allPassed &= SelfTestCheck(output, "IsValidSshTarget accepts hostnames and IPv4 literals", TestIsValidSshTargetAcceptsHostnamesAndIPv4);
+            allPassed &= SelfTestCheck(output, "IsValidSshTarget rejects shell-injection shapes, flag-lookalikes, and empty values", TestIsValidSshTargetRejectsInjectionAndEmpty);
             allPassed &= SelfTestCheck(output, "GenerateRandomToken returns a 64-character lowercase hex string, different each call", TestGenerateRandomTokenShape);
             allPassed &= SelfTestCheck(output, "Ingestion token configured-state reflects whether options.Token is set", TestSendIngestionTokenStatusReflectsConfiguredState);
             allPassed &= SelfTestCheck(output, "Linux SSH tools status reflects plink.exe/pscp.exe file presence", TestSendLinuxSshToolsStatusReflectsFilePresence);
@@ -9350,6 +9406,34 @@ namespace WindowsInventoryLite
             if (!IsValidHostKeyFingerprint("SHA256:hXNM4oXACpM336pm8Tv/f3mA/2X1tq6ocXcl7TmFvtA"))
             {
                 return "a real, valid fingerprint failed the validation pattern";
+            }
+            return null;
+        }
+
+        private static string TestIsValidSshTargetAcceptsHostnamesAndIPv4()
+        {
+            string[] valid = { "192.168.1.10", "debian-01", "host.example.local", "a", "10.0.0.254" };
+            foreach (string target in valid)
+            {
+                if (!IsValidSshTarget(target))
+                {
+                    return "expected target '" + target + "' to be accepted, but IsValidSshTarget rejected it";
+                }
+            }
+            return null;
+        }
+
+        private static string TestIsValidSshTargetRejectsInjectionAndEmpty()
+        {
+            // Every one of these is a value a compromised managed host could put
+            // in its own self-reported "hostname" field.
+            string[] invalid = { "", null, "host;rm -rf /", "host name", "$(whoami)", "host`id`", "-oProxyCommand=calc", "host\nsecond", "host|id", "host&id", "host'x", "host\"x", "host\\x", "host/../x" };
+            foreach (string target in invalid)
+            {
+                if (IsValidSshTarget(target))
+                {
+                    return "expected target '" + target + "' to be rejected, but IsValidSshTarget accepted it";
+                }
             }
             return null;
         }
