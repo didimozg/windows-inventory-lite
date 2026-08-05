@@ -45,3 +45,16 @@ jobs:
         run: |
           .\src\Build-Client.ps1 -TargetFramework Net40 -OutputPath .\build\WindowsInventoryLiteClient-net40.exe
           .\build\WindowsInventoryLiteClient-net40.exe --version
+
+      # windows-latest GitHub-hosted runners ship with Go preinstalled - no
+      # actions/setup-go step needed. This doesn't rebuild/recommit
+      # linux-client/prebuilt/wil-linux-client (that stays a deliberate
+      # human step, see the Pester staleness check above) - it only proves
+      # the current Go source still builds, vets, and passes its own tests.
+      - name: Build and test Linux client
+        shell: pwsh
+        working-directory: linux-client
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./...
