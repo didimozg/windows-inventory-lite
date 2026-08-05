@@ -4,7 +4,7 @@
 param(
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string]$Version = '0.1.2',
+    [string]$Version = '0.1.3',
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
