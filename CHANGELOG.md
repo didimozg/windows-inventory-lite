@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.37.2] - 2026-08-05
+
+### Fixed
+
+- Reinstalling the Linux client no longer waits out its full normal cadence (up to 6 hours for a full inventory, up to 30 minutes for a status ping) before its first report. `OnBootSec=5min` in the generated systemd timers, previously assumed to give a short grace period after any `systemctl restart`, does not actually do that - it fires once, relative to real machine boot, not to the restart, so on an already-running host it never fires again. Both install paths (the Client Package ZIP-download's `install.sh` and the SSH-push `Install-ClientDebianSSH.ps1`) now also run an explicit, best-effort immediate `systemctl start` for both services right after restarting their timers, so an admin sees fresh data promptly after install/reinstall instead of waiting out the normal cadence. A failure in that immediate run doesn't fail the install job - the scheduled timers still guarantee a real report on the normal cadence regardless.
+- **Linux client version bumped to 0.1.2** (independent of the server's own version above) - no client binary change, but bumped alongside this install-flow fix per explicit instruction.
+
 ## [0.37.1] - 2026-08-04
 
 ### Fixed

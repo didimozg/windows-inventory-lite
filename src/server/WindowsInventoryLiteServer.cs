@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.37.1";
+        internal const string ProductVersion = "0.37.2";
 
         private static int Main(string[] args)
         {
@@ -7503,11 +7503,25 @@ namespace WindowsInventoryLite
             lines.Add("sudo systemctl enable --now wil-linux-client-status.timer");
             // enable --now on a timer that was already active (a reinstall
             // over an existing client) does not reset OnUnitActiveSec's
-            // countdown - restart unconditionally does, so a fresh binary
-            // always gets scheduled promptly (within OnBootSec) whether
-            // this is a fresh install or a reinstall.
+            // countdown - restart unconditionally does, so a fresh binary is
+            // scheduled promptly on its normal cadence (6h / 30min) whether
+            // this is a fresh install or a reinstall. OnBootSec=5min does NOT
+            // help here: it fires once, relative to actual machine boot, not
+            // to this restart - on a long-uptime host it never fires again
+            // this session, so without the explicit immediate run below, the
+            // fresh binary's first real report could still be up to a full
+            // 6h/30min away.
             lines.Add("sudo systemctl restart wil-linux-client.timer");
             lines.Add("sudo systemctl restart wil-linux-client-status.timer");
+            // Best-effort immediate report so an admin sees fresh data right
+            // after install/reinstall instead of waiting out the normal
+            // cadence. "|| true" so a transient collection failure here (e.g.
+            // dpkg momentarily locked right after other package activity)
+            // does not abort the script under "set -e" - the scheduled
+            // timers above already guarantee a real report lands on the
+            // normal cadence regardless.
+            lines.Add("sudo systemctl start wil-linux-client.service || true");
+            lines.Add("sudo systemctl start wil-linux-client-status.service || true");
             lines.Add("");
             lines.Add("echo \"Windows Inventory Lite Linux client installed to $INSTALL_PATH.\"");
             return lines.ToArray();
@@ -7615,6 +7629,16 @@ namespace WindowsInventoryLite
             if (!content.Contains("systemctl restart wil-linux-client.timer") || !content.Contains("systemctl restart wil-linux-client-status.timer"))
             {
                 return "expected the script to restart both timers (not just enable --now) so a reinstall's fresh binary actually gets scheduled promptly, got: " + content;
+            }
+            // OnBootSec=5min fires once, relative to actual machine boot, not
+            // to this restart - on a long-uptime host it never fires again,
+            // so restarting the timers alone still leaves up to a full
+            // 6h/30min wait for the first real report. An explicit immediate
+            // "systemctl start" closes that gap; "|| true" keeps a transient
+            // collection failure there from aborting the script under "set -e".
+            if (!content.Contains("systemctl start wil-linux-client.service || true") || !content.Contains("systemctl start wil-linux-client-status.service || true"))
+            {
+                return "expected the script to immediately start both services (best-effort) after restarting their timers, so a fresh install/reinstall reports promptly instead of waiting out the normal cadence, got: " + content;
             }
             return null;
         }

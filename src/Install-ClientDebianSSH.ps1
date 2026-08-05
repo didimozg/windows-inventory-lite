@@ -414,10 +414,23 @@ if ($MyInvocation.InvocationName -ne '.') {
                     "${sudoPrefix}systemctl enable --now wil-linux-client-status.timer && " +
                     # enable --now on a timer that was already active (a reinstall over an
                     # existing client) does not reset OnUnitActiveSec's countdown - restart
-                    # unconditionally does, so a fresh binary always gets scheduled promptly
-                    # (within OnBootSec) whether this is a fresh install or a reinstall.
+                    # unconditionally does, so a fresh binary is scheduled promptly on its
+                    # normal cadence (6h / 30min) whether this is a fresh install or a
+                    # reinstall. OnBootSec=5min does NOT help here: it fires once, relative
+                    # to actual machine boot, not to this restart - on a long-uptime host it
+                    # never fires again this session, so without an explicit immediate run
+                    # below, the fresh binary's first real report could still be up to a
+                    # full 6h/30min away.
                     "${sudoPrefix}systemctl restart wil-linux-client.timer && " +
-                    "${sudoPrefix}systemctl restart wil-linux-client-status.timer"
+                    "${sudoPrefix}systemctl restart wil-linux-client-status.timer && " +
+                    # Best-effort immediate report so an admin sees fresh data right after
+                    # install/reinstall instead of waiting out the normal cadence. Wrapped in
+                    # `|| true` so a transient collection failure here (e.g. dpkg momentarily
+                    # locked right after other package activity) does not mark the whole
+                    # install job as failed - the scheduled timers above already guarantee a
+                    # real report lands on the normal cadence regardless.
+                    "(${sudoPrefix}systemctl start wil-linux-client.service || true) && " +
+                    "(${sudoPrefix}systemctl start wil-linux-client-status.service || true)"
                 Invoke-RemoteCommand -TargetComputer $computer -Command $installCommand -ExpectedHostKey $ExpectedHostKey | Out-Null
 
                 Write-Host "Client installed: $computer"
