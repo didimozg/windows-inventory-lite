@@ -6672,7 +6672,6 @@ namespace WindowsInventoryLite
                 {
                     Directory.CreateDirectory(directory);
                 }
-                ApplyRestrictedDirectoryAcl(directory);
                 File.WriteAllBytes(tempPath, keyBytes);
                 // Restrict the temp file's ACL immediately - it holds the plaintext
                 // private key and would otherwise inherit the directory's default
@@ -6687,6 +6686,12 @@ namespace WindowsInventoryLite
                     File.Move(tempPath, keyPath);
                 }
                 ApplyRestrictedKeyFileAcl(keyPath);
+                // Harden the directory itself only now that every write into it
+                // for this operation is done - hardening it earlier would lock
+                // the writing identity out of its own in-progress work whenever
+                // the service isn't running as SYSTEM (see
+                // ApplyRestrictedDirectoryAcl's doc comment).
+                ApplyRestrictedDirectoryAcl(directory);
             }
             catch (Exception)
             {
@@ -6885,23 +6890,24 @@ namespace WindowsInventoryLite
         // Directory counterpart to ApplyRestrictedKeyFileAcl. The _linux-ssh
         // directory holds the private key and the known-hosts trust store, but was
         // created with a bare Directory.CreateDirectory and inherited whatever
-        // ProgramData's defaults are. Same two-step DACL-then-Owner persist, and the
+        // ProgramData's defaults are. Same two-step DACL-then-Owner persist, the
+        // same grant set (Administrators + SYSTEM only, nothing else), and the
         // same swallow-and-log failure handling, as the file version.
         //
-        // Unlike a file (which is only hardened AFTER its content is already
-        // written), this directory needs to remain writable by whatever identity
-        // is actively managing it - both to create the temp files moved into it
-        // and, in a non-SYSTEM context (self-tests, or a differently-configured
-        // service account), to clean it up again. Restricting the DACL to only
-        // Administrators+SYSTEM strips that access outright: a non-elevated
-        // Administrators group membership is deny-only in the process token, so
-        // even an interactively-admin user loses all access to their own
-        // just-created folder the moment this DACL is applied. Adding an
-        // explicit rule for the current process identity keeps the directory
-        // usable by whoever is actually running it - a no-op in production
-        // (the Windows Service already runs as SYSTEM) - while still excluding
-        // every other local account, which is the actual threat this guards
-        // against.
+        // Callers MUST only invoke this after every write into the directory for
+        // the current operation has already completed (temp file write, per-file
+        // hardening, move into place) - the same "harden only after the content
+        // is already there" ordering ApplyRestrictedKeyFileAcl uses for
+        // individual files, extended to the directory itself. Applying this
+        // before those writes complete locks the writing identity out of its
+        // own in-progress work whenever the service does not run as SYSTEM -
+        // which is a real, documented deployment mode, not a hypothetical one
+        // (see README.md's guidance to run the service under a least-privileged
+        // domain or managed service account). Widening the grant set to also
+        // include the current identity is not an acceptable workaround for
+        // that: it would leave a permanent extra ACE on the directory holding
+        // the private key for whatever account the service runs under in that
+        // mode, defeating the point of restricting this directory at all.
         private void ApplyRestrictedDirectoryAcl(string path)
         {
             try
@@ -6913,11 +6919,6 @@ namespace WindowsInventoryLite
                 acl.SetAccessRuleProtection(true, false);
                 acl.AddAccessRule(new FileSystemAccessRule(adminSid, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
                 acl.AddAccessRule(new FileSystemAccessRule(systemSid, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
-                SecurityIdentifier currentSid = WindowsIdentity.GetCurrent().User;
-                if (currentSid != null && !currentSid.Equals(adminSid) && !currentSid.Equals(systemSid))
-                {
-                    acl.AddAccessRule(new FileSystemAccessRule(currentSid, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
-                }
                 Directory.SetAccessControl(path, acl);
 
                 DirectorySecurity ownerAcl = Directory.GetAccessControl(path);
@@ -6963,21 +6964,38 @@ namespace WindowsInventoryLite
                 {
                     Directory.CreateDirectory(directory);
                 }
-                ApplyRestrictedDirectoryAcl(directory);
                 // Copy to a temp path, THEN move into place and harden the real
                 // file - mirroring the upload path's own temp/move idiom
-                // (ConfigureLinuxSshKey). File.Copy straight to the real path left
-                // a window where the private key sat there with whatever broad,
-                // inherited permissions the containing directory previously had.
-                // The directory itself is now hardened (immediately above) before
-                // this copy happens, so the temp file already inherits a
-                // restricted ACL the moment it's created - unlike
-                // ConfigureLinuxSshKey's upload path, an extra hardening pass on
-                // the temp file itself isn't needed to close that gap here, and
-                // skipping it avoids stripping the running identity's own access
-                // to the temp file (a rename needs access on the file itself, not
-                // just the containing directory) before the move below completes.
-                // The move target still gets fully hardened afterward.
+                // (ConfigureLinuxSshKey). File.Copy straight to the real path
+                // would leave a window where the private key sits there with
+                // whatever broad, inherited permissions the containing
+                // directory has. The directory itself is deliberately NOT
+                // hardened until after this whole sequence completes (below) -
+                // hardening it first would lock the running identity out of its
+                // own in-progress copy/move whenever the service isn't running
+                // as SYSTEM.
+                //
+                // NOTE: an intermediate ApplyRestrictedKeyFileAcl(tempPath) call
+                // before the move (matching ConfigureLinuxSshKey's own temp-file
+                // hardening) was evaluated and is intentionally NOT applied
+                // here. Confirmed via an isolated repro: hardening tempPath to
+                // Administrators+SYSTEM only, then calling File.Move, throws
+                // UnauthorizedAccessException for a non-privileged identity even
+                // though the containing directory itself is unrestricted - a
+                // rename requires DELETE access on the source file's own
+                // security descriptor, which is not satisfiable via the parent
+                // directory's delete-child grant (unlike a plain File.Delete,
+                // which is). This is independent of the directory-ACL ordering
+                // fix above. The only known workaround is granting the current
+                // identity access on the temp file, which would reintroduce the
+                // same kind of permanent-widening risk this fix exists to
+                // remove (ApplyRestrictedKeyFileAcl is shared with the final
+                // managedPath hardening below, so widening it here would widen
+                // the real key file's grant set too). Left as a known,
+                // documented limitation rather than worked around; see the
+                // fix report for details. ConfigureLinuxSshKey has the same
+                // latent limitation in its own upload path, pre-existing and
+                // out of scope here.
                 string tempPath = managedPath + ".tmp";
                 try
                 {
@@ -6999,6 +7017,10 @@ namespace WindowsInventoryLite
                         // Best-effort cleanup only, same as UploadLinuxSshKey's.
                     }
                 }
+                // Harden the directory itself only now that every write into it
+                // for this migration is done (see ApplyRestrictedDirectoryAcl's
+                // doc comment for why the ordering matters).
+                ApplyRestrictedDirectoryAcl(directory);
                 DebugLogger.Log(options, "Config", "Migrated legacy LinuxUpdateKeyPath ('" + DebugLogger.SanitizeForLog(options.LinuxUpdateKeyPath) + "') into the managed linux-update-key store. The original file is no longer used and can be removed.");
             }
             catch (Exception ex)
@@ -10072,13 +10094,28 @@ namespace WindowsInventoryLite
                     return "expected inheritance to be disabled on the linux-ssh directory";
                 }
                 SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
                 bool adminFound = false;
+                // Assert the grant set is EXACTLY {Administrators, SYSTEM} - not
+                // just that Administrators is present. This is what catches a
+                // regression where some other identity (e.g. the current process
+                // identity) gets an extra ACE added to the directory.
                 foreach (FileSystemAccessRule rule in acl.GetAccessRules(true, false, typeof(SecurityIdentifier)))
                 {
-                    if (rule.IdentityReference.Equals(adminSid) && (rule.FileSystemRights & FileSystemRights.FullControl) == FileSystemRights.FullControl)
+                    SecurityIdentifier identity = (SecurityIdentifier)rule.IdentityReference;
+                    if (identity.Equals(adminSid))
                     {
-                        adminFound = true;
+                        if ((rule.FileSystemRights & FileSystemRights.FullControl) == FileSystemRights.FullControl)
+                        {
+                            adminFound = true;
+                        }
+                        continue;
                     }
+                    if (identity.Equals(systemSid))
+                    {
+                        continue;
+                    }
+                    return "expected only Administrators and SYSTEM to have access, but found an access rule for " + identity.Value;
                 }
                 if (!adminFound)
                 {
@@ -10107,7 +10144,28 @@ namespace WindowsInventoryLite
                 server.MigrateLegacyLinuxSshKey();
 
                 string managedPath = Path.Combine(dataPath, "_linux-ssh", "linux-update-key");
-                if (!File.Exists(managedPath))
+                // File.Exists is not a reliable check here: MigrateLegacyLinuxSshKey
+                // hardens the containing _linux-ssh directory to Administrators+SYSTEM
+                // only by the time it returns, and once the DIRECTORY denies this
+                // (non-elevated, non-SYSTEM) test process all access, File.Exists
+                // silently returns false for a file that is genuinely present -
+                // .NET's File.Exists swallows UnauthorizedAccessException and reports
+                // "does not exist" rather than distinguishing "denied" from "missing".
+                // File.GetAttributes does distinguish the two: it throws
+                // UnauthorizedAccessException when the path is present but
+                // inaccessible, versus FileNotFoundException/DirectoryNotFoundException
+                // when it genuinely is not there. Confirmed empirically in this exact
+                // non-elevated environment before relying on it here.
+                try
+                {
+                    File.GetAttributes(managedPath);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    // Present, just inaccessible to this identity - exactly what a
+                    // correctly-hardened directory looks like from here. Success.
+                }
+                catch (Exception)
                 {
                     return "expected the legacy key to be copied to the managed path";
                 }
@@ -10115,8 +10173,15 @@ namespace WindowsInventoryLite
             }
             finally
             {
-                Directory.Delete(dataPath, true);
-                File.Delete(legacyKeyPath);
+                // Directory.Delete can legitimately fail here: MigrateLegacyLinuxSshKey
+                // hardens _linux-ssh to Administrators+SYSTEM only by the time it
+                // returns, and this test process is not necessarily Administrators
+                // or SYSTEM in a non-elevated dev environment - same reason
+                // TestApplyRestrictedDirectoryAclSetsDacl guards its own cleanup
+                // below. Best-effort only; must not mask a real assertion failure
+                // above with a cleanup exception.
+                try { Directory.Delete(dataPath, true); } catch (Exception) { }
+                try { File.Delete(legacyKeyPath); } catch (Exception) { }
             }
         }
 
