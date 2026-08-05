@@ -5170,6 +5170,7 @@ namespace WindowsInventoryLite
             string[] statusServiceLines;
             string[] statusTimerLines;
             string[] installScriptLines;
+            string[] envFileLines;
             try
             {
                 serviceLines = GenerateSystemdUnitLines(installPath, serverUrl, token);
@@ -5177,6 +5178,7 @@ namespace WindowsInventoryLite
                 statusServiceLines = GenerateSystemdStatusUnitLines(installPath, statusUrl, token);
                 statusTimerLines = GenerateSystemdStatusTimerLines(statusIntervalMinutes);
                 installScriptLines = GenerateLinuxInstallScriptLines(installPath);
+                envFileLines = GenerateSystemdEnvFileLines(token);
             }
             catch (ArgumentException ex)
             {
@@ -5197,6 +5199,22 @@ namespace WindowsInventoryLite
             // (WriteAllLines' default) is \r\n on Windows, which breaks the shebang interpreter lookup
             // and turns "set -e" into the literal token "-e\r", silently disabling errexit. Force bare \n.
             File.WriteAllText(Path.Combine(options.LinuxClientPackagePath, "install.sh"), String.Join("\n", installScriptLines) + "\n", new UTF8Encoding(false));
+            // Written with bare \n for the same reason install.sh is: this file is
+            // sourced by systemd on Linux, and a trailing \r would become part of
+            // the token value. Only written when there is a token - the unit files
+            // only reference EnvironmentFile in that case (see
+            // GenerateSystemdUnitLines).
+            string envFilePath = Path.Combine(options.LinuxClientPackagePath, "wil-linux-client.env");
+            if (!String.IsNullOrEmpty(token))
+            {
+                File.WriteAllText(envFilePath, String.Join("\n", envFileLines) + "\n", new UTF8Encoding(false));
+            }
+            else if (File.Exists(envFilePath))
+            {
+                // A reconfigure that clears the token must not leave the previous
+                // token sitting in the package directory.
+                File.Delete(envFilePath);
+            }
 
             Dictionary<string, object> settingsToSave = new Dictionary<string, object>();
             settingsToSave["serverUrl"] = serverUrl;
@@ -5237,6 +5255,7 @@ namespace WindowsInventoryLite
                 "wil-linux-client.timer",
                 "wil-linux-client-status.service",
                 "wil-linux-client-status.timer",
+                "wil-linux-client.env",
                 "install.sh"
             };
 
@@ -7463,6 +7482,22 @@ namespace WindowsInventoryLite
             return lines.ToArray();
         }
 
+        // Absolute path on the MANAGED LINUX HOST (not on this Windows server).
+        // Must stay identical to Install-ClientDebianSSH.ps1's own copy.
+        internal const string LinuxClientEnvFilePath = "/etc/wil-linux-client.env";
+
+        // The mode-600 counterpart to the unit files' EnvironmentFile= line.
+        // Must stay byte-for-byte in sync with New-SystemdEnvFile
+        // (Install-ClientDebianSSH.ps1) - cross-checked by
+        // TestGenerateSystemdEnvFileLinesMatchesPowerShellFormat.
+        // ValidatePosixShellSafe already rejects CR/LF in sharedToken, so the
+        // single-line shape cannot be broken by the value.
+        private static string[] GenerateSystemdEnvFileLines(string sharedToken)
+        {
+            ValidatePosixShellSafe(sharedToken, "sharedToken");
+            return new string[] { "WIL_INGESTION_TOKEN=" + sharedToken };
+        }
+
         // Must stay byte-for-byte in sync with New-SystemdUnitFiles
         // (Install-ClientDebianSSH.ps1) - same two independent generators,
         // one per runtime, that this project already maintains for the
@@ -7476,10 +7511,6 @@ namespace WindowsInventoryLite
             ValidatePosixShellSafe(sharedToken, "sharedToken");
 
             string execStart = installDirectory + "/wil-linux-client --server-url \"" + url + "\"";
-            if (!String.IsNullOrEmpty(sharedToken))
-            {
-                execStart += " --token \"" + sharedToken + "\"";
-            }
 
             List<string> lines = new List<string>();
             lines.Add("[Unit]");
@@ -7487,6 +7518,20 @@ namespace WindowsInventoryLite
             lines.Add("");
             lines.Add("[Service]");
             lines.Add("Type=oneshot");
+            // The token is deliberately NOT on the ExecStart line. A command-line
+            // argument is readable from /proc/<pid>/cmdline by any local user on the
+            // managed host, and from this unit file itself (mode 644). It goes in a
+            // mode-600 EnvironmentFile instead. This project already fixed the
+            // equivalent Windows-side exposure - see docs/threat-model.md, "Storing
+            // dashboard credentials in the Windows Service ImagePath registry key".
+            // Written without systemd's "-" ignore-if-missing prefix on purpose: a
+            // silently-absent token file would put the client back in the "reports
+            // are rejected and nobody knows why" state this project has already been
+            // bitten by once.
+            if (!String.IsNullOrEmpty(sharedToken))
+            {
+                lines.Add("EnvironmentFile=" + LinuxClientEnvFilePath);
+            }
             lines.Add("ExecStart=" + execStart);
             return lines.ToArray();
         }
@@ -7522,10 +7567,6 @@ namespace WindowsInventoryLite
             ValidatePosixShellSafe(sharedToken, "sharedToken");
 
             string execStart = installDirectory + "/wil-linux-client --server-url \"" + statusUrl + "\" --mode status";
-            if (!String.IsNullOrEmpty(sharedToken))
-            {
-                execStart += " --token \"" + sharedToken + "\"";
-            }
 
             List<string> lines = new List<string>();
             lines.Add("[Unit]");
@@ -7533,6 +7574,11 @@ namespace WindowsInventoryLite
             lines.Add("");
             lines.Add("[Service]");
             lines.Add("Type=oneshot");
+            // Same EnvironmentFile reasoning as GenerateSystemdUnitLines above.
+            if (!String.IsNullOrEmpty(sharedToken))
+            {
+                lines.Add("EnvironmentFile=" + LinuxClientEnvFilePath);
+            }
             lines.Add("ExecStart=" + execStart);
             return lines.ToArray();
         }
@@ -7575,6 +7621,14 @@ namespace WindowsInventoryLite
             lines.Add("sudo cp \"$SCRIPT_DIR/wil-linux-client.timer\" /etc/systemd/system/wil-linux-client.timer");
             lines.Add("sudo cp \"$SCRIPT_DIR/wil-linux-client-status.service\" /etc/systemd/system/wil-linux-client-status.service");
             lines.Add("sudo cp \"$SCRIPT_DIR/wil-linux-client-status.timer\" /etc/systemd/system/wil-linux-client-status.timer");
+            // Mode 600, owned by root: this file holds the ingestion token, which
+            // used to sit readable on the ExecStart command line. Conditional
+            // because the package only contains this file when a token is
+            // configured (see ConfigureLinuxClientPackage).
+            lines.Add("if [ -f \"$SCRIPT_DIR/wil-linux-client.env\" ]; then");
+            lines.Add("  sudo cp \"$SCRIPT_DIR/wil-linux-client.env\" " + LinuxClientEnvFilePath);
+            lines.Add("  sudo chmod 600 " + LinuxClientEnvFilePath);
+            lines.Add("fi");
             lines.Add("sudo systemctl daemon-reload");
             lines.Add("sudo systemctl enable --now wil-linux-client.timer");
             lines.Add("sudo systemctl enable --now wil-linux-client-status.timer");
@@ -7604,6 +7658,69 @@ namespace WindowsInventoryLite
             return lines.ToArray();
         }
 
+        private static string TestGenerateSystemdUnitLinesUsesEnvironmentFileNotCommandLineToken()
+        {
+            string[] lines = GenerateSystemdUnitLines("/opt/windows-inventory-lite", "https://example.local/api/v1/linux/inventory", "secret-token");
+            string content = String.Join("\n", lines);
+            // The whole point of the fix: the token must not be readable from
+            // /proc/<pid>/cmdline or from the mode-644 unit file.
+            if (content.Contains("--token"))
+            {
+                return "expected no --token on the ExecStart line once EnvironmentFile is used, got: " + content;
+            }
+            if (content.Contains("secret-token"))
+            {
+                return "expected the token value to appear nowhere in the unit file, got: " + content;
+            }
+            if (!content.Contains("EnvironmentFile=/etc/wil-linux-client.env"))
+            {
+                return "expected EnvironmentFile=/etc/wil-linux-client.env in the [Service] section, got: " + content;
+            }
+            return null;
+        }
+
+        private static string TestGenerateSystemdUnitLinesOmitsEnvironmentFileWhenNoToken()
+        {
+            string[] lines = GenerateSystemdUnitLines("/opt/windows-inventory-lite", "https://example.local/api/v1/linux/inventory", "");
+            string content = String.Join("\n", lines);
+            // No token means no env file is written, and a unit referencing a
+            // nonexistent EnvironmentFile (without the "-" prefix) fails to start.
+            if (content.Contains("EnvironmentFile"))
+            {
+                return "expected no EnvironmentFile line when there is no token, got: " + content;
+            }
+            return null;
+        }
+
+        private static string TestGenerateSystemdStatusUnitLinesUsesEnvironmentFileNotCommandLineToken()
+        {
+            string[] lines = GenerateSystemdStatusUnitLines("/opt/windows-inventory-lite", "https://example.local/api/v1/linux/inventory/service-status", "secret-token");
+            string content = String.Join("\n", lines);
+            if (content.Contains("--token") || content.Contains("secret-token"))
+            {
+                return "expected the status unit to carry no token on its command line, got: " + content;
+            }
+            if (!content.Contains("EnvironmentFile=/etc/wil-linux-client.env"))
+            {
+                return "expected EnvironmentFile=/etc/wil-linux-client.env in the status unit, got: " + content;
+            }
+            if (!content.Contains("--mode status"))
+            {
+                return "expected --mode status to survive the ExecStart rewrite, got: " + content;
+            }
+            return null;
+        }
+
+        private static string TestGenerateSystemdEnvFileLinesMatchesPowerShellFormat()
+        {
+            string[] lines = GenerateSystemdEnvFileLines("secret-token");
+            if (lines.Length != 1 || lines[0] != "WIL_INGESTION_TOKEN=secret-token")
+            {
+                return "expected exactly one line 'WIL_INGESTION_TOKEN=secret-token', got: " + String.Join("\n", lines);
+            }
+            return null;
+        }
+
         private static string TestGenerateSystemdUnitLinesMatchesPowerShellFormat()
         {
             string[] serviceLines = GenerateSystemdUnitLines("/opt/windows-inventory-lite", "https://example.local/api/v1/linux/inventory", "");
@@ -7622,9 +7739,9 @@ namespace WindowsInventoryLite
             }
 
             string[] serviceLinesWithToken = GenerateSystemdUnitLines("/opt/windows-inventory-lite", "https://example.local/api/v1/linux/inventory", "secret-token");
-            if (!String.Join("\n", serviceLinesWithToken).Contains("--token \"secret-token\""))
+            if (!String.Join("\n", serviceLinesWithToken).Contains("EnvironmentFile=/etc/wil-linux-client.env"))
             {
-                return "expected --token \"secret-token\" when sharedToken is provided";
+                return "expected the token to be delivered via EnvironmentFile, not the command line";
             }
 
             string[] timerLines = GenerateSystemdTimerLines(12);
@@ -7934,6 +8051,10 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "MergeServiceStatus sets servicesStatusCollectedAt from the incoming payload", TestMergeServiceStatusSetsTimestamp);
             allPassed &= SelfTestCheck(output, "GenerateSystemdStatusUnitLines matches the PowerShell New-SystemdStatusUnitFiles format", TestGenerateSystemdStatusUnitLinesMatchesPowerShellFormat);
             allPassed &= SelfTestCheck(output, "GenerateSystemdStatusUnitLines rejects shell-unsafe installDirectory", TestGenerateSystemdStatusUnitLinesRejectsUnsafeCharacters);
+            allPassed &= SelfTestCheck(output, "GenerateSystemdUnitLines passes the token via EnvironmentFile, never on the command line", TestGenerateSystemdUnitLinesUsesEnvironmentFileNotCommandLineToken);
+            allPassed &= SelfTestCheck(output, "GenerateSystemdUnitLines omits EnvironmentFile entirely when there is no token", TestGenerateSystemdUnitLinesOmitsEnvironmentFileWhenNoToken);
+            allPassed &= SelfTestCheck(output, "GenerateSystemdStatusUnitLines passes the token via EnvironmentFile, never on the command line", TestGenerateSystemdStatusUnitLinesUsesEnvironmentFileNotCommandLineToken);
+            allPassed &= SelfTestCheck(output, "GenerateSystemdEnvFileLines matches the PowerShell New-SystemdEnvFile format", TestGenerateSystemdEnvFileLinesMatchesPowerShellFormat);
             return allPassed;
         }
 

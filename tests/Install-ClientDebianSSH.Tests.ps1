@@ -34,14 +34,14 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
         $serviceContent | Should -Not -Match '--token'
     }
 
-    It 'New-SystemdUnitFiles includes --token when a token is provided' {
+    It 'New-SystemdUnitFiles delivers the token via EnvironmentFile when a token is provided' {
         $dir = Join-Path -Path $TestDrive -ChildPath 'units2'
         New-Item -Path $dir -ItemType Directory -Force | Out-Null
 
         $result = New-SystemdUnitFiles -Directory $dir -InstallDirectory '/opt/windows-inventory-lite' -Url 'https://example.local/api/v1/linux/inventory' -SharedToken 'secret-token' -Hours 6
 
         $serviceContent = Get-Content -LiteralPath $result.ServicePath -Raw
-        $serviceContent | Should -Match ([regex]::Escape('--token "secret-token"'))
+        $serviceContent | Should -Match ([regex]::Escape('EnvironmentFile=/etc/wil-linux-client.env'))
     }
 
     It 'New-SystemdUnitFiles writes a timer matching the requested interval' {
@@ -67,14 +67,14 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
         $serviceContent | Should -Not -Match '--token'
     }
 
-    It 'New-SystemdStatusUnitFiles includes --token when a token is provided' {
+    It 'New-SystemdStatusUnitFiles delivers the token via EnvironmentFile when a token is provided' {
         $dir = Join-Path -Path $TestDrive -ChildPath 'status-units2'
         New-Item -Path $dir -ItemType Directory -Force | Out-Null
 
         $result = New-SystemdStatusUnitFiles -Directory $dir -InstallDirectory '/opt/windows-inventory-lite' -Url 'https://example.local/api/v1/linux/inventory/service-status' -SharedToken 'secret-token' -Minutes 30
 
         $serviceContent = Get-Content -LiteralPath $result.ServicePath -Raw
-        $serviceContent | Should -Match ([regex]::Escape('--token "secret-token"'))
+        $serviceContent | Should -Match ([regex]::Escape('EnvironmentFile=/etc/wil-linux-client.env'))
     }
 
     It 'New-SystemdStatusUnitFiles writes a timer matching the requested interval in minutes' {
@@ -257,6 +257,42 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
             $options = Get-OpenSshKeyModeOptions -ExpectedHostKey '' -KnownHostsPath $null
             ($options -join ' ') | Should -Match ([regex]::Escape('StrictHostKeyChecking=accept-new'))
             ($options -join ' ') | Should -Not -Match ([regex]::Escape('UserKnownHostsFile'))
+        }
+    }
+
+    Context 'New-SystemdUnitFiles token handling' {
+        It 'keeps the token out of the unit file and points at the env file instead' {
+            $dir = Join-Path -Path $TestDrive -ChildPath 'units-token'
+            New-Item -Path $dir -ItemType Directory -Force | Out-Null
+            $units = New-SystemdUnitFiles -Directory $dir -InstallDirectory '/opt/windows-inventory-lite' -Url 'https://example.local/api/v1/linux/inventory' -SharedToken 'secret-token' -Hours 6
+            $content = Get-Content -LiteralPath $units.ServicePath -Raw
+            $content | Should -Not -Match ([regex]::Escape('--token'))
+            $content | Should -Not -Match ([regex]::Escape('secret-token'))
+            $content | Should -Match ([regex]::Escape('EnvironmentFile=/etc/wil-linux-client.env'))
+        }
+
+        It 'omits EnvironmentFile entirely when there is no token' {
+            $dir = Join-Path -Path $TestDrive -ChildPath 'units-no-token'
+            New-Item -Path $dir -ItemType Directory -Force | Out-Null
+            $units = New-SystemdUnitFiles -Directory $dir -InstallDirectory '/opt/windows-inventory-lite' -Url 'https://example.local/api/v1/linux/inventory' -SharedToken '' -Hours 6
+            (Get-Content -LiteralPath $units.ServicePath -Raw) | Should -Not -Match 'EnvironmentFile'
+        }
+
+        It 'produces a status unit with the env file and no command-line token' {
+            $dir = Join-Path -Path $TestDrive -ChildPath 'status-units'
+            New-Item -Path $dir -ItemType Directory -Force | Out-Null
+            $units = New-SystemdStatusUnitFiles -Directory $dir -InstallDirectory '/opt/windows-inventory-lite' -Url 'https://example.local/api/v1/linux/inventory/service-status' -SharedToken 'secret-token' -Minutes 30
+            $content = Get-Content -LiteralPath $units.ServicePath -Raw
+            $content | Should -Not -Match ([regex]::Escape('secret-token'))
+            $content | Should -Match ([regex]::Escape('EnvironmentFile=/etc/wil-linux-client.env'))
+            $content | Should -Match ([regex]::Escape('--mode status'))
+        }
+
+        It 'writes an env file whose single line matches the C# generator byte-for-byte' {
+            $dir = Join-Path -Path $TestDrive -ChildPath 'env-file'
+            New-Item -Path $dir -ItemType Directory -Force | Out-Null
+            $env = New-SystemdEnvFile -Directory $dir -SharedToken 'secret-token'
+            (Get-Content -LiteralPath $env.EnvPath -Raw).TrimEnd("`n") | Should -Be 'WIL_INGESTION_TOKEN=secret-token'
         }
     }
 }

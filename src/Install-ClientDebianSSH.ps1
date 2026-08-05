@@ -51,6 +51,10 @@ $ErrorActionPreference = 'Stop'
 
 $script:usingPassword = $PSCmdlet.ParameterSetName -eq 'Password'
 
+# Absolute path on the MANAGED LINUX HOST. Must stay identical to
+# WindowsInventoryLiteServer.cs's LinuxClientEnvFilePath.
+$script:LinuxClientEnvFilePath = '/etc/wil-linux-client.env'
+
 # POSIX shell metacharacters - InstallPath/ServerUrl/Token end up
 # interpolated into a remote shell command string built in this script
 # (see Invoke-RemoteCommand's callers), so a value containing any of
@@ -104,8 +108,18 @@ function New-SystemdUnitFiles {
     Test-PosixShellSafe -Value $SharedToken -FieldName 'Token'
 
     $execStart = "$InstallDirectory/wil-linux-client --server-url `"$Url`""
+
+    # The token is deliberately NOT on the ExecStart line - a command-line
+    # argument is readable from /proc/<pid>/cmdline by any local user on the
+    # managed host, and from this unit file itself (mode 644). It goes in a
+    # mode-600 EnvironmentFile instead, mirroring the fix this project already
+    # applied to the Windows service ImagePath (see docs/threat-model.md).
+    # Systemd's "-" ignore-if-missing prefix is deliberately NOT used: a
+    # silently-absent token file would put the client back in the "reports are
+    # rejected and nobody knows why" state.
+    $environmentFileLine = ''
     if ($SharedToken) {
-        $execStart += " --token `"$SharedToken`""
+        $environmentFileLine = "EnvironmentFile=$script:LinuxClientEnvFilePath`n"
     }
 
     $serviceContent = @"
@@ -114,7 +128,7 @@ Description=Windows Inventory Lite - Linux client (one-shot report)
 
 [Service]
 Type=oneshot
-ExecStart=$execStart
+${environmentFileLine}ExecStart=$execStart
 "@
 
     $timerContent = @"
@@ -157,8 +171,11 @@ function New-SystemdStatusUnitFiles {
     Test-PosixShellSafe -Value $SharedToken -FieldName 'Token'
 
     $execStart = "$InstallDirectory/wil-linux-client --server-url `"$Url`" --mode status"
+
+    # Same EnvironmentFile reasoning as New-SystemdUnitFiles above.
+    $environmentFileLine = ''
     if ($SharedToken) {
-        $execStart += " --token `"$SharedToken`""
+        $environmentFileLine = "EnvironmentFile=$script:LinuxClientEnvFilePath`n"
     }
 
     $serviceContent = @"
@@ -167,7 +184,7 @@ Description=Windows Inventory Lite - Linux client service-status ping (one-shot 
 
 [Service]
 Type=oneshot
-ExecStart=$execStart
+${environmentFileLine}ExecStart=$execStart
 "@
 
     $timerContent = @"
@@ -189,6 +206,24 @@ WantedBy=timers.target
     [System.IO.File]::WriteAllText($timerPath, $timerContent, (New-Object System.Text.UTF8Encoding($false)))
 
     return @{ ServicePath = $servicePath; TimerPath = $timerPath }
+}
+
+# Writes the mode-600 counterpart to the unit files' EnvironmentFile= line.
+# The 600 mode is applied on the TARGET host by the install command chain -
+# this only stages the content locally. Must stay byte-for-byte in sync with
+# GenerateSystemdEnvFileLines (WindowsInventoryLiteServer.cs). Pure function
+# of its parameters apart from the file write, same as its siblings above.
+function New-SystemdEnvFile {
+    param(
+        [string]$Directory,
+        [string]$SharedToken
+    )
+
+    Test-PosixShellSafe -Value $SharedToken -FieldName 'Token'
+
+    $envPath = Join-Path -Path $Directory -ChildPath 'wil-linux-client.env'
+    [System.IO.File]::WriteAllText($envPath, "WIL_INGESTION_TOKEN=$SharedToken`n", (New-Object System.Text.UTF8Encoding($false)))
+    return @{ EnvPath = $envPath }
 }
 
 # $ErrorActionPreference = 'Stop' (set script-wide, above) turns EVERY line
@@ -542,6 +577,11 @@ if ($MyInvocation.InvocationName -ne '.') {
         $statusUrl = $ServerUrl.TrimEnd('/') + '/service-status'
         $statusUnits = New-SystemdStatusUnitFiles -Directory $stagingDir -InstallDirectory $InstallPath -Url $statusUrl -SharedToken $Token -Minutes $StatusIntervalMinutes
 
+        $envFile = $null
+        if ($Token) {
+            $envFile = New-SystemdEnvFile -Directory $stagingDir -SharedToken $Token
+        }
+
         foreach ($computer in $ComputerName) {
             try {
                 Write-Host "Connecting: $computer"
@@ -569,15 +609,29 @@ if ($MyInvocation.InvocationName -ne '.') {
                 Copy-FileToRemote -TargetComputer $computer -LocalPath $units.TimerPath -RemotePath "$remoteTmpDir/wil-linux-client.timer" -ExpectedHostKey $ExpectedHostKey
                 Copy-FileToRemote -TargetComputer $computer -LocalPath $statusUnits.ServicePath -RemotePath "$remoteTmpDir/wil-linux-client-status.service" -ExpectedHostKey $ExpectedHostKey
                 Copy-FileToRemote -TargetComputer $computer -LocalPath $statusUnits.TimerPath -RemotePath "$remoteTmpDir/wil-linux-client-status.timer" -ExpectedHostKey $ExpectedHostKey
+                if ($envFile) {
+                    Copy-FileToRemote -TargetComputer $computer -LocalPath $envFile.EnvPath -RemotePath "$remoteTmpDir/wil-linux-client.env" -ExpectedHostKey $ExpectedHostKey
+                }
 
                 Write-Host "Installing service: $computer"
                 Test-PosixShellSafe -Value $InstallPath -FieldName 'InstallPath'
+                # chmod BEFORE the file is in place would race; chmod right after
+                # the mv is the smallest window available over a single SSH command
+                # chain. 600 + root ownership (the mv runs under sudo for a non-root
+                # connecting user, and as root directly otherwise) is what keeps the
+                # ingestion token off every other local user's radar.
+                $envInstallFragment = ''
+                if ($envFile) {
+                    $envInstallFragment = "${sudoPrefix}mv $remoteTmpDir/wil-linux-client.env $script:LinuxClientEnvFilePath && " +
+                        "${sudoPrefix}chmod 600 $script:LinuxClientEnvFilePath && "
+                }
                 $installCommand = "${sudoPrefix}mv $remoteTmpDir/wil-linux-client $InstallPath/wil-linux-client && " +
                     "${sudoPrefix}chmod 755 $InstallPath/wil-linux-client && " +
                     "${sudoPrefix}mv $remoteTmpDir/wil-linux-client.service /etc/systemd/system/wil-linux-client.service && " +
                     "${sudoPrefix}mv $remoteTmpDir/wil-linux-client.timer /etc/systemd/system/wil-linux-client.timer && " +
                     "${sudoPrefix}mv $remoteTmpDir/wil-linux-client-status.service /etc/systemd/system/wil-linux-client-status.service && " +
                     "${sudoPrefix}mv $remoteTmpDir/wil-linux-client-status.timer /etc/systemd/system/wil-linux-client-status.timer && " +
+                    $envInstallFragment +
                     "${sudoPrefix}rm -rf $remoteTmpDir && " +
                     "${sudoPrefix}systemctl daemon-reload && " +
                     "${sudoPrefix}systemctl enable --now wil-linux-client.timer && " +
