@@ -22,7 +22,7 @@ jobs:
       # Windows PowerShell 5.1 (not pwsh/PowerShell 7): this project's tests
       # touch System.Web.Extensions types that only resolve via the .NET
       # Framework GAC, which PowerShell 7's .NET Core runtime doesn't have -
-      # pwsh reproducibly fails Test-InstallServerRefreshOnly with a
+      # pwsh reproducibly fails the Get-InstallServerMode tests with a
       # WebResourceAttribute load error unrelated to the code under test.
       # -SkipPublisherCheck/-Force are needed to replace Windows PowerShell
       # 5.1's own pre-installed Pester 3.4.0 (different signing cert) with

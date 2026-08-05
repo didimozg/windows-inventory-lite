@@ -68,6 +68,57 @@ Describe 'Windows Inventory Lite Install-Server ingestion token resolution' {
     }
 }
 
+# Same AST-extraction approach as above, applied to the functions that
+# guard config-file ACL ordering (3e) and install-path validation (3c-PS).
+# Write-ServerConfig depends on Set-RestrictedFileAcl and ConvertTo-JsonString,
+# so all three are extracted together; Test-BatchSafeValue is independent.
+Describe 'Windows Inventory Lite Install-Server config and validation helpers' {
+    BeforeAll {
+        $script:ProjectRoot = Split-Path -Parent $PSScriptRoot
+        $scriptPath = Join-Path -Path $script:ProjectRoot -ChildPath 'src\Install-Server.ps1'
+        $scriptContent = Get-Content -LiteralPath $scriptPath -Raw
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($scriptContent, [ref]$tokens, [ref]$errors)
+        $targetNames = @('Write-ServerConfig', 'Set-RestrictedFileAcl', 'ConvertTo-JsonString', 'Test-BatchSafeValue')
+        $functionAsts = $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $targetNames -contains $node.Name
+        }, $true)
+        if ($functionAsts.Count -ne 4) {
+            throw "Expected to find Write-ServerConfig, Set-RestrictedFileAcl, ConvertTo-JsonString, and Test-BatchSafeValue in Install-Server.ps1, found $($functionAsts.Count)"
+        }
+        foreach ($functionAst in $functionAsts) {
+            . ([scriptblock]::Create($functionAst.Extent.Text))
+        }
+    }
+
+    Context 'Write-ServerConfig ACL ordering' {
+        It 'restricts the config file before any secret is written into it' {
+            $configPath = Join-Path -Path $TestDrive -ChildPath 'acl-order\server-config.json'
+            Write-ServerConfig -Path $configPath -Config @{ Token = 'a-secret-value' }
+
+            # The file must exist and be readable back - the point of the test is
+            # that Write-ServerConfig itself performs the hardening, so there is no
+            # window where a DPAPI-scoped secret sits under inherited ProgramData
+            # permissions.
+            (Get-Content -LiteralPath $configPath -Raw) | Should -Match 'a-secret-value'
+            $acl = Get-Acl -LiteralPath $configPath
+            $acl.AreAccessRulesProtected | Should -BeTrue
+        }
+    }
+
+    Context 'Test-BatchSafeValue coverage' {
+        It 'rejects a LinuxClientPackagePath containing a cmd.exe metacharacter' {
+            { Test-BatchSafeValue -Value 'C:\pkg & calc.exe' -FieldName 'LinuxClientPackagePath' } | Should -Throw
+        }
+
+        It 'accepts an ordinary ProgramData path' {
+            { Test-BatchSafeValue -Value 'C:\ProgramData\WindowsInventoryLite\linux-client-package' -FieldName 'LinuxClientPackagePath' } | Should -Not -Throw
+        }
+    }
+}
+
 # Install-Server.ps1 falls back to the git-tracked linux-client/prebuilt/
 # binary on machines without the Go toolchain (see the "No Go toolchain"
 # branch there) - this only helps if that committed binary is actually kept

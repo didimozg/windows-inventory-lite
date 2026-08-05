@@ -192,11 +192,6 @@ function Test-BatchSafeValue {
         throw "$FieldName contains a character that is not allowed here (double quote, &, |, <, >, ^, or a line break)."
     }
 }
-Test-BatchSafeValue -Value $DataPath -FieldName 'DataPath'
-Test-BatchSafeValue -Value $ContentPath -FieldName 'ContentPath'
-Test-BatchSafeValue -Value $ClientPackagePath -FieldName 'ClientPackagePath'
-Test-BatchSafeValue -Value $ConfigPath -FieldName 'ConfigPath'
-
 function Invoke-ServiceControl {
     param(
         [Parameter(Mandatory = $true)]
@@ -365,6 +360,16 @@ function Write-ServerConfig {
     }
 
     $json = '{' + (($items.ToArray()) -join ',') + '}'
+
+    # Create empty, restrict, THEN write. On a first install the previous order
+    # (write, then Set-RestrictedFileAcl at the call site) left the file sitting
+    # under inherited ProgramData permissions for the whole window between the two
+    # - readable by any local process, while already containing the
+    # DPAPI-LocalMachine-scoped Token/WebPassword/AdPassword values.
+    if (-not (Test-Path -LiteralPath $Path)) {
+        New-Item -Path $Path -ItemType File -Force | Out-Null
+    }
+    Set-RestrictedFileAcl -FilePath $Path
     [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
 }
 
@@ -1031,6 +1036,22 @@ function Set-RestrictedFileAcl {
 # silently revert to whatever port was set at install time. The server reads
 # ListenPrefix/HttpsPort/EnableHttp from --config on every startup instead,
 # same as WebUsername, UseHttps, and the other dashboard-only settings.
+# Validated HERE, not at the top of the script: every one of these paths can be
+# reassigned from the saved server-config.json between the top of the script and
+# this point (see the "if (-not $DataPath)" blocks and friends above), so
+# validating on entry would guard values that no longer exist by the time they
+# are interpolated into the sc.exe binPath below. $LinuxClientPackagePath was
+# never on this list at all.
+Test-BatchSafeValue -Value $DataPath -FieldName 'DataPath'
+Test-BatchSafeValue -Value $ContentPath -FieldName 'ContentPath'
+Test-BatchSafeValue -Value $ClientPackagePath -FieldName 'ClientPackagePath'
+Test-BatchSafeValue -Value $LinuxClientPackagePath -FieldName 'LinuxClientPackagePath'
+Test-BatchSafeValue -Value $ConfigPath -FieldName 'ConfigPath'
+Test-BatchSafeValue -Value $InstallPath -FieldName 'InstallPath'
+Test-BatchSafeValue -Value $winRmInstallerPath -FieldName 'WinRmInstallerPath'
+Test-BatchSafeValue -Value $winRmUninstallerPath -FieldName 'WinRmUninstallerPath'
+Test-BatchSafeValue -Value $linuxSshInstallerPath -FieldName 'LinuxSshInstallerPath'
+Test-BatchSafeValue -Value $linuxSshUninstallerPath -FieldName 'LinuxSshUninstallerPath'
 $serviceCommand = '"' + (ConvertTo-ServiceArgValue $servicePath) + '" --data "' + (ConvertTo-ServiceArgValue $DataPath) + '" --content "' + (ConvertTo-ServiceArgValue $ContentPath) + '" --client-package "' + (ConvertTo-ServiceArgValue $ClientPackagePath) + '" --linux-client-package "' + (ConvertTo-ServiceArgValue $LinuxClientPackagePath) + '" --winrm-installer "' + (ConvertTo-ServiceArgValue $winRmInstallerPath) + '" --winrm-uninstaller "' + (ConvertTo-ServiceArgValue $winRmUninstallerPath) + '" --linux-ssh-installer "' + (ConvertTo-ServiceArgValue $linuxSshInstallerPath) + '" --linux-ssh-uninstaller "' + (ConvertTo-ServiceArgValue $linuxSshUninstallerPath) + '"'
 $serviceCommand += ' --install-log-retention-days ' + $InstallLogRetentionDays
 $serviceCommand += ' --config "' + (ConvertTo-ServiceArgValue $ConfigPath) + '"'
