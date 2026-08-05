@@ -227,6 +227,38 @@ function New-PinnedKnownHostsFile {
     return $knownHostsPath
 }
 
+# The -pwfile temp file holds the target's password in plaintext. Deleting it
+# with -ErrorAction SilentlyContinue meant a genuine deletion failure (file
+# locked by an AV scanner, disk full, permissions) left that credential sitting
+# in %TEMP% indefinitely with nobody told. Overwrite the content with
+# same-length filler first, so even a failed delete leaves no readable password,
+# and warn loudly if the delete itself still fails.
+function Clear-TempPasswordFile {
+    [CmdletBinding()]
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+
+    try {
+        $length = (Get-Item -LiteralPath $Path).Length
+        if ($length -gt 0) {
+            [System.IO.File]::WriteAllBytes($Path, (New-Object byte[] $length))
+        }
+    }
+    catch {
+        Write-Warning ("Could not overwrite the temporary credential file '{0}': {1}" -f $Path, $_.Exception.Message)
+    }
+
+    try {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+    }
+    catch {
+        Write-Warning ("Could not delete the temporary credential file '{0}' - its contents were overwritten, but delete it manually: {1}" -f $Path, $_.Exception.Message)
+    }
+}
+
 function Invoke-PlinkWithPasswordFile {
     param(
         [string]$ExePath,
@@ -251,6 +283,10 @@ function Invoke-PlinkWithPasswordFile {
             $fullArgs += @('-hostkey', $ExpectedHostKey)
         }
         $fullArgs += $Arguments
+        # Reset first: if the native command fails to launch at all, $LASTEXITCODE
+        # keeps whatever the PREVIOUS native call left behind - which, after a
+        # successful ssh.exe, is 0, silently turning a failed launch into a pass.
+        $global:LASTEXITCODE = 0
         $output = Invoke-NativeAllowingStderr { & $ExePath @fullArgs 2>&1 }
 
         if ($LASTEXITCODE -ne 0) {
@@ -264,7 +300,7 @@ function Invoke-PlinkWithPasswordFile {
         return $output
     }
     finally {
-        Remove-Item -LiteralPath $pwFile -Force -ErrorAction SilentlyContinue
+        Clear-TempPasswordFile -Path $pwFile
     }
 }
 
@@ -287,6 +323,7 @@ function Invoke-RemoteCommand {
                 $knownHostsPath = New-PinnedKnownHostsFile -TargetComputer $TargetComputer -ExpectedHostKey $ExpectedHostKey
             }
             $hostKeyOptions = Get-OpenSshKeyModeOptions -ExpectedHostKey $ExpectedHostKey -KnownHostsPath $knownHostsPath
+            $global:LASTEXITCODE = 0
             $output = Invoke-NativeAllowingStderr { & ssh.exe -i $script:KeyPath -o BatchMode=yes @hostKeyOptions -o ConnectTimeout=10 "$script:CredentialUsername@$TargetComputer" $Command 2>&1 }
         }
         finally {
@@ -322,6 +359,17 @@ if ($MyInvocation.InvocationName -ne '.') {
     else {
         if (-not (Test-Path -LiteralPath $KeyPath)) {
             throw "SSH private key was not found: $KeyPath"
+        }
+        # This script only runs remote commands, never scp - so ssh.exe alone,
+        # plus the keyscan/keygen pair when a host key is pinned.
+        $requiredOpenSshTools = @('ssh.exe')
+        if ($ExpectedHostKey) {
+            $requiredOpenSshTools += @('ssh-keyscan.exe', 'ssh-keygen.exe')
+        }
+        foreach ($opensshTool in $requiredOpenSshTools) {
+            if (-not (Get-Command -Name $opensshTool -ErrorAction SilentlyContinue)) {
+                throw "Required tool was not found on PATH: $opensshTool. It ships with the Windows OpenSSH client feature, which SSH-key-mode connections require."
+            }
         }
     }
 

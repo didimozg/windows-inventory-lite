@@ -206,6 +206,38 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
         }
     }
 
+    Context 'Clear-TempPasswordFile' {
+        It 'overwrites the file content before deleting it' {
+            $file = Join-Path -Path $TestDrive -ChildPath 'pw-overwrite.txt'
+            [System.IO.File]::WriteAllText($file, 'super-secret-password')
+            Clear-TempPasswordFile -Path $file
+            Test-Path -LiteralPath $file | Should -BeFalse
+        }
+
+        It 'warns instead of failing silently when the file cannot be deleted' {
+            $file = Join-Path -Path $TestDrive -ChildPath 'pw-locked.txt'
+            [System.IO.File]::WriteAllText($file, 'super-secret-password')
+            $stream = [System.IO.File]::Open($file, 'Open', 'ReadWrite', 'None')
+            try {
+                # A plaintext credential left behind in %TEMP% indefinitely must not
+                # be silent - the old code used -ErrorAction SilentlyContinue.
+                $warnings = @()
+                Clear-TempPasswordFile -Path $file -WarningVariable warnings -WarningAction SilentlyContinue
+                $warnings.Count | Should -BeGreaterThan 0
+            }
+            finally {
+                $stream.Close()
+                Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It 'does not warn when the file is already gone' {
+            $warnings = @()
+            Clear-TempPasswordFile -Path (Join-Path -Path $TestDrive -ChildPath 'never-existed.txt') -WarningVariable warnings -WarningAction SilentlyContinue
+            $warnings.Count | Should -Be 0
+        }
+    }
+
     Context 'Select-KnownHostsLineByFingerprint' {
         BeforeAll {
             # Real ssh-keyscan / ssh-keygen -lf output captured from a live host.

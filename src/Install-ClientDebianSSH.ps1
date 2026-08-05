@@ -398,6 +398,38 @@ function New-PinnedKnownHostsFile {
 # mismatched host key a clean, immediate failure instead of a prompt this
 # function has no way to answer - see Invoke-RemoteCommand's error
 # handling for the operator-facing message that results.
+# The -pwfile temp file holds the target's password in plaintext. Deleting it
+# with -ErrorAction SilentlyContinue meant a genuine deletion failure (file
+# locked by an AV scanner, disk full, permissions) left that credential sitting
+# in %TEMP% indefinitely with nobody told. Overwrite the content with
+# same-length filler first, so even a failed delete leaves no readable password,
+# and warn loudly if the delete itself still fails.
+function Clear-TempPasswordFile {
+    [CmdletBinding()]
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+
+    try {
+        $length = (Get-Item -LiteralPath $Path).Length
+        if ($length -gt 0) {
+            [System.IO.File]::WriteAllBytes($Path, (New-Object byte[] $length))
+        }
+    }
+    catch {
+        Write-Warning ("Could not overwrite the temporary credential file '{0}': {1}" -f $Path, $_.Exception.Message)
+    }
+
+    try {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+    }
+    catch {
+        Write-Warning ("Could not delete the temporary credential file '{0}' - its contents were overwritten, but delete it manually: {1}" -f $Path, $_.Exception.Message)
+    }
+}
+
 function Invoke-PlinkWithPasswordFile {
     param(
         [string]$ExePath,
@@ -422,6 +454,10 @@ function Invoke-PlinkWithPasswordFile {
             $fullArgs += @('-hostkey', $ExpectedHostKey)
         }
         $fullArgs += $Arguments
+        # Reset first: if the native command fails to launch at all, $LASTEXITCODE
+        # keeps whatever the PREVIOUS native call left behind - which, after a
+        # successful ssh.exe, is 0, silently turning a failed launch into a pass.
+        $global:LASTEXITCODE = 0
         $output = Invoke-NativeAllowingStderr { & $ExePath @fullArgs 2>&1 }
 
         if ($LASTEXITCODE -ne 0) {
@@ -438,7 +474,7 @@ function Invoke-PlinkWithPasswordFile {
         return $output
     }
     finally {
-        Remove-Item -LiteralPath $pwFile -Force -ErrorAction SilentlyContinue
+        Clear-TempPasswordFile -Path $pwFile
     }
 }
 
@@ -467,6 +503,7 @@ function Invoke-RemoteCommand {
                 $knownHostsPath = New-PinnedKnownHostsFile -TargetComputer $TargetComputer -ExpectedHostKey $ExpectedHostKey
             }
             $hostKeyOptions = Get-OpenSshKeyModeOptions -ExpectedHostKey $ExpectedHostKey -KnownHostsPath $knownHostsPath
+            $global:LASTEXITCODE = 0
             $output = Invoke-NativeAllowingStderr { & ssh.exe -i $script:KeyPath -o BatchMode=yes @hostKeyOptions -o ConnectTimeout=10 "$script:CredentialUsername@$TargetComputer" $Command 2>&1 }
         }
         finally {
@@ -501,6 +538,7 @@ function Copy-FileToRemote {
                 $knownHostsPath = New-PinnedKnownHostsFile -TargetComputer $TargetComputer -ExpectedHostKey $ExpectedHostKey
             }
             $hostKeyOptions = Get-OpenSshKeyModeOptions -ExpectedHostKey $ExpectedHostKey -KnownHostsPath $knownHostsPath
+            $global:LASTEXITCODE = 0
             Invoke-NativeAllowingStderr { & scp.exe -i $script:KeyPath -o BatchMode=yes @hostKeyOptions -o ConnectTimeout=10 $LocalPath "${script:CredentialUsername}@${TargetComputer}:$RemotePath" 2>&1 } | Out-Null
         }
         finally {
@@ -547,15 +585,22 @@ if ($MyInvocation.InvocationName -ne '.') {
         if (-not (Test-Path -LiteralPath $KeyPath)) {
             throw "SSH private key was not found: $KeyPath"
         }
-        # Host-key pinning on this path needs both of these (see
-        # New-PinnedKnownHostsFile). They ship with Windows' built-in OpenSSH
-        # client alongside ssh.exe, so a missing one means OpenSSH is not
-        # installed - fail with that, not with an opaque error mid-push.
+        # The password path already checks plink.exe/pscp.exe exist before use;
+        # the key path only ever checked the key file. Combined with a stale
+        # $LASTEXITCODE (see below), a missing scp.exe after a successful ssh.exe
+        # call read the previous call's success code and reported a push that
+        # copied nothing as a success. ssh-keyscan/ssh-keygen are only needed when
+        # a host key is actually pinned (see New-PinnedKnownHostsFile). All four
+        # ship with Windows' built-in OpenSSH client feature, so a missing one
+        # means OpenSSH is not installed - fail with that, not with an opaque
+        # error mid-push.
+        $requiredOpenSshTools = @('ssh.exe', 'scp.exe')
         if ($ExpectedHostKey) {
-            foreach ($opensshTool in @('ssh-keyscan.exe', 'ssh-keygen.exe')) {
-                if (-not (Get-Command -Name $opensshTool -ErrorAction SilentlyContinue)) {
-                    throw "Required tool was not found on PATH: $opensshTool. It ships with the Windows OpenSSH client feature, which is required for SSH-key-mode pushes to targets with pinned fingerprints."
-                }
+            $requiredOpenSshTools += @('ssh-keyscan.exe', 'ssh-keygen.exe')
+        }
+        foreach ($opensshTool in $requiredOpenSshTools) {
+            if (-not (Get-Command -Name $opensshTool -ErrorAction SilentlyContinue)) {
+                throw "Required tool was not found on PATH: $opensshTool. It ships with the Windows OpenSSH client feature, which SSH-key-mode pushes require."
             }
         }
     }
