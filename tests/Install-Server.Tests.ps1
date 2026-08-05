@@ -95,16 +95,49 @@ Describe 'Windows Inventory Lite Install-Server config and validation helpers' {
 
     Context 'Write-ServerConfig ACL ordering' {
         It 'restricts the config file before any secret is written into it' {
+            # Install-Server.ps1 already requires full Administrator privileges to
+            # run for real (it calls sc.exe create), so Write-ServerConfig hardening
+            # the file to Administrators+SYSTEM before writing into it does not add
+            # any new privilege requirement - it just moves an existing one earlier.
+            # A non-admin account (as this test process may be, depending on the
+            # environment) can still create and restrict the file, but can no longer
+            # write into it afterward. Branch on elevation so the test asserts
+            # something real either way, instead of silently no-op'ing on a
+            # non-admin box: elevated runs get the full happy-path assertion,
+            # non-elevated runs prove the ACL is enforced by observing the expected
+            # throw, plus an independent check of Set-RestrictedFileAcl itself.
+            $isElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
             $configPath = Join-Path -Path $TestDrive -ChildPath 'acl-order\server-config.json'
-            Write-ServerConfig -Path $configPath -Config @{ Token = 'a-secret-value' }
 
-            # The file must exist and be readable back - the point of the test is
-            # that Write-ServerConfig itself performs the hardening, so there is no
-            # window where a DPAPI-scoped secret sits under inherited ProgramData
-            # permissions.
-            (Get-Content -LiteralPath $configPath -Raw) | Should -Match 'a-secret-value'
-            $acl = Get-Acl -LiteralPath $configPath
-            $acl.AreAccessRulesProtected | Should -BeTrue
+            if ($isElevated) {
+                Write-ServerConfig -Path $configPath -Config @{ Token = 'a-secret-value' }
+
+                # The file must exist and be readable back - the point of the test is
+                # that Write-ServerConfig itself performs the hardening, so there is no
+                # window where a DPAPI-scoped secret sits under inherited ProgramData
+                # permissions.
+                (Get-Content -LiteralPath $configPath -Raw) | Should -Match 'a-secret-value'
+                $acl = Get-Acl -LiteralPath $configPath
+                $acl.AreAccessRulesProtected | Should -BeTrue
+            }
+            else {
+                # Write-ServerConfig hardens the file to Administrators+SYSTEM before
+                # writing the JSON into it, so a non-admin caller (this process) can no
+                # longer complete the write. The throw itself is meaningful: a no-op or
+                # broken ACL would let the write through and would NOT throw here.
+                { Write-ServerConfig -Path $configPath -Config @{ Token = 'a-secret-value' } } | Should -Throw
+
+                # Independently verify Set-RestrictedFileAcl's own ACL-setting behavior
+                # against a plain throwaway scratch file, since the throw above means a
+                # non-elevated run never reaches an ACL assertion via Write-ServerConfig's
+                # own output file (this process can restrict the file, just not then
+                # write into it - which is exactly the behavior under test).
+                $scratchPath = Join-Path -Path $TestDrive -ChildPath 'scratch.txt'
+                New-Item -Path $scratchPath -ItemType File -Force | Out-Null
+                Set-RestrictedFileAcl -FilePath $scratchPath
+                $scratchAcl = Get-Acl -LiteralPath $scratchPath
+                $scratchAcl.AreAccessRulesProtected | Should -BeTrue
+            }
         }
     }
 
