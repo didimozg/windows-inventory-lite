@@ -569,9 +569,18 @@ if (-not $LinuxClientBinarySourcePath) {
         & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-LinuxClient.ps1') -OutputPath $defaultLinuxClientBinarySourcePath
         $LinuxClientBinarySourcePath = $defaultLinuxClientBinarySourcePath
     }
-    elseif (Test-Path -LiteralPath $defaultLinuxClientBinarySourcePath) {
-        Write-Warning "Go toolchain not found on PATH - reusing the existing Linux client binary at $defaultLinuxClientBinarySourcePath instead of rebuilding it. Install Go (https://go.dev/dl/) so future installs/updates always ship the current version."
-        $LinuxClientBinarySourcePath = $defaultLinuxClientBinarySourcePath
+    else {
+        # No Go toolchain on this machine - fall back to the git-tracked
+        # prebuilt binary (linux-client/prebuilt/) instead of whatever might
+        # or might not already be sitting in the ephemeral build\ path.
+        # Present in every checkout, not just ones where someone happened to
+        # build locally before - a fresh checkout on a Go-less machine used
+        # to get nothing at all here.
+        $prebuiltLinuxClientBinaryPath = Join-Path -Path $projectRoot -ChildPath 'linux-client\prebuilt\wil-linux-client'
+        if (Test-Path -LiteralPath $prebuiltLinuxClientBinaryPath) {
+            Write-Warning "Go toolchain not found on PATH - using the git-tracked prebuilt Linux client binary at $prebuiltLinuxClientBinaryPath instead of building from source. Install Go (https://go.dev/dl/) if you want this machine to always build the current source directly."
+            $LinuxClientBinarySourcePath = $prebuiltLinuxClientBinaryPath
+        }
     }
 }
 

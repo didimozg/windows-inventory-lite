@@ -67,3 +67,27 @@ Describe 'Windows Inventory Lite Install-Server ingestion token resolution' {
         $first | Should -Not -Be $second
     }
 }
+
+# Install-Server.ps1 falls back to the git-tracked linux-client/prebuilt/
+# binary on machines without the Go toolchain (see the "No Go toolchain"
+# branch there) - this only helps if that committed binary is actually kept
+# current. Nothing else catches a version bumped in Build-LinuxClient.ps1
+# without a matching rebuild+recommit, since the fallback path only runs on
+# a machine without Go, where nobody would notice a stale version until an
+# admin happens to compare it against the dashboard.
+Describe 'Committed Linux client prebuilt binary stays in sync with Build-LinuxClient.ps1' {
+    It 'wil-linux-client.version matches the script''s own default -Version' {
+        $projectRoot = Split-Path -Parent $PSScriptRoot
+        $buildScriptContent = Get-Content -LiteralPath (Join-Path -Path $projectRoot -ChildPath 'src\Build-LinuxClient.ps1') -Raw
+        if ($buildScriptContent -notmatch "\`$Version\s*=\s*'([^']+)'") {
+            throw "Could not find a `$Version default in Build-LinuxClient.ps1 - has its param() block changed shape?"
+        }
+        $scriptDefaultVersion = $Matches[1]
+
+        $versionFilePath = Join-Path -Path $projectRoot -ChildPath 'linux-client\prebuilt\wil-linux-client.version'
+        Test-Path -LiteralPath $versionFilePath | Should -Be $true -Because 'linux-client/prebuilt/wil-linux-client.version should be committed to the repo'
+        $committedVersion = (Get-Content -LiteralPath $versionFilePath -Raw).Trim()
+
+        $committedVersion | Should -Be $scriptDefaultVersion -Because 'the committed prebuilt binary must be rebuilt and recommitted whenever Build-LinuxClient.ps1''s default -Version changes, or machines without Go will silently keep shipping an old client'
+    }
+}
