@@ -50,7 +50,14 @@ $env:CGO_ENABLED = '0'
 
 Push-Location $sourceDir
 try {
-    & go build -ldflags "-X main.ClientVersion=$Version" -o $OutputPath .
+    # -trimpath strips the local build machine's absolute source paths
+    # (e.g. C:\Users\<name>\...) from the compiled binary's embedded debug
+    # info - without it, anyone inspecting the binary (`strings` or a
+    # panic/stack trace) sees the exact filesystem layout, including the
+    # Windows username, of whichever machine built it. This binary is
+    # committed to the repo (linux-client/prebuilt/), so that would leak
+    # into the public history on every rebuild.
+    & go build -trimpath -ldflags "-X main.ClientVersion=$Version" -o $OutputPath .
     if ($LASTEXITCODE -ne 0) {
         throw "go build failed with exit code $LASTEXITCODE."
     }
