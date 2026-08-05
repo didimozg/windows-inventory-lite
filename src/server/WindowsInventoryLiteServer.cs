@@ -1645,6 +1645,14 @@ namespace WindowsInventoryLite
             try
             {
                 inventory = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                // A body of literally "null" parses fine and yields null, making the
+                // ContainsKey call below an unauthenticated NullReferenceException
+                // that writes a full stack trace to the Windows Event Log. Same guard
+                // every authenticated handler in this file already has.
+                if (inventory == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
             }
             catch
             {
@@ -2043,6 +2051,14 @@ namespace WindowsInventoryLite
             try
             {
                 inventory = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                // A body of literally "null" parses fine and yields null, making the
+                // ContainsKey call below an unauthenticated NullReferenceException
+                // that writes a full stack trace to the Windows Event Log. Same guard
+                // every authenticated handler in this file already has.
+                if (inventory == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
             }
             catch
             {
@@ -2099,6 +2115,14 @@ namespace WindowsInventoryLite
             try
             {
                 payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                // A body of literally "null" parses fine and yields null, making the
+                // ContainsKey call below an unauthenticated NullReferenceException
+                // that writes a full stack trace to the Windows Event Log. Same guard
+                // every authenticated handler in this file already has.
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
             }
             catch
             {
@@ -2573,6 +2597,13 @@ namespace WindowsInventoryLite
             if (String.IsNullOrEmpty(username) || (authMode == "credentials" && String.IsNullOrEmpty(password)))
             {
                 DebugLogger.Log(options, "Schedule", "Scheduled Linux client update push skipped: no saved Linux credentials configured.");
+                return;
+            }
+
+            string pushValidationError;
+            if (!TryValidateLinuxPushValues(serverUrl, token, installPath, out pushValidationError))
+            {
+                DebugLogger.Log(options, "Schedule", "Scheduled Linux client update push skipped: " + DebugLogger.SanitizeForLog(pushValidationError));
                 return;
             }
 
@@ -3069,18 +3100,6 @@ namespace WindowsInventoryLite
                 statusIntervalMinutes = 30;
             }
 
-            try
-            {
-                ValidatePosixShellSafe(serverUrl, "serverUrl");
-                ValidatePosixShellSafe(token, "token");
-                ValidatePosixShellSafe(installPath, "installPath");
-            }
-            catch (ArgumentException ex)
-            {
-                SendText(stream, "{\"error\":\"" + ex.Message.Replace("\\", "\\\\").Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-
             ArrayList targets = ExpandInstallTargets(targetText);
             if (targets.Count == 0)
             {
@@ -3154,6 +3173,18 @@ namespace WindowsInventoryLite
             if (action == "install" && String.IsNullOrEmpty(serverUrl))
             {
                 SendText(stream, "{\"error\":\"serverUrl is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            // Validated HERE, not at the top of this method: the saved-settings
+            // fallback above can overwrite serverUrl and installPath with values
+            // read from linux-package-settings.json, so validating on entry would
+            // guard values that no longer exist by the time they reach the command
+            // line.
+            string pushValidationError;
+            if (!TryValidateLinuxPushValues(serverUrl, token, installPath, out pushValidationError))
+            {
+                SendText(stream, "{\"error\":\"" + pushValidationError.Replace("\\", "\\\\").Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
                 return;
             }
 
@@ -3358,6 +3389,17 @@ namespace WindowsInventoryLite
             {
                 expectedHostKey = GetStringValue(knownHost, "Fingerprint");
                 result["hostKeyTrust"] = "already-trusted";
+            }
+
+            // Last line of defence at the single point both the manual and the
+            // scheduled push paths converge on, right where the values become part
+            // of a command line.
+            string pushValidationError;
+            if (!TryValidateLinuxPushValues(serverUrl, token, installPath, out pushValidationError))
+            {
+                result["status"] = "failed";
+                result["message"] = pushValidationError;
+                return result;
             }
 
             StringBuilder argsBuilder = new StringBuilder();
@@ -4489,6 +4531,17 @@ namespace WindowsInventoryLite
                 int bufLen = (int)buffer.Length;
                 headerEnd = FindHeaderEnd(buffer.GetBuffer(), bufLen, scanOffset);
                 scanOffset = Math.Max(0, bufLen - 3);
+            }
+
+            // The loop above exits either because headers were found (headerEnd >= 0)
+            // or because the peer closed first (read <= 0). In the second case
+            // headerEnd is still -1, and Encoding.ASCII.GetString(raw, 0, -1) below
+            // throws ArgumentOutOfRangeException - reachable by a bare port scan or
+            // health probe, and an unauthenticated path to a full stack trace in the
+            // Windows Event Log. Fail the same clean way the size limits above do.
+            if (headerEnd < 0)
+            {
+                throw new InvalidOperationException("Connection closed before the request headers were complete.");
             }
 
             byte[] raw = buffer.ToArray();
@@ -6619,6 +6672,7 @@ namespace WindowsInventoryLite
                 {
                     Directory.CreateDirectory(directory);
                 }
+                ApplyRestrictedDirectoryAcl(directory);
                 File.WriteAllBytes(tempPath, keyBytes);
                 // Restrict the temp file's ACL immediately - it holds the plaintext
                 // private key and would otherwise inherit the directory's default
@@ -6828,6 +6882,54 @@ namespace WindowsInventoryLite
             }
         }
 
+        // Directory counterpart to ApplyRestrictedKeyFileAcl. The _linux-ssh
+        // directory holds the private key and the known-hosts trust store, but was
+        // created with a bare Directory.CreateDirectory and inherited whatever
+        // ProgramData's defaults are. Same two-step DACL-then-Owner persist, and the
+        // same swallow-and-log failure handling, as the file version.
+        //
+        // Unlike a file (which is only hardened AFTER its content is already
+        // written), this directory needs to remain writable by whatever identity
+        // is actively managing it - both to create the temp files moved into it
+        // and, in a non-SYSTEM context (self-tests, or a differently-configured
+        // service account), to clean it up again. Restricting the DACL to only
+        // Administrators+SYSTEM strips that access outright: a non-elevated
+        // Administrators group membership is deny-only in the process token, so
+        // even an interactively-admin user loses all access to their own
+        // just-created folder the moment this DACL is applied. Adding an
+        // explicit rule for the current process identity keeps the directory
+        // usable by whoever is actually running it - a no-op in production
+        // (the Windows Service already runs as SYSTEM) - while still excluding
+        // every other local account, which is the actual threat this guards
+        // against.
+        private void ApplyRestrictedDirectoryAcl(string path)
+        {
+            try
+            {
+                SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+
+                DirectorySecurity acl = Directory.GetAccessControl(path);
+                acl.SetAccessRuleProtection(true, false);
+                acl.AddAccessRule(new FileSystemAccessRule(adminSid, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+                acl.AddAccessRule(new FileSystemAccessRule(systemSid, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+                SecurityIdentifier currentSid = WindowsIdentity.GetCurrent().User;
+                if (currentSid != null && !currentSid.Equals(adminSid) && !currentSid.Equals(systemSid))
+                {
+                    acl.AddAccessRule(new FileSystemAccessRule(currentSid, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+                }
+                Directory.SetAccessControl(path, acl);
+
+                DirectorySecurity ownerAcl = Directory.GetAccessControl(path);
+                ownerAcl.SetOwner(systemSid);
+                Directory.SetAccessControl(path, ownerAcl);
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Config", "Could not fully restrict the linux-ssh directory permissions: " + DebugLogger.SanitizeForLog(ex.Message));
+            }
+        }
+
         // One-time upgrade path: an existing install may already have
         // LinuxUpdateKeyPath pointing at a real private key file
         // somewhere on disk (the old "type a path" model). Adopts it
@@ -6861,8 +6963,42 @@ namespace WindowsInventoryLite
                 {
                     Directory.CreateDirectory(directory);
                 }
-                File.Copy(options.LinuxUpdateKeyPath, managedPath);
-                ApplyRestrictedKeyFileAcl(managedPath);
+                ApplyRestrictedDirectoryAcl(directory);
+                // Copy to a temp path, THEN move into place and harden the real
+                // file - mirroring the upload path's own temp/move idiom
+                // (ConfigureLinuxSshKey). File.Copy straight to the real path left
+                // a window where the private key sat there with whatever broad,
+                // inherited permissions the containing directory previously had.
+                // The directory itself is now hardened (immediately above) before
+                // this copy happens, so the temp file already inherits a
+                // restricted ACL the moment it's created - unlike
+                // ConfigureLinuxSshKey's upload path, an extra hardening pass on
+                // the temp file itself isn't needed to close that gap here, and
+                // skipping it avoids stripping the running identity's own access
+                // to the temp file (a rename needs access on the file itself, not
+                // just the containing directory) before the move below completes.
+                // The move target still gets fully hardened afterward.
+                string tempPath = managedPath + ".tmp";
+                try
+                {
+                    File.Copy(options.LinuxUpdateKeyPath, tempPath, true);
+                    File.Move(tempPath, managedPath);
+                    ApplyRestrictedKeyFileAcl(managedPath);
+                }
+                finally
+                {
+                    try
+                    {
+                        if (File.Exists(tempPath))
+                        {
+                            File.Delete(tempPath);
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        // Best-effort cleanup only, same as UploadLinuxSshKey's.
+                    }
+                }
                 DebugLogger.Log(options, "Config", "Migrated legacy LinuxUpdateKeyPath ('" + DebugLogger.SanitizeForLog(options.LinuxUpdateKeyPath) + "') into the managed linux-update-key store. The original file is no longer used and can be removed.");
             }
             catch (Exception ex)
@@ -7444,6 +7580,30 @@ namespace WindowsInventoryLite
             }
         }
 
+        // The three values that get interpolated into the remote shell command
+        // built for a Linux push. Grouped into one helper because they must be
+        // validated at the point they are USED, not at the top of the request
+        // handler: StartLinuxClientAction overwrites serverUrl/installPath from
+        // linux-package-settings.json AFTER its original validation ran, and
+        // StartScheduledLinuxClientUpdatePush reads all three straight from that
+        // file and never validated them at all.
+        internal static bool TryValidateLinuxPushValues(string serverUrl, string token, string installPath, out string error)
+        {
+            error = null;
+            try
+            {
+                ValidatePosixShellSafe(serverUrl, "serverUrl");
+                ValidatePosixShellSafe(token, "token");
+                ValidatePosixShellSafe(installPath, "installPath");
+                return true;
+            }
+            catch (ArgumentException ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
         private static string[] GenerateCmdLines(string serverUrl, string token, int intervalHours, string packageSharePath)
         {
             ValidateBatchSafe(serverUrl, "serverUrl");
@@ -7990,6 +8150,10 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "GenerateCmdLines rejects serverUrl/token/packageSharePath containing batch-unsafe characters", TestGenerateCmdLinesRejectsUnsafeCharacters);
             allPassed &= SelfTestCheck(output, "ValidatePosixShellSafe rejects POSIX shell metacharacters", TestValidatePosixShellSafeRejectsUnsafeCharacters);
             allPassed &= SelfTestCheck(output, "ValidatePosixShellSafe accepts safe values including null/empty", TestValidatePosixShellSafeAcceptsSafeValues);
+            allPassed &= SelfTestCheck(output, "ReadRequest fails cleanly when the connection closes mid-headers", TestReadRequestFailsCleanlyOnAConnectionClosedMidHeaders);
+            allPassed &= SelfTestCheck(output, "ReadRequest fails cleanly on an immediately closed connection", TestReadRequestFailsCleanlyOnAnImmediatelyClosedConnection);
+            allPassed &= SelfTestCheck(output, "A 'null' JSON body deserializes to null, which is why the ingestion endpoints need an explicit guard", TestNullJsonBodyDeserializesToNullNotAnEmptyDictionary);
+            allPassed &= SelfTestCheck(output, "TryValidateLinuxPushValues rejects shell-unsafe serverUrl/token/installPath", TestTryValidateLinuxPushValuesRejectsUnsafeValuesAndAcceptsSafeOnes);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent matches either package version", TestIsClientVersionCurrentMatchesEitherPackage);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent is outdated when it matches neither package", TestIsClientVersionCurrentOutdatedWhenMatchesNeither);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent treats an empty clientVersion as outdated", TestIsClientVersionCurrentTreatsEmptyAsOutdated);
@@ -8043,6 +8207,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "LooksLikeEncryptedPrivateKey detects a legacy PEM Proc-Type header", TestLooksLikeEncryptedPrivateKeyDetectsLegacyPem);
             allPassed &= SelfTestCheck(output, "LooksLikeEncryptedPrivateKey detects an OpenSSH bcrypt KDF marker", TestLooksLikeEncryptedPrivateKeyDetectsOpenSshBcryptKdf);
             allPassed &= SelfTestCheck(output, "ApplyRestrictedKeyFileAcl sets the DACL (and Owner, when elevated)", TestApplyRestrictedKeyFileAclSetsDaclAndOwnerWhenElevated);
+            allPassed &= SelfTestCheck(output, "ApplyRestrictedDirectoryAcl protects the _linux-ssh directory itself", TestApplyRestrictedDirectoryAclSetsDacl);
             allPassed &= SelfTestCheck(output, "MigrateLegacyLinuxSshKey adopts a valid legacy LinuxUpdateKeyPath", TestMigrateLegacyLinuxSshKeyAdoptsValidLegacyPath);
             allPassed &= SelfTestCheck(output, "MigrateLegacyLinuxSshKey is a no-op when the legacy path is missing or invalid", TestMigrateLegacyLinuxSshKeyIgnoresMissingOrInvalidLegacyPath);
             allPassed &= SelfTestCheck(output, "MergeServiceStatus flips active in both directions for known units", TestMergeServiceStatusFlipsActiveBothDirections);
@@ -8797,6 +8962,89 @@ namespace WindowsInventoryLite
                 {
                     return "expected value '" + safeValue + "' to be accepted, but ValidatePosixShellSafe rejected it: " + ex.Message;
                 }
+            }
+            return null;
+        }
+
+        private static string TestReadRequestFailsCleanlyOnAConnectionClosedMidHeaders()
+        {
+            // A bare port scan or health probe that opens a socket, writes a few
+            // bytes and closes reaches this. It used to throw
+            // ArgumentOutOfRangeException from Encoding.ASCII.GetString(raw, 0, -1),
+            // an unauthenticated path to a full stack trace in the Windows Event Log.
+            using (MemoryStream truncated = new MemoryStream(Encoding.ASCII.GetBytes("GET / HTT")))
+            {
+                try
+                {
+                    ReadRequest(truncated);
+                    return "expected a truncated request to be rejected";
+                }
+                catch (ArgumentOutOfRangeException)
+                {
+                    return "expected a clean InvalidOperationException, got ArgumentOutOfRangeException (the bug)";
+                }
+                catch (InvalidOperationException)
+                {
+                    return null;
+                }
+            }
+        }
+
+        private static string TestReadRequestFailsCleanlyOnAnImmediatelyClosedConnection()
+        {
+            using (MemoryStream empty = new MemoryStream(new byte[0]))
+            {
+                try
+                {
+                    ReadRequest(empty);
+                    return "expected an empty request to be rejected";
+                }
+                catch (ArgumentOutOfRangeException)
+                {
+                    return "expected a clean InvalidOperationException, got ArgumentOutOfRangeException (the bug)";
+                }
+                catch (InvalidOperationException)
+                {
+                    return null;
+                }
+            }
+        }
+
+        private static string TestNullJsonBodyDeserializesToNullNotAnEmptyDictionary()
+        {
+            // The premise the ingestion endpoints' null-guard exists for: a body of
+            // literally "null" parses successfully and yields a null dictionary, so
+            // the very next ContainsKey call is an unauthenticated NullReferenceException.
+            Dictionary<string, object> parsed = CreateJsonSerializer().Deserialize<Dictionary<string, object>>("null");
+            if (parsed != null)
+            {
+                return "expected a 'null' body to deserialize to null, got a non-null dictionary";
+            }
+            return null;
+        }
+
+        private static string TestTryValidateLinuxPushValuesRejectsUnsafeValuesAndAcceptsSafeOnes()
+        {
+            string error;
+            if (!TryValidateLinuxPushValues("https://example.local/api/v1/linux/inventory", "a1b2c3", "/opt/windows-inventory-lite", out error))
+            {
+                return "expected safe values to be accepted, got: " + error;
+            }
+            if (TryValidateLinuxPushValues("https://example.local", "a1b2c3", "/opt/wil; rm -rf /", out error))
+            {
+                return "expected an unsafe installPath to be rejected";
+            }
+            if (String.IsNullOrEmpty(error))
+            {
+                return "expected a non-empty error message when validation fails";
+            }
+            if (TryValidateLinuxPushValues("https://example.local/$(id)", "a1b2c3", "/opt/windows-inventory-lite", out error))
+            {
+                return "expected an unsafe serverUrl to be rejected";
+            }
+            if (TryValidateLinuxPushValues("https://example.local", "tok`id`", "/opt/windows-inventory-lite", out error))
+            {
+                return "expected an unsafe token to be rejected";
             }
             return null;
         }
@@ -9805,6 +10053,42 @@ namespace WindowsInventoryLite
             finally
             {
                 File.Delete(tempPath);
+            }
+        }
+
+        private static string TestApplyRestrictedDirectoryAclSetsDacl()
+        {
+            string tempDirectory = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDirectory);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                InventoryServer server = new InventoryServer(options);
+                server.ApplyRestrictedDirectoryAcl(tempDirectory);
+
+                DirectorySecurity acl = Directory.GetAccessControl(tempDirectory);
+                if (!acl.AreAccessRulesProtected)
+                {
+                    return "expected inheritance to be disabled on the linux-ssh directory";
+                }
+                SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                bool adminFound = false;
+                foreach (FileSystemAccessRule rule in acl.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+                {
+                    if (rule.IdentityReference.Equals(adminSid) && (rule.FileSystemRights & FileSystemRights.FullControl) == FileSystemRights.FullControl)
+                    {
+                        adminFound = true;
+                    }
+                }
+                if (!adminFound)
+                {
+                    return "expected an explicit Administrators FullControl rule on the linux-ssh directory";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDirectory, true); } catch (Exception) { }
             }
         }
 
