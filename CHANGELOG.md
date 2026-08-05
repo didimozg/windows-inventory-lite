@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.37.5] - 2026-08-05
+
+### Fixed
+
+- `Install-Server.ps1` now rebuilds the Linux client from current source on every install/update that uses the default binary path, the same way it already does for the two Windows client executables - previously it only ever copied whatever binary already happened to sit at `build\wil-linux-client`, so a server update could silently leave the Linux client package on an old version. If the Go toolchain isn't installed, this is a soft skip with a visible warning (Go is optional - a Windows-only deployment has no reason to install it) rather than a failure; an actual build error (source doesn't compile) still aborts the install, matching how the Windows client rebuilds already behave.
+- The install/update summary log now also reports "Linux client package version" alongside the existing Windows client package version lines, read from the Go binary's `.version` sidecar (the binary itself is a Linux ELF executable and can't be run on the Windows host to ask its own `--version`) - makes a version mismatch between the server and the Linux client package visible at a glance instead of only discoverable later via the dashboard.
+
 ## [0.37.4] - 2026-08-05
 
 ### Fixed

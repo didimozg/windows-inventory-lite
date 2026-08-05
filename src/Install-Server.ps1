@@ -554,7 +554,23 @@ if (-not $LinuxClientPackagePath) {
 if (-not $LinuxClientBinarySourcePath) {
     $projectRoot = Split-Path -Parent $PSScriptRoot
     $defaultLinuxClientBinarySourcePath = Join-Path -Path $projectRoot -ChildPath 'build\wil-linux-client'
-    if (Test-Path -LiteralPath $defaultLinuxClientBinarySourcePath) {
+    # Mirrors the Windows client executables' own "always rebuild when using
+    # the default (not caller-supplied) path" contract (see the
+    # ClientNet35/40ExecutablePath blocks above) - an existence-only check
+    # let a stale Linux binary from an earlier build silently keep being
+    # redeployed on every server update, which is exactly the "I updated the
+    # server, clients stayed on an old version" bug this mirrors. Go is an
+    # optional toolchain (a Windows-only WIL deployment has no reason to
+    # install it), so its absence is a soft skip with a visible warning, not
+    # a fatal error - an actual build failure (source doesn't compile) still
+    # propagates and aborts the install, matching the Windows client's own
+    # unwrapped Build-Client.ps1 calls.
+    if (Get-Command go -ErrorAction SilentlyContinue) {
+        & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-LinuxClient.ps1') -OutputPath $defaultLinuxClientBinarySourcePath
+        $LinuxClientBinarySourcePath = $defaultLinuxClientBinarySourcePath
+    }
+    elseif (Test-Path -LiteralPath $defaultLinuxClientBinarySourcePath) {
+        Write-Warning "Go toolchain not found on PATH - reusing the existing Linux client binary at $defaultLinuxClientBinarySourcePath instead of rebuilding it. Install Go (https://go.dev/dl/) so future installs/updates always ship the current version."
         $LinuxClientBinarySourcePath = $defaultLinuxClientBinarySourcePath
     }
 }
@@ -962,6 +978,19 @@ if (Test-Path -LiteralPath $clientNet40PackagePath) {
     $clientNet40Version = (& $clientNet40PackagePath --version 2>&1 | Select-Object -First 1)
 }
 
+# The deployed binary is a Linux ELF executable - it cannot be run on this
+# Windows host to ask its own --version the way the two .NET clients above
+# are. Its .version sidecar (written by Build-LinuxClient.ps1 alongside the
+# binary) is the only source of truth for what's actually deployed, so
+# report that instead - this is what makes a version mismatch (server
+# updated, Linux client package left stale) visible at a glance in this
+# same summary, rather than only discoverable later via the dashboard.
+$linuxClientVersion = $null
+$linuxClientVersionSidecarPath = Join-Path -Path $LinuxClientPackagePath -ChildPath 'wil-linux-client.version'
+if (Test-Path -LiteralPath $linuxClientVersionSidecarPath) {
+    $linuxClientVersion = (Get-Content -LiteralPath $linuxClientVersionSidecarPath -Raw).Trim()
+}
+
 function ConvertTo-ServiceArgValue {
     param([string]$Value)
     return $Value -replace '"', '\"'
@@ -1061,6 +1090,9 @@ if ($clientNet35Version) {
 }
 if ($clientNet40Version) {
     Write-Host "Client package Net40 version: $clientNet40Version"
+}
+if ($linuxClientVersion) {
+    Write-Host "Linux client package version: $linuxClientVersion"
 }
 Write-Host "Client action log retention days: $InstallLogRetentionDays"
 if ($DisableHttp) {
