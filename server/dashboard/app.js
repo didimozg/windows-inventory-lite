@@ -285,7 +285,18 @@
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         state.linuxClients = state.linuxClients.filter(client => client.hostname !== hostname);
+        // Every view that reads state.linuxClients has to be redrawn, not just the
+        // Linux Clients table. Since the Dashboard/Hardware merge, the combined
+        // tiles and the merged Hardware section both read getAllClients(), and
+        // Linux Software reads state.linuxClients directly - all three kept
+        // counting a deleted client until the next 30s poll, and only then if the
+        // active view happened to be in linuxDataViews. This is the same set
+        // loadLinuxClients re-renders after every fetch.
         renderLinuxClientsTable(state.linuxClients);
+        renderLinuxSoftwareTable(state.linuxClients);
+        renderHardwarePage(getAllClients());
+        renderDashboardTiles();
+        byId('generatedAt').textContent = `Updated: ${formatDateTime(new Date().toISOString())}`;
       })
       .catch(error => {
         window.alert(`Failed to delete ${hostname}: ${error.message}`);
