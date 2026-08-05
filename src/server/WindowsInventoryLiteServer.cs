@@ -6895,8 +6895,12 @@ namespace WindowsInventoryLite
         //
         // Grant set: Administrators, SYSTEM, and the identity actually running
         // this server process (WindowsIdentity.GetCurrent().User) - skipped only
-        // if that identity's SID already equals Administrators or SYSTEM, to
-        // avoid a redundant duplicate rule. This is deliberately NOT
+        // if that identity's SID already equals SYSTEM, to avoid a redundant
+        // duplicate rule. (The Administrators check is defensive but effectively
+        // dead code: WindowsIdentity.GetCurrent().User returns an individual
+        // user SID, which can never equal the well-known Administrators GROUP
+        // SID, even for a user who is a group member. Only the SYSTEM comparison
+        // can actually match and skip.) This is deliberately NOT
         // "Administrators and SYSTEM only": there is no way for a non-privileged
         // identity to repeatedly read/write/rotate/delete files in an
         // ACL-protected directory across separate operations unless it is
@@ -6916,14 +6920,14 @@ namespace WindowsInventoryLite
         // Granting the operating identity here does not meaningfully widen the
         // attack surface: it is the SAME account already running the entire
         // server process, so it already has access to everything else the
-        // server manages (DPAPI-protected secrets, server-config.json, the
-        // Windows client packages, the ingestion token). Restricting this one
-        // directory to "Administrators+SYSTEM only, excluding the server's own
-        // account" would not protect against a compromise of that account - it
-        // already holds the keys to everything else - while the actual threat
-        // this hardening exists to stop (some OTHER local account snooping on or
-        // tampering with the SSH trust store) remains fully addressed, since
-        // every other local identity is still excluded.
+        // server manages (DPAPI-protected secrets - which are inherently scoped
+        // to the identity that encrypted them by DPAPI's own design). Restricting
+        // this one directory to "Administrators+SYSTEM only, excluding the
+        // server's own account" would not protect against a compromise of that
+        // account - it already holds the keys to everything else - while the
+        // actual threat this hardening exists to stop (some OTHER local account
+        // snooping on or tampering with the SSH trust store) remains fully
+        // addressed, since every other local identity is still excluded.
         //
         // Callers should still only invoke this after every write into the
         // directory for the current operation has completed (temp file write,
