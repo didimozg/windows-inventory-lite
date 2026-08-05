@@ -519,7 +519,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         if ($ExpectedHostKey) {
             foreach ($opensshTool in @('ssh-keyscan.exe', 'ssh-keygen.exe')) {
                 if (-not (Get-Command -Name $opensshTool -ErrorAction SilentlyContinue)) {
-                    throw "Required tool was not found on PATH: $opensshTool. It ships with the Windows OpenSSH client feature, which is required for SSH-key-mode pushes to a host with a trusted host key."
+                    throw "Required tool was not found on PATH: $opensshTool. It ships with the Windows OpenSSH client feature, which is required for SSH-key-mode pushes to targets with pinned fingerprints."
                 }
             }
         }
