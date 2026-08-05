@@ -28,6 +28,16 @@ if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
 if (-not $OutputPath) {
     $OutputPath = Join-Path -Path $projectRoot -ChildPath 'build\wil-linux-client'
 }
+elseif (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
+    # A relative -OutputPath must be resolved against the CALLER's current
+    # directory now, before Push-Location below changes it to $sourceDir -
+    # otherwise a relative path silently gets rewritten as though it were
+    # relative to linux-client/ instead (e.g. "linux-client\prebuilt\..."
+    # becomes "linux-client\linux-client\prebuilt\..."), and go build
+    # writes to a path nobody asked for while the script still reports
+    # success at the originally-intended (never-populated) location.
+    $OutputPath = [System.IO.Path]::GetFullPath((Join-Path -Path (Get-Location).Path -ChildPath $OutputPath))
+}
 
 $outputDir = Split-Path -Parent $OutputPath
 if (-not (Test-Path -LiteralPath $outputDir)) {
