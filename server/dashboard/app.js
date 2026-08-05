@@ -2764,6 +2764,31 @@
     updateVersionDatalist();
   }
 
+  // Chromium-based browsers (and others) refuse to reopen a <datalist>'s
+  // suggestion dropdown once the input's value already exactly matches one
+  // of its options - clicking back into a filled licenseName/licenseVersion
+  // field to pick something else does nothing until the field is manually
+  // cleared or typed into. Clearing on focus forces the browser to treat it
+  // as an empty field again (which always shows the full list); restoring
+  // on blur - but only if the user left it empty without picking or typing
+  // anything - avoids silently wiping out the value on a stray click.
+  function handleDatalistFieldFocus(event) {
+    const input = event.target;
+    input.dataset.preFocusValue = input.value;
+    input.value = '';
+    if (input.id === 'licenseName') updateVersionDatalist();
+  }
+
+  function handleDatalistFieldBlur(event) {
+    const input = event.target;
+    const preFocusValue = input.dataset.preFocusValue || '';
+    delete input.dataset.preFocusValue;
+    if (input.value === '' && preFocusValue !== '') {
+      input.value = preFocusValue;
+      if (input.id === 'licenseName') updateVersionDatalist();
+    }
+  }
+
   function updateVersionDatalist() {
     const nameField = byId('licenseName');
     const versionList = byId('softwareVersionOptions');
@@ -4099,6 +4124,10 @@
   byId('licenseCancelButton').addEventListener('click', closeLicenseForm);
   byId('licenseName').addEventListener('input', updateVersionDatalist);
   byId('licenseName').addEventListener('change', applySoftwareComputers);
+  byId('licenseName').addEventListener('focus', handleDatalistFieldFocus);
+  byId('licenseName').addEventListener('blur', handleDatalistFieldBlur);
+  byId('licenseVersion').addEventListener('focus', handleDatalistFieldFocus);
+  byId('licenseVersion').addEventListener('blur', handleDatalistFieldBlur);
   byId('licenseComputerAddButton').addEventListener('click', addLicenseComputerFromInput);
   byId('licenseComputerInput').addEventListener('keydown', e => {
     if (e.key === 'Enter') {

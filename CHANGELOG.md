@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.37.4] - 2026-08-05
+
+### Fixed
+
+- The Licenses tab's Name/Version fields (native `<input list>`/`<datalist>` autocomplete) now always reopen their suggestion list on click, even after a value has already been picked. Chromium-based browsers refuse to reopen a datalist's dropdown once the field's value exactly matches one of its options - previously this meant an admin had to manually erase the current name before a different one could be selected. Both fields now clear on focus (forcing the browser to treat them as empty, which always shows the full list) and restore the original value on blur only if the user left the field empty without picking or typing anything else.
+
 ## [0.37.3] - 2026-08-05
 
 ### Fixed
