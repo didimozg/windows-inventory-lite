@@ -4156,7 +4156,7 @@ namespace WindowsInventoryLite
         // One OU Distinguished Name per line - not reused with
         // ExpandInstallTargets' comma/semicolon/space splitting below, since
         // a DN's own RDN components are themselves comma-separated
-        // (e.g. "OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru") and
+        // (e.g. "OU=Workstations,OU=Site1,DC=corp,DC=example,DC=com") and
         // would be shredded by that splitter.
         private static ArrayList ParseAdComputerImportOUs(string raw)
         {
@@ -8380,10 +8380,10 @@ namespace WindowsInventoryLite
 
         private static string TestParseAdComputerImportOUsSplitsOnNewlinesOnly()
         {
-            ArrayList result = ParseAdComputerImportOUs("OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru\r\n\r\nOU=Servers,DC=spb,DC=cccb,DC=ru\n  \nOU=Third,DC=x,DC=y  ");
+            ArrayList result = ParseAdComputerImportOUs("OU=Workstations,OU=Site1,DC=corp,DC=example,DC=com\r\n\r\nOU=Servers,DC=corp,DC=example,DC=com\n  \nOU=Third,DC=x,DC=y  ");
             string[] expected = new string[] {
-                "OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru",
-                "OU=Servers,DC=spb,DC=cccb,DC=ru",
+                "OU=Workstations,OU=Site1,DC=corp,DC=example,DC=com",
+                "OU=Servers,DC=corp,DC=example,DC=com",
                 "OU=Third,DC=x,DC=y"
             };
             return CompareStringLists(expected, result);
