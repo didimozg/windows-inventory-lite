@@ -61,7 +61,7 @@ func BuildReport() (Report, error) {
 	defer memInfoFile.Close()
 	ramTotalMb := collect.ParseMemInfo(memInfoFile)
 
-	disks := collect.ParseBlockDevices("/sys/block")
+	disks := collect.ParseBlockDevices("/sys/block", "/proc/self/mountinfo")
 
 	// Best-effort, matching every other collector in this file: a failure here
 	// degrades to an empty Services list rather than throwing away a perfectly

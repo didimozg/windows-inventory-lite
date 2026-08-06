@@ -339,6 +339,34 @@ function Get-OpenSshKeyModeOptions {
 # "host key": the server's ClassifyHostKeyFailure searches the child process
 # output for that substring to decide "changed" vs "unknown", so a message
 # without it would be misreported to the operator as a generic failure.
+# Builds the "no keys retrieved from ssh-keyscan" failure message, folding in
+# whatever ssh-keyscan wrote to stderr along the way. Found via a real fleet
+# push: a target running a newer OpenSSH (Debian 13, OpenSSH 10.0) can offer
+# a KEX algorithm (sntrup761x25519-sha512@openssh.com) an older Windows
+# OpenSSH client build does not know, so ssh-keyscan returns zero keys and
+# writes "choose_kex: unsupported KEX method ..." to stderr - previously
+# discarded (the caller redirected stderr to $null), so the operator only
+# ever saw a generic "host unreachable" message for a host that answered
+# fine on port 22. The literal substring "host key" is deliberately replaced
+# if it appears in the stderr detail: ClassifyHostKeyFailure on the server
+# side greps the combined output for that exact substring to decide whether
+# a failure means the target's key changed, and a diagnostic detail here
+# must never accidentally trigger that classification for an unrelated
+# failure (missing tool, KEX mismatch, timeout). Pure function, unit-tested.
+function Format-SshKeyscanFailureMessage {
+    param(
+        [string]$TargetComputer,
+        [string[]]$ScanErrors
+    )
+
+    $detail = ''
+    if ($ScanErrors -and $ScanErrors.Count -gt 0) {
+        $safeDetail = ($ScanErrors -join '; ') -replace '(?i)host key', 'host-key'
+        $detail = " ssh-keyscan reported: $safeDetail"
+    }
+    return "Could not reach $TargetComputer on port 22 to verify its identity - the host may be unreachable, its SSH service may not be running, or a firewall may be blocking the connection.$detail"
+}
+
 function New-PinnedKnownHostsFile {
     param(
         [string]$TargetComputer,
@@ -346,8 +374,23 @@ function New-PinnedKnownHostsFile {
     )
 
     $knownHostsPath = [System.IO.Path]::GetTempFileName()
-    $scanOutput = Invoke-NativeAllowingStderr { & ssh-keyscan.exe -T 10 $TargetComputer 2>$null }
-    $scanLines = @($scanOutput | ForEach-Object { [string]$_ })
+    # 2>&1, not 2>$null: a target that offers no KEX algorithm this ssh-keyscan
+    # build knows (see Format-SshKeyscanFailureMessage above) produces zero key
+    # lines on stdout and the actual reason on stderr - losing stderr here was
+    # exactly what turned that failure into a misleading "host unreachable".
+    # Native-command stderr lines redirected this way arrive as
+    # ErrorRecord objects, not plain strings, so they're split back out below.
+    $scanOutput = Invoke-NativeAllowingStderr { & ssh-keyscan.exe -T 10 $TargetComputer 2>&1 }
+    $scanLines = @()
+    $scanErrors = @()
+    foreach ($item in $scanOutput) {
+        if ($item -is [System.Management.Automation.ErrorRecord]) {
+            $scanErrors += $item.Exception.Message
+        }
+        else {
+            $scanLines += [string]$item
+        }
+    }
 
     $scanFile = "$knownHostsPath.scan"
     [System.IO.File]::WriteAllLines($scanFile, $scanLines, (New-Object System.Text.UTF8Encoding($false)))
@@ -362,7 +405,7 @@ function New-PinnedKnownHostsFile {
     $nonCommentScanLines = @($scanLines | Where-Object { $_ -and -not $_.TrimStart().StartsWith('#') })
     if ($nonCommentScanLines.Count -eq 0) {
         Remove-Item -LiteralPath $knownHostsPath -Force -ErrorAction SilentlyContinue
-        throw "Could not reach $TargetComputer on port 22 to verify its identity - the host may be unreachable, its SSH service may not be running, or a firewall may be blocking the connection."
+        throw (Format-SshKeyscanFailureMessage -TargetComputer $TargetComputer -ScanErrors $scanErrors)
     }
 
     $match = Select-KnownHostsLineByFingerprint -KeyScanLines $scanLines -FingerprintLines $fingerprintLines -ExpectedHostKey $ExpectedHostKey

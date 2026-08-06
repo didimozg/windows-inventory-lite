@@ -20,3 +20,10 @@ docs/superpowers/
 # (still describes v0.21.3, no mention of the Linux client at all). Untracked
 # until it gets a full rewrite against the current state - see the roadmap.
 docs/project-specification.md
+
+# Internal release-prep working notes - not meant for the public repo.
+docs/pending-readme-updates.md
+
+# Detailed release-by-release history, kept for local reference only -
+# CHANGELOG.md is the public version history.
+docs/project-history.md

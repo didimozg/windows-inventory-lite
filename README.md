@@ -63,7 +63,7 @@ Full parameters for every script, every `server-config.json` key, GPO deployment
 
 ## Using the dashboard
 
-The sidebar is a tree with five sections: **Dashboard** (the landing page - summary tiles and top-software/hardware charts across both fleets), **Windows Inventory** and **Linux Inventory** (each with Clients, Software, and Hardware tables), a combined **Hardware** view merging both platforms, **Licenses**, **Installation** (Client actions/updates for Windows, the same pair for Linux, and package configuration for both), and **Settings** (general options, HTTPS certificate management, admin password).
+The sidebar is a tree with five sections: **Dashboard** (the landing page - summary tiles and top-software/hardware charts across both fleets), **Windows Inventory** and **Linux Inventory** (each with Clients and Software tables), a single **Hardware** view merging both platforms into one, **Licenses**, **Installation** (Client actions/updates for Windows, the same pair for Linux, and package configuration for both), and **Settings** (general options, HTTPS certificate management, admin password).
 
 The dashboard polls every 30 seconds and updates in place - sort order, search, and expanded rows are preserved. Every table supports column sorting, a search filter, and CSV export (semicolon-delimited, UTF-8 BOM, for direct opening in Excel). Click a computer, software title, or hardware group to expand its detail row.
 

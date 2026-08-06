@@ -327,4 +327,37 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
             (Get-Content -LiteralPath $env.EnvPath -Raw).TrimEnd("`n") | Should -Be 'WIL_INGESTION_TOKEN=secret-token'
         }
     }
+
+    Context 'Format-SshKeyscanFailureMessage' {
+        It 'includes ssh-keyscan stderr detail when present, so a KEX-algorithm mismatch is not misreported as "host unreachable"' {
+            # Real-world case: a target running a very new OpenSSH version
+            # (Debian 13, OpenSSH 10.0) can offer a KEX algorithm
+            # (sntrup761x25519-sha512@openssh.com) that an older Windows
+            # OpenSSH client build does not know - ssh-keyscan then emits
+            # zero keys, previously reported as "host unreachable" even
+            # though the host answers fine on port 22. Confirmed live
+            # against a real fleet: TCP connect succeeds, but ssh-keyscan
+            # writes "choose_kex: unsupported KEX method ..." to stderr and
+            # returns no key lines.
+            $message = Format-SshKeyscanFailureMessage -TargetComputer '192.168.4.103' -ScanErrors @('choose_kex: unsupported KEX method sntrup761x25519-sha512@openssh.com')
+            $message | Should -Match ([regex]::Escape('choose_kex: unsupported KEX method sntrup761x25519-sha512@openssh.com'))
+            $message | Should -Match ([regex]::Escape('192.168.4.103'))
+        }
+
+        It 'still reports the generic unreachable message when there is no stderr detail at all' {
+            $message = Format-SshKeyscanFailureMessage -TargetComputer '192.168.4.103' -ScanErrors @()
+            $message | Should -Match 'unreachable'
+        }
+
+        It 'never lets the literal substring "host key" reach the message, even if ssh-keyscan happens to say it' {
+            # ClassifyHostKeyFailure on the server side greps the combined
+            # process output for the case-insensitive substring "host key"
+            # to decide whether a failure means "the target's key changed" -
+            # a diagnostic detail here must never accidentally trigger that,
+            # or a missing-tool/KEX-mismatch failure would be misreported as
+            # a security-relevant host-key change.
+            $message = Format-SshKeyscanFailureMessage -TargetComputer '192.168.4.103' -ScanErrors @('Some hypothetical stderr text mentioning a Host Key in passing')
+            $message | Should -Not -Match '(?i)host key'
+        }
+    }
 }
