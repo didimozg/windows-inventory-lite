@@ -11,8 +11,12 @@ tmp/
 inventory-index.json
 
 # Internal AI-assisted development scratch - useful locally while building a
-# feature, not meant for a reader of the public repo. docs/project-specification.md
-# (the one consolidated project spec) is the exception and stays tracked.
+# feature, not meant for a reader of the public repo.
 docs/superpowers/
 .superpowers/
 .claude/skills/
+
+# Fell behind the project during this branch's Linux-client/security work
+# (still describes v0.21.3, no mention of the Linux client at all). Untracked
+# until it gets a full rewrite against the current state - see the roadmap.
+docs/project-specification.md
