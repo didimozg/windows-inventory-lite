@@ -3,6 +3,7 @@ package collect
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -16,13 +17,19 @@ func writeFixtureFile(t *testing.T, path, content string) {
 	}
 }
 
+// noMountinfoPath points at a file that does not exist, so ParseBlockDevices
+// falls back to its pre-mountinfo-filter behavior (report every /sys/block
+// entry) - correct for tests that are only exercising size/type/model
+// parsing, not the mount-based filter itself.
+const noMountinfoPath = ""
+
 func TestParseBlockDevicesSSD(t *testing.T) {
 	root := t.TempDir()
 	writeFixtureFile(t, filepath.Join(root, "sda", "size"), "1000215216\n")
 	writeFixtureFile(t, filepath.Join(root, "sda", "queue", "rotational"), "0\n")
 	writeFixtureFile(t, filepath.Join(root, "sda", "device", "model"), "Samsung SSD 970 EVO Plus 500GB\n")
 
-	disks := ParseBlockDevices(root)
+	disks := ParseBlockDevices(root, noMountinfoPath)
 
 	if len(disks) != 1 {
 		t.Fatalf("got %d disks, want 1", len(disks))
@@ -43,7 +50,7 @@ func TestParseBlockDevicesHDD(t *testing.T) {
 	writeFixtureFile(t, filepath.Join(root, "sdb", "size"), "3907029168\n")
 	writeFixtureFile(t, filepath.Join(root, "sdb", "queue", "rotational"), "1\n")
 
-	disks := ParseBlockDevices(root)
+	disks := ParseBlockDevices(root, noMountinfoPath)
 
 	if len(disks) != 1 {
 		t.Fatalf("got %d disks, want 1", len(disks))
@@ -62,9 +69,96 @@ func TestParseBlockDevicesSkipsDeviceWithoutSizeFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	disks := ParseBlockDevices(root)
+	disks := ParseBlockDevices(root, noMountinfoPath)
 
 	if len(disks) != 0 {
 		t.Errorf("got %d disks, want 0 (device has no size file)", len(disks))
+	}
+}
+
+// TestParseBlockDevicesFiltersToMountedDevicesOnly reproduces the real bug:
+// inside an LXC container, /sys/block reflects the HOST's full device list
+// (every other container's LVM volume, plus loop devices), not just the one
+// device this container's root filesystem actually lives on. Confirmed live
+// against a real Proxmox LXC container - /sys/block listed 16 dm-N volumes
+// belonging to OTHER containers/VMs plus the host's own "sda", while
+// /proc/self/mountinfo's root entry pointed at a single dm-N (major:minor
+// 252:6, backed by /dev/mapper/pve-vm--103--disk--0) that was this
+// container's own disk and no one else's.
+func TestParseBlockDevicesFiltersToMountedDevicesOnly(t *testing.T) {
+	root := t.TempDir()
+	// This container's own disk - mounted, must be reported.
+	writeFixtureFile(t, filepath.Join(root, "dm-6", "size"), "20971520\n")
+	writeFixtureFile(t, filepath.Join(root, "dm-6", "dev"), "252:6\n")
+	// Another container's LVM volume, visible in /sys/block only because
+	// sysfs is not namespace-isolated for block devices under LXC - not
+	// mounted here, must NOT be reported.
+	writeFixtureFile(t, filepath.Join(root, "dm-7", "size"), "41943040\n")
+	writeFixtureFile(t, filepath.Join(root, "dm-7", "dev"), "252:7\n")
+	// The host's own physical disk, same story - not mounted in this
+	// container, must NOT be reported.
+	writeFixtureFile(t, filepath.Join(root, "sda", "size"), "1000215216\n")
+	writeFixtureFile(t, filepath.Join(root, "sda", "dev"), "8:0\n")
+
+	mountinfoPath := filepath.Join(t.TempDir(), "mountinfo")
+	mountinfoContent := strings.Join([]string{
+		`566 355 252:6 / / rw,relatime shared:220 - ext4 /dev/mapper/pve-vm--103--disk--0 rw,stripe=16`,
+		`567 566 0:65 / /dev rw,relatime shared:312 - tmpfs none rw,size=492k,mode=755`,
+		`568 566 0:66 / /proc rw,nosuid,nodev,noexec,relatime shared:326 - proc proc rw`,
+		`627 578 0:29 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime shared:342 - cgroup2 none rw`,
+	}, "\n") + "\n"
+	writeFixtureFile(t, mountinfoPath, mountinfoContent)
+
+	disks := ParseBlockDevices(root, mountinfoPath)
+
+	if len(disks) != 1 {
+		t.Fatalf("got %d disks, want 1 (only the mounted dm-6): %+v", len(disks), disks)
+	}
+	if disks[0].SizeGb < 9 || disks[0].SizeGb > 11 {
+		t.Errorf("SizeGb = %d, want ~10 (dm-6's size)", disks[0].SizeGb)
+	}
+}
+
+// TestParseBlockDevicesFallsBackToAllDevicesWhenMountinfoUnavailable covers
+// the case where mountinfo can't be read or parses to nothing useful (should
+// never happen on a real Linux host, but a missing/unreadable mountinfo must
+// not silently blank out an otherwise-working report on a normal server).
+func TestParseBlockDevicesFallsBackToAllDevicesWhenMountinfoUnavailable(t *testing.T) {
+	root := t.TempDir()
+	writeFixtureFile(t, filepath.Join(root, "sda", "size"), "1000215216\n")
+	writeFixtureFile(t, filepath.Join(root, "sda", "dev"), "8:0\n")
+
+	disks := ParseBlockDevices(root, filepath.Join(t.TempDir(), "does-not-exist"))
+
+	if len(disks) != 1 {
+		t.Fatalf("got %d disks, want 1 (fallback to unfiltered when mountinfo is unavailable)", len(disks))
+	}
+}
+
+func TestParseMountedMajorMinorsExcludesPseudoFilesystems(t *testing.T) {
+	mountinfo := strings.Join([]string{
+		`566 355 252:6 / / rw,relatime shared:220 - ext4 /dev/mapper/pve-vm--103--disk--0 rw,stripe=16`,
+		`567 566 0:65 / /dev rw,relatime shared:312 - tmpfs none rw,size=492k,mode=755`,
+		`568 566 0:66 / /proc rw,nosuid,nodev,noexec,relatime shared:326 - proc proc rw`,
+		`578 566 0:67 / /sys ro,nosuid,nodev,noexec,relatime shared:339 - sysfs sysfs rw`,
+	}, "\n") + "\n"
+
+	ids := parseMountedMajorMinors(strings.NewReader(mountinfo))
+
+	if len(ids) != 1 {
+		t.Fatalf("got %d major:minor ids, want 1: %+v", len(ids), ids)
+	}
+	if !ids["252:6"] {
+		t.Errorf("expected 252:6 (the ext4 mount) to be present, got %+v", ids)
+	}
+}
+
+func TestParseMountedMajorMinorsEmptyWhenOnlyPseudoFilesystems(t *testing.T) {
+	mountinfo := `568 566 0:66 / /proc rw,nosuid,nodev,noexec,relatime shared:326 - proc proc rw` + "\n"
+
+	ids := parseMountedMajorMinors(strings.NewReader(mountinfo))
+
+	if len(ids) != 0 {
+		t.Errorf("got %d major:minor ids, want 0: %+v", len(ids), ids)
 	}
 }

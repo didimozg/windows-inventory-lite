@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [Linux client 0.1.4]
+
+Server/dashboard unchanged in this release - the server version stays at 0.37.7.
+
+### Fixed
+
+- Disk inventory collected inside an LXC container previously listed every block device visible to the host - other containers' and VMs' LVM volumes included - instead of just the container's own disk. `/sys/block` is not namespace-isolated under LXC, so it reflects the whole physical host's device list. The collector now cross-references `/proc/self/mountinfo` and only reports a device that has something genuinely mounted on it, which correctly narrows the list down to the container's own disk on LXC and has no effect on a normal bare-metal or VM host, where every disk that matters is already mounted. The one trade-off: an inserted-but-never-mounted spare disk on a bare-metal server no longer appears in the report.
+
 ## [0.37.7]
 
 ### Fixed
