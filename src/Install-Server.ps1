@@ -896,9 +896,10 @@ Copy-Item -LiteralPath $linuxSshUninstallerSource -Destination $linuxSshUninstal
 # directory and looks for plink.exe/pscp.exe at $projectRoot\deploy\linux-client.
 # On an installed server the script lives in server-bin (i.e. $InstallPath), so
 # $projectRoot is the WindowsInventoryLite root - the tools must land in a
-# deploy\linux-client folder that is a SIBLING of server-bin. Per
-# deploy\linux-client\NOTICE these binaries are never tracked in the repo (each
-# deployer fetches their own), so the copy is skipped silently when absent.
+# deploy\linux-client folder that is a SIBLING of server-bin. These binaries
+# are git-tracked (see deploy\linux-client\NOTICE), so they are normally
+# present at the source; the copy is still skipped silently when absent,
+# for a source checkout or install package that strips them.
 $linuxSshToolsSourceDir = Join-Path -Path (Split-Path -Parent $PSScriptRoot) -ChildPath 'deploy\linux-client'
 $linuxSshToolsDestDir = Join-Path -Path (Split-Path -Parent $InstallPath) -ChildPath 'deploy\linux-client'
 foreach ($linuxSshToolName in @('plink.exe', 'pscp.exe')) {

@@ -46,13 +46,12 @@ Describe 'Windows Inventory Lite project' {
         ) | ForEach-Object { Join-Path -Path $script:ProjectRoot -ChildPath $_ }
 
         # Binary extensions are excluded: deploy\linux-client legitimately
-        # holds gitignored, user-downloaded plink.exe/pscp.exe locally (see
-        # deploy\linux-client\NOTICE) - raw PE bytes read as UTF8 text
-        # produce codepoints that land in the Cyrillic range purely by
-        # chance, which is a false positive this test was never meant to
-        # catch (found via live testing, when those binaries were placed
-        # there for a real SSH session and this test started failing on
-        # binary noise instead of any real non-English text).
+        # holds git-tracked plink.exe/pscp.exe (see deploy\linux-client\NOTICE) -
+        # raw PE bytes read as UTF8 text produce codepoints that land in the
+        # Cyrillic range purely by chance, which is a false positive this test
+        # was never meant to catch (found via live testing, when those binaries
+        # were placed there for a real SSH session and this test started
+        # failing on binary noise instead of any real non-English text).
         $binaryExtensions = @('.exe', '.dll', '.pdb', '.zip', '.png', '.ico', '.ttf', '.woff', '.woff2')
 
         foreach ($path in $paths) {

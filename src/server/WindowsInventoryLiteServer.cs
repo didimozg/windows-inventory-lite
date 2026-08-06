@@ -6687,10 +6687,11 @@ namespace WindowsInventoryLite
                 }
                 ApplyRestrictedKeyFileAcl(keyPath);
                 // Harden the directory itself only now that every write into it
-                // for this operation is done - hardening it earlier would lock
-                // the writing identity out of its own in-progress work whenever
-                // the service isn't running as SYSTEM (see
-                // ApplyRestrictedDirectoryAcl's doc comment).
+                // for this operation is done. The grant set (see
+                // ApplyRestrictedDirectoryAcl's doc comment) already includes the
+                // server's own operating identity, so this ordering is no longer
+                // needed to avoid locking that identity out - it remains good
+                // defense-in-depth for the directory's first-ever hardening pass.
                 ApplyRestrictedDirectoryAcl(directory);
             }
             catch (Exception)
@@ -7002,10 +7003,12 @@ namespace WindowsInventoryLite
                 // would leave a window where the private key sits there with
                 // whatever broad, inherited permissions the containing
                 // directory has. The directory itself is deliberately NOT
-                // hardened until after this whole sequence completes (below) -
-                // hardening it first would lock the running identity out of its
-                // own in-progress copy/move whenever the service isn't running
-                // as SYSTEM.
+                // hardened until after this whole sequence completes (below).
+                // The grant set (see ApplyRestrictedDirectoryAcl's doc comment)
+                // already includes the server's own operating identity, so this
+                // ordering is no longer needed to avoid locking that identity
+                // out - it remains good defense-in-depth for the directory's
+                // first-ever hardening pass.
                 //
                 // NOTE: an intermediate ApplyRestrictedKeyFileAcl(tempPath) call
                 // before the move (matching ConfigureLinuxSshKey's own temp-file
