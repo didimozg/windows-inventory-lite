@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.37.7]
+
+### Fixed
+
+- CI's self-test run failed on `ApplyRestrictedKeyFileAcl`'s elevated-owner check. The check assumed that any elevated-Administrator identity can reassign a file's Owner to SYSTEM, but that specifically needs an enabled `SeRestorePrivilege`, not just Administrators membership - GitHub Actions' own build identity lacks it, and so does this project's documented least-privileged-service-account deployment mode. `ApplyRestrictedKeyFileAcl` already degrades gracefully in that case (the DACL, not the Owner field, is the real access boundary); the test now accepts either SYSTEM or Administrators as a correct outcome instead of requiring SYSTEM specifically. Never caught locally because this branch of the test only runs when elevated, and this project's own development machine was non-elevated throughout the work that added it.
+
 ## [0.37.6]
 
 ### Fixed

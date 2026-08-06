@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.37.6";
+        internal const string ProductVersion = "0.37.7";
 
         private static int Main(string[] args)
         {
@@ -10107,10 +10107,25 @@ namespace WindowsInventoryLite
                 bool isElevatedAdmin = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
                 if (isElevatedAdmin)
                 {
+                    // Membership in Administrators is not the same thing as
+                    // holding an ENABLED SeRestorePrivilege, which is what
+                    // File.SetAccessControl actually needs to reassign
+                    // ownership to a different SID like SYSTEM. An elevated
+                    // Administrator identity that lacks it (confirmed on
+                    // GitHub Actions' own "runneradmin" account, and true of
+                    // this project's documented least-privileged-service-
+                    // account deployment mode too) makes ApplyRestrictedKeyFileAcl's
+                    // Owner=SYSTEM step silently no-op, per that method's own
+                    // best-effort design - the file keeps its OS-assigned
+                    // default owner (Administrators) instead. Both outcomes
+                    // are correct: the DACL asserted above (Administrators
+                    // and SYSTEM, both FullControl) is the real, enforced
+                    // access boundary regardless of which of the two ends up
+                    // as Owner.
                     SecurityIdentifier owner = (SecurityIdentifier)acl.GetOwner(typeof(SecurityIdentifier));
-                    if (!owner.Equals(systemSid))
+                    if (!owner.Equals(systemSid) && !owner.Equals(adminSid))
                     {
-                        return "expected Owner to be SYSTEM when running elevated, got " + owner.Translate(typeof(NTAccount));
+                        return "expected Owner to be SYSTEM or Administrators when running elevated, got " + owner.Translate(typeof(NTAccount));
                     }
                 }
                 return null;
