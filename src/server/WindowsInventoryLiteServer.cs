@@ -3679,7 +3679,7 @@ namespace WindowsInventoryLite
         // can legally contain - letters, digits, '.', '-' - rather than trying to
         // quote/escape, matching this project's existing reject-don't-escape
         // convention (ValidatePosixShellSafe, Test-BatchSafeValue).
-        private static readonly Regex SshTargetFormatPattern = new Regex(@"^[A-Za-z0-9][A-Za-z0-9.\-]*$");
+        private static readonly Regex SshTargetFormatPattern = new Regex(@"^[A-Za-z0-9][A-Za-z0-9.\-]*\z");
 
         internal static bool IsValidSshTarget(string target)
         {
@@ -7131,6 +7131,14 @@ namespace WindowsInventoryLite
             // not confidentiality, is what this ACL protects (same reasoning
             // as licenses.json, reusing the identical helper).
             ApplyRestrictedConfigAcl(path);
+            // Harden the directory itself only now that every write into it
+            // for this operation is done, matching the ordering contract
+            // ConfigureLinuxSshKey and MigrateLegacyLinuxSshKey both follow -
+            // this is the password-auth-only deployment path, where no
+            // private key is ever uploaded and no legacy migration ever
+            // runs, so this is the only call site that would otherwise
+            // harden the directory for that deployment shape.
+            ApplyRestrictedDirectoryAcl(directory);
         }
 
         private Dictionary<string, object> FindLinuxKnownHost(string host, int port)
@@ -9873,7 +9881,7 @@ namespace WindowsInventoryLite
         {
             // Every one of these is a value a compromised managed host could put
             // in its own self-reported "hostname" field.
-            string[] invalid = { "", null, "host;rm -rf /", "host name", "$(whoami)", "host`id`", "-oProxyCommand=calc", "host\nsecond", "host|id", "host&id", "host'x", "host\"x", "host\\x", "host/../x" };
+            string[] invalid = { "", null, "host;rm -rf /", "host name", "$(whoami)", "host`id`", "-oProxyCommand=calc", "host\nsecond", "host|id", "host&id", "host'x", "host\"x", "host\\x", "host/../x", "host\n" };
             foreach (string target in invalid)
             {
                 if (IsValidSshTarget(target))

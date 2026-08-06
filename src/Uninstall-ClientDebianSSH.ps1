@@ -83,6 +83,7 @@ function Get-LinuxUninstallCommand {
     return "${SudoPrefix}systemctl disable --now wil-linux-client.timer wil-linux-client.service wil-linux-client-status.timer wil-linux-client-status.service && " +
         "${SudoPrefix}rm -f /etc/systemd/system/wil-linux-client.service /etc/systemd/system/wil-linux-client.timer /etc/systemd/system/wil-linux-client-status.service /etc/systemd/system/wil-linux-client-status.timer && " +
         "${SudoPrefix}rm -rf $InstallPath && " +
+        "${SudoPrefix}rm -f /etc/wil-linux-client.env && " +
         "${SudoPrefix}systemctl daemon-reload"
 }
 
@@ -215,6 +216,12 @@ function New-PinnedKnownHostsFile {
     }
     finally {
         Remove-Item -LiteralPath $scanFile -Force -ErrorAction SilentlyContinue
+    }
+
+    $nonCommentScanLines = @($scanLines | Where-Object { $_ -and -not $_.TrimStart().StartsWith('#') })
+    if ($nonCommentScanLines.Count -eq 0) {
+        Remove-Item -LiteralPath $knownHostsPath -Force -ErrorAction SilentlyContinue
+        throw "Could not reach $TargetComputer on port 22 to verify its identity - the host may be unreachable, its SSH service may not be running, or a firewall may be blocking the connection."
     }
 
     $match = Select-KnownHostsLineByFingerprint -KeyScanLines $scanLines -FingerprintLines $fingerprintLines -ExpectedHostKey $ExpectedHostKey

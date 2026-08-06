@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
-## [0.37.6] - 2026-08-05
+## [0.37.6] - 2026-08-06
 
 ### Fixed
 
@@ -20,7 +20,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Linux service collection now batches its `dpkg` lookups into a single invocation instead of one per running service, roughly halving the process spawns on hosts with many active units, where the old fan-out could approach systemd's 90-second start timeout.
 - The three inventory ingestion endpoints now reject a `null` JSON body with a 400 instead of an unauthenticated null-reference error that wrote a full stack trace to the Windows Event Log. A connection closed before its headers finished, which a bare port scan produces, now also fails cleanly instead of throwing.
 - Shell-safety validation on the Linux push path and path validation in `Install-Server.ps1` now run immediately before the values are used, not at the start of the function. Both could be overwritten from a saved settings file after validation had already run. `Install-Server.ps1` also validates `LinuxClientPackagePath`, which was never on the list.
-- The managed SSH private key is now hardened before it lands at its final path during migration from a legacy `LinuxUpdateKeyPath`, rather than copied first and restricted afterwards, and the `_linux-ssh` directory itself now gets a restricted ACL.
+- The `_linux-ssh` directory that holds the managed SSH private key and known-hosts trust store now gets a restricted ACL (Administrators, SYSTEM, and the server's own operating identity), closing a gap where it was created with default inherited permissions. Migrating a private key from a legacy `LinuxUpdateKeyPath` still copies it to a temporary file and moves that into place before hardening the final path, the same copy-then-move-then-harden sequence the direct upload path already used.
 - `server-config.json` is now created and restricted before any secret is written into it. On a first install there was a window where DPAPI-scoped credentials sat in a file with inherited permissions.
 - SSH-key-mode pushes now check that the OpenSSH tools they need are present before starting, and reset `$LASTEXITCODE` before each native call. A missing `scp.exe` after a successful `ssh.exe` call previously read the earlier success code and reported a push that copied nothing as a success.
 - The temporary file holding a target's password during a password-mode push is now overwritten before deletion, and a failed deletion produces a warning instead of failing silently and leaving a plaintext credential in `%TEMP%`.
