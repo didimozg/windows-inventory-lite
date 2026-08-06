@@ -1,5 +1,7 @@
 # Windows Inventory Lite
 
+> Проект сделан под личные потребности автора. Идея и контроль - автора. Реализация - ИИ Claude (Anthropic).
+
 ![Windows Inventory Lite](./docs/images/logo.svg)
 
 [![Release](https://img.shields.io/github/v/release/didimozg/windows-inventory-lite?display_name=tag)](https://github.com/didimozg/windows-inventory-lite/releases)
@@ -89,3 +91,11 @@ Windows Inventory Lite - легкий инструмент инвентариз�
 ## Лицензия
 
 [MIT License](./LICENSE). Copyright (c) 2026 didimozg.
+
+## Благодарности
+
+Реализовано с помощью [Claude Code](https://claude.com/claude-code) (Anthropic), с использованием следующих сторонних наборов агентов и скилов в процессе разработки:
+
+- [obra/superpowers](https://github.com/obra/superpowers) - проработка идеи, планирование, subagent-driven development, систематическая отладка и процесс код-ревью.
+- [affaan-m/ECC](https://github.com/affaan-m/ECC) - паттерны API design, frontend design и verification-loop.
+- [anthropics/skills](https://github.com/anthropics/skills) - тестирование web-приложений через браузер.

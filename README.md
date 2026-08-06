@@ -1,5 +1,7 @@
 # Windows Inventory Lite
 
+> This project was built to the author's own personal requirements. Idea and direction: the author. Implementation: Claude (Anthropic).
+
 ![Windows Inventory Lite](./docs/images/logo.svg)
 
 [![Release](https://img.shields.io/github/v/release/didimozg/windows-inventory-lite?display_name=tag)](https://github.com/didimozg/windows-inventory-lite/releases)
@@ -89,3 +91,11 @@ Captured from a scratch instance seeded with fictional test data - no real hosts
 ## License
 
 [MIT License](./LICENSE). Copyright (c) 2026 didimozg.
+
+## Credits
+
+Implemented by [Claude Code](https://claude.com/claude-code) (Anthropic), using these third-party agent/skill packs during development:
+
+- [obra/superpowers](https://github.com/obra/superpowers) - brainstorming, planning, subagent-driven development, systematic debugging, and code review workflow.
+- [affaan-m/ECC](https://github.com/affaan-m/ECC) - API design, frontend design, and verification-loop patterns.
+- [anthropics/skills](https://github.com/anthropics/skills) - browser-based web app testing.
