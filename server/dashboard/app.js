@@ -1,7 +1,16 @@
 (function () {
   const inventoryViews = ['clients', 'software', 'hardware'];
+  const linuxInventoryViews = ['linux', 'linuxSoftware'];
+  // Views whose rendered content depends on state.linuxClients, so the 30s
+  // poll keeps Linux data fresh while one of them is open. Deliberately a
+  // separate list from linuxInventoryViews, which drives the search box and
+  // the "Generated:" line and must stay limited to the Linux inventory
+  // tables themselves - the Dashboard reads Linux data but is not an
+  // inventory view, and the merged Hardware view is already covered for
+  // search purposes by inventoryViews.
+  const linuxDataViews = ['linux', 'linuxSoftware', 'dashboard', 'hardware'];
   const state = {
-    clients: [], view: getInitialView(), installJobId: null, installPollTimer: null, installJobs: [],
+    clients: [], linuxClients: [], view: getInitialView(), installJobId: null, installPollTimer: null, installJobs: [],
     updateJobId: null, updatePollTimer: null,
     // Baselined from the first client-updates poll response, then compared
     // on every later one - lets an open dashboard tab pick up a scheduled
@@ -15,19 +24,24 @@
     sort: {
       clients: { key: 'computerName', dir: 1 },
       software: { key: 'name', dir: 1 },
+      // hwCpu/hwDisk/hwRam drive the single cross-platform Hardware view -
+      // these were always per-table, never per-platform, so the merged view
+      // reuses them and the former linuxHw* keys are gone.
       hwCpu: { key: 'name', dir: 1 },
       hwDisk: { key: 'model', dir: 1 },
       hwRam: { key: 'totalMb', dir: -1 },
-      licenses: { key: 'name', dir: 1 }
+      licenses: { key: 'name', dir: 1 },
+      linuxClients: { key: 'hostname', dir: 1 },
+      linuxSoftware: { key: 'name', dir: 1 }
     },
-    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1 },
+    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxClients: 1, linuxSoftware: 1 },
     // clients/software start at a reasonable fallback and are corrected to
     // the real viewport-fitting value the first time their table becomes
     // visible (see computeLiveRowsPerPage/recalculateActivePagination).
     // hwCpu/hwDisk/hwRam are fixed (see HW_PAGE_SIZE) - the three Hardware
     // sub-tables render stacked in one view and are rarely large enough to
     // need viewport-adaptive sizing.
-    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20 },
+    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20, linuxClients: 20, linuxSoftware: 20 },
     // Prefixed keys ('client:'/'software:'/'hw:' + id) so the three
     // separate data-*-details attribute namespaces can't collide in one
     // Set. Drives each render function's initial hidden/visible class for
@@ -47,6 +61,19 @@
 
   function byId(id) {
     return document.getElementById(id);
+  }
+
+  // Shows whether a write-only password field (AD password, Linux update
+  // password, Windows Client updates password) currently has a saved
+  // value, as classic dots - without ever revealing the value or its real
+  // length (the dot count here is fixed, not derived from the actual
+  // password). Only ever touches .placeholder, never .value, so there is
+  // no path where this indicator could itself be submitted and overwrite
+  // the real saved password. emptyPlaceholder is restored when a
+  // previously-saved password is cleared without a full page reload (e.g.
+  // "Delete saved credentials").
+  function applyPasswordPlaceholder(inputId, hasPassword, emptyPlaceholder) {
+    byId(inputId).placeholder = hasPassword ? '••••••••' : emptyPlaceholder;
   }
 
   function currentTheme() {
@@ -72,35 +99,64 @@
     updateThemeToggle();
   }
 
+  // Basic Auth has no server-side session to invalidate, so this is a
+  // best-effort client-side clear: an explicit, deliberately-wrong
+  // Authorization header gives the browser a chance to drop the real
+  // cached credentials, but not every browser honors it. The overlay text
+  // says so - closing the tab/window is the only guaranteed way out.
+  function handleLogout() {
+    if (!window.confirm('Log out of Windows Inventory Lite? On some browsers you may need to close this tab to fully clear your saved sign-in.')) return;
+    stopPolling();
+    fetch('/api/v1/clients', {
+      cache: 'no-store',
+      headers: { Authorization: 'Basic ' + btoa('logout:' + Math.random().toString(36).slice(2)) }
+    }).catch(() => {}).then(() => {
+      byId('logoutOverlay').classList.remove('hidden');
+    });
+  }
+
   function getInitialView() {
     const hash = window.location.hash.replace(/^#/, '').toLowerCase();
     if (hash === 'clients') return 'clients';
     if (hash === 'software') return 'software';
-    if (hash === 'hardware') return 'hardware';
+    // #linux-hardware is kept as an alias so existing bookmarks/links to the
+    // retired Linux Hardware tab land on the merged view instead of silently
+    // falling through to the Dashboard.
+    if (hash === 'hardware' || hash === 'linux-hardware') return 'hardware';
     if (hash === 'client-actions' || hash === 'actions' || hash === 'install') return 'install';
     if (hash === 'client-package' || hash === 'package') return 'package';
     if (hash === 'client-updates' || hash === 'updates') return 'updates';
     if (hash === 'general') return 'general';
     if (hash === 'certificate') return 'certificate';
     if (hash === 'licenses') return 'licenses';
+    if (hash === 'linux-clients' || hash === 'linux') return 'linux';
+    if (hash === 'linux-software') return 'linuxSoftware';
     if (hash === 'admin-password' || hash === 'admin') return 'admin';
+    if (hash === 'linux-client-actions') return 'linuxInstall';
+    if (hash === 'linux-client-updates') return 'linuxUpdates';
     return 'dashboard';
   }
 
   function setView(view) {
     state.view = view;
-    const hash = view === 'install' ? 'client-actions' : view === 'package' ? 'client-package' : view === 'updates' ? 'client-updates' : view === 'admin' ? 'admin-password' : view;
+    const hash = view === 'install' ? 'client-actions' : view === 'linuxInstall' ? 'linux-client-actions' : view === 'linuxUpdates' ? 'linux-client-updates' : view === 'package' ? 'client-package' : view === 'updates' ? 'client-updates' : view === 'admin' ? 'admin-password' : view === 'linux' ? 'linux-clients' : view === 'linuxSoftware' ? 'linux-software' : view;
     if (window.location.hash.replace(/^#/, '') !== hash) {
       window.location.hash = hash;
       return;
     }
     render();
     if (view === 'install') loadInstallHistory();
-    if (view === 'package') loadPackageStatus();
+    if (view === 'linuxInstall') loadLinuxInstallHistory();
+    if (view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
+    if (view === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
     if (view === 'updates') loadClientUpdates();
-    if (view === 'general') loadGeneralSettings();
+    if (view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (view === 'licenses') loadLicenses();
+    // 'hardware' is in this list because the merged Hardware view reads Linux
+    // data too - opening the tab re-fetches it rather than waiting up to 30s
+    // for the next poll tick.
+    if (view === 'linux' || view === 'linuxSoftware' || view === 'hardware') loadLinuxClients();
     if (view === 'admin') loadAdminPasswordStatus();
   }
 
@@ -150,8 +206,194 @@
   // saveClientDescription detect a no-op blur/Enter and skip the network
   // request.
   function formatDescriptionEditor(client, clientId) {
-    const value = escapeHtml(client.adDescription || '');
+    // escapeHtml() runs every value through text(), which turns an empty
+    // string into the literal word "Unknown" - correct for most cells, but
+    // this editor's whole point is to show a genuinely blank input when
+    // there's no Description yet, not a placeholder word. escapeHtmlOrEmpty
+    // is the sibling helper built for exactly this case.
+    const value = escapeHtmlOrEmpty(client.adDescription);
     return `<input type="text" class="description-edit-input" data-description-client="${clientId}" data-computer-name="${escapeHtml(client.computerName)}" data-last-saved-value="${value}" value="${value}" maxlength="1024">`;
+  }
+
+  // Linux-table counterparts of formatAdDescription/formatDescriptionEditor.
+  // Separate functions (rather than branching the Windows ones) because the
+  // Linux report shape keys off `hostname` instead of `computerName` and
+  // needs data-platform="linux" so the shared saveClientDescription (and the
+  // global keydown/blur listeners it's wired to) can tell the two tables apart.
+  function formatLinuxDescriptionEditor(client, clientId) {
+    // See formatDescriptionEditor's comment - escapeHtml() would turn a
+    // genuinely blank Description into the literal word "Unknown" here.
+    const value = escapeHtmlOrEmpty(client.adDescription);
+    return `<input type="text" class="description-edit-input" data-description-client="${clientId}" data-computer-name="${escapeHtml(client.hostname)}" data-platform="linux" data-last-saved-value="${value}" value="${value}" maxlength="1024">`;
+  }
+
+  function formatLinuxAdDescription(client) {
+    if (client.adSyncStatus === 'not-found') return 'Not found in AD';
+    if (client.adSyncStatus === 'error') return 'AD unreachable';
+    return escapeHtmlOrEmpty(client.adDescription);
+  }
+
+  function loadLinuxClients() {
+    fetch('/api/v1/linux/clients', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.linuxClients = data.clients || [];
+        state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
+        renderLinuxClientsTable(state.linuxClients);
+        renderLinuxSoftwareTable(state.linuxClients);
+        // Both of these read Windows and Linux data together, so they have
+        // to be redrawn whenever the Linux half lands - including on the
+        // unconditional page-load call, which can resolve after render().
+        renderHardwarePage(getAllClients());
+        renderDashboardTiles();
+      })
+      .catch(() => {});
+  }
+
+  // Mirrors clientMatches (Windows) - haystack built from the fields a
+  // Linux client actually reports (see linux-client/report.go): hostname,
+  // client version, IP, OS pretty name, CPU model, service name+version,
+  // disk model+type. No publisher/office/domain fields exist on this side.
+  function linuxClientMatches(client, query) {
+    if (!query) return true;
+    const services = (client.services || []).map(item => `${item.name} ${item.version}`).join(' ');
+    const disks = (client.disks || []).map(d => `${d.model} ${d.type}`).join(' ');
+    const haystack = [
+      client.hostname,
+      client.clientVersion,
+      formatIpAddresses(client),
+      client.os && client.os.prettyName,
+      client.cpu && client.cpu.model,
+      services,
+      disks
+    ].join(' ').toLowerCase();
+    return haystack.indexOf(query.toLowerCase()) !== -1;
+  }
+
+  function deleteLinuxClient(hostname) {
+    if (!hostname) return;
+    const confirmed = window.confirm(`Delete ${hostname} from the inventory dashboard?`);
+    if (!confirmed) return;
+
+    fetch(`/api/v1/linux/clients/${encodeURIComponent(hostname)}`, {
+      method: 'DELETE',
+      cache: 'no-store'
+    })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        state.linuxClients = state.linuxClients.filter(client => client.hostname !== hostname);
+        // Every view that reads state.linuxClients has to be redrawn, not just the
+        // Linux Clients table. Since the Dashboard/Hardware merge, the combined
+        // tiles and the merged Hardware section both read getAllClients(), and
+        // Linux Software reads state.linuxClients directly - all three kept
+        // counting a deleted client until the next 30s poll, and only then if the
+        // active view happened to be in linuxDataViews. This is the same set
+        // loadLinuxClients re-renders after every fetch.
+        renderLinuxClientsTable(state.linuxClients);
+        renderLinuxSoftwareTable(state.linuxClients);
+        renderHardwarePage(getAllClients());
+        renderDashboardTiles();
+        byId('generatedAt').textContent = `Updated: ${formatDateTime(new Date().toISOString())}`;
+      })
+      .catch(error => {
+        window.alert(`Failed to delete ${hostname}: ${error.message}`);
+      });
+  }
+
+  // Mirrors renderTable (Windows Clients) - pagination, a stable
+  // safeId(hostname)-based row id (NOT the old positional linux-${index},
+  // which would silently misattribute an expanded row's state to a
+  // different client after any sort or data change), row-expand with a
+  // CPU/RAM/Disks summary plus a nested services table (name/version only
+  // - Linux services carry no publisher or install date), a Delete
+  // button, and the same in-progress-edit-survives-a-rerender handling
+  // renderTable already has for the Windows Description editor.
+  function renderLinuxClientsTable(clients) {
+    const tbody = byId('linuxClientsBody');
+    if (!tbody) return;
+
+    const activeElement = document.activeElement;
+    const editingClientId = activeElement && activeElement.matches('.description-edit-input') && activeElement.dataset.platform === 'linux' ? activeElement.dataset.descriptionClient : null;
+    const editingValue = editingClientId ? activeElement.value : null;
+    const editingSelectionStart = editingClientId ? activeElement.selectionStart : null;
+
+    renderSortHeaders();
+    byId('linuxDescriptionColumnHeader').textContent = state.adDescriptionSyncEnabled ? 'AD Description' : 'Description';
+
+    const query = byId('searchInput').value.trim();
+    const { key: sortKey, dir: sortDir } = state.sort.linuxClients;
+    const filtered = applySort(clients.filter(client => linuxClientMatches(client, query)), c => linuxClientSortValue(c, sortKey), sortDir);
+    const { items: pageItems, page, totalPages } = paginate(filtered, state.page.linuxClients, state.pageSize.linuxClients);
+    state.page.linuxClients = page;
+
+    const rows = pageItems.map(client => {
+      const clientId = safeId(client.hostname || '');
+      const descriptionCell = state.adDescriptionSyncEnabled
+        ? formatLinuxAdDescription(client)
+        : formatLinuxDescriptionEditor(client, clientId);
+      const osName = (client.os && client.os.prettyName) || '';
+      const services = Array.isArray(client.services) ? client.services : [];
+      const serviceCount = services.length;
+      const detailsHidden = state.expandedDetails.has('linux-client:' + clientId) ? '' : 'hidden';
+
+      const serviceRows = services.map(item => `<tr>
+        <td>${escapeHtml(item.name)}</td>
+        <td>${escapeHtml(item.unit || '')}</td>
+        <td>${escapeHtml(item.version)}</td>
+        <td>${item.active === false ? '<span class="usb-badge">INACTIVE</span>' : ''}</td>
+      </tr>`).join('');
+
+      const cpu = client.cpu || {};
+      const cpuText = cpu.model ? `${escapeHtml(cpu.model)}${cpu.cores ? `, ${Number(cpu.cores) || 0} cores` : ''}` : 'Unknown';
+      const ramGb = client.ramTotalMb
+        ? (client.ramTotalMb >= 1024 ? `${Math.round(client.ramTotalMb / 1024)} GB` : `${Number(client.ramTotalMb) || 0} MB`)
+        : 'Unknown';
+      const disksSummary = (client.disks || []).map(d => {
+        const size = d.sizeGb ? ` ${d.sizeGb} GB` : '';
+        return `${escapeHtml(d.type)}${escapeHtml(size)} <small>${escapeHtml(d.model)}</small>`;
+      }).join('<br>') || 'Unknown';
+
+      return `<tr>
+        <td><button class="link-button" type="button" data-linux-client="${clientId}">${escapeHtml(client.hostname)}</button></td>
+        <td>${escapeHtml(client.clientVersion)}</td>
+        <td>${escapeHtml(osName)}</td>
+        <td>${formatIpAddressesHtml(client)}</td>
+        <td>${serviceCount}</td>
+        <td>${descriptionCell}</td>
+        <td>${escapeHtml(formatDateTime(client.collectedAt || client.sourceUpdatedAt))}${client.servicesStatusCollectedAt ? `<small>Services checked: ${escapeHtml(formatDateTime(client.servicesStatusCollectedAt))}</small>` : ''}</td>
+        <td><button class="danger-button-ghost" type="button" data-delete-linux-client="${escapeHtml(client.hostname)}">Delete</button></td>
+      </tr>
+      <tr class="details-row ${detailsHidden}" data-linux-client-details="${clientId}">
+        <td colspan="8">
+          <div class="details">
+            <div class="hw-summary">
+              <div><strong>CPU</strong><span>${cpuText}</span></div>
+              <div><strong>RAM</strong><span>${ramGb}</span></div>
+              <div><strong>Storage</strong><span>${disksSummary}</span></div>
+            </div>
+            <h2>${escapeHtml(client.hostname)} services</h2>
+            <table class="nested-table">
+              <thead><tr><th>Name</th><th>Unit</th><th>Version</th><th>Active</th></tr></thead>
+              <tbody>${serviceRows || '<tr><td colspan="4" class="empty">No service records.</td></tr>'}</tbody>
+            </table>
+          </div>
+        </td>
+      </tr>`;
+    });
+
+    tbody.innerHTML = rows.join('') || '<tr><td colspan="8" class="empty">No matching Linux clients.</td></tr>';
+    if (editingClientId) {
+      const restoredInput = document.querySelector(`.description-edit-input[data-description-client="${editingClientId}"][data-platform="linux"]`);
+      if (restoredInput) {
+        restoredInput.value = editingValue;
+        restoredInput.focus();
+        restoredInput.setSelectionRange(editingSelectionStart, editingSelectionStart);
+      }
+    }
+    renderPager('linuxClientsPager', 'linuxClients', page, totalPages, () => renderLinuxClientsTable(state.linuxClients));
   }
 
   function formatDateTime(value) {
@@ -210,6 +452,14 @@
   }
 
   function isStale(client) {
+    // A client just pushed/updated server-side (lastInstalledAtUtc set,
+    // see PatchClientReportVersionAfterInstall) genuinely has an old
+    // stored report timestamp until its own next check-in - but that's
+    // expected, not a problem, so it's deliberately excluded from
+    // staleness everywhere this function is used (dashboard tile count,
+    // CSV export, row highlighting). The field disappears on its own once
+    // a real report lands, so this stops applying automatically too.
+    if (client.lastInstalledAtUtc) return false;
     const date = new Date(client.collectedAt || client.sourceUpdatedAt || 0);
     return Number.isNaN(date.getTime()) || ((Date.now() - date.getTime()) / 36e5) > state.staleHours;
   }
@@ -327,6 +577,17 @@
     }
   }
 
+  function linuxClientSortValue(client, key) {
+    switch (key) {
+      case 'hostname': return (client.hostname || '').toLowerCase();
+      case 'clientVersion': return client.clientVersion || '';
+      case 'os': return ((client.os && client.os.prettyName) || '').toLowerCase();
+      case 'softwareCount': return Array.isArray(client.services) ? client.services.length : 0;
+      case 'collectedAt': return new Date(client.collectedAt || client.sourceUpdatedAt || 0).getTime();
+      default: return '';
+    }
+  }
+
   function softwareSortValue(group, key) {
     switch (key) {
       case 'name': return (group.name || '').toLowerCase();
@@ -337,11 +598,20 @@
     }
   }
 
+  function linuxSoftwareSortValue(group, key) {
+    switch (key) {
+      case 'name': return (group.name || '').toLowerCase();
+      case 'version': return group.version || '';
+      case 'count': return group.clients.length;
+      default: return '';
+    }
+  }
+
+  // No 'clockMhz' case: clock is no longer a group-level field (see
+  // getCpuGroups) and the merged CPU table has no Clock column to sort by.
   function cpuSortValue(g, key) {
     switch (key) {
       case 'name': return (g.name || '').toLowerCase();
-      case 'cores': return g.cores || 0;
-      case 'clockMhz': return g.clockMhz || 0;
       case 'count': return g.clients.length;
       default: return '';
     }
@@ -357,10 +627,11 @@
     }
   }
 
+  // No 'moduleCount' case: module count is no longer a group-level field
+  // (see getRamGroups) and the merged RAM table has no Modules column.
   function ramSortValue(g, key) {
     switch (key) {
       case 'totalMb': return g.totalMb || 0;
-      case 'moduleCount': return g.moduleCount || 0;
       case 'count': return g.clients.length;
       default: return '';
     }
@@ -451,6 +722,38 @@
     downloadCsv('clients-' + csvDate() + '.csv', rows);
   }
 
+  function exportLinuxClients() {
+    const query = byId('searchInput').value.trim();
+    const { key: sortKey, dir: sortDir } = state.sort.linuxClients;
+    const items = applySort(state.linuxClients.filter(c => linuxClientMatches(c, query)), c => linuxClientSortValue(c, sortKey), sortDir);
+    const rows = [['Computer', 'IP Addresses', 'Client Version', 'OS', 'Service Count', 'CPU', 'RAM', 'Disks', 'Collected', 'AD Description']].concat(
+      items.map(c => {
+        const os = c.os || {};
+        const cpu = c.cpu || {};
+        const ramText = c.ramTotalMb ? (c.ramTotalMb >= 1024 ? Math.round(c.ramTotalMb / 1024) + ' GB' : c.ramTotalMb + ' MB') : '';
+        const disksText = (c.disks || []).map(d => (d.type || '') + ' ' + (d.sizeGb ? d.sizeGb + ' GB' : '') + ' ' + (d.model || '')).join(', ').trim();
+        return [
+          c.hostname || '', formatIpAddresses(c), c.clientVersion || '',
+          os.prettyName || '', Array.isArray(c.services) ? c.services.length : 0,
+          cpu.model || '', ramText, disksText,
+          formatDateTime(c.collectedAt || c.sourceUpdatedAt),
+          state.adDescriptionSyncEnabled ? (c.adSyncStatus === 'not-found' ? 'Not found in AD' : c.adSyncStatus === 'error' ? 'AD unreachable' : (c.adDescription || '')) : (c.adDescription || '')
+        ];
+      })
+    );
+    downloadCsv('linux-clients-' + csvDate() + '.csv', rows);
+  }
+
+  function exportLinuxSoftware() {
+    const query = byId('searchInput').value.trim();
+    const { key: sortKey, dir: sortDir } = state.sort.linuxSoftware;
+    const groups = applySort(getLinuxSoftwareGroups(state.linuxClients).filter(g => linuxSoftwareMatches(g, query)), g => linuxSoftwareSortValue(g, sortKey), sortDir);
+    const rows = [['Software', 'Version', 'Installations', 'Computers']].concat(
+      groups.map(g => [g.name, g.version, g.clients.length, g.clients.map(c => c.hostname).join(', ')])
+    );
+    downloadCsv('linux-software-' + csvDate() + '.csv', rows);
+  }
+
   function exportSoftware() {
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.software;
@@ -461,15 +764,20 @@
     downloadCsv('software-' + csvDate() + '.csv', rows);
   }
 
+  // Computers are exported as "NAME (Platform)" now that one row can list
+  // machines from both platforms - the Clock GHz / Modules columns are gone
+  // because those fields are no longer group-level (see getCpuGroups /
+  // getRamGroups); their per-computer values live in the expanded row on
+  // screen and are deliberately not flattened into the CSV.
   function exportHardwareCpu() {
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.hwCpu;
     const groups = applySort(
-      getCpuGroups(state.clients).filter(g => hwMatches([g.name].concat(g.clients.map(c => c.computerName)).join(' '), query)),
+      getCpuGroups(getAllClients()).filter(g => hwMatches([g.name].concat(g.clients.map(c => clientDisplayName(c))).join(' '), query)),
       g => cpuSortValue(g, sortKey), sortDir
     );
-    const rows = [['Model', 'Cores', 'Clock GHz', 'Machines', 'Computers']].concat(
-      groups.map(g => [g.name, g.cores != null ? g.cores : '', g.clockMhz ? (g.clockMhz / 1000).toFixed(2) + ' GHz' : '', g.clients.length, g.clients.map(c => c.computerName).join(', ')])
+    const rows = [['Model', 'Machines', 'Computers']].concat(
+      groups.map(g => [g.name, g.clients.length, g.clients.map(c => `${clientDisplayName(c)} (${clientPlatformLabel(c)})`).join(', ')])
     );
     downloadCsv('hardware-cpu-' + csvDate() + '.csv', rows);
   }
@@ -478,11 +786,11 @@
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.hwDisk;
     const groups = applySort(
-      getDiskGroups(state.clients).filter(g => hwMatches([g.model, g.type].concat(g.clients.map(c => c.computerName)).join(' '), query)),
+      getDiskGroups(getAllClients()).filter(g => hwMatches([g.model, g.type].concat(g.clients.map(c => clientDisplayName(c))).join(' '), query)),
       g => diskSortValue(g, sortKey), sortDir
     );
     const rows = [['Model', 'Type', 'Size GB', 'USB', 'Machines', 'Computers']].concat(
-      groups.map(g => [g.model, g.type, g.sizeGb || '', g.usb ? 'Yes' : 'No', g.clients.length, g.clients.map(c => c.computerName).join(', ')])
+      groups.map(g => [g.model, g.type, g.sizeGb || '', g.usb ? 'Yes' : 'No', g.clients.length, g.clients.map(c => `${clientDisplayName(c)} (${clientPlatformLabel(c)})`).join(', ')])
     );
     downloadCsv('hardware-storage-' + csvDate() + '.csv', rows);
   }
@@ -491,11 +799,11 @@
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.hwRam;
     const groups = applySort(
-      getRamGroups(state.clients).filter(g => hwMatches([g.totalGb].concat(g.clients.map(c => c.computerName)).join(' '), query)),
+      getRamGroups(getAllClients()).filter(g => hwMatches([g.totalGb].concat(g.clients.map(c => clientDisplayName(c))).join(' '), query)),
       g => ramSortValue(g, sortKey), sortDir
     );
-    const rows = [['Total RAM', 'Modules', 'Machines', 'Computers']].concat(
-      groups.map(g => [g.totalGb, g.moduleCount || '', g.clients.length, g.clients.map(c => c.computerName).join(', ')])
+    const rows = [['Total RAM', 'Machines', 'Computers']].concat(
+      groups.map(g => [g.totalGb, g.clients.length, g.clients.map(c => `${clientDisplayName(c)} (${clientPlatformLabel(c)})`).join(', ')])
     );
     downloadCsv('hardware-ram-' + csvDate() + '.csv', rows);
   }
@@ -544,12 +852,35 @@
 
   function renderInstallJob(job, statusElementId = 'installStatus') {
     const results = job.results || [];
-    const rows = results.map(result => `<tr>
+    const rows = results.map(result => {
+      // Trust-and-retry only makes sense on the Linux Client Actions panel:
+      // it submits the Actions tab's own install-form fields (server URL,
+      // token, path, auth mode), which don't exist/apply on the Updates
+      // panel's already-installed-clients flow. The Updates panel still
+      // shows the hostKeyBadge below so the operator sees why it failed.
+      let trustControl = '';
+      if (statusElementId === 'linuxInstallStatus') {
+        if (result.hostKeyStatus && result.hostKeyFingerprint) {
+          trustControl = `<button class="link-button trust-host-key-button" type="button"
+               data-trust-host="${escapeHtml(result.target)}"
+               data-trust-fingerprint="${escapeHtml(result.hostKeyFingerprint)}">Trust and retry</button>`;
+        } else if (result.hostKeyStatus) {
+          trustControl = `<span class="trust-host-key-manual">
+               <input type="text" class="trust-fingerprint-input" placeholder="SHA256:..." data-trust-host-input="${escapeHtml(result.target)}">
+               <button class="link-button trust-host-key-button" type="button" data-trust-host-manual="${escapeHtml(result.target)}">Trust and retry</button>
+             </span>`;
+        }
+      }
+      const hostKeyBadge = result.hostKeyStatus === 'changed'
+        ? '<span class="usb-badge">HOST KEY CHANGED</span>'
+        : (result.hostKeyStatus === 'unknown' ? '<span class="usb-badge">HOST KEY UNKNOWN</span>' : '');
+      return `<tr>
       <td>${escapeHtml(result.target)}</td>
-      <td>${escapeHtml(result.status)}</td>
+      <td>${escapeHtml(result.status)}${hostKeyBadge}</td>
       <td>${escapeHtml(result.message)}</td>
-      <td><pre class="install-output">${escapeHtml((result.error || result.output || '').trim())}</pre></td>
-    </tr>`).join('');
+      <td><pre class="install-output">${escapeHtml((result.error || result.output || '').trim())}</pre>${trustControl}</td>
+    </tr>`;
+    }).join('');
 
     const statusElement = byId(statusElementId);
     statusElement.classList.remove('empty');
@@ -564,6 +895,22 @@
           <tbody>${rows || '<tr><td colspan="4" class="empty">Waiting for results.</td></tr>'}</tbody>
         </table>
       </div>`;
+
+    statusElement.querySelectorAll('[data-trust-host]').forEach(button => {
+      button.addEventListener('click', () => trustHostKeyAndRetry(button.dataset.trustHost, button.dataset.trustFingerprint, statusElementId));
+    });
+    statusElement.querySelectorAll('[data-trust-host-manual]').forEach(button => {
+      button.addEventListener('click', () => {
+        const host = button.dataset.trustHostManual;
+        const input = statusElement.querySelector(`[data-trust-host-input="${CSS.escape(host)}"]`);
+        const fingerprint = input ? input.value.trim() : '';
+        if (!fingerprint) {
+          window.alert('Enter the host key fingerprint (e.g. SHA256:...) before trusting it.');
+          return;
+        }
+        trustHostKeyAndRetry(host, fingerprint, statusElementId);
+      });
+    });
   }
 
   function renderInstallHistory() {
@@ -638,10 +985,212 @@
       });
   }
 
+  function pollLinuxInstallJob(jobId, statusElementId = 'linuxInstallStatus', onComplete = loadLinuxInstallHistory, timerKey = 'linuxInstallPollTimer') {
+    fetch(`/api/v1/linux-client-install/${encodeURIComponent(jobId)}`, { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(job => {
+        renderInstallJob(job, statusElementId);
+        if (job.status === 'completed' && state[timerKey]) {
+          window.clearInterval(state[timerKey]);
+          state[timerKey] = null;
+          onComplete();
+        }
+      })
+      .catch(error => {
+        byId(statusElementId).textContent = `Install job status is not available: ${error.message}`;
+      });
+  }
+
+  // Parameterized (not hardcoded to the Linux Client actions page's own
+  // element ids) so the Linux Client updates page's own auth-mode selector
+  // (Task 10) can reuse this instead of duplicating it - the established
+  // pattern this project uses for this exact 3-way-select shape (see
+  // updateScheduleFieldVisibility).
+  function updateLinuxAuthModeFieldsUi(selectElementId, credentialsUserFieldId, passwordFieldId) {
+    const mode = byId(selectElementId).value;
+    byId(credentialsUserFieldId).classList.toggle('hidden', mode === 'ad');
+    byId(passwordFieldId).classList.toggle('hidden', mode !== 'credentials');
+  }
+
+  function updateLinuxClientActionUi() {
+    const action = byId('linuxClientAction').value;
+    const isInstall = action === 'install';
+    document.querySelectorAll('#linuxInstallView .install-only').forEach(element => {
+      element.classList.toggle('hidden', !isInstall);
+    });
+    byId('linuxInstallButton').textContent = isInstall ? 'Install client' : 'Uninstall client';
+    if (!isInstall) {
+      byId('linuxTrustNewHostKeys').checked = false;
+      byId('linuxAcknowledgeHostKeyRisk').checked = false;
+    }
+    updateLinuxTrustNewHostKeysUi();
+  }
+
+  function updateLinuxTrustNewHostKeysUi() {
+    const trustChecked = byId('linuxTrustNewHostKeys').checked;
+    byId('linuxAcknowledgeHostKeyRiskField').classList.toggle('hidden', !trustChecked);
+    if (!trustChecked) {
+      byId('linuxAcknowledgeHostKeyRisk').checked = false;
+    }
+    const acknowledgeChecked = byId('linuxAcknowledgeHostKeyRisk').checked;
+    byId('linuxInstallButton').disabled = trustChecked && !acknowledgeChecked;
+  }
+
+  function loadLinuxInstallHistory() {
+    fetch('/api/v1/linux-client-install', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.linuxInstallJobs = data.jobs || [];
+        renderLinuxInstallHistory();
+      })
+      .catch(error => {
+        byId('linuxInstallHistory').classList.add('empty');
+        byId('linuxInstallHistory').textContent = `Saved client action logs are not available: ${error.message}`;
+      });
+  }
+
+  function renderLinuxInstallHistory() {
+    const jobs = state.linuxInstallJobs || [];
+    if (jobs.length === 0) {
+      byId('linuxInstallHistory').classList.add('empty');
+      byId('linuxInstallHistory').textContent = 'No saved client action logs.';
+      return;
+    }
+
+    const rows = jobs.map(job => `<tr>
+      <td><button class="link-button" type="button" data-linux-install-job="${escapeHtml(job.id)}">${escapeHtml(job.id)}</button></td>
+      <td>${escapeHtml(job.action || 'install')}</td>
+      <td>${escapeHtml(job.status)}</td>
+      <td>${escapeHtml(formatDateTime(job.createdAt))}</td>
+      <td>${escapeHtml(formatDateTime(job.completedAt))}</td>
+      <td>${escapeHtml(job.targetCount)}</td>
+      <td>${escapeHtml(job.failedCount)}</td>
+    </tr>`).join('');
+
+    byId('linuxInstallHistory').classList.remove('empty');
+    byId('linuxInstallHistory').innerHTML = `<h2>Saved client action logs</h2>
+      <div class="install-history-results">
+        <table class="nested-table install-history-table">
+          <thead><tr><th>Job</th><th>Action</th><th>Status</th><th>Started</th><th>Completed</th><th>Targets</th><th>Failed</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+
+    document.querySelectorAll('[data-linux-install-job]').forEach(button => {
+      button.addEventListener('click', () => {
+        state.linuxInstallJobId = button.dataset.linuxInstallJob;
+        pollLinuxInstallJob(state.linuxInstallJobId);
+      });
+    });
+  }
+
+  function startLinuxClientActionJob() {
+    const action = byId('linuxClientAction').value;
+    const targets = byId('linuxInstallTargets').value.trim();
+    const serverUrl = byId('linuxInstallServerUrl').value.trim();
+    const token = byId('linuxInstallToken').value.trim();
+    const intervalHours = Number(byId('linuxInstallIntervalHours').value) || 6;
+    const statusIntervalMinutes = Number(byId('linuxInstallStatusIntervalMinutes').value) || 30;
+    const installPath = byId('linuxInstallPath').value.trim() || '/opt/windows-inventory-lite';
+    const authMode = byId('linuxInstallAuthMode').value;
+    const username = authMode === 'ad' ? '' : byId('linuxInstallUsername').value.trim();
+    const password = authMode === 'credentials' ? byId('linuxInstallPassword').value : '';
+    const trustNewHostKeys = action === 'install' && byId('linuxTrustNewHostKeys').checked;
+    const acknowledgeHostKeyRisk = action === 'install' && byId('linuxAcknowledgeHostKeyRisk').checked;
+
+    if (!targets) {
+      window.alert('Enter at least one target.');
+      return;
+    }
+    if (action === 'install' && !serverUrl) {
+      window.alert('Enter server URL.');
+      return;
+    }
+
+    if (action === 'uninstall') {
+      const confirmed = window.confirm('Uninstall the client service from the selected Linux targets?');
+      if (!confirmed) return;
+    }
+
+    byId('linuxInstallButton').disabled = true;
+    byId('linuxInstallStatus').classList.add('empty');
+    byId('linuxInstallStatus').textContent = `Starting ${action} job...`;
+
+    fetch(action === 'uninstall' ? '/api/v1/linux-client-uninstall' : '/api/v1/linux-client-install', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targets, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, authMode, username, password, trustNewHostKeys, acknowledgeHostKeyRisk })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
+      .then(({ ok, status, data }) => {
+        if (!ok) throw new Error(data.error || `HTTP ${status}`);
+        return data;
+      })
+      .then(data => {
+        state.linuxInstallJobId = data.jobId;
+        if (state.linuxInstallPollTimer) window.clearInterval(state.linuxInstallPollTimer);
+        pollLinuxInstallJob(state.linuxInstallJobId);
+        state.linuxInstallPollTimer = window.setInterval(() => pollLinuxInstallJob(state.linuxInstallJobId), 3000);
+      })
+      .catch(error => {
+        byId('linuxInstallStatus').textContent = `Failed to start ${action} job: ${error.message}`;
+      })
+      .finally(() => {
+        updateLinuxTrustNewHostKeysUi();
+      });
+  }
+
+  function trustHostKeyAndRetry(host, fingerprint, statusElementId) {
+    fetch('/api/v1/linux-client-install/trust-host-key', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, port: 22, fingerprint })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
+      .then(({ ok, status, data }) => {
+        if (!ok) throw new Error(data.error || `HTTP ${status}`);
+
+        const serverUrl = byId('linuxInstallServerUrl').value.trim();
+        const token = byId('linuxInstallToken').value.trim();
+        const intervalHours = Number(byId('linuxInstallIntervalHours').value) || 6;
+        const statusIntervalMinutes = Number(byId('linuxInstallStatusIntervalMinutes').value) || 30;
+        const installPath = byId('linuxInstallPath').value.trim() || '/opt/windows-inventory-lite';
+        const authMode = byId('linuxInstallAuthMode').value;
+        const username = authMode === 'ad' ? '' : byId('linuxInstallUsername').value.trim();
+        const password = authMode === 'credentials' ? byId('linuxInstallPassword').value : '';
+
+        return fetch('/api/v1/linux-client-install', {
+          method: 'POST',
+          cache: 'no-store',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ targets: host, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, authMode, username, password, trustNewHostKeys: false, acknowledgeHostKeyRisk: false })
+        });
+      })
+      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
+      .then(({ ok, status, data }) => {
+        if (!ok) throw new Error(data.error || `HTTP ${status}`);
+        state.linuxInstallJobId = data.jobId;
+        if (state.linuxInstallPollTimer) window.clearInterval(state.linuxInstallPollTimer);
+        pollLinuxInstallJob(state.linuxInstallJobId);
+        state.linuxInstallPollTimer = window.setInterval(() => pollLinuxInstallJob(state.linuxInstallJobId), 3000);
+      })
+      .catch(error => {
+        byId(statusElementId).textContent = `Trust and retry failed: ${error.message}`;
+      });
+  }
+
   function updateClientActionUi() {
     const action = byId('clientAction').value;
     const isInstall = action === 'install';
-    document.querySelectorAll('.install-only').forEach(element => {
+    document.querySelectorAll('#installView .install-only').forEach(element => {
       element.classList.toggle('hidden', !isInstall);
     });
     byId('installButton').textContent = isInstall ? 'Install client' : 'Uninstall client';
@@ -664,6 +1213,162 @@
     const useAd = byId('updatesUseAdCredentials').checked;
     byId('updatesUsername').disabled = useAd;
     byId('updatesPassword').disabled = useAd;
+  }
+
+  function loadLinuxUpdateCredentials() {
+    fetch('/api/v1/linux-client-updates/credentials', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('linuxCredsUsername').value = data.username || '';
+        applyPasswordPlaceholder('linuxCredsPassword', !!data.hasPassword, 'leave blank to keep the current one');
+        byId('linuxSshKeyStatus').textContent = data.hasStoredKey
+          ? `Key configured, uploaded ${formatDateTime(data.keyUploadedAtUtc)}`
+          : 'No key configured.';
+        byId('linuxSshKeyDeleteButton').disabled = !data.hasStoredKey;
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxCredsMessage'), `Status unavailable: ${error.message}`, true);
+        byId('linuxSshKeyStatus').textContent = 'Status unavailable.';
+        byId('linuxSshKeyDeleteButton').disabled = true;
+      });
+  }
+
+  function loadLinuxSshToolsStatus() {
+    fetch('/api/v1/server/linux-ssh-tools-status', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        const statusElement = byId('linuxSshToolsStatus');
+        if (data.plinkFound && data.pscpFound) {
+          statusElement.textContent = 'plink.exe/pscp.exe found - password-based SSH push is available. Key-based push works regardless.';
+        } else {
+          statusElement.textContent = 'plink.exe/pscp.exe not found - password-based SSH push will fail. See deploy\\linux-client\\NOTICE for how to obtain them. Key-based push works regardless.';
+        }
+      })
+      .catch(error => {
+        byId('linuxSshToolsStatus').textContent = `SSH tools status unavailable: ${error.message}`;
+      });
+  }
+
+  function saveLinuxUpdateCredentials() {
+    const username = byId('linuxCredsUsername').value.trim();
+    const password = byId('linuxCredsPassword').value;
+
+    byId('linuxCredsSaveButton').disabled = true;
+    fetch('/api/v1/linux-client-updates/credentials', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        byId('linuxCredsPassword').value = '';
+        showSavedMessage(byId('linuxCredsMessage'), 'Saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxCredsMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('linuxCredsSaveButton').disabled = false;
+      });
+  }
+
+  function clearLinuxUpdateCredentials() {
+    const confirmed = window.confirm('Delete the saved Linux update username/password?');
+    if (!confirmed) return;
+
+    byId('linuxCredsClearButton').disabled = true;
+    fetch('/api/v1/linux-client-updates/credentials', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clear: true })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Delete failed');
+        byId('linuxCredsUsername').value = '';
+        byId('linuxCredsPassword').value = '';
+        showSavedMessage(byId('linuxCredsMessage'), 'Deleted.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxCredsMessage'), `Delete failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('linuxCredsClearButton').disabled = false;
+      });
+  }
+
+  function uploadLinuxSshKey() {
+    const fileInput = byId('linuxSshKeyFile');
+    const file = fileInput.files && fileInput.files[0];
+
+    if (!file) {
+      window.alert('Choose a private key file.');
+      return;
+    }
+
+    byId('linuxSshKeyUploadButton').disabled = true;
+    byId('linuxSshKeyMessage').className = 'pkg-message hidden';
+
+    fileToBase64(file)
+      .then(keyBase64 => fetch('/api/v1/server/linux-ssh-key', {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keyBase64 })
+      }))
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Upload failed');
+        fileInput.value = '';
+        loadLinuxUpdateCredentials();
+        const risks = data.risks || [];
+        const el = byId('linuxSshKeyMessage');
+        el.textContent = risks.length
+          ? `Key uploaded with ${risks.length} risk(s): ${risks.join(' ')}`
+          : 'Key uploaded.';
+        el.className = 'pkg-message' + (risks.length ? ' error' : '');
+      })
+      .catch(error => {
+        const el = byId('linuxSshKeyMessage');
+        el.textContent = `Upload failed: ${error.message}`;
+        el.className = 'pkg-message error';
+      })
+      .finally(() => {
+        byId('linuxSshKeyUploadButton').disabled = false;
+      });
+  }
+
+  function deleteLinuxSshKey() {
+    const confirmed = window.confirm('Delete the configured SSH key? Pushes using "SSH key" auth mode will fail until a new key is uploaded.');
+    if (!confirmed) return;
+
+    byId('linuxSshKeyDeleteButton').disabled = true;
+    fetch('/api/v1/server/linux-ssh-key', { method: 'DELETE', cache: 'no-store' })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Delete failed');
+        loadLinuxUpdateCredentials();
+        const el = byId('linuxSshKeyMessage');
+        el.textContent = 'Key deleted.';
+        el.className = 'pkg-message';
+      })
+      .catch(error => {
+        const el = byId('linuxSshKeyMessage');
+        el.textContent = `Delete failed: ${error.message}`;
+        el.className = 'pkg-message error';
+      })
+      .finally(() => {
+        byId('linuxSshKeyDeleteButton').disabled = false;
+      });
   }
 
   // onlyMissing=false: every AD computer in the configured scope.
@@ -821,6 +1526,183 @@
     updateUpdatesBadge(data.outdatedCount);
   }
 
+  function loadLinuxClientUpdates() {
+    fetch('/api/v1/linux-client-updates', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.linuxClientUpdates = data;
+        renderLinuxClientUpdates(data);
+      })
+      .catch(error => {
+        byId('linuxUpdatesPackageStatus').textContent = `Client update status unavailable: ${error.message}`;
+      });
+  }
+
+  function updateLinuxUpdatesBadge(count) {
+    const badge = byId('linuxUpdatesBadge');
+    if (count > 0) {
+      badge.textContent = String(count);
+      badge.classList.remove('hidden');
+    } else {
+      badge.classList.add('hidden');
+    }
+  }
+
+  // Badge-only counterpart to handleClientUpdatesSummary (Windows), used by
+  // the dedicated fetches in pollForUpdates() and the initial page load -
+  // updates just the sidebar count, without the full loadLinuxClientUpdates()/
+  // renderLinuxClientUpdates() table rebuild.
+  function handleLinuxClientUpdatesSummary(data) {
+    updateLinuxUpdatesBadge(data.packageAvailable ? data.outdatedCount : 0);
+  }
+
+  function renderLinuxClientUpdates(data) {
+    if (!data.packageAvailable) {
+      byId('linuxUpdatesPackageStatus').textContent = 'No Linux client package is available yet - build one on the Client package tab first.';
+      byId('linuxUpdatesBody').innerHTML = '';
+      updateLinuxUpdatesBadge(0);
+      return;
+    }
+
+    const updates = data.updates || [];
+    updateLinuxUpdatesBadge(updates.length);
+    byId('linuxUpdatesPackageStatus').textContent = `Current package version: v${escapeHtml(data.currentVersion)}. ${updates.length} client(s) outdated.`;
+
+    if (updates.length === 0) {
+      byId('linuxUpdatesBody').innerHTML = '<tr><td colspan="5" class="empty">All Linux clients are up to date.</td></tr>';
+      byId('linuxUpdatesPushButton').disabled = true;
+      return;
+    }
+
+    byId('linuxUpdatesBody').innerHTML = updates.map(entry => `<tr>
+      <td>${escapeHtml(entry.hostname)}</td>
+      <td>${escapeHtml(entry.clientVersion || 'unknown')}</td>
+      <td>v${escapeHtml(data.currentVersion)}</td>
+      <td>${escapeHtml(formatDateTime(entry.sourceUpdatedAt))}</td>
+      <td><input type="checkbox" class="linux-update-select" value="${escapeHtml(entry.target || entry.hostname)}"></td>
+    </tr>`).join('');
+
+    document.querySelectorAll('.linux-update-select').forEach(checkbox => {
+      checkbox.addEventListener('change', updateLinuxUpdatesPushButtonState);
+    });
+    updateLinuxUpdatesPushButtonState();
+  }
+
+  function updateLinuxUpdatesPushButtonState() {
+    const anyChecked = document.querySelectorAll('.linux-update-select:checked').length > 0;
+    const trustChecked = byId('linuxUpdatesTrustNewHostKeys').checked;
+    const acknowledgeChecked = byId('linuxUpdatesAcknowledgeHostKeyRisk').checked;
+    byId('linuxUpdatesPushButton').disabled = !anyChecked || (trustChecked && !acknowledgeChecked);
+  }
+
+  // Mirrors updateLinuxTrustNewHostKeysUi (Linux Client actions) - same
+  // pairing (risk-ack field only shown/required once "trust new host keys"
+  // is checked), reusing this panel's own combined button-state function
+  // instead of a bare disabled=false so the trust/ack pairing is still
+  // enforced client-side after the checkbox toggles.
+  function updateLinuxUpdatesTrustNewHostKeysUi() {
+    const trustChecked = byId('linuxUpdatesTrustNewHostKeys').checked;
+    byId('linuxUpdatesAcknowledgeHostKeyRiskField').classList.toggle('hidden', !trustChecked);
+    if (!trustChecked) {
+      byId('linuxUpdatesAcknowledgeHostKeyRisk').checked = false;
+    }
+    updateLinuxUpdatesPushButtonState();
+  }
+
+  function startLinuxUpdatesPush() {
+    const selected = Array.from(document.querySelectorAll('.linux-update-select:checked')).map(cb => cb.value);
+    if (selected.length === 0) return;
+
+    const authMode = byId('linuxUpdatesAuthMode').value;
+    const username = authMode === 'ad' ? '' : byId('linuxUpdatesUsername').value.trim();
+    const password = authMode === 'credentials' ? byId('linuxUpdatesPassword').value : '';
+    const trustNewHostKeys = byId('linuxUpdatesTrustNewHostKeys').checked;
+    const acknowledgeHostKeyRisk = byId('linuxUpdatesAcknowledgeHostKeyRisk').checked;
+    byId('linuxUpdatesPushButton').disabled = true;
+    byId('linuxUpdatesStatus').classList.add('empty');
+    byId('linuxUpdatesStatus').textContent = 'Starting update job...';
+
+    fetch('/api/v1/linux-client-install', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targets: selected.join('\n'), authMode, username, password, trustNewHostKeys, acknowledgeHostKeyRisk })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
+      .then(({ ok, status, data }) => {
+        if (!ok) throw new Error(data.error || `HTTP ${status}`);
+        return data;
+      })
+      .then(data => {
+        state.linuxUpdatesJobId = data.jobId;
+        if (state.linuxUpdatesPollTimer) window.clearInterval(state.linuxUpdatesPollTimer);
+        pollLinuxInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', loadLinuxClientUpdates, 'linuxUpdatesPollTimer');
+        state.linuxUpdatesPollTimer = window.setInterval(() => pollLinuxInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', loadLinuxClientUpdates, 'linuxUpdatesPollTimer'), 3000);
+      })
+      .catch(error => {
+        byId('linuxUpdatesStatus').textContent = `Failed to start update job: ${error.message}`;
+      })
+      .finally(() => {
+        updateLinuxUpdatesPushButtonState();
+      });
+  }
+
+  function updateLinuxUpdatesScheduleFieldVisibility() {
+    const mode = byId('linuxUpdatesScheduleMode').value;
+    byId('linuxUpdatesScheduleOnceField').classList.toggle('hidden', mode !== 'once');
+    byId('linuxUpdatesScheduleIntervalField').classList.toggle('hidden', mode !== 'interval');
+  }
+
+  function loadLinuxUpdateSchedule() {
+    fetch('/api/v1/linux-client-updates/schedule', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('linuxUpdatesScheduleMode').value = data.mode || 'off';
+        if (data.onceAtUtc) byId('linuxUpdatesScheduleOnceAt').value = data.onceAtUtc.slice(0, 16);
+        byId('linuxUpdatesScheduleIntervalHours').value = data.intervalHours || 24;
+        updateLinuxUpdatesScheduleFieldVisibility();
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxUpdatesScheduleMessage'), `Schedule status unavailable: ${error.message}`, true);
+      });
+  }
+
+  function saveLinuxUpdateSchedule() {
+    const mode = byId('linuxUpdatesScheduleMode').value;
+    const body = { mode };
+    if (mode === 'once') {
+      body.onceAtUtc = byId('linuxUpdatesScheduleOnceAt').value;
+    }
+    if (mode === 'interval') {
+      body.intervalHours = Number(byId('linuxUpdatesScheduleIntervalHours').value) || 24;
+    }
+
+    byId('linuxUpdatesScheduleSaveButton').disabled = true;
+    fetch('/api/v1/linux-client-updates/schedule', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        showSavedMessage(byId('linuxUpdatesScheduleMessage'), 'Saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxUpdatesScheduleMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('linuxUpdatesScheduleSaveButton').disabled = false;
+      });
+  }
+
   // Shared by the initial page-load badge fetch and pollForUpdates()'s own
   // badge fetch. A scheduled push runs entirely server-side (the timer
   // calls StartScheduledClientUpdatePush directly, no HTTP request from
@@ -913,8 +1795,13 @@
     const newValue = input.value;
     if (newValue === input.dataset.lastSavedValue) return;
 
+    const isLinux = input.dataset.platform === 'linux';
+    const endpoint = isLinux
+      ? `/api/v1/linux/clients/${encodeURIComponent(computerName)}/description`
+      : `/api/v1/clients/${encodeURIComponent(computerName)}/description`;
+
     input.disabled = true;
-    fetch(`/api/v1/clients/${encodeURIComponent(computerName)}/description`, {
+    fetch(endpoint, {
       method: 'PUT',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
@@ -924,7 +1811,9 @@
       .then(({ ok, data }) => {
         if (!ok) throw new Error(data.error || 'Save failed');
         input.dataset.lastSavedValue = data.description;
-        const client = (state.clients || []).find(c => c.computerName === computerName);
+        const list = isLinux ? (state.linuxClients || []) : (state.clients || []);
+        const key = isLinux ? 'hostname' : 'computerName';
+        const client = list.find(c => c[key] === computerName);
         if (client) client.adDescription = data.description;
       })
       .catch(error => {
@@ -955,6 +1844,7 @@
         } else {
           hint.classList.add('hidden');
         }
+        applyPasswordPlaceholder('updatesPassword', !!data.hasPassword, 'leave blank to keep the current one');
       })
       .catch(() => {});
   }
@@ -1116,11 +2006,94 @@
         renderPackageStatus(data);
         if (data.cmdServerUrl) byId('pkgServerUrl').value = data.cmdServerUrl;
         if (data.cmdIntervalHours) byId('pkgIntervalHours').value = data.cmdIntervalHours;
-        if (data.cmdToken) byId('pkgToken').value = data.cmdToken;
         byId('pkgSharePath').value = data.cmdPackageSharePath || '';
+        // Only pre-fill from the last-built package's own baked-in token if
+        // it still matches the server's current live token - otherwise a
+        // regenerate leaves this field silently showing a stale value that
+        // looks correct but isn't, and resubmitting it would also defeat
+        // ResolveEffectiveToken's blank-means-use-live-token fallback
+        // (Task 3), since the field would never actually be blank.
+        if (data.cmdToken) {
+          fetch('/api/v1/server/ingestion-token', { cache: 'no-store' })
+            .then(response => (response.ok ? response.json() : null))
+            .then(tokenStatus => {
+              if (tokenStatus && tokenStatus.token === data.cmdToken) {
+                byId('pkgToken').value = data.cmdToken;
+              }
+            })
+            .catch(() => {});
+        }
       })
       .catch(error => {
         byId('pkgStatus').textContent = `Package status unavailable: ${error.message}`;
+      });
+  }
+
+  function loadLinuxPackageStatus() {
+    fetch('/api/v1/linux-client-package', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        const statusText = data.binaryPresent
+          ? `Linux client binary present (v${escapeHtml(data.binaryVersion || 'unknown')}).`
+          : 'No Linux client binary found - run Build-LinuxClient.ps1 and place the output in the Linux client package directory first.';
+        byId('linuxPkgStatus').textContent = statusText;
+        byId('linuxPkgServerUrl').value = data.serverUrl || '';
+        byId('linuxPkgIntervalHours').value = data.intervalHours || 6;
+        byId('linuxPkgStatusIntervalMinutes').value = data.statusIntervalMinutes || 30;
+        byId('linuxPkgInstallPath').value = data.installPath || '/opt/windows-inventory-lite';
+        // Only pre-fill from the last-saved settings' token if it still
+        // matches the server's current live token - see the identical
+        // guard in loadPackageStatus for why a stale baked token must
+        // never silently resurface here.
+        if (data.token) {
+          fetch('/api/v1/server/ingestion-token', { cache: 'no-store' })
+            .then(response => (response.ok ? response.json() : null))
+            .then(tokenStatus => {
+              if (tokenStatus && tokenStatus.token === data.token) {
+                byId('linuxPkgToken').value = data.token;
+              }
+            })
+            .catch(() => {});
+        }
+      })
+      .catch(error => {
+        byId('linuxPkgStatus').textContent = `Linux package status unavailable: ${error.message}`;
+      });
+  }
+
+  function saveLinuxPackageConfig() {
+    const serverUrl = byId('linuxPkgServerUrl').value.trim();
+    const token = byId('linuxPkgToken').value.trim();
+    const intervalHours = Number(byId('linuxPkgIntervalHours').value) || 6;
+    const statusIntervalMinutes = Number(byId('linuxPkgStatusIntervalMinutes').value) || 30;
+    const installPath = byId('linuxPkgInstallPath').value.trim() || '/opt/windows-inventory-lite';
+
+    if (!serverUrl) {
+      window.alert('Enter server URL.');
+      return;
+    }
+
+    byId('linuxPkgSaveButton').disabled = true;
+    fetch('/api/v1/linux-client-package/configure', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ serverUrl, token, intervalHours, statusIntervalMinutes, installPath })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        showSavedMessage(byId('linuxPkgMessage'), 'Saved.', false);
+        loadLinuxPackageStatus();
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxPkgMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('linuxPkgSaveButton').disabled = false;
       });
   }
 
@@ -1470,6 +2443,7 @@
         byId('generalAdUseServiceIdentity').checked = data.adUseServiceIdentity !== false;
         byId('generalAdUsername').value = data.adUsername || '';
         byId('generalAdPassword').value = '';
+        applyPasswordPlaceholder('generalAdPassword', !!data.adPasswordConfigured, 'leave blank to keep the current password');
         byId('generalAdComputerImportOUs').value = data.adComputerImportOUs || '';
         updateAdIdentityFields();
         byId('generalDebugLogEnabled').checked = !!data.debugLogEnabled;
@@ -1518,13 +2492,14 @@
     showSavedMessage(byId('generalMessage'), msg, isError);
   }
 
-  function saveGeneralSettings(acknowledgeRisks, confirmedDisruption) {
+  function saveGeneralSettings(acknowledgeRisks, confirmedDisruption, acknowledgeIngestionTokenRisk) {
     const staleHours = Number.parseInt(byId('generalStaleHours').value, 10) || 48;
     const installLogRetentionDays = Number.parseInt(byId('generalInstallLogRetentionDays').value, 10) || 30;
     const port = Number.parseInt(byId('generalPort').value, 10) || 8080;
     const enableHttp = byId('generalEnableHttp').checked;
     const httpsPort = Number.parseInt(byId('generalHttpsPort').value, 10) || 8443;
     const useHttps = byId('generalUseHttps').checked;
+    const requireIngestionToken = byId('generalRequireIngestionToken').checked;
 
     // Only the HTTP port and the Enable HTTP switch can actually move this
     // browser's own connection out from under it - staleHours/httpsPort/
@@ -1539,6 +2514,16 @@
       if (!confirmed) return;
     }
 
+    const disablingIngestionToken = state.generalLoadedRequireIngestionToken && !requireIngestionToken;
+    if (disablingIngestionToken && !acknowledgeIngestionTokenRisk) {
+      const confirmed = window.confirm(
+        "Turning this off means anyone who can reach this server's port can submit inventory reports with no token at all - "
+          + 'both /api/v1/inventory and /api/v1/linux/inventory will accept any request, unauthenticated. Continue?'
+      );
+      if (!confirmed) return;
+      acknowledgeIngestionTokenRisk = true;
+    }
+
     byId('generalSaveButton').disabled = true;
     byId('generalMessage').className = 'pkg-message hidden';
 
@@ -1547,7 +2532,8 @@
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        staleHours, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, acknowledgeRisks: !!acknowledgeRisks,
+        staleHours, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, requireIngestionToken,
+        acknowledgeRisks: !!acknowledgeRisks, acknowledgeIngestionTokenRisk: !!acknowledgeIngestionTokenRisk,
         adSyncEnabled: byId('generalAdSyncEnabled').checked,
         adDescriptionSyncEnabled: byId('generalAdDescriptionSyncEnabled').checked,
         adSyncMode: byId('generalAdSyncMode').value,
@@ -1580,11 +2566,11 @@
         state.generalLoadedPort = data.port || 8080;
         state.generalLoadedEnableHttp = data.enableHttp !== false;
         state.adDescriptionSyncEnabled = byId('generalAdDescriptionSyncEnabled').checked;
-        renderSummary(state.clients);
         renderDashboardTiles();
         renderConnectionStatus(data);
         byId('generalAdPassword').value = '';
         showGeneralMessage('Settings saved.', false);
+        loadIngestionTokenStatus();
       })
       .catch(error => {
         showGeneralMessage(`Save failed: ${error.message}`, true);
@@ -1615,6 +2601,101 @@
       })
       .catch(error => {
         showAdminPasswordMessage(`Status unavailable: ${error.message}`, true);
+      });
+  }
+
+  function loadIngestionTokenStatus() {
+    fetch('/api/v1/server/ingestion-token', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        if (!data.configured && data.requireIngestionToken) {
+          // Reachable only via a hand-edited config (RequireIngestionToken
+          // explicitly set to true with no Token key) - the server's own
+          // guard fails closed in this state (see IsIngestionTokenRejected),
+          // so ingestion is rejecting every request, not merely
+          // unauthenticated. Worth its own message: an admin debugging
+          // "all my clients stopped reporting" needs the opposite of what
+          // the token-presence-only message below would tell them.
+          byId('ingestionTokenStatusText').textContent = 'No token configured, but enforcement is on - inventory ingestion is currently rejecting every request. Regenerate to set a token.';
+        } else if (!data.configured) {
+          byId('ingestionTokenStatusText').textContent = 'No token configured - inventory ingestion is unauthenticated. Regenerate to set one.';
+        } else if (!data.requireIngestionToken) {
+          byId('ingestionTokenStatusText').textContent = 'A token is configured, but enforcement is off - inventory ingestion currently accepts requests with no token.';
+        } else {
+          byId('ingestionTokenStatusText').textContent = 'A token is configured and required for inventory ingestion.';
+        }
+        byId('ingestionTokenValue').value = data.token || '';
+        byId('generalRequireIngestionToken').checked = !!data.requireIngestionToken;
+        state.generalLoadedRequireIngestionToken = !!data.requireIngestionToken;
+      })
+      .catch(error => {
+        // Deliberately writes to the status line, not ingestionTokenMessage -
+        // this is also called right after a successful regenerate to refresh
+        // the "configured" state, and ingestionTokenMessage may still be
+        // showing the one-time token reveal at that point. A failed status
+        // fetch here must not clobber the admin's only copy of the token.
+        byId('ingestionTokenStatusText').textContent = `Status unavailable: ${error.message}`;
+      });
+  }
+
+  // Deliberately does NOT use showSavedMessage - that helper auto-hides
+  // success messages after 30s, but this one shows the only copy of a
+  // freshly generated secret the admin will ever get from this page.
+  // isError styling (red) would also be semantically wrong for a
+  // successful generation, so this sets the message classes directly.
+  function regenerateIngestionToken() {
+    const warningText = state.generalLoadedRequireIngestionToken !== false
+      ? 'Regenerate the ingestion token? Every already-installed client will stop reporting until it is reconfigured with the new token - and any not-yet-deployed GPO package still has the OLD token baked in, so it must be rebuilt from the Client package tab, not just redeployed. This cannot be undone.'
+      : "Regenerate the ingestion token? Already-installed clients are unaffected right now since 'Require ingestion token' is off - but any package rebuilt after this uses the new value, and turning enforcement back on later will require every client to have this value. Continue?";
+    const confirmed = window.confirm(warningText);
+    if (!confirmed) return;
+
+    byId('ingestionTokenRegenerateButton').disabled = true;
+
+    fetch('/api/v1/server/ingestion-token/regenerate', {
+      method: 'POST',
+      cache: 'no-store'
+    })
+      .then(response => {
+        if (response.ok) {
+          return response.json().then(data => ({ ok: true, data }));
+        }
+        // The generic server error handler returns a text/plain body, not
+        // JSON (e.g. on a failed config save) - parse defensively so that
+        // case falls back to a generic message instead of surfacing a raw
+        // "Unexpected token..." JSON-parse error to the admin.
+        return response.json()
+          .catch(() => null)
+          .then(data => ({ ok: false, data, statusText: response.statusText }));
+      })
+      .then(({ ok, data, statusText }) => {
+        if (!ok) throw new Error((data && data.error) || statusText || 'Regenerate failed');
+        const messageEl = byId('ingestionTokenMessage');
+        // The token is now always visible in the "Current token" field above
+        // (populated by loadIngestionTokenStatus below), so this message no
+        // longer needs to be the one-and-only place to see it - it just
+        // confirms the regenerate happened and shows the new value inline.
+        messageEl.textContent = `Token regenerated: ${data.token}`;
+        messageEl.className = 'pkg-message';
+        loadIngestionTokenStatus();
+        // Client Package tab fields were pre-filled from the last-built
+        // package's own baked-in token, which is now stale - blank them so
+        // an immediate Save on that tab (without reloading first) correctly
+        // falls back to the fresh live token via ResolveEffectiveToken,
+        // instead of silently resubmitting the token that was just replaced.
+        const pkgTokenEl = byId('pkgToken');
+        if (pkgTokenEl) pkgTokenEl.value = '';
+        const linuxPkgTokenEl = byId('linuxPkgToken');
+        if (linuxPkgTokenEl) linuxPkgTokenEl.value = '';
+      })
+      .catch(error => {
+        showSavedMessage(byId('ingestionTokenMessage'), `Regenerate failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('ingestionTokenRegenerateButton').disabled = false;
       });
   }
 
@@ -1692,6 +2773,31 @@
     state.softwareVersionsByName = versionsByName;
     state.softwareAllVersions = allVersions;
     updateVersionDatalist();
+  }
+
+  // Chromium-based browsers (and others) refuse to reopen a <datalist>'s
+  // suggestion dropdown once the input's value already exactly matches one
+  // of its options - clicking back into a filled licenseName/licenseVersion
+  // field to pick something else does nothing until the field is manually
+  // cleared or typed into. Clearing on focus forces the browser to treat it
+  // as an empty field again (which always shows the full list); restoring
+  // on blur - but only if the user left it empty without picking or typing
+  // anything - avoids silently wiping out the value on a stray click.
+  function handleDatalistFieldFocus(event) {
+    const input = event.target;
+    input.dataset.preFocusValue = input.value;
+    input.value = '';
+    if (input.id === 'licenseName') updateVersionDatalist();
+  }
+
+  function handleDatalistFieldBlur(event) {
+    const input = event.target;
+    const preFocusValue = input.dataset.preFocusValue || '';
+    delete input.dataset.preFocusValue;
+    if (input.value === '' && preFocusValue !== '') {
+      input.value = preFocusValue;
+      if (input.id === 'licenseName') updateVersionDatalist();
+    }
   }
 
   function updateVersionDatalist() {
@@ -1951,17 +3057,89 @@
     });
   }
 
+  // Mirrors getSoftwareGroups (Windows) - groups by name+version only.
+  // Linux ServiceInfo (linux-client/collect/services.go) has no publisher
+  // field, unlike Windows software entries.
+  function getLinuxSoftwareGroups(clients) {
+    const groups = new Map();
+    clients.forEach(client => {
+      (client.services || []).forEach(item => {
+        if (!item.name) return;
+        const key = [item.name, item.version || ''].join('\u001f').toLowerCase();
+        if (!groups.has(key)) {
+          groups.set(key, { name: item.name, version: item.version || '', clients: [], clientKeys: new Set() });
+        }
+        const group = groups.get(key);
+        const clientKey = String(client.hostname || '').toLowerCase();
+        if (!group.clientKeys.has(clientKey)) {
+          group.clientKeys.add(clientKey);
+          group.clients.push(client);
+        }
+      });
+    });
+
+    return Array.from(groups.values()).sort((a, b) => {
+      const nameCompare = a.name.localeCompare(b.name);
+      return nameCompare || a.version.localeCompare(b.version);
+    });
+  }
+
+  // Display name for a client from either platform: Windows clients report
+  // computerName, Linux clients report hostname. Used everywhere merged
+  // cross-platform code needs a computer's name.
+  function clientDisplayName(client) {
+    return client.computerName || client.hostname || 'Unknown';
+  }
+
+  // Which platform a client came from, derived from which name field it
+  // carries. Deliberately not a new explicit `platform` field on the client
+  // objects: computerName vs hostname already disambiguates the two sources
+  // cleanly, and adding a field would mean changing the C# and Go report
+  // shapes for a purely cosmetic dashboard label.
+  function clientPlatformLabel(client) {
+    return client.computerName ? 'Windows' : 'Linux';
+  }
+
+  // Per-client dedupe key inside a hardware group. Platform-prefixed so a
+  // Windows machine and a Linux machine that happen to share a name still
+  // count as two distinct computers in a merged group.
+  function clientGroupKey(client) {
+    return clientPlatformLabel(client) + ':' + String(clientDisplayName(client)).toLowerCase();
+  }
+
+  // Every client from both platforms in one array. The merged Hardware view
+  // and the combined Dashboard tiles/charts read this instead of
+  // state.clients.
+  function getAllClients() {
+    return state.clients.concat(state.linuxClients);
+  }
+
+  // Cross-platform CPU grouping. Windows reports the model as cpu.name,
+  // Linux as cpu.model - the same underlying concept, so both feed one key.
+  // The key is name+cores only: Windows' cpu.clockMhz has no Linux
+  // counterpart, so keying on it would split otherwise-identical
+  // configurations, and it could not honestly be a group-level column
+  // either (a merged group's members would disagree). Clock is rendered
+  // per-computer in the expanded row instead.
+  // Grouped by model name only - core count is dropped from the key.
+  // Virtualized fleets routinely allocate different vCPU counts to VMs
+  // sharing the same underlying physical/model CPU, so keying on cores
+  // fragmented "the same processor" into multiple rows. Core count is
+  // shown per-computer in the expanded row instead (see hardwareComputerItem
+  // call sites), matching the clockMhz/moduleCount treatment already used
+  // here for the other platform/instance-specific hardware fields.
   function getCpuGroups(clients) {
     const groups = new Map();
     clients.forEach(client => {
       const cpu = client.cpu || {};
-      if (!cpu.name) return;
-      const key = String(cpu.name).toLowerCase();
+      const name = cpu.name || cpu.model;
+      if (!name) return;
+      const key = String(name).toLowerCase();
       if (!groups.has(key)) {
-        groups.set(key, { name: cpu.name, cores: cpu.cores, clockMhz: cpu.clockMhz, clients: [], clientKeys: new Set() });
+        groups.set(key, { name, clients: [], clientKeys: new Set() });
       }
       const group = groups.get(key);
-      const clientKey = String(client.computerName || '').toLowerCase();
+      const clientKey = clientGroupKey(client);
       if (!group.clientKeys.has(clientKey)) {
         group.clientKeys.add(clientKey);
         group.clients.push(client);
@@ -1970,6 +3148,12 @@
     return Array.from(groups.values()).sort((a, b) => a.name.localeCompare(b.name));
   }
 
+  // Cross-platform disk grouping. The key (model+type+sizeGb) is already
+  // identical on both platforms, so it needs no normalization. usb is the
+  // one asymmetric field - only Windows disks ever set it - and is computed
+  // here as "any member disk in this group is a USB disk", which keeps the
+  // existing USB badge and USB-last sort order behaving exactly as before
+  // for Windows-only groups.
   function getDiskGroups(clients) {
     const groups = new Map();
     clients.forEach(client => {
@@ -1977,10 +3161,11 @@
         if (!disk.model) return;
         const key = [disk.model, disk.type, disk.sizeGb].join('\x1f').toLowerCase();
         if (!groups.has(key)) {
-          groups.set(key, { model: disk.model, type: disk.type || 'HDD', sizeGb: disk.sizeGb || 0, usb: disk.usb === true, clients: [], clientKeys: new Set() });
+          groups.set(key, { model: disk.model, type: disk.type || 'HDD', sizeGb: disk.sizeGb || 0, usb: false, clients: [], clientKeys: new Set() });
         }
         const group = groups.get(key);
-        const clientKey = String(client.computerName || '').toLowerCase();
+        if (disk.usb === true) group.usb = true;
+        const clientKey = clientGroupKey(client);
         if (!group.clientKeys.has(clientKey)) {
           group.clientKeys.add(clientKey);
           group.clients.push(client);
@@ -1993,18 +3178,22 @@
     });
   }
 
+  // Cross-platform RAM grouping, keyed on total size only. Windows'
+  // per-module breakdown (ramModules) has no Linux counterpart, so keeping
+  // module count in the key would prevent any cross-platform merge at all.
+  // Module count is rendered per-computer in the expanded row instead, and
+  // the group-level "Modules" column is gone.
   function getRamGroups(clients) {
     const groups = new Map();
     clients.forEach(client => {
       const totalMb = client.ramTotalMb || 0;
-      const modules = client.ramModules || [];
-      const key = `${totalMb}:${modules.length}`;
+      const key = String(totalMb);
       if (!groups.has(key)) {
         const totalGb = totalMb >= 1024 ? `${Math.round(totalMb / 1024)} GB` : `${totalMb} MB`;
-        groups.set(key, { totalMb, totalGb, moduleCount: modules.length, clients: [], clientKeys: new Set() });
+        groups.set(key, { totalMb, totalGb, clients: [], clientKeys: new Set() });
       }
       const group = groups.get(key);
-      const clientKey = String(client.computerName || '').toLowerCase();
+      const clientKey = clientGroupKey(client);
       if (!group.clientKeys.has(clientKey)) {
         group.clientKeys.add(clientKey);
         group.clients.push(client);
@@ -2084,6 +3273,26 @@
       .slice(0, limit);
   }
 
+  // One bar per distinct OS release across both platforms: Windows reports
+  // it as os.caption, Linux as os.prettyName (collect.OSInfo). Same
+  // [{label, count}] shape as getTopCpuModels/getRamBuckets so it can go
+  // straight into renderBarChart. Grouped case-insensitively but displayed
+  // with the first-seen casing, matching getTopSoftwareNames' approach.
+  function getOsVersionBreakdown(clients, limit) {
+    const counts = new Map();
+    clients.forEach(client => {
+      const os = client.os || {};
+      const label = String(os.caption || os.prettyName || '').trim();
+      if (!label) return;
+      const key = label.toLowerCase();
+      if (!counts.has(key)) counts.set(key, { label, count: 0 });
+      counts.get(key).count++;
+    });
+    return Array.from(counts.values())
+      .sort((a, b) => b.count - a.count)
+      .slice(0, limit);
+  }
+
   function renderBarChart(containerId, items) {
     const container = byId(containerId);
     if (!items.length) {
@@ -2113,31 +3322,39 @@
     return haystack.indexOf(query.toLowerCase()) !== -1;
   }
 
-  function renderSummary(clients) {
-    byId('clientCount').textContent = clients.length;
-    byId('windowsActivated').textContent = clients.filter(client => client.activation && client.activation.windows && client.activation.windows.activated).length;
-    byId('officeActivated').textContent = clients.filter(client => client.activation && client.activation.office && client.activation.office.activated).length;
-    const staleCount = clients.filter(isStale).length;
-    byId('staleCount').textContent = staleCount;
-    byId('staleLabel').textContent = `Stale >${state.staleHours}h`;
-    byId('staleTile').classList.toggle('tile-alert', staleCount > 0);
+  function linuxSoftwareMatches(group, query) {
+    if (!query) return true;
+    const computers = group.clients.map(client => client.hostname).join(' ');
+    const haystack = [group.name, group.version, computers].join(' ').toLowerCase();
+    return haystack.indexOf(query.toLowerCase()) !== -1;
   }
 
   function renderDashboardTiles() {
     const clients = state.clients;
-    byId('dashClientCount').textContent = clients.length;
+    const allClients = getAllClients();
+    byId('dashClientCount').textContent = allClients.length;
+    // Windows-only by design, not an oversight: neither Windows activation
+    // nor Office activation has any Linux equivalent, so these two tiles
+    // stay state.clients-only while Clients/Stale go fleet-wide.
     byId('dashWindowsActivated').textContent = clients.filter(client => client.activation && client.activation.windows && client.activation.windows.activated).length;
     byId('dashOfficeActivated').textContent = clients.filter(client => client.activation && client.activation.office && client.activation.office.activated).length;
-    const dashStaleCount = clients.filter(isStale).length;
+    // isStale needs no platform handling - it reads collectedAt ||
+    // sourceUpdatedAt, both of which Linux client reports also carry.
+    const dashStaleCount = allClients.filter(isStale).length;
     byId('dashStaleCount').textContent = dashStaleCount;
     byId('dashStaleLabel').textContent = `Stale >${state.staleHours}h`;
     byId('dashStaleTile').classList.toggle('tile-alert', dashStaleCount > 0);
     byId('dashLicenseCount').textContent = state.licenses.length;
-    byId('dashUsbCount').textContent = clients.filter(client => client.hasUsbStorage).length;
+    byId('dashUsbCount').textContent = allClients.filter(client => client.hasUsbStorage).length;
+    // Top software stays Windows-only: the Linux client inventories running
+    // services, a different concept that would not mix meaningfully into a
+    // "top installed software" chart. The OS chart below is the cross-
+    // platform Software-card addition.
     renderBarChart('dashSoftwareChart', getTopSoftwareNames(clients, 5));
-    renderBarChart('dashCpuChart', getTopCpuModels(clients, 4));
-    renderBarChart('dashRamChart', getRamBuckets(clients));
-    renderBarChart('dashStorageChart', getStorageTypeBreakdown(clients));
+    renderBarChart('dashOsChart', getOsVersionBreakdown(allClients, 5));
+    renderBarChart('dashCpuChart', getTopCpuModels(allClients, 4));
+    renderBarChart('dashRamChart', getRamBuckets(allClients));
+    renderBarChart('dashStorageChart', getStorageTypeBreakdown(allClients));
   }
 
   // Each module renders as its own grid cell (2 columns) instead of one
@@ -2170,8 +3387,11 @@
     byId('descriptionColumnHeader').textContent = state.adDescriptionSyncEnabled ? 'AD Description' : 'Description';
     const rows = pageItems.map(client => {
       const stale = isStale(client);
+      const awaitingReport = !!client.lastInstalledAtUtc;
       const staleClass = stale ? ' stale' : '';
-      const staleBadge = stale ? ' <span class="usb-badge">STALE</span>' : '';
+      const staleBadge = awaitingReport
+        ? ` <span class="usb-badge" title="Pushed at ${escapeHtml(formatDateTime(client.lastInstalledAtUtc))}, waiting for this client to report in">AWAITING REPORT</span>`
+        : (stale ? ' <span class="usb-badge">STALE</span>' : '');
       const os = client.os || {};
       const office = client.office || {};
       const activation = client.activation || {};
@@ -2304,39 +3524,100 @@
     });
   }
 
+  // Mirrors renderSoftwareTable (Windows) - row-expand shows which
+  // computers have this service (no License column, no publisher - this
+  // project has no Linux licensing concept and ServiceInfo has no
+  // publisher field).
+  function renderLinuxSoftwareTable(clients) {
+    const tbody = byId('linuxSoftwareBody');
+    if (!tbody) return;
+
+    const query = byId('searchInput').value.trim();
+    const { key: sortKey, dir: sortDir } = state.sort.linuxSoftware;
+    const filtered = applySort(getLinuxSoftwareGroups(clients).filter(g => linuxSoftwareMatches(g, query)), g => linuxSoftwareSortValue(g, sortKey), sortDir);
+    const { items: pageItems, page, totalPages } = paginate(filtered, state.page.linuxSoftware, state.pageSize.linuxSoftware);
+    state.page.linuxSoftware = page;
+
+    const rows = pageItems.map(group => {
+      const computers = group.clients.map(client => `<li>${escapeHtml(client.hostname)}</li>`).join('');
+      const groupId = safeId('linux:' + group.name + '\u001f' + group.version);
+      const detailsHidden = state.expandedDetails.has('linux-software:' + groupId) ? '' : 'hidden';
+
+      return `<tr>
+        <td><button class="link-button" type="button" data-linux-software="${groupId}">${escapeHtml(group.name)}</button></td>
+        <td>${escapeHtml(group.version)}</td>
+        <td class="hw-num">${group.clients.length}</td>
+      </tr>
+      <tr class="details-row ${detailsHidden}" data-linux-software-details="${groupId}">
+        <td colspan="3">
+          <div class="details">
+            <h2>${escapeHtml(group.name)}</h2>
+            <ul class="computer-list">${computers}</ul>
+          </div>
+        </td>
+      </tr>`;
+    });
+
+    tbody.innerHTML = rows.join('') || '<tr><td colspan="3" class="empty">No matching software records.</td></tr>';
+    renderPager('linuxSoftwarePager', 'linuxSoftware', page, totalPages, () => renderLinuxSoftwareTable(state.linuxClients));
+  }
+
+  // One <li> per computer inside an expanded hardware group. Cross-platform:
+  // the display name falls back to hostname for Linux clients, the platform
+  // tag is derived from which name field is present, and domain (Windows
+  // only) is rendered only when the client actually reports one - piping an
+  // absent domain through escapeHtml would print the literal word "Unknown"
+  // under every Linux entry. extraHtml carries the per-computer,
+  // instance-specific detail a merged group can no longer show as a table
+  // column (CPU cores/clock - VMs sharing a model often have different
+  // vCPU allocations, RAM module count).
+  function hardwareComputerItem(client, extraHtml) {
+    const domain = client.domain ? `<small>${escapeHtml(client.domain)}</small>` : '';
+    return `<li>${escapeHtml(clientDisplayName(client))} <small class="platform-tag">${escapeHtml(clientPlatformLabel(client))}</small>${extraHtml || ''}${domain}</li>`;
+  }
+
+  // The single cross-platform Hardware page: three stacked group-by tables
+  // (CPU/Storage/RAM) built from state.clients and state.linuxClients
+  // together (callers pass getAllClients()). Replaces the former
+  // renderHardwarePage/renderLinuxHardwarePage pair and reuses the Windows
+  // side's DOM ids and hwCpu/hwDisk/hwRam sort+page state, which were always
+  // per-table rather than per-platform.
   function renderHardwarePage(clients) {
     const query = byId('searchInput').value.trim();
 
     const { key: cpuSortKey, dir: cpuSortDir } = state.sort.hwCpu;
-    const cpuFiltered = applySort(getCpuGroups(clients).filter(g => hwMatches([g.name, ...g.clients.map(c => c.computerName)].join(' '), query)), g => cpuSortValue(g, cpuSortKey), cpuSortDir);
+    const cpuFiltered = applySort(getCpuGroups(clients).filter(g => hwMatches([g.name, ...g.clients.map(c => clientDisplayName(c))].join(' '), query)), g => cpuSortValue(g, cpuSortKey), cpuSortDir);
     const { items: cpuPageItems, page: cpuPage, totalPages: cpuTotalPages } = paginate(cpuFiltered, state.page.hwCpu, state.pageSize.hwCpu);
     state.page.hwCpu = cpuPage;
     const cpuRows = cpuPageItems.map(g => {
         const id = safeId('cpu:' + g.name);
         const detailsHidden = state.expandedDetails.has('hw:' + id) ? '' : 'hidden';
-        const computers = g.clients.map(c => `<li>${escapeHtml(c.computerName)}<small>${escapeHtml(c.domain)}</small></li>`).join('');
-        const clock = g.clockMhz ? `${(g.clockMhz / 1000).toFixed(2)} GHz` : 'Unknown';
+        const computers = g.clients.map(c => {
+          const cpu = c.cpu || {};
+          const coresText = cpu.cores != null ? `${Number(cpu.cores) || 0} cores` : '';
+          const clockText = cpu.clockMhz ? `${(Number(cpu.clockMhz) / 1000).toFixed(2)} GHz` : '';
+          const extra = [coresText, clockText].filter(Boolean).join(', ');
+          return hardwareComputerItem(c, extra ? `<small>${extra}</small>` : '');
+        }).join('');
         return `<tr>
           <td><button class="link-button" type="button" data-hw="${id}">${escapeHtml(g.name)}</button></td>
-          <td class="hw-num">${g.cores != null ? (Number(g.cores) || 0) : 'Unknown'}</td>
-          <td class="hw-num">${escapeHtml(clock)}</td>
           <td class="hw-num">${g.clients.length}</td>
         </tr>
         <tr class="details-row ${detailsHidden}" data-hw-details="${id}">
-          <td colspan="4"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
+          <td colspan="2"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
         </tr>`;
       });
-    byId('hwCpuBody').innerHTML = cpuRows.join('') || '<tr><td colspan="4" class="empty">No CPU data.</td></tr>';
-    renderPager('hwCpuPager', 'hwCpu', cpuPage, cpuTotalPages, () => renderHardwarePage(state.clients));
+    byId('hwCpuBody').innerHTML = cpuRows.join('') || '<tr><td colspan="2" class="empty">No CPU data.</td></tr>';
+    renderPager('hwCpuPager', 'hwCpu', cpuPage, cpuTotalPages, () => renderHardwarePage(getAllClients()));
 
     const { key: diskSortKey, dir: diskSortDir } = state.sort.hwDisk;
-    const diskFiltered = applySort(getDiskGroups(clients).filter(g => hwMatches([g.model, g.type, ...g.clients.map(c => c.computerName)].join(' '), query)), g => diskSortValue(g, diskSortKey), diskSortDir);
+    const diskFiltered = applySort(getDiskGroups(clients).filter(g => hwMatches([g.model, g.type, ...g.clients.map(c => clientDisplayName(c))].join(' '), query)), g => diskSortValue(g, diskSortKey), diskSortDir);
     const { items: diskPageItems, page: diskPage, totalPages: diskTotalPages } = paginate(diskFiltered, state.page.hwDisk, state.pageSize.hwDisk);
     state.page.hwDisk = diskPage;
     const diskRows = diskPageItems.map(g => {
-        const id = safeId('disk:' + g.model + g.sizeGb);
+        const id = safeId('disk:' + g.model + g.type + g.sizeGb);
         const detailsHidden = state.expandedDetails.has('hw:' + id) ? '' : 'hidden';
-        const computers = g.clients.map(c => `<li>${escapeHtml(c.computerName)}<small>${escapeHtml(c.domain)}</small></li>`).join('');
+        const computers = g.clients.map(c => hardwareComputerItem(c, '')).join('');
         const usbBadge = g.usb ? ' <span class="usb-badge">USB</span>' : '';
         const size = g.sizeGb ? `${g.sizeGb} GB` : 'Unknown';
         return `<tr${g.usb ? ' class="usb-row"' : ''}>
@@ -2350,36 +3631,34 @@
         </tr>`;
       });
     byId('hwDiskBody').innerHTML = diskRows.join('') || '<tr><td colspan="4" class="empty">No storage data.</td></tr>';
-    renderPager('hwDiskPager', 'hwDisk', diskPage, diskTotalPages, () => renderHardwarePage(state.clients));
+    renderPager('hwDiskPager', 'hwDisk', diskPage, diskTotalPages, () => renderHardwarePage(getAllClients()));
 
     const { key: ramSortKey, dir: ramSortDir } = state.sort.hwRam;
-    const ramFiltered = applySort(getRamGroups(clients).filter(g => hwMatches([g.totalGb, ...g.clients.map(c => c.computerName)].join(' '), query)), g => ramSortValue(g, ramSortKey), ramSortDir);
+    const ramFiltered = applySort(getRamGroups(clients).filter(g => hwMatches([g.totalGb, ...g.clients.map(c => clientDisplayName(c))].join(' '), query)), g => ramSortValue(g, ramSortKey), ramSortDir);
     const { items: ramPageItems, page: ramPage, totalPages: ramTotalPages } = paginate(ramFiltered, state.page.hwRam, state.pageSize.hwRam);
     state.page.hwRam = ramPage;
     const ramRows = ramPageItems.map(g => {
-        const id = safeId('ram:' + g.totalMb + ':' + g.moduleCount);
+        const id = safeId('ram:' + g.totalMb);
         const detailsHidden = state.expandedDetails.has('hw:' + id) ? '' : 'hidden';
-        const computers = g.clients.map(c => `<li>${escapeHtml(c.computerName)}<small>${escapeHtml(c.domain)}</small></li>`).join('');
+        const computers = g.clients.map(c => hardwareComputerItem(c, c.ramModules && c.ramModules.length ? `<small>${c.ramModules.length} module${c.ramModules.length === 1 ? '' : 's'}</small>` : '')).join('');
         return `<tr>
           <td><button class="link-button" type="button" data-hw="${id}">${escapeHtml(g.totalGb)}</button></td>
-          <td class="hw-num">${g.moduleCount || 'Unknown'}</td>
           <td class="hw-num">${g.clients.length}</td>
         </tr>
         <tr class="details-row ${detailsHidden}" data-hw-details="${id}">
-          <td colspan="3"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
+          <td colspan="2"><div class="details"><ul class="computer-list">${computers}</ul></div></td>
         </tr>`;
       });
-    byId('hwRamBody').innerHTML = ramRows.join('') || '<tr><td colspan="3" class="empty">No RAM data.</td></tr>';
-    renderPager('hwRamPager', 'hwRam', ramPage, ramTotalPages, () => renderHardwarePage(state.clients));
+    byId('hwRamBody').innerHTML = ramRows.join('') || '<tr><td colspan="2" class="empty">No RAM data.</td></tr>';
+    renderPager('hwRamPager', 'hwRam', ramPage, ramTotalPages, () => renderHardwarePage(getAllClients()));
   }
 
   function render() {
     renderDashboardTiles();
-    renderSummary(state.clients);
     renderSortHeaders();
     renderTable(state.clients);
     renderSoftwareTable(state.clients);
-    renderHardwarePage(state.clients);
+    renderHardwarePage(getAllClients());
     renderLicenses();
     populateSoftwareDatalists();
     byId('dashboardView').classList.toggle('hidden', state.view !== 'dashboard');
@@ -2387,28 +3666,36 @@
     byId('softwareView').classList.toggle('hidden', state.view !== 'software');
     byId('hardwareView').classList.toggle('hidden', state.view !== 'hardware');
     byId('installView').classList.toggle('hidden', state.view !== 'install');
+    byId('linuxInstallView').classList.toggle('hidden', state.view !== 'linuxInstall');
+    byId('linuxUpdatesView').classList.toggle('hidden', state.view !== 'linuxUpdates');
     byId('packageView').classList.toggle('hidden', state.view !== 'package');
     byId('updatesView').classList.toggle('hidden', state.view !== 'updates');
     byId('generalView').classList.toggle('hidden', state.view !== 'general');
     byId('generalStatusView').classList.toggle('hidden', state.view !== 'general');
     byId('certificateView').classList.toggle('hidden', state.view !== 'certificate');
     byId('licensesView').classList.toggle('hidden', state.view !== 'licenses');
+    byId('linuxClientsView').classList.toggle('hidden', state.view !== 'linux');
+    byId('linuxSoftwareView').classList.toggle('hidden', state.view !== 'linuxSoftware');
     byId('adminPasswordView').classList.toggle('hidden', state.view !== 'admin');
     byId('dashboardTab').classList.toggle('active', state.view === 'dashboard');
     byId('clientsTab').classList.toggle('active', state.view === 'clients');
     byId('softwareTab').classList.toggle('active', state.view === 'software');
     byId('hardwareTab').classList.toggle('active', state.view === 'hardware');
     byId('installTab').classList.toggle('active', state.view === 'install');
+    byId('linuxInstallTab').classList.toggle('active', state.view === 'linuxInstall');
+    byId('linuxUpdatesTab').classList.toggle('active', state.view === 'linuxUpdates');
     byId('packageTab').classList.toggle('active', state.view === 'package');
     byId('updatesTab').classList.toggle('active', state.view === 'updates');
     byId('generalTab').classList.toggle('active', state.view === 'general');
     byId('certificateTab').classList.toggle('active', state.view === 'certificate');
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
+    byId('linuxClientsTab').classList.toggle('active', state.view === 'linux');
+    byId('linuxSoftwareTab').classList.toggle('active', state.view === 'linuxSoftware');
     byId('adminPasswordTab').classList.toggle('active', state.view === 'admin');
     const isInventoryView = inventoryViews.includes(state.view);
-    byId('summarySection').classList.toggle('hidden', !isInventoryView);
-    byId('searchInput').classList.toggle('hidden', !isInventoryView);
-    byId('generatedAt').classList.toggle('hidden', !isInventoryView);
+    const isLinuxInventoryView = linuxInventoryViews.includes(state.view);
+    byId('searchInput').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
+    byId('generatedAt').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
     recalculateActivePagination();
   }
 
@@ -2495,6 +3782,17 @@
         // Silent - see function comment above.
       });
 
+    // Linux data has no separate change-fingerprint (its own dataset is
+    // much smaller in practice than the Windows fleet this project was
+    // built around) - loadLinuxClients() always re-fetches+re-renders on
+    // every 30s tick while a view that reads Linux data is open, same
+    // silent-on-failure behavior as the Windows poll above. That now
+    // includes the Dashboard (combined tiles/charts) and the merged
+    // Hardware view, not just the Linux Inventory tabs.
+    if (linuxDataViews.includes(state.view)) {
+      loadLinuxClients();
+    }
+
     // Separate fetch, badge-only: the sidebar "Client updates" count should
     // stay live even when the Client updates tab itself isn't open. A full
     // loadClientUpdates()/renderClientUpdates() call is deliberately NOT used
@@ -2508,6 +3806,21 @@
         return response.json();
       })
       .then(handleClientUpdatesSummary)
+      .catch(() => {
+        // Silent - matches the clients-poll fetch above.
+      });
+
+    // Same badge-only concern as the Windows fetch above, for the Linux
+    // "Client updates" sidebar count - this was missing entirely, so the
+    // count only ever appeared after the user opened the Linux Client
+    // updates tab directly (which populates it as a side effect of
+    // loadLinuxClientUpdates()).
+    fetch('/api/v1/linux-client-updates', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(handleLinuxClientUpdatesSummary)
       .catch(() => {
         // Silent - matches the clients-poll fetch above.
       });
@@ -2574,6 +3887,28 @@
       // Silent - matches pollForUpdates()'s badge fetch.
     });
 
+  // Same badge-only fetch pollForUpdates() does on every tick, run once
+  // immediately on page load - otherwise the Linux sidebar badge stays
+  // blank until the first 30s poll tick or the user opens Linux Client
+  // updates directly (which populates it as a side effect).
+  fetch('/api/v1/linux-client-updates', { cache: 'no-store' })
+    .then(response => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    })
+    .then(handleLinuxClientUpdatesSummary)
+    .catch(() => {
+      // Silent - matches pollForUpdates()'s badge fetch.
+    });
+
+  // Unconditional, mirroring the initial /api/v1/clients fetch above:
+  // state.linuxClients must be populated regardless of which view the user
+  // lands on, because the Dashboard's combined tiles/charts and the merged
+  // Hardware view both read it. Previously this only ran when a Linux
+  // Inventory tab was opened, so a user landing on the Dashboard saw
+  // Windows-only counts until they clicked into a Linux tab.
+  loadLinuxClients();
+
   loadLicenses();
 
   byId('searchInput').addEventListener('input', () => {
@@ -2582,7 +3917,14 @@
     state.page.hwCpu = 1;
     state.page.hwDisk = 1;
     state.page.hwRam = 1;
+    state.page.linuxClients = 1;
+    state.page.linuxSoftware = 1;
     render();
+    if (state.view === 'linux') {
+      renderLinuxClientsTable(state.linuxClients);
+    } else if (state.view === 'linuxSoftware') {
+      renderLinuxSoftwareTable(state.linuxClients);
+    }
   });
 
   let paginationResizeTimer = null;
@@ -2605,19 +3947,41 @@
   byId('installTab').addEventListener('click', () => {
     setView('install');
   });
+  byId('linuxInstallTab').addEventListener('click', () => setView('linuxInstall'));
   window.addEventListener('hashchange', () => {
     state.view = getInitialView();
     render();
     if (state.view === 'install') loadInstallHistory();
-    if (state.view === 'package') loadPackageStatus();
+    if (state.view === 'linuxInstall') loadLinuxInstallHistory();
+    if (state.view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
+    if (state.view === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
     if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
-    if (state.view === 'general') loadGeneralSettings();
+    if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (state.view === 'licenses') loadLicenses();
+    if (state.view === 'linux' || state.view === 'linuxSoftware' || state.view === 'hardware') loadLinuxClients();
     if (state.view === 'admin') loadAdminPasswordStatus();
   });
   byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
+  byId('linuxInstallServerUrl').value = `${window.location.origin}/api/v1/linux/inventory`;
   byId('clientAction').addEventListener('change', updateClientActionUi);
+  byId('linuxClientAction').addEventListener('change', updateLinuxClientActionUi);
+  byId('linuxInstallAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField'));
+  byId('linuxInstallButton').addEventListener('click', startLinuxClientActionJob);
+  byId('linuxTrustNewHostKeys').addEventListener('change', updateLinuxTrustNewHostKeysUi);
+  byId('linuxAcknowledgeHostKeyRisk').addEventListener('change', updateLinuxTrustNewHostKeysUi);
+  byId('linuxUpdatesAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField'));
+  byId('linuxUpdatesSelectAll').addEventListener('change', () => {
+    const checked = byId('linuxUpdatesSelectAll').checked;
+    document.querySelectorAll('.linux-update-select').forEach(cb => { cb.checked = checked; });
+    updateLinuxUpdatesPushButtonState();
+  });
+  byId('linuxUpdatesPushButton').addEventListener('click', startLinuxUpdatesPush);
+  byId('linuxUpdatesTrustNewHostKeys').addEventListener('change', updateLinuxUpdatesTrustNewHostKeysUi);
+  byId('linuxUpdatesAcknowledgeHostKeyRisk').addEventListener('change', updateLinuxUpdatesTrustNewHostKeysUi);
+  byId('linuxUpdatesScheduleMode').addEventListener('change', updateLinuxUpdatesScheduleFieldVisibility);
+  byId('linuxUpdatesScheduleSaveButton').addEventListener('click', saveLinuxUpdateSchedule);
+  byId('linuxUpdatesTab').addEventListener('click', () => setView('linuxUpdates'));
   byId('installUseAdCredentials').addEventListener('change', updateInstallCredentialFieldsUi);
   byId('updatesUseAdCredentials').addEventListener('change', updateUpdatesCredentialFieldsUi);
   byId('installButton').addEventListener('click', startClientActionJob);
@@ -2649,7 +4013,16 @@
         current.dir = 1;
       }
       if (state.page[table] !== undefined) state.page[table] = 1;
-      render();
+      // render() doesn't touch the Linux Clients table (it's loaded/rendered
+      // through its own loadLinuxClients()/setView('linux') path, not the
+      // main Windows-side render pipeline) - re-render it directly instead.
+      if (table === 'linuxClients') {
+        renderLinuxClientsTable(state.linuxClients);
+      } else if (table === 'linuxSoftware') {
+        renderLinuxSoftwareTable(state.linuxClients);
+      } else {
+        render();
+      }
       return;
     }
 
@@ -2686,9 +4059,37 @@
       return;
     }
 
+    const linuxClientBtn = e.target.closest('[data-linux-client]');
+    if (linuxClientBtn) {
+      const key = 'linux-client:' + linuxClientBtn.dataset.linuxClient;
+      const row = document.querySelector(`[data-linux-client-details="${linuxClientBtn.dataset.linuxClient}"]`);
+      if (row) {
+        const nowHidden = row.classList.toggle('hidden');
+        if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
+      }
+      return;
+    }
+
+    const linuxSoftwareBtn = e.target.closest('[data-linux-software]');
+    if (linuxSoftwareBtn) {
+      const key = 'linux-software:' + linuxSoftwareBtn.dataset.linuxSoftware;
+      const row = document.querySelector(`[data-linux-software-details="${linuxSoftwareBtn.dataset.linuxSoftware}"]`);
+      if (row) {
+        const nowHidden = row.classList.toggle('hidden');
+        if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
+      }
+      return;
+    }
+
     const deleteBtn = e.target.closest('[data-delete-client]');
     if (deleteBtn) {
       deleteClient(deleteBtn.dataset.deleteClient);
+      return;
+    }
+
+    const deleteLinuxBtn = e.target.closest('[data-delete-linux-client]');
+    if (deleteLinuxBtn) {
+      deleteLinuxClient(deleteLinuxBtn.dataset.deleteLinuxClient);
     }
   });
   byId('packageTab').addEventListener('click', () => setView('package'));
@@ -2707,6 +4108,10 @@
     }
   });
   byId('pkgSaveButton').addEventListener('click', savePackageConfig);
+  byId('linuxPkgSaveButton').addEventListener('click', saveLinuxPackageConfig);
+  byId('linuxPkgDownloadButton').addEventListener('click', () => {
+    window.location.href = '/api/v1/linux-client-package/download';
+  });
   byId('pkgDownloadButton').addEventListener('click', () => {
     window.location.href = '/api/v1/client-package/download';
   });
@@ -2720,12 +4125,20 @@
   byId('certUploadButton').addEventListener('click', uploadCertificate);
   byId('certDeleteButton').addEventListener('click', deleteCertificate);
   byId('licensesTab').addEventListener('click', () => setView('licenses'));
+  byId('linuxClientsTab').addEventListener('click', () => setView('linux'));
+  byId('linuxSoftwareTab').addEventListener('click', () => setView('linuxSoftware'));
+  byId('exportLinuxClientsBtn').addEventListener('click', exportLinuxClients);
+  byId('exportLinuxSoftwareBtn').addEventListener('click', exportLinuxSoftware);
   byId('exportLicensesBtn').addEventListener('click', exportLicenses);
   byId('licenseAddButton').addEventListener('click', () => openLicenseForm(null));
   byId('licenseSaveButton').addEventListener('click', saveLicense);
   byId('licenseCancelButton').addEventListener('click', closeLicenseForm);
   byId('licenseName').addEventListener('input', updateVersionDatalist);
   byId('licenseName').addEventListener('change', applySoftwareComputers);
+  byId('licenseName').addEventListener('focus', handleDatalistFieldFocus);
+  byId('licenseName').addEventListener('blur', handleDatalistFieldBlur);
+  byId('licenseVersion').addEventListener('focus', handleDatalistFieldFocus);
+  byId('licenseVersion').addEventListener('blur', handleDatalistFieldBlur);
   byId('licenseComputerAddButton').addEventListener('click', addLicenseComputerFromInput);
   byId('licenseComputerInput').addEventListener('keydown', e => {
     if (e.key === 'Enter') {
@@ -2735,14 +4148,26 @@
   });
   byId('adminPasswordTab').addEventListener('click', () => setView('admin'));
   byId('adminPasswordSaveButton').addEventListener('click', changeAdminPassword);
+  byId('ingestionTokenRegenerateButton').addEventListener('click', regenerateIngestionToken);
+  byId('linuxCredsSaveButton').addEventListener('click', saveLinuxUpdateCredentials);
+  byId('linuxCredsClearButton').addEventListener('click', clearLinuxUpdateCredentials);
+  byId('linuxSshKeyUploadButton').addEventListener('click', uploadLinuxSshKey);
+  byId('linuxSshKeyDeleteButton').addEventListener('click', deleteLinuxSshKey);
   byId('themeToggle').addEventListener('click', toggleTheme);
+  byId('logoutButton').addEventListener('click', handleLogout);
+  byId('logoutReloadButton').addEventListener('click', () => window.location.reload());
   updateThemeToggle();
-  if (state.view === 'package') loadPackageStatus();
+  if (state.view === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
+  if (state.view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
   if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
-  if (state.view === 'general') loadGeneralSettings();
+  if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
   if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
   if (state.view === 'licenses') loadLicenses();
   if (state.view === 'admin') loadAdminPasswordStatus();
   updateClientActionUi();
   loadInstallHistory();
+  updateLinuxClientActionUi();
+  updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField');
+  updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField');
+  if (state.view === 'linuxInstall') loadLinuxInstallHistory();
 }());

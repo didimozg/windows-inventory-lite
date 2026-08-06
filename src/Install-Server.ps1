@@ -32,6 +32,20 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
+    [string]$LinuxClientPackagePath,
+
+    # Mirrors ClientPackageSourcePath's own "copy in if present" contract for
+    # the Linux client. There is no ClientNet35/40ExecutablePath equivalent
+    # here (an always-present, server-bundled fallback binary) because the Go
+    # binary is never part of the .NET server build - if this path (and its
+    # OutputPath.version sidecar, see Build-LinuxClient.ps1) is absent, the
+    # copy is skipped silently and whatever is already deployed is left as-is.
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$LinuxClientBinarySourcePath,
+
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
     [string]$ConfigPath,
 
     [Parameter()]
@@ -178,11 +192,6 @@ function Test-BatchSafeValue {
         throw "$FieldName contains a character that is not allowed here (double quote, &, |, <, >, ^, or a line break)."
     }
 }
-Test-BatchSafeValue -Value $DataPath -FieldName 'DataPath'
-Test-BatchSafeValue -Value $ContentPath -FieldName 'ContentPath'
-Test-BatchSafeValue -Value $ClientPackagePath -FieldName 'ClientPackagePath'
-Test-BatchSafeValue -Value $ConfigPath -FieldName 'ConfigPath'
-
 function Invoke-ServiceControl {
     param(
         [Parameter(Mandatory = $true)]
@@ -351,6 +360,16 @@ function Write-ServerConfig {
     }
 
     $json = '{' + (($items.ToArray()) -join ',') + '}'
+
+    # Create empty, restrict, THEN write. On a first install the previous order
+    # (write, then Set-RestrictedFileAcl at the call site) left the file sitting
+    # under inherited ProgramData permissions for the whole window between the two
+    # - readable by any local process, while already containing the
+    # DPAPI-LocalMachine-scoped Token/WebPassword/AdPassword values.
+    if (-not (Test-Path -LiteralPath $Path)) {
+        New-Item -Path $Path -ItemType File -Force | Out-Null
+    }
+    Set-RestrictedFileAcl -FilePath $Path
     [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
 }
 
@@ -365,6 +384,50 @@ function Get-ConfigValue {
     }
 
     return $null
+}
+
+# Generates a cryptographically random ingestion token. 32 bytes,
+# hex-encoded to 64 lowercase characters: long enough to be
+# unguessable, and hex avoids the +/=/ characters base64 would produce,
+# which are awkward to pass as a CLI arg or paste into a URL header.
+function New-RandomToken {
+    $bytes = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    }
+    finally {
+        $rng.Dispose()
+    }
+    return -join ($bytes | ForEach-Object { $_.ToString('x2') })
+}
+
+# Decides the ingestion token to actually use: an explicit -Token value
+# always wins, then a saved value from an existing server-config.json,
+# and only if neither exists does this generate a brand new random one.
+# Install-Wizard.ps1's own prompt has always said "leave blank to
+# auto-generate" but nothing ever actually generated one before this -
+# a blank Token meant inventory ingestion ran completely unauthenticated,
+# not "protected by an unseen random value". This makes that promise
+# true, and (as a beneficial side effect) self-heals an existing install
+# that's already in that broken empty-token state the next time its
+# config is touched in any mode, since $SavedToken would itself be
+# empty/falsy for such an install. Extracted as its own function - not
+# inlined at the call site - specifically so it's testable without
+# needing to dot-source the rest of this script, which is not
+# dot-source-safe (see this task's own file-list note).
+function Resolve-InstallToken {
+    param(
+        [string]$ExplicitToken,
+        [string]$SavedToken
+    )
+    if ($ExplicitToken) {
+        return $ExplicitToken
+    }
+    if ($SavedToken) {
+        return $SavedToken
+    }
+    return New-RandomToken
 }
 
 # Encrypts a secret with Windows DPAPI (LocalMachine scope, not CurrentUser -
@@ -483,6 +546,49 @@ if (-not $ClientPackageSourcePath) {
     }
 }
 
+if (-not $LinuxClientPackagePath) {
+    $savedLinuxClientPackagePath = Get-ConfigValue -Config $existingConfig -Name 'LinuxClientPackagePath'
+    if ($savedLinuxClientPackagePath) {
+        $LinuxClientPackagePath = $savedLinuxClientPackagePath
+    }
+    else {
+        $LinuxClientPackagePath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\linux-client-package'
+    }
+}
+
+if (-not $LinuxClientBinarySourcePath) {
+    $projectRoot = Split-Path -Parent $PSScriptRoot
+    $defaultLinuxClientBinarySourcePath = Join-Path -Path $projectRoot -ChildPath 'build\wil-linux-client'
+    # Mirrors the Windows client executables' own "always rebuild when using
+    # the default (not caller-supplied) path" contract (see the
+    # ClientNet35/40ExecutablePath blocks above) - an existence-only check
+    # let a stale Linux binary from an earlier build silently keep being
+    # redeployed on every server update, which is exactly the "I updated the
+    # server, clients stayed on an old version" bug this mirrors. Go is an
+    # optional toolchain (a Windows-only WIL deployment has no reason to
+    # install it), so its absence is a soft skip with a visible warning, not
+    # a fatal error - an actual build failure (source doesn't compile) still
+    # propagates and aborts the install, matching the Windows client's own
+    # unwrapped Build-Client.ps1 calls.
+    if (Get-Command go -ErrorAction SilentlyContinue) {
+        & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-LinuxClient.ps1') -OutputPath $defaultLinuxClientBinarySourcePath
+        $LinuxClientBinarySourcePath = $defaultLinuxClientBinarySourcePath
+    }
+    else {
+        # No Go toolchain on this machine - fall back to the git-tracked
+        # prebuilt binary (linux-client/prebuilt/) instead of whatever might
+        # or might not already be sitting in the ephemeral build\ path.
+        # Present in every checkout, not just ones where someone happened to
+        # build locally before - a fresh checkout on a Go-less machine used
+        # to get nothing at all here.
+        $prebuiltLinuxClientBinaryPath = Join-Path -Path $projectRoot -ChildPath 'linux-client\prebuilt\wil-linux-client'
+        if (Test-Path -LiteralPath $prebuiltLinuxClientBinaryPath) {
+            Write-Warning "Go toolchain not found on PATH - using the git-tracked prebuilt Linux client binary at $prebuiltLinuxClientBinaryPath instead of building from source. Install Go (https://go.dev/dl/) if you want this machine to always build the current source directly."
+            $LinuxClientBinarySourcePath = $prebuiltLinuxClientBinaryPath
+        }
+    }
+}
+
 if (-not $PSBoundParameters.ContainsKey('ListenPrefix')) {
     $savedListenPrefix = Get-ConfigValue -Config $existingConfig -Name 'ListenPrefix'
     if ($savedListenPrefix) {
@@ -490,12 +596,11 @@ if (-not $PSBoundParameters.ContainsKey('ListenPrefix')) {
     }
 }
 
-if (-not $PSBoundParameters.ContainsKey('Token')) {
-    $savedToken = Get-ConfigValue -Config $existingConfig -Name 'Token'
-    if ($savedToken) {
-        $Token = Unprotect-Secret -StoredValue $savedToken
-    }
+$savedToken = Get-ConfigValue -Config $existingConfig -Name 'Token'
+if ($savedToken) {
+    $savedToken = Unprotect-Secret -StoredValue $savedToken
 }
+$Token = Resolve-InstallToken -ExplicitToken $Token -SavedToken $savedToken
 
 if (-not $PSBoundParameters.ContainsKey('WebUsername')) {
     $savedWebUsername = Get-ConfigValue -Config $existingConfig -Name 'WebUsername'
@@ -679,16 +784,21 @@ if ($DisableHttp -and $UseHttps -and -not $certificateFoundInStore) {
     throw "-DisableHttp requires a working HTTPS setup, but the configured certificate (thumbprint $CertificateThumbprint) was not found in LocalMachine\My. Import it first (-CertificatePfxPath), or drop -DisableHttp until it is confirmed working."
 }
 
-if ($UseHttps -and -not $DisableHttp) {
-    $listenPrefixPort = $null
-    try {
-        $listenPrefixPort = ([Uri]($ListenPrefix -replace '\+', 'localhost')).Port
-    }
-    catch {
-    }
-    if ($listenPrefixPort -and $HttpsPort -eq $listenPrefixPort) {
-        throw "-HttpsPort must be different from the HTTP port ($listenPrefixPort) when both are enabled."
-    }
+# Parsed unconditionally: consumed below both by the HTTPS/HTTP port-clash
+# check (HTTPS-only) and by the -OpenFirewall block (any HTTP install) - a
+# version of this that only ran under "if ($UseHttps ...)" left
+# $listenPrefixPort unset under Set-StrictMode whenever HTTPS was off,
+# throwing "variable cannot be retrieved" the moment -OpenFirewall tried to
+# read it.
+$listenPrefixPort = $null
+try {
+    $listenPrefixPort = ([Uri]($ListenPrefix -replace '\+', 'localhost')).Port
+}
+catch {
+}
+
+if ($UseHttps -and -not $DisableHttp -and $listenPrefixPort -and $HttpsPort -eq $listenPrefixPort) {
+    throw "-HttpsPort must be different from the HTTP port ($listenPrefixPort) when both are enabled."
 }
 
 if (-not $PSBoundParameters.ContainsKey('InstallLogRetentionDays')) {
@@ -746,7 +856,7 @@ elseif (-not (Test-Path -LiteralPath $ClientNet40ExecutablePath)) {
     & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Client.ps1') -OutputPath $ClientNet40ExecutablePath -TargetFramework Net40
 }
 
-foreach ($path in @($InstallPath, $DataPath, $ContentPath, $ClientPackagePath)) {
+foreach ($path in @($InstallPath, $DataPath, $ContentPath, $ClientPackagePath, $LinuxClientPackagePath)) {
     if (-not (Test-Path -LiteralPath $path)) {
         New-Item -Path $path -ItemType Directory -Force | Out-Null
     }
@@ -780,6 +890,48 @@ Copy-Item -LiteralPath $winRmInstallerSource -Destination $winRmInstallerPath -F
 $winRmUninstallerSource = Join-Path -Path $PSScriptRoot -ChildPath 'Uninstall-ClientWinRM.ps1'
 $winRmUninstallerPath = Join-Path -Path $InstallPath -ChildPath 'Uninstall-ClientWinRM.ps1'
 Copy-Item -LiteralPath $winRmUninstallerSource -Destination $winRmUninstallerPath -Force
+$linuxSshInstallerSource = Join-Path -Path $PSScriptRoot -ChildPath 'Install-ClientDebianSSH.ps1'
+$linuxSshInstallerPath = Join-Path -Path $InstallPath -ChildPath 'Install-ClientDebianSSH.ps1'
+Copy-Item -LiteralPath $linuxSshInstallerSource -Destination $linuxSshInstallerPath -Force
+$linuxSshUninstallerSource = Join-Path -Path $PSScriptRoot -ChildPath 'Uninstall-ClientDebianSSH.ps1'
+$linuxSshUninstallerPath = Join-Path -Path $InstallPath -ChildPath 'Uninstall-ClientDebianSSH.ps1'
+Copy-Item -LiteralPath $linuxSshUninstallerSource -Destination $linuxSshUninstallerPath -Force
+
+# Install-ClientDebianSSH.ps1 resolves $projectRoot as the parent of its own
+# directory and looks for plink.exe/pscp.exe at $projectRoot\deploy\linux-client.
+# On an installed server the script lives in server-bin (i.e. $InstallPath), so
+# $projectRoot is the WindowsInventoryLite root - the tools must land in a
+# deploy\linux-client folder that is a SIBLING of server-bin. These binaries
+# are git-tracked (see deploy\linux-client\NOTICE), so they are normally
+# present at the source; the copy is still skipped silently when absent,
+# for a source checkout or install package that strips them.
+$linuxSshToolsSourceDir = Join-Path -Path (Split-Path -Parent $PSScriptRoot) -ChildPath 'deploy\linux-client'
+$linuxSshToolsDestDir = Join-Path -Path (Split-Path -Parent $InstallPath) -ChildPath 'deploy\linux-client'
+foreach ($linuxSshToolName in @('plink.exe', 'pscp.exe')) {
+    $linuxSshToolSource = Join-Path -Path $linuxSshToolsSourceDir -ChildPath $linuxSshToolName
+    if (Test-Path -LiteralPath $linuxSshToolSource) {
+        if (-not (Test-Path -LiteralPath $linuxSshToolsDestDir)) {
+            New-Item -ItemType Directory -Path $linuxSshToolsDestDir -Force | Out-Null
+        }
+        Copy-Item -LiteralPath $linuxSshToolSource -Destination (Join-Path -Path $linuxSshToolsDestDir -ChildPath $linuxSshToolName) -Force
+    }
+}
+
+# Mirrors the ClientPackageSourcePath copy below: an install/reinstall that
+# finds a Linux client binary at LinuxClientBinarySourcePath (default
+# build\wil-linux-client, produced by Build-LinuxClient.ps1) copies it - and
+# its .version sidecar - into LinuxClientPackagePath, the same folder
+# RunLinuxClientInstallTarget's -ClientBinaryPath already points at
+# server-side. Absent, this is skipped silently and whatever is already
+# deployed there is left untouched, same contract as the Windows GPO copy.
+if ($LinuxClientBinarySourcePath -and (Test-Path -LiteralPath $LinuxClientBinarySourcePath)) {
+    Copy-Item -LiteralPath $LinuxClientBinarySourcePath -Destination (Join-Path -Path $LinuxClientPackagePath -ChildPath 'wil-linux-client') -Force
+    $linuxClientBinaryVersionSourcePath = "$LinuxClientBinarySourcePath.version"
+    if (Test-Path -LiteralPath $linuxClientBinaryVersionSourcePath) {
+        Copy-Item -LiteralPath $linuxClientBinaryVersionSourcePath -Destination (Join-Path -Path $LinuxClientPackagePath -ChildPath 'wil-linux-client.version') -Force
+    }
+}
+
 $deployScriptSource = Join-Path -Path (Split-Path -Parent $PSScriptRoot) -ChildPath 'deploy\client\Deploy-ClientGpo.ps1'
 $deployScriptBinPath = Join-Path -Path $InstallPath -ChildPath 'Deploy-ClientGpo.ps1'
 if (Test-Path -LiteralPath $deployScriptSource) {
@@ -846,6 +998,19 @@ if (Test-Path -LiteralPath $clientNet40PackagePath) {
     $clientNet40Version = (& $clientNet40PackagePath --version 2>&1 | Select-Object -First 1)
 }
 
+# The deployed binary is a Linux ELF executable - it cannot be run on this
+# Windows host to ask its own --version the way the two .NET clients above
+# are. Its .version sidecar (written by Build-LinuxClient.ps1 alongside the
+# binary) is the only source of truth for what's actually deployed, so
+# report that instead - this is what makes a version mismatch (server
+# updated, Linux client package left stale) visible at a glance in this
+# same summary, rather than only discoverable later via the dashboard.
+$linuxClientVersion = $null
+$linuxClientVersionSidecarPath = Join-Path -Path $LinuxClientPackagePath -ChildPath 'wil-linux-client.version'
+if (Test-Path -LiteralPath $linuxClientVersionSidecarPath) {
+    $linuxClientVersion = (Get-Content -LiteralPath $linuxClientVersionSidecarPath -Raw).Trim()
+}
+
 function ConvertTo-ServiceArgValue {
     param([string]$Value)
     return $Value -replace '"', '\"'
@@ -877,7 +1042,23 @@ function Set-RestrictedFileAcl {
 # silently revert to whatever port was set at install time. The server reads
 # ListenPrefix/HttpsPort/EnableHttp from --config on every startup instead,
 # same as WebUsername, UseHttps, and the other dashboard-only settings.
-$serviceCommand = '"' + (ConvertTo-ServiceArgValue $servicePath) + '" --data "' + (ConvertTo-ServiceArgValue $DataPath) + '" --content "' + (ConvertTo-ServiceArgValue $ContentPath) + '" --client-package "' + (ConvertTo-ServiceArgValue $ClientPackagePath) + '" --winrm-installer "' + (ConvertTo-ServiceArgValue $winRmInstallerPath) + '" --winrm-uninstaller "' + (ConvertTo-ServiceArgValue $winRmUninstallerPath) + '"'
+# Validated HERE, not at the top of the script: every one of these paths can be
+# reassigned from the saved server-config.json between the top of the script and
+# this point (see the "if (-not $DataPath)" blocks and friends above), so
+# validating on entry would guard values that no longer exist by the time they
+# are interpolated into the sc.exe binPath below. $LinuxClientPackagePath was
+# never on this list at all.
+Test-BatchSafeValue -Value $DataPath -FieldName 'DataPath'
+Test-BatchSafeValue -Value $ContentPath -FieldName 'ContentPath'
+Test-BatchSafeValue -Value $ClientPackagePath -FieldName 'ClientPackagePath'
+Test-BatchSafeValue -Value $LinuxClientPackagePath -FieldName 'LinuxClientPackagePath'
+Test-BatchSafeValue -Value $ConfigPath -FieldName 'ConfigPath'
+Test-BatchSafeValue -Value $InstallPath -FieldName 'InstallPath'
+Test-BatchSafeValue -Value $winRmInstallerPath -FieldName 'WinRmInstallerPath'
+Test-BatchSafeValue -Value $winRmUninstallerPath -FieldName 'WinRmUninstallerPath'
+Test-BatchSafeValue -Value $linuxSshInstallerPath -FieldName 'LinuxSshInstallerPath'
+Test-BatchSafeValue -Value $linuxSshUninstallerPath -FieldName 'LinuxSshUninstallerPath'
+$serviceCommand = '"' + (ConvertTo-ServiceArgValue $servicePath) + '" --data "' + (ConvertTo-ServiceArgValue $DataPath) + '" --content "' + (ConvertTo-ServiceArgValue $ContentPath) + '" --client-package "' + (ConvertTo-ServiceArgValue $ClientPackagePath) + '" --linux-client-package "' + (ConvertTo-ServiceArgValue $LinuxClientPackagePath) + '" --winrm-installer "' + (ConvertTo-ServiceArgValue $winRmInstallerPath) + '" --winrm-uninstaller "' + (ConvertTo-ServiceArgValue $winRmUninstallerPath) + '" --linux-ssh-installer "' + (ConvertTo-ServiceArgValue $linuxSshInstallerPath) + '" --linux-ssh-uninstaller "' + (ConvertTo-ServiceArgValue $linuxSshUninstallerPath) + '"'
 $serviceCommand += ' --install-log-retention-days ' + $InstallLogRetentionDays
 $serviceCommand += ' --config "' + (ConvertTo-ServiceArgValue $ConfigPath) + '"'
 
@@ -895,6 +1076,7 @@ $config.DataPath                = $DataPath
 $config.InstallPath             = $InstallPath
 $config.ContentPath             = $ContentPath
 $config.ClientPackagePath       = $ClientPackagePath
+$config.LinuxClientPackagePath  = $LinuxClientPackagePath
 $config.InstallLogRetentionDays = $InstallLogRetentionDays
 $config.Token                   = Protect-Secret -PlainText $Token
 $config.WebUsername             = $WebUsername
@@ -944,6 +1126,9 @@ if ($clientNet35Version) {
 }
 if ($clientNet40Version) {
     Write-Host "Client package Net40 version: $clientNet40Version"
+}
+if ($linuxClientVersion) {
+    Write-Host "Linux client package version: $linuxClientVersion"
 }
 Write-Host "Client action log retention days: $InstallLogRetentionDays"
 if ($DisableHttp) {

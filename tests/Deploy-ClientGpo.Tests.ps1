@@ -46,6 +46,20 @@ Describe 'Windows Inventory Lite Deploy-ClientGpo client-data layout' {
         Test-Path -LiteralPath $legacyExe | Should -Be $true
     }
 
+    It 'Get-ServiceBinaryPath returns the WMI PathName for an existing service' {
+        Mock Get-WmiObject {
+            return [pscustomobject]@{ PathName = '"C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe" --server-url "https://example.local/api/v1/inventory"' }
+        }
+
+        Get-ServiceBinaryPath | Should -Be '"C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe" --server-url "https://example.local/api/v1/inventory"'
+    }
+
+    It 'Get-ServiceBinaryPath returns null when the service does not exist' {
+        Mock Get-WmiObject { return $null }
+
+        Get-ServiceBinaryPath | Should -BeNullOrEmpty
+    }
+
     It 'Remove-LegacyClientFiles does not delete client-version.txt when LegacyRoot and new path directory are the same' {
         $script:LogPath = Join-Path -Path $TestDrive -ChildPath 'test-deploy3.log'
         $bareRoot = Join-Path -Path $TestDrive -ChildPath 'bare-root'

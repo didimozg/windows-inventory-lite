@@ -181,16 +181,100 @@ function Invoke-WizardAction {
     Write-Host ''
 
     if (-not $PSCmdlet.ShouldProcess($ScriptName, 'Run')) {
-        return
+        return $false
     }
 
     $confirm = Read-WizardAnswer -Prompt 'Proceed? [y/N]' -Default 'N'
     if ($confirm -notmatch '^(y|yes)$') {
         Write-Host 'Cancelled.'
-        return
+        return $false
     }
 
     & $ScriptPath @Params
+    return $true
+}
+
+# Printed only right after a genuinely successful quick install (not
+# cancelled, not -WhatIf - see the main loop's $ran check below) - lists
+# exactly what was left at its default and where to change it, so the
+# admin never has to wonder whether something is actually configured.
+# Values are read back from the same $Params the wizard itself resolved
+# and passed to Install-Server.ps1, not re-derived separately.
+function Show-QuickInstallSummary {
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Params
+    )
+
+    $listenPrefix = if ($Params.ContainsKey('ListenPrefix')) { $Params['ListenPrefix'] } else { 'http://+:8080/' }
+    $port = 8080
+    if ($listenPrefix -match ':(\d+)/?$') {
+        $port = [int]$Matches[1]
+    }
+    $firewallOpened = [bool]$Params['OpenFirewall']
+
+    # Write-Output, not Write-Host: this function's output must flow
+    # through the pipeline so it can be captured (e.g. via | Out-String in
+    # tests) - it still prints to the console exactly as before when the
+    # main loop calls it directly and doesn't capture the result.
+    Write-Output ''
+    Write-Output 'Server installed and started.'
+    Write-Output "Dashboard:        http://localhost:$port/"
+    Write-Output 'HTTPS:            disabled - enable via Settings > General'
+    Write-Output 'AD sync:          disabled - configure via Settings > General'
+    Write-Output 'Ingestion token:  auto-generated - rotate it via Settings > General > Ingestion Token (regenerate only, matching the Admin Password page - the current value is not shown there, but it can be viewed in plaintext on the Client package tab when building a package)'
+    Write-Output 'Client package:   not built yet - build via the Client package tab'
+    if ($firewallOpened) {
+        Write-Output "Firewall:         opened for port $port"
+    }
+    else {
+        Write-Output "Firewall:         not opened - see the Windows Firewall section in Settings if clients can't reach this server"
+    }
+}
+
+# Gates whether the main loop shows the post-install summary: only a
+# genuinely successful ($Ran) Quick-mode install should ever print it -
+# Skip and Full both behave the same here (no summary). Extracted into its
+# own function so this decision is directly unit-testable, since the main
+# loop itself lives inside the `-ne '.'` guard below and is never reached
+# by Pester's usual dot-source-and-call pattern.
+function Test-ShouldShowQuickInstallSummary {
+    param(
+        [Parameter(Mandatory = $true)]
+        [bool]$Ran,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Mode
+    )
+
+    return ($Ran -and $Mode -eq 'Quick')
+}
+
+# Decides what params hashtable a flow should pass to its target script,
+# given the resolved mode. Consolidates logic that used to be inlined
+# directly in the main loop (see the loop's own history) into one small,
+# directly-testable function - the main loop itself lives inside the
+# `-ne '.'` guard below and is never reached by Pester's usual
+# dot-source-and-call pattern, so any decision left inline there is
+# otherwise only provable by hand-tracing.
+function Resolve-WizardFlowParams {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Mode,
+
+        [Parameter(Mandatory = $true)]
+        [object[]]$Questions,
+
+        [Parameter()]
+        [hashtable]$SkipParams = @{}
+    )
+
+    if ($Mode -eq 'Skip') {
+        return $SkipParams
+    }
+
+    $effectiveQuestions = if ($Mode -eq 'Quick') { @($Questions | Where-Object { $_['QuickInstall'] }) } else { $Questions }
+    return Read-WizardAnswers -Questions $effectiveQuestions
 }
 
 # Duplicated from Install-Server.ps1's own Read-ServerConfig (this project
@@ -224,21 +308,26 @@ function Read-WizardServerConfig {
     return $null
 }
 
-# Detects an existing server install (via the default server-config.json
-# location) and, if found, asks whether to just refresh (reapply the
-# current settings, no questions asked) or fully reconfigure. Returns
-# $true when the caller should skip the question sequence entirely and
-# pass Install-Server.ps1 an empty params hashtable - relies on the same
-# behavior every other blank/omitted wizard answer already relies on:
-# leaving a parameter unspecified makes Install-Server.ps1 reload its
-# last-saved value, so an empty hashtable is a genuine "no change" reapply,
-# not a reset to the wizard's own hardcoded defaults. Detection only
-# checks the default config path (the same one Uninstall-Server.ps1 falls
-# back to) - a server installed at a custom -ConfigPath won't be detected,
-# same limitation as every other path-override this wizard doesn't ask
-# about, and simply behaves as if no install exists (asks all 22
-# questions, as before).
-function Test-InstallServerRefreshOnly {
+# Decides how the "Install server" flow should proceed, based on whether
+# server-config.json already exists at the default location:
+#   'Quick' - no existing config at all (a genuinely fresh install) - the
+#             caller should ask only the QuickInstall-flagged questions
+#             below and let Install-Server.ps1's own defaults handle
+#             everything else.
+#   'Skip'  - an existing config was found and the user picked "Just
+#             refresh" - the caller should pass Install-Server.ps1 an
+#             empty params hashtable (every parameter left unspecified
+#             reloads its last-saved value, a genuine "no change" reapply).
+#   'Full'  - an existing config was found and the user explicitly picked
+#             "Full reconfigure" - the caller should ask every question in
+#             $installServerQuestions, exactly as this flow has always
+#             worked for that choice.
+# Detection only checks the default config path (the same one
+# Uninstall-Server.ps1 falls back to) - a server installed at a custom
+# -ConfigPath won't be detected, same limitation as every other
+# path-override this wizard doesn't ask about, and is treated as 'Quick'
+# (behaves as a fresh install).
+function Get-InstallServerMode {
     param(
         [Parameter(Mandatory = $true)]
         [string]$ConfigPath
@@ -246,7 +335,7 @@ function Test-InstallServerRefreshOnly {
 
     $existingConfig = Read-WizardServerConfig -Path $ConfigPath
     if (-not $existingConfig) {
-        return $false
+        return 'Quick'
     }
 
     Write-Host ''
@@ -254,7 +343,170 @@ function Test-InstallServerRefreshOnly {
     Write-Host '1. Just refresh (recommended) - reapply current settings, no questions asked'
     Write-Host '2. Full reconfigure - re-answer every question from scratch'
     $updateChoice = Read-WizardAnswer -Prompt 'Choice' -Default '1'
-    return ($updateChoice -ne '2')
+    if ($updateChoice -eq '2') {
+        return 'Full'
+    }
+    return 'Skip'
+}
+
+# Extracts one --flagname "value" pair's value out of a service binPath
+# string, un-escaping the \" that ConvertTo-ServiceArgValue (in
+# Install-Client.ps1 and Deploy-ClientGpo.ps1) would have escaped an
+# embedded literal " into when the value was originally written. Returns
+# $null if the flag isn't present at all - the caller decides whether
+# that's fatal (ServerUrl) or fine (ServerSharePath/Token, both optional
+# on the real command line).
+function Get-BinPathFlagValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BinPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FlagName
+    )
+
+    if ($BinPath -notmatch ([regex]::Escape($FlagName) + '\s+"((?:[^"\\]|\\.)*)"')) {
+        return $null
+    }
+    return $Matches[1] -replace '\\"', '"'
+}
+
+# Thin wrapper around sc.exe, existing purely so Pester can mock it
+# directly. Mocking sc.exe itself fails under Windows PowerShell 5.1
+# with "Alias is not writeable because alias sc is read-only or
+# constant and cannot be written to" - "sc" is a built-in, protected
+# (ReadOnly, AllScope) alias for Set-Content on this PowerShell
+# version, and Pester's mocking machinery for an external/application
+# command collides with it. Mocking a plain function has no such
+# problem.
+function Invoke-ScExe {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    $output = & sc.exe @Arguments 2>&1
+    return @{ Output = $output; ExitCode = $LASTEXITCODE }
+}
+
+# Reads a service's raw binPath via WMI (Win32_Service.PathName), the same
+# way Deploy-ClientGpo.ps1's own Get-ServiceBinaryPath now does too -
+# duplicated rather than shared, matching this project's established
+# per-script convention. Deliberately NOT sc.exe qc + a regex on
+# BINARY_PATH_NAME (the original approach here): that field label is
+# localized by the OS's own display language, so the regex never matches
+# on a non-English Windows host - confirmed missing entirely on a live
+# Russian-language machine. WMI property names are stable regardless of
+# OS language, so this can't silently fail the same way.
+function Get-ClientServiceBinaryPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ServiceName
+    )
+
+    $service = Get-WmiObject -Class Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
+    if (-not $service) {
+        return $null
+    }
+
+    return $service.PathName
+}
+
+# Reverse-parses a WindowsInventoryLiteClient service's binPath back into
+# the same named parameters Install-Client.ps1 accepts. Built to handle
+# both real shapes this project produces: Install-Client.ps1's own
+# Get-ClientServiceCommand (may include --share) and
+# Deploy-ClientGpo.ps1's Get-DesiredServiceCommand (never includes
+# --share) - both use identical --flag "value" syntax for everything
+# else, so a flag-based (not position-based) parser handles both without
+# special-casing either one. Returns $null when --server-url can't be
+# found at all - the one value Install-Client.ps1 treats as strictly
+# required, and the signal the caller uses to fall back to asking every
+# question instead of trusting a malformed/unrecognized binPath.
+function ConvertFrom-ClientBinPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BinPath
+    )
+
+    $serverUrl = Get-BinPathFlagValue -BinPath $BinPath -FlagName '--server-url'
+    if (-not $serverUrl) {
+        return $null
+    }
+
+    $params = @{ ServerUrl = $serverUrl }
+
+    $sharePath = Get-BinPathFlagValue -BinPath $BinPath -FlagName '--share'
+    if ($sharePath) {
+        $params['ServerSharePath'] = $sharePath
+    }
+
+    $token = Get-BinPathFlagValue -BinPath $BinPath -FlagName '--token'
+    if ($token) {
+        $params['Token'] = $token
+    }
+
+    if ($BinPath -match '--interval-hours\s+(\d+)') {
+        $params['IntervalHours'] = [int]$Matches[1]
+    }
+
+    if ($BinPath -match '^"((?:[^"\\]|\\.)*)"') {
+        $exePath = $Matches[1] -replace '\\"', '"'
+        $installPath = Split-Path -Parent $exePath
+        if ($installPath) {
+            $params['InstallPath'] = $installPath
+        }
+    }
+
+    return $params
+}
+
+# Decides how the "Install client (local)" flow should proceed, mirroring
+# Get-InstallServerMode's shape:
+#   Mode = 'Full' - no existing service, or its binPath doesn't parse (no
+#                   -ServerUrl found) - the caller should ask every
+#                   question in $installClientQuestions, exactly as this
+#                   flow has always worked. Params is always @{}.
+#   Mode = 'Skip' - an existing, parseable service was found and the user
+#                   picked "Just refresh" - the caller should pass Params
+#                   (the reconstructed hashtable) straight to
+#                   Install-Client.ps1 with no questions asked. Unlike
+#                   Install-Server.ps1, Install-Client.ps1 has no
+#                   config-file-reload fallback of its own (-ServerUrl is
+#                   Mandatory with nothing to fall back to) - so "just
+#                   refresh" here must supply real reconstructed values,
+#                   not an empty hashtable the way the server flow's own
+#                   Skip mode does.
+function Get-InstallClientMode {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ServiceName
+    )
+
+    $queryResult = Invoke-ScExe -Arguments @('query', $ServiceName)
+    if ($queryResult.ExitCode -ne 0) {
+        return @{ Mode = 'Full'; Params = @{} }
+    }
+
+    $binPath = Get-ClientServiceBinaryPath -ServiceName $ServiceName
+    if (-not $binPath) {
+        return @{ Mode = 'Full'; Params = @{} }
+    }
+
+    $parsedParams = ConvertFrom-ClientBinPath -BinPath $binPath
+    if (-not $parsedParams) {
+        return @{ Mode = 'Full'; Params = @{} }
+    }
+
+    Write-Host ''
+    Write-Host 'An existing client installation was detected.'
+    Write-Host '1. Just refresh (recommended) - reapply current settings, no questions asked'
+    Write-Host '2. Full reconfigure - re-answer every question from scratch'
+    $updateChoice = Read-WizardAnswer -Prompt 'Choice' -Default '1'
+    if ($updateChoice -eq '2') {
+        return @{ Mode = 'Full'; Params = @{} }
+    }
+    return @{ Mode = 'Skip'; Params = $parsedParams }
 }
 
 $installClientQuestions = @(
@@ -268,8 +520,8 @@ $installClientQuestions = @(
 
 $installServerQuestions = @(
     # Network
-    @{ Name = 'ListenPrefix'; Prompt = 'Listen prefix'; Type = 'String'; Default = 'http://+:8080/'; Mandatory = $false }
-    @{ Name = 'OpenFirewall'; Prompt = 'Open the Windows Firewall for the listen port(s)'; Type = 'Switch' }
+    @{ Name = 'ListenPrefix'; Prompt = 'Listen prefix'; Type = 'String'; Default = 'http://+:8080/'; Mandatory = $false; QuickInstall = $true }
+    @{ Name = 'OpenFirewall'; Prompt = 'Open the Windows Firewall for the listen port(s)'; Type = 'Switch'; QuickInstall = $true }
 
     # HTTPS
     @{ Name = 'UseHttps'; Prompt = 'Enable HTTPS'; Type = 'Switch' }
@@ -280,8 +532,8 @@ $installServerQuestions = @(
     @{ Name = 'DisableHttp'; Prompt = 'Disable plain HTTP once HTTPS is confirmed working (refused unless HTTPS is enabled)'; Type = 'Switch' }
 
     # Basic Auth / dashboard access
-    @{ Name = 'WebUsername'; Prompt = 'Dashboard username'; Type = 'String'; Mandatory = $false }
-    @{ Name = 'WebPassword'; Prompt = 'Dashboard password'; Type = 'SecureString'; Mandatory = $false }
+    @{ Name = 'WebUsername'; Prompt = 'Dashboard username'; Type = 'String'; Mandatory = $false; QuickInstall = $true }
+    @{ Name = 'WebPassword'; Prompt = 'Dashboard password'; Type = 'SecureString'; Mandatory = $false; QuickInstall = $true }
     @{ Name = 'Token'; Prompt = 'Inventory ingestion token (leave blank to auto-generate)'; Type = 'SecureString'; Mandatory = $false }
 
     # Active Directory identity - configures the domain/credentials used by
@@ -401,17 +653,27 @@ if ($MyInvocation.InvocationName -ne '.') {
 
         $scriptPath = Join-Path -Path $PSScriptRoot -ChildPath $flow.ScriptName
 
-        # Only the "Install server" flow has an existing-install detection
-        # step - see Test-InstallServerRefreshOnly for why "just refresh"
-        # means an empty params hashtable rather than a shorter question
-        # list.
-        $skipQuestions = $false
+        # "Install server" and "Install client (local)" are the only two
+        # flows that distinguish Quick/Skip/Full - see Get-InstallServerMode
+        # and Get-InstallClientMode for what each means for its own flow.
+        # Every other flow keeps asking its full question list, unaffected
+        # ($mode stays 'Full', $skipParams stays empty and unused).
+        $mode = 'Full'
+        $skipParams = @{}
         if ($choice -eq '1') {
             $defaultConfigPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\server-config.json'
-            $skipQuestions = Test-InstallServerRefreshOnly -ConfigPath $defaultConfigPath
+            $mode = Get-InstallServerMode -ConfigPath $defaultConfigPath
+        }
+        elseif ($choice -eq '2') {
+            $clientMode = Get-InstallClientMode -ServiceName 'WindowsInventoryLiteClient'
+            $mode = $clientMode.Mode
+            $skipParams = $clientMode.Params
         }
 
-        $params = if ($skipQuestions) { @{} } else { Read-WizardAnswers -Questions $flow.Questions }
-        Invoke-WizardAction -ScriptPath $scriptPath -ScriptName $flow.ScriptName -Params $params -SecretParams $flow.SecretParams
+        $params = Resolve-WizardFlowParams -Mode $mode -Questions $flow.Questions -SkipParams $skipParams
+        $ran = Invoke-WizardAction -ScriptPath $scriptPath -ScriptName $flow.ScriptName -Params $params -SecretParams $flow.SecretParams
+        if (Test-ShouldShowQuickInstallSummary -Ran $ran -Mode $mode) {
+            Show-QuickInstallSummary -Params $params
+        }
     }
 }

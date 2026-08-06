@@ -1,0 +1,40 @@
+This directory bundles plink.exe and pscp.exe from the PuTTY project
+(https://www.chiark.greenend.org.uk/~sgtatham/putty/), used here for
+unattended SSH password authentication - Windows' own built-in OpenSSH
+client cannot read a password from a non-interactive stdin at all, so
+there is no dependency-free way to script password-based SSH from
+PowerShell without a different tool.
+
+Install-ClientDebianSSH.ps1 writes the password to a short-lived,
+current-user-only temp file and passes it via plink's/pscp's -pwfile
+argument (added in PuTTY 0.81) rather than the -pw command-line argument,
+so the password never appears in a local process listing (Get-CimInstance
+Win32_Process, Task Manager) for the duration of the connection. The temp
+file's contents are overwritten before deletion once the connection
+completes.
+
+PuTTY (including plink and pscp) is distributed under the MIT license:
+
+Copyright (c) 1997-2024 Simon Tatham.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to permit
+persons to whom the Software is furnished to do so, subject to the
+following conditions: the above copyright notice and this permission
+notice shall be included in all copies or substantial portions of the
+Software.
+
+plink.exe and pscp.exe are bundled in this directory and tracked in the
+repository as of 2026-07-29. Both were verified before being added:
+Authenticode signature valid (signed by Simon Tatham, issued by Sectigo
+Public Code Signing CA R36, chain valid through 2027-09-28), FileVersion
+"Release 0.84" for both.
+SHA-256 plink.exe: 8AFECC0DC0A87272D302585FF6CED864A1D1F399B54E44CD2B690876452D1D0F
+SHA-256 pscp.exe:  D7534E6AD0228877ABBEDEB221345845F3237898E07273D8A186241744895EB6
+Re-verify signature and hash before replacing either file with a newer
+release - do not update plink.exe/pscp.exe here without repeating that
+check against the official release page:
+https://www.chiark.greenend.org.uk/~sgtatham/putty/latest.html

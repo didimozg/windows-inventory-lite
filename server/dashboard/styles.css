@@ -1,6 +1,17 @@
 :root {
   color-scheme: light;
   --font-mono: "JetBrains Mono", Consolas, "Courier New", monospace;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 12px;
+  --space-lg: 16px;
+  --space-xl: 24px;
+  --space-2xl: 32px;
+  --font-size-xs: 12px;
+  --font-size-sm: 13px;
+  --font-size-base: 14px;
+  --font-size-lg: 16px;
+  --font-size-display: 28px;
   --bg: #f8f9fa;
   --panel: #ffffff;
   --text: #2d3748;
@@ -156,8 +167,8 @@ body {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 20px 12px;
+  gap: var(--space-xs);
+  padding: var(--space-xl) var(--space-md);
   background: var(--panel);
   border-right: 1px solid var(--line);
   position: sticky;
@@ -171,15 +182,15 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-sm);
   margin-bottom: 16px;
-  padding: 0 10px;
+  padding: 0 var(--space-md);
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-sm);
   min-width: 0;
 }
 
@@ -198,7 +209,7 @@ body {
 
 .brand-word-main {
   color: var(--heading);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   font-weight: 700;
   letter-spacing: 0.2px;
   white-space: nowrap;
@@ -206,7 +217,7 @@ body {
 
 .brand-word-sub {
   color: var(--accent);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   font-weight: 400;
   letter-spacing: 2px;
   text-transform: uppercase;
@@ -222,7 +233,7 @@ body {
   background: var(--panel);
   color: var(--muted);
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--font-size-base);
   line-height: 1;
 }
 
@@ -246,9 +257,9 @@ body {
 
 .nav-group-title {
   margin: 4px 0 2px;
-  padding: 8px 10px 4px 10px;
+  padding: var(--space-sm) var(--space-md) var(--space-xs) var(--space-md);
   color: var(--muted);
-  font-size: 14px;
+  font-size: var(--font-size-base);
   font-weight: 650;
 }
 
@@ -264,12 +275,12 @@ body {
 .nav-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 10px 8px 17px;
+  gap: var(--space-md);
+  padding: var(--space-sm) var(--space-md) var(--space-sm) var(--space-lg);
   border-left: 3px solid transparent;
   border-radius: 0 6px 6px 0;
   text-align: left;
-  font-size: 14px;
+  font-size: var(--font-size-base);
 }
 
 .nav-icon {
@@ -296,7 +307,7 @@ body {
 
 .nav-item-root {
   margin: 4px 0 10px;
-  padding-left: 10px;
+  padding-left: var(--space-md);
   font-weight: 650;
 }
 
@@ -304,10 +315,10 @@ body {
   margin-left: auto;
   background: var(--accent);
   color: var(--accent-text);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   font-weight: 650;
   line-height: 1;
-  padding: 2px 7px;
+  padding: 2px var(--space-sm);
   border-radius: 999px;
 }
 
@@ -319,22 +330,22 @@ body {
    of fighting it for specificity. Vertical-only: doesn't make sense once
    the sidebar switches to a horizontal bar below 900px, see media query. */
 .nav-tree > * + * {
-  padding-top: 6px;
+  padding-top: var(--space-sm);
   border-top: 1px dotted var(--line);
 }
 
 .sidebar-footer {
   margin-top: auto;
-  padding: 10px;
+  padding: var(--space-md);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-xs);
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
 }
 
 .sidebar-footer #generatedAt {
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   transition: color 0.3s ease;
 }
 
@@ -351,12 +362,70 @@ body {
 
 .topbar {
   display: flex;
-  gap: 24px;
+  gap: var(--space-xl);
   align-items: center;
   justify-content: space-between;
-  padding: 16px 32px;
+  padding: var(--space-lg) var(--space-2xl);
   background: var(--panel);
   border-bottom: 1px solid var(--line);
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-shrink: 0;
+  /* #searchInput (the .topbar's other child) is hidden on non-Inventory
+     views, leaving this as the sole flex child - justify-content:
+     space-between on the parent has no effect with only one item, so it
+     was collapsing to the left edge instead of staying pinned right.
+     margin-left: auto keeps it right-pinned regardless of the sibling's
+     visibility. */
+  margin-left: auto;
+}
+
+.logout-button {
+  flex-shrink: 0;
+  min-height: 40px;
+  min-width: 72px;
+  padding: var(--space-sm) var(--space-lg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-sm);
+}
+
+.logout-button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.logout-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-2xl);
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.logout-overlay-card {
+  max-width: 420px;
+  padding: var(--space-2xl);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  text-align: center;
+}
+
+.logout-overlay-card p {
+  margin: var(--space-md) 0 var(--space-xl);
+  color: var(--muted);
 }
 
 p,
@@ -372,7 +441,7 @@ input[type="search"] {
   width: min(520px, 45vw);
   min-width: 280px;
   height: 40px;
-  padding: 0 12px;
+  padding: 0 var(--space-md);
   border: 1px solid var(--line);
   border-radius: 6px;
   font: inherit;
@@ -382,7 +451,7 @@ main {
   flex: 1;
   display: flex;
   flex-direction: column;
-  padding: 24px 32px;
+  padding: var(--space-xl) var(--space-2xl);
 }
 
 .link-button {
@@ -392,8 +461,9 @@ main {
 }
 
 .danger-button {
+  min-height: 40px;
   min-width: 72px;
-  padding: 6px 10px;
+  padding: var(--space-sm) var(--space-md);
   border: 1px solid var(--danger-border);
   border-radius: 6px;
   background: var(--danger-bg);
@@ -414,8 +484,9 @@ main {
    HTTPS off). Same red only on hover, so the row stays calm at rest but
    still reads as "delete" on interaction. */
 .danger-button-ghost {
+  min-height: 40px;
   min-width: 72px;
-  padding: 6px 10px;
+  padding: var(--space-sm) var(--space-md);
   border: 1px solid var(--line);
   border-radius: 6px;
   background: transparent;
@@ -432,8 +503,9 @@ main {
 }
 
 .edit-button {
+  min-height: 40px;
   min-width: 72px;
-  padding: 6px 10px;
+  padding: var(--space-sm) var(--space-md);
   border: 1px solid var(--accent);
   border-radius: 6px;
   background: var(--accent-soft);
@@ -451,7 +523,7 @@ main {
 .summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(150px, 1fr));
-  gap: 12px;
+  gap: var(--space-md);
   margin-bottom: 18px;
 }
 
@@ -460,7 +532,7 @@ main {
 }
 
 .dashboard-card {
-  padding: 16px;
+  padding: var(--space-lg);
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -474,11 +546,11 @@ main {
 .dash-chart-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 16px;
+  gap: var(--space-lg);
 }
 
 .dash-chart {
-  padding: 12px;
+  padding: var(--space-md);
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -486,7 +558,7 @@ main {
 
 .dash-chart h3 {
   margin: 0 0 10px;
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   font-weight: 650;
   color: var(--muted);
   text-transform: uppercase;
@@ -496,15 +568,15 @@ main {
 .bar-chart {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-sm);
 }
 
 .bar-row {
   display: grid;
   grid-template-columns: minmax(70px, 40%) 1fr auto;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
+  gap: var(--space-sm);
+  font-size: var(--font-size-sm);
 }
 
 .bar-label {
@@ -538,14 +610,14 @@ main {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 16px;
+  padding: var(--space-lg);
 }
 
 .summary span {
   display: block;
   margin-bottom: 4px;
   color: var(--accent);
-  font-size: 28px;
+  font-size: var(--font-size-display);
   font-weight: 700;
 }
 
@@ -553,11 +625,11 @@ main {
    specificity both rule pairs share - same reasoning as .tile-alert
    just below, which relies on the same ordering. */
 .summary-compact div {
-  padding: 7px 10px;
+  padding: var(--space-sm) var(--space-md);
 }
 
 .summary-compact span {
-  font-size: 15px;
+  font-size: var(--font-size-lg);
   margin-bottom: 2px;
 }
 
@@ -591,7 +663,7 @@ table {
 
 th,
 td {
-  padding: 12px 14px;
+  padding: var(--space-md) var(--space-lg);
   border-bottom: 1px solid var(--line);
   text-align: left;
   vertical-align: top;
@@ -599,7 +671,7 @@ td {
 
 th {
   background: var(--table-header-bg);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   color: var(--muted);
   text-transform: uppercase;
 }
@@ -618,13 +690,13 @@ tr.stale td {
 }
 
 .details {
-  padding: 8px 0;
+  padding: var(--space-sm) 0;
 }
 
 .details h2 {
   margin: 0 0 12px;
   color: var(--heading);
-  font-size: 16px;
+  font-size: var(--font-size-lg);
 }
 
 .nested-table {
@@ -634,7 +706,7 @@ tr.stale td {
 .computer-list {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 8px 18px;
+  gap: var(--space-sm) var(--space-lg);
   margin: 0;
   padding-left: 18px;
 }
@@ -644,7 +716,7 @@ tr.stale td {
 }
 
 .empty {
-  padding: 28px;
+  padding: var(--space-xl);
   text-align: center;
   color: var(--muted);
 }
@@ -662,7 +734,7 @@ tr.stale td {
 
 .install-panel {
   margin-bottom: 18px;
-  padding: 16px;
+  padding: var(--space-lg);
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -671,15 +743,15 @@ tr.stale td {
 .install-grid {
   display: grid;
   grid-template-columns: minmax(320px, 1.4fr) minmax(180px, 0.8fr) minmax(180px, 0.8fr) minmax(140px, 0.6fr);
-  gap: 12px;
+  gap: var(--space-md);
   align-items: end;
 }
 
 .install-grid label {
   display: grid;
-  gap: 6px;
+  gap: var(--space-sm);
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
 }
 
 /* Client updates' "Use global AD settings" checkbox sits outside
@@ -695,17 +767,31 @@ tr.stale td {
    property alone even though font-size still applied correctly. */
 .check-label.updates-use-ad-field {
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
 }
 
 textarea,
 input[type="text"],
 input[type="password"],
-input[type="number"],
 input[type="file"],
 select {
   width: 100%;
-  padding: 10px 12px;
+  padding: var(--space-md) var(--space-md);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+}
+
+/* Split from the shared rule above: a number input's own content is
+   never longer than a handful of digits (stale-hours, retention-days,
+   ports all cap at 4-5 characters), so unlike text/password/file/select
+   it should never stretch to its full grid-column width - confirmed live
+   this session that "48" and "30" were rendering in ~470px/~940px boxes
+   because this rule inherited width:100% with nothing capping it. */
+input[type="number"] {
+  width: 100%;
+  max-width: 120px;
+  padding: var(--space-md) var(--space-md);
   border: 1px solid var(--line);
   border-radius: 6px;
   font: inherit;
@@ -713,18 +799,18 @@ select {
 
 .description-edit-input {
   width: 100%;
-  padding: 4px 6px;
+  padding: var(--space-xs) var(--space-sm);
   border: 1px solid var(--line);
   border-radius: 4px;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--font-size-sm);
 }
 
 .description-save-error {
   display: block;
   margin-top: 4px;
   color: var(--danger);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
 }
 
 .install-targets-field {
@@ -732,7 +818,8 @@ select {
   grid-row: 1 / span 2;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-md);
+  align-self: start;
 }
 
 .install-targets-textarea-wrap {
@@ -757,7 +844,7 @@ select {
   min-height: 0;
   display: grid;
   grid-template-rows: auto 1fr;
-  gap: 6px;
+  gap: var(--space-sm);
 }
 
 .install-targets-field textarea {
@@ -795,7 +882,7 @@ select {
   grid-row: 1 / span 2;
   display: grid;
   grid-template-columns: minmax(180px, 0.8fr) minmax(140px, 0.6fr);
-  gap: 12px;
+  gap: var(--space-md);
   align-self: start;
 }
 
@@ -844,6 +931,37 @@ select {
   justify-self: end;
 }
 
+/* Linux Client actions has more fields (9) than .install-right-fields'
+   explicit 5-row grid was ever designed for (Windows: Action/ServerUrl/
+   User/Password + 2 checkbox rows + submit). Reusing that grid's
+   fixed-position classes (.install-action-field/.install-server-field/
+   .install-user-field/.install-password-field) on more fields than it has
+   distinct cells for made several land in the SAME cell, rendering as
+   overlapping text/inputs - a real bug live-reported by a user, invisible
+   to every prior DOM-state (classList/hidden) check in this project's own
+   testing, since the elements were all correctly present and toggled,
+   just visually stacked on top of each other.
+   This container flows its children naturally instead (no per-field
+   position class needed) - each field just takes the next of 2 columns
+   in DOM order, so it can't collide regardless of field count, and a
+   .hidden field (auth-mode toggling) is removed from grid flow entirely,
+   leaving no gap. */
+.linux-install-right-fields {
+  grid-column: 3 / span 2;
+  grid-row: 1 / span 2;
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(140px, 0.6fr);
+  gap: var(--space-md);
+  align-self: start;
+}
+
+.linux-install-right-fields .install-submit-field {
+  grid-column: 1 / span 2;
+  grid-row: auto;
+  justify-self: end;
+  margin-top: 8px;
+}
+
 .check-label {
   min-height: 40px;
   grid-template-columns: auto 1fr;
@@ -853,7 +971,7 @@ select {
 
 .primary-button {
   min-height: 40px;
-  padding: 8px 14px;
+  padding: var(--space-sm) var(--space-lg);
   border: 1px solid var(--accent);
   border-radius: 6px;
   background: var(--accent);
@@ -908,7 +1026,7 @@ select {
   max-width: none;
   max-height: 220px;
   overflow: auto;
-  padding: 8px;
+  padding: var(--space-sm);
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--code-bg);
@@ -921,7 +1039,7 @@ select {
 .install-history h2 {
   margin: 0 0 10px;
   color: var(--heading);
-  font-size: 16px;
+  font-size: var(--font-size-lg);
 }
 
 .install-history-results {
@@ -943,7 +1061,7 @@ select {
 
 .job-header {
   display: flex;
-  gap: 12px;
+  gap: var(--space-md);
   align-items: center;
   margin-bottom: 10px;
 }
@@ -954,7 +1072,7 @@ pre {
   white-space: pre-wrap;
   word-break: break-word;
   font-family: Consolas, "Courier New", monospace;
-  font-size: 12px;
+  font-size: var(--font-size-xs);
 }
 
 .usb-badge {
@@ -965,10 +1083,48 @@ pre {
   background: var(--usb-bg);
   border: 1px solid var(--usb-border);
   color: var(--usb-text);
-  font-size: 11px;
+  font-size: var(--font-size-xs);
   font-weight: 700;
   vertical-align: middle;
   white-space: nowrap;
+}
+
+/* Which platform a computer in an expanded Hardware group came from. Same
+   shape as .usb-badge (the established inline-badge pattern in this file),
+   in neutral theme colors rather than the USB warning palette - it is
+   metadata, not an alert. Selector is deliberately more specific than
+   `.computer-list small { display: block }` above, which would otherwise
+   win and push the tag onto its own line. */
+.computer-list small.platform-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: var(--font-size-xs);
+  font-weight: 650;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.trust-host-key-button {
+  margin-top: 6px;
+}
+
+.trust-host-key-manual {
+  display: inline-flex;
+  gap: var(--space-sm);
+  align-items: center;
+  margin-top: 6px;
+}
+
+.trust-fingerprint-input {
+  font: inherit;
+  font-size: var(--font-size-xs);
+  padding: 2px 6px;
+  width: 220px;
 }
 
 tr.usb-row td {
@@ -1015,14 +1171,14 @@ tr.usb-row td {
 .status-grid {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--space-lg);
 }
 
 .status-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  font-size: 14px;
+  gap: var(--space-md);
+  font-size: var(--font-size-base);
   font-weight: 650;
 }
 
@@ -1030,7 +1186,7 @@ tr.usb-row td {
   display: block;
   margin-top: 2px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   font-weight: 400;
 }
 
@@ -1049,16 +1205,16 @@ tr.usb-row td {
 .hw-heading {
   margin: 0 0 10px;
   color: var(--heading);
-  font-size: 16px;
+  font-size: var(--font-size-lg);
   font-weight: 650;
 }
 
 .hw-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 8px 18px;
+  gap: var(--space-sm) var(--space-lg);
   margin-bottom: 14px;
-  padding: 10px 14px;
+  padding: var(--space-md) var(--space-lg);
   background: var(--hw-summary-bg);
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -1066,14 +1222,14 @@ tr.usb-row td {
 
 .hw-summary div {
   display: flex;
-  gap: 8px;
+  gap: var(--space-sm);
   align-items: baseline;
 }
 
 .hw-summary strong {
   min-width: 60px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   text-transform: uppercase;
   flex-shrink: 0;
 }
@@ -1081,7 +1237,7 @@ tr.usb-row td {
 .ram-modules-grid {
   display: grid;
   grid-template-columns: repeat(2, auto);
-  gap: 2px 16px;
+  gap: 2px var(--space-lg);
   margin-top: 2px;
 }
 
@@ -1097,29 +1253,32 @@ th.sortable:hover {
 
 th.sort-asc::after {
   content: ' \25b2';
-  font-size: 10px;
+  font-size: var(--font-size-xs);
 }
 
 th.sort-desc::after {
   content: ' \25bc';
-  font-size: 10px;
+  font-size: var(--font-size-xs);
 }
 
 .view-toolbar {
   display: flex;
   justify-content: flex-end;
+  gap: var(--space-sm);
   margin-bottom: 8px;
 }
 
 .export-button {
-  padding: 6px 14px;
+  min-height: 40px;
+  min-width: 72px;
+  padding: var(--space-sm) var(--space-lg);
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--panel);
   color: var(--text);
   cursor: pointer;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--font-size-sm);
 }
 
 .export-button:hover {
@@ -1131,7 +1290,7 @@ th.sort-desc::after {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 12px;
+  gap: var(--space-md);
   margin: 12px 0 4px;
 }
 
@@ -1141,14 +1300,14 @@ th.sort-desc::after {
 }
 
 .pager-status {
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   color: var(--muted);
 }
 
 .hw-section-header {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-md);
   margin-bottom: 10px;
 }
 
@@ -1159,14 +1318,58 @@ th.sort-desc::after {
 
 .pkg-status {
   margin: 0 0 14px;
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   color: var(--muted);
+}
+
+/* Ingestion Token's "Current token" field is the one place on this page
+   that isn't inside a .pkg-grid/.general-grid row - it's a lone field, so
+   a 3-column grid built for URL/port-shaped rows would leave two empty
+   tracks and awkward math for a single item. Unlike every field wrapped in
+   a real grid, it inherited the bare input[type=text] { width: 100% }
+   rule with nothing to cap it, so it stretched edge-to-edge - a 64-char
+   token doesn't need anywhere near that width. max-width here is sized
+   generously for that fixed-length monospace string. */
+.token-value-field {
+  display: grid;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+  color: var(--muted);
+  font-size: var(--font-size-sm);
+}
+
+.token-value-field input {
+  max-width: 520px;
+}
+
+/* Same root cause as .token-value-field above, for the checkbox right
+   below it: outside a .pkg-grid, .check-label's own grid-template-columns/
+   align-items/min-height (declared further down this file) never actually
+   applied, since nothing set display:grid on it - .pkg-grid label is what
+   normally supplies that. Also gives it a bottom margin, so Regenerate
+   doesn't sit touching it - every other button-after-checkbox pairing on
+   this page gets that gap for free from its grid container's own margin,
+   which this lone field never had. */
+.ingestion-require-token-field {
+  display: grid;
+  margin-bottom: var(--space-md);
+}
+
+/* Linux Client updates' per-push credential override fields (L15) - same
+   .pkg-token-field/.check-label root cause as .token-value-field above:
+   outside a .pkg-grid ancestor, nothing sets display:grid on these labels. */
+.linux-updates-credential-field {
+  display: grid;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+  color: var(--muted);
+  font-size: var(--font-size-sm);
 }
 
 .pkg-grid {
   display: grid;
   grid-template-columns: minmax(240px, 2fr) minmax(160px, 1fr) 110px auto;
-  gap: 12px;
+  gap: var(--space-md);
   align-items: end;
 }
 
@@ -1187,14 +1390,14 @@ th.sort-desc::after {
 
 .pkg-grid label {
   display: grid;
-  gap: 6px;
+  gap: var(--space-sm);
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
 }
 
 .pkg-buttons {
   display: flex;
-  gap: 8px;
+  gap: var(--space-sm);
   flex-wrap: nowrap;
   align-items: end;
 }
@@ -1210,12 +1413,12 @@ th.sort-desc::after {
 
 .pkg-message {
   margin-top: 12px;
-  padding: 8px 12px;
+  padding: var(--space-sm) var(--space-md);
   border-radius: 6px;
   background: var(--success-bg);
   border: 1px solid var(--success-border);
   color: var(--success-text);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
   /* Every other .pkg-message caller is single-line; AD Computer Import's
      "Loaded N computer(s)..." plus per-OU warnings joins multiple lines
      with \n - without this, normal white-space collapses them into one
@@ -1231,7 +1434,7 @@ th.sort-desc::after {
 
 .cert-hint {
   margin-top: 12px;
-  font-size: 12px;
+  font-size: var(--font-size-xs);
 }
 
 .admin-password-grid {
@@ -1259,7 +1462,7 @@ th.sort-desc::after {
 .ad-sync-mode-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: var(--space-md);
 }
 
 /* Domain/identity/username/password are credential-shaped fields that
@@ -1287,7 +1490,7 @@ th.sort-desc::after {
 }
 
 .settings-block {
-  padding-bottom: 18px;
+  padding-bottom: var(--space-lg);
   margin-bottom: 18px;
   border-bottom: 1px solid var(--line);
 }
@@ -1295,29 +1498,29 @@ th.sort-desc::after {
 .settings-block-title {
   margin: 0 0 12px;
   color: var(--heading);
-  font-size: 15px;
+  font-size: var(--font-size-lg);
   font-weight: 650;
 }
 
 .cert-history-heading {
   margin: 24px 0 10px;
   color: var(--heading);
-  font-size: 16px;
+  font-size: var(--font-size-lg);
   font-weight: 650;
 }
 
 .license-grid {
   display: grid;
   grid-template-columns: minmax(100px, 0.8fr) minmax(70px, 0.45fr) minmax(220px, 1.5fr) minmax(180px, 1.1fr);
-  gap: 12px;
+  gap: var(--space-md);
   align-items: end;
 }
 
 .license-grid label {
   display: grid;
-  gap: 6px;
+  gap: var(--space-sm);
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
 }
 
 .license-buttons {
@@ -1330,14 +1533,14 @@ th.sort-desc::after {
 
 .license-computers-field label {
   display: grid;
-  gap: 6px;
+  gap: var(--space-sm);
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
 }
 
 .chip-input-row {
   display: flex;
-  gap: 8px;
+  gap: var(--space-sm);
 }
 
 .chip-input-row input {
@@ -1347,7 +1550,7 @@ th.sort-desc::after {
 .chip-list {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--space-sm);
   margin: 10px 0 0;
   padding: 0;
   list-style: none;
@@ -1356,12 +1559,12 @@ th.sort-desc::after {
 .chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 6px 4px 10px;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm) var(--space-xs) var(--space-md);
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--hover-bg);
-  font-size: 13px;
+  font-size: var(--font-size-sm);
 }
 
 .chip button {
@@ -1370,7 +1573,7 @@ th.sort-desc::after {
   background: transparent;
   color: var(--muted);
   cursor: pointer;
-  font-size: 14px;
+  font-size: var(--font-size-base);
   line-height: 1;
 }
 
@@ -1388,7 +1591,7 @@ th.sort-desc::after {
     flex-direction: row;
     flex-wrap: wrap;
     align-items: center;
-    gap: 4px 10px;
+    gap: var(--space-xs) var(--space-md);
     border-right: 0;
     border-bottom: 1px solid var(--line);
     position: static;
@@ -1398,7 +1601,7 @@ th.sort-desc::after {
 
   .sidebar-header {
     margin-bottom: 0;
-    padding: 0 10px 0 0;
+    padding: 0 var(--space-md) 0 0;
     flex-basis: 100%;
   }
 
@@ -1420,11 +1623,11 @@ th.sort-desc::after {
   }
 
   .nav-group-title {
-    padding: 4px 8px 4px 0;
+    padding: var(--space-xs) var(--space-sm) var(--space-xs) 0;
   }
 
   .nav-item {
-    padding: 6px 10px;
+    padding: var(--space-sm) var(--space-md);
     border-left: 0;
     border-bottom: 3px solid transparent;
     border-radius: 6px 6px 0 0;
@@ -1437,13 +1640,13 @@ th.sort-desc::after {
 
   .nav-item-root {
     margin: 0;
-    padding: 6px 10px;
+    padding: var(--space-sm) var(--space-md);
   }
 
   .topbar {
     align-items: stretch;
     flex-direction: column;
-    padding: 18px;
+    padding: var(--space-lg);
   }
 
   input[type="search"] {
@@ -1452,7 +1655,7 @@ th.sort-desc::after {
   }
 
   main {
-    padding: 18px;
+    padding: var(--space-lg);
   }
 
   .summary {
