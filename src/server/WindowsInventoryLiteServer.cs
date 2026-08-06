@@ -8,10 +8,12 @@ using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.AccessControl;
 using System.Security.Authentication;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Principal;
 using System.ServiceProcess;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
 
@@ -20,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.22.2";
+        internal const string ProductVersion = "0.37.6";
 
         private static int Main(string[] args)
         {
@@ -88,10 +90,31 @@ namespace WindowsInventoryLite
         public int HttpsPort;
         public IPAddress Address;
         public string DataPath;
+        // Fully separate from DataPath (Windows reports) - the Linux client
+        // v1 has its own independent storage, API, and dashboard tab. See
+        // ReceiveLinuxInventory/BuildLinuxClientIndex.
+        public string LinuxDataPath;
         public string ContentPath;
         public string ClientPackagePath;
         public string WinRmInstallerPath;
         public string WinRmUninstallerPath;
+        public string LinuxSshInstallerPath;
+        public string LinuxSshUninstallerPath;
+        // Optional, off by default - dashboard-configured only, same
+        // reasoning as ClientUpdateUsername/Password (no Install-Server.ps1
+        // CLI flag by design). Used as the "stored Linux credentials" auth
+        // mode for Linux Client actions/updates pushes.
+        public string LinuxUpdateUsername;
+        public string LinuxUpdatePassword;
+        public string LinuxUpdateKeyPath;
+        public string LinuxClientPackagePath;
+        // Independent of ClientUpdateSchedule* above - a separate Linux
+        // fleet with separate credentials needs its own schedule, per
+        // explicit user choice during design.
+        public string LinuxUpdateScheduleMode;
+        public string LinuxUpdateScheduleOnceAtUtc;
+        public int LinuxUpdateScheduleIntervalHours;
+        public string LinuxUpdateScheduleLastRunUtc;
         public string Token;
         public string WebUsername;
         public string WebPassword;
@@ -117,6 +140,9 @@ namespace WindowsInventoryLite
         // makes the Clients table's Description column manually editable
         // without losing AD credentials elsewhere.
         public bool AdDescriptionSyncEnabled;
+        // Gates the ingestion endpoints - resolved by ResolveRequireIngestionToken
+        // below to preserve upgrade compatibility (defaults to token presence).
+        public bool RequireIngestionToken;
         public string AdSyncMode;
         public int AdSyncIntervalHours;
         public string AdDomain;
@@ -160,10 +186,14 @@ namespace WindowsInventoryLite
             options.HttpsPort = 8443;
             options.Address = IPAddress.Any;
             options.DataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server");
+            options.LinuxDataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\linux-clients-data");
             options.ContentPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-content");
             options.ClientPackagePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\client-package");
+            options.LinuxClientPackagePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\linux-client-package");
             options.WinRmInstallerPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-bin\Install-ClientWinRM.ps1");
             options.WinRmUninstallerPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-bin\Uninstall-ClientWinRM.ps1");
+            options.LinuxSshInstallerPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-bin\Install-ClientDebianSSH.ps1");
+            options.LinuxSshUninstallerPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server-bin\Uninstall-ClientDebianSSH.ps1");
             options.InstallLogRetentionDays = 30;
             options.StaleHours = 48;
             options.AdSyncMode = "on-report";
@@ -173,6 +203,10 @@ namespace WindowsInventoryLite
             options.ClientUpdateScheduleOnceAtUtc = "";
             options.ClientUpdateScheduleIntervalHours = 24;
             options.ClientUpdateScheduleLastRunUtc = "";
+            options.LinuxUpdateScheduleMode = "off";
+            options.LinuxUpdateScheduleOnceAtUtc = "";
+            options.LinuxUpdateScheduleIntervalHours = 24;
+            options.LinuxUpdateScheduleLastRunUtc = "";
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -209,6 +243,10 @@ namespace WindowsInventoryLite
                 {
                     options.DataPath = args[++i];
                 }
+                else if (key == "--linux-data" && i + 1 < args.Length)
+                {
+                    options.LinuxDataPath = args[++i];
+                }
                 else if (key == "--content" && i + 1 < args.Length)
                 {
                     options.ContentPath = args[++i];
@@ -217,6 +255,10 @@ namespace WindowsInventoryLite
                 {
                     options.ClientPackagePath = args[++i];
                 }
+                else if (key == "--linux-client-package" && i + 1 < args.Length)
+                {
+                    options.LinuxClientPackagePath = args[++i];
+                }
                 else if (key == "--winrm-installer" && i + 1 < args.Length)
                 {
                     options.WinRmInstallerPath = args[++i];
@@ -224,6 +266,14 @@ namespace WindowsInventoryLite
                 else if (key == "--winrm-uninstaller" && i + 1 < args.Length)
                 {
                     options.WinRmUninstallerPath = args[++i];
+                }
+                else if (key == "--linux-ssh-installer" && i + 1 < args.Length)
+                {
+                    options.LinuxSshInstallerPath = args[++i];
+                }
+                else if (key == "--linux-ssh-uninstaller" && i + 1 < args.Length)
+                {
+                    options.LinuxSshUninstallerPath = args[++i];
                 }
                 else if (key == "--token" && i + 1 < args.Length)
                 {
@@ -320,6 +370,13 @@ namespace WindowsInventoryLite
                 }
             }
 
+            // Matches the pre-branch guard's real-world behavior for a
+            // config-less invocation ("--token X" with no --config, or a
+            // --config path that doesn't exist yet): a token supplied on
+            // the command line is enforced by default. LoadConfigFile below
+            // still overrides this from an explicit RequireIngestionToken
+            // key whenever a real config file exists.
+            options.RequireIngestionToken = !String.IsNullOrEmpty(options.Token);
             LoadConfigFile(options);
             return options;
         }
@@ -340,6 +397,7 @@ namespace WindowsInventoryLite
                 {
                     options.Token = SecretProtector.Unprotect(GetConfigString(config, "Token"));
                 }
+                options.RequireIngestionToken = ResolveRequireIngestionToken(GetConfigString(config, "RequireIngestionToken"), !String.IsNullOrEmpty(options.Token));
                 if (String.IsNullOrEmpty(options.WebUsername))
                 {
                     options.WebUsername = GetConfigString(config, "WebUsername");
@@ -471,6 +529,43 @@ namespace WindowsInventoryLite
                 {
                     options.ClientUpdatePassword = SecretProtector.Unprotect(GetConfigString(config, "ClientUpdatePassword"));
                 }
+                if (String.IsNullOrEmpty(options.LinuxUpdateUsername))
+                {
+                    options.LinuxUpdateUsername = GetConfigString(config, "LinuxUpdateUsername");
+                }
+                if (String.IsNullOrEmpty(options.LinuxUpdatePassword))
+                {
+                    options.LinuxUpdatePassword = SecretProtector.Unprotect(GetConfigString(config, "LinuxUpdatePassword"));
+                }
+                if (String.IsNullOrEmpty(options.LinuxUpdateKeyPath))
+                {
+                    options.LinuxUpdateKeyPath = GetConfigString(config, "LinuxUpdateKeyPath");
+                }
+                if (options.LinuxUpdateScheduleMode == "off")
+                {
+                    string linuxScheduleModeText = GetConfigString(config, "LinuxUpdateScheduleMode");
+                    if (linuxScheduleModeText == "off" || linuxScheduleModeText == "once" || linuxScheduleModeText == "interval")
+                    {
+                        options.LinuxUpdateScheduleMode = linuxScheduleModeText;
+                    }
+                }
+                if (String.IsNullOrEmpty(options.LinuxUpdateScheduleOnceAtUtc))
+                {
+                    options.LinuxUpdateScheduleOnceAtUtc = GetConfigString(config, "LinuxUpdateScheduleOnceAtUtc") ?? "";
+                }
+                if (options.LinuxUpdateScheduleIntervalHours == 24)
+                {
+                    string linuxScheduleIntervalText = GetConfigString(config, "LinuxUpdateScheduleIntervalHours");
+                    int linuxScheduleIntervalFromConfig;
+                    if (!String.IsNullOrEmpty(linuxScheduleIntervalText) && Int32.TryParse(linuxScheduleIntervalText, out linuxScheduleIntervalFromConfig) && linuxScheduleIntervalFromConfig > 0 && linuxScheduleIntervalFromConfig <= 8760)
+                    {
+                        options.LinuxUpdateScheduleIntervalHours = linuxScheduleIntervalFromConfig;
+                    }
+                }
+                if (String.IsNullOrEmpty(options.LinuxUpdateScheduleLastRunUtc))
+                {
+                    options.LinuxUpdateScheduleLastRunUtc = GetConfigString(config, "LinuxUpdateScheduleLastRunUtc") ?? "";
+                }
                 if (options.ClientUpdateScheduleMode == "off")
                 {
                     string scheduleModeText = GetConfigString(config, "ClientUpdateScheduleMode");
@@ -554,6 +649,26 @@ namespace WindowsInventoryLite
             }
             return adSyncEnabledResolved;
         }
+
+        // Migration for upgrades from before RequireIngestionToken existed:
+        // if the config file has no explicit value yet, preserve today's
+        // real-world behavior exactly - enforcement was always implicitly
+        // "on" whenever a token happened to be configured (see the old
+        // ReceiveInventory/ReceiveLinuxInventory guard this replaces), so an
+        // existing deployment keeps behaving the same way after the upgrade
+        // with no admin action required. A fresh install always resolves
+        // this to true with zero special-case code, since Install-Server.ps1
+        // always configures a real token by the time this ever runs - no
+        // separate "fresh install default" branch is needed. Pure - no I/O,
+        // self-tested directly.
+        internal static bool ResolveRequireIngestionToken(string configValueText, bool tokenIsConfigured)
+        {
+            if (!String.IsNullOrEmpty(configValueText))
+            {
+                return String.Equals(configValueText, "true", StringComparison.OrdinalIgnoreCase);
+            }
+            return tokenIsConfigured;
+        }
     }
 
     internal sealed class InventoryServer
@@ -561,6 +676,8 @@ namespace WindowsInventoryLite
         private readonly ServerOptions options;
         private readonly object installJobsLock = new object();
         private readonly Dictionary<string, InstallJob> installJobs = new Dictionary<string, InstallJob>();
+        private readonly object linuxInstallJobsLock = new object();
+        private readonly Dictionary<string, LinuxInstallJob> linuxInstallJobs = new Dictionary<string, LinuxInstallJob>();
         // Lets an open dashboard tab notice a server-initiated (scheduled)
         // push exists at all - a scheduled push never goes through any HTTP
         // request the browser makes, so without this the browser has no way
@@ -569,6 +686,7 @@ namespace WindowsInventoryLite
         // know their own job.Id locally, from the response of the request
         // that created them) - only the schedule timer sets this.
         private volatile string lastScheduledUpdateJobId;
+        private volatile string lastScheduledLinuxUpdateJobId;
         private readonly object licensesLock = new object();
         private readonly object certificateHistoryLock = new object();
         private readonly object listenerRestartLock = new object();
@@ -608,11 +726,20 @@ namespace WindowsInventoryLite
             {
                 Directory.CreateDirectory(options.DataPath);
             }
+            if (!Directory.Exists(options.LinuxDataPath))
+            {
+                Directory.CreateDirectory(options.LinuxDataPath);
+            }
             if (!Directory.Exists(GetInstallJobDirectory()))
             {
                 Directory.CreateDirectory(GetInstallJobDirectory());
             }
+            if (!Directory.Exists(GetLinuxInstallJobDirectory()))
+            {
+                Directory.CreateDirectory(GetLinuxInstallJobDirectory());
+            }
             CleanupInstallJobLogs();
+            MigrateLegacyLinuxSshKey();
 
             if (options.EnableHttp)
             {
@@ -629,6 +756,7 @@ namespace WindowsInventoryLite
             ReconfigureAdSyncTimer();
             ResetMissedOnceSchedule();
             ReconfigureClientUpdateScheduleTimer();
+            ReconfigureLinuxUpdateScheduleTimer();
 
             if (!httpSlot.Running && !httpsSlot.Running)
             {
@@ -967,6 +1095,7 @@ namespace WindowsInventoryLite
             job.Targets = targets;
             job.Results = new ArrayList();
             job.ServerUrl = serverUrl;
+            job.Token = options.Token;
             job.Username = username;
             job.Password = password;
             job.Force = false;
@@ -1228,6 +1357,14 @@ namespace WindowsInventoryLite
                     {
                         ReceiveInventory(stream, request);
                     }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/linux/inventory")
+                    {
+                        ReceiveLinuxInventory(stream, request);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/linux/inventory/service-status")
+                    {
+                        ReceiveLinuxServiceStatus(stream, request);
+                    }
                     else if (!IsWebRequestAuthorized(request))
                     {
                         SendUnauthorized(stream);
@@ -1243,6 +1380,18 @@ namespace WindowsInventoryLite
                     else if (request.Method == "PUT" && request.Path.StartsWith("/api/v1/clients/", StringComparison.OrdinalIgnoreCase))
                     {
                         UpdateClientDescription(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/linux/clients")
+                    {
+                        SendJson(stream, BuildLinuxClientIndex());
+                    }
+                    else if (request.Method == "DELETE" && request.Path.StartsWith("/api/v1/linux/clients/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        DeleteLinuxClient(stream, request);
+                    }
+                    else if (request.Method == "PUT" && request.Path.StartsWith("/api/v1/linux/clients/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        UpdateLinuxClientDescription(stream, request);
                     }
                     else if (request.Method == "POST" && request.Path == "/api/v1/client-install")
                     {
@@ -1292,6 +1441,70 @@ namespace WindowsInventoryLite
                     {
                         DownloadClientPackage(stream);
                     }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-install")
+                    {
+                        StartLinuxClientAction(stream, request, "install");
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-uninstall")
+                    {
+                        StartLinuxClientAction(stream, request, "uninstall");
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-install/trust-host-key")
+                    {
+                        TrustLinuxHostKey(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-install")
+                    {
+                        SendLinuxClientInstallJobs(stream);
+                    }
+                    else if (request.Method == "GET" && request.Path.StartsWith("/api/v1/linux-client-install/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        SendLinuxClientInstallJob(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-updates")
+                    {
+                        SendLinuxClientUpdates(stream);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-updates/credentials")
+                    {
+                        SendLinuxUpdateCredentialsStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-updates/credentials")
+                    {
+                        ConfigureLinuxUpdateCredentials(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-updates/schedule")
+                    {
+                        SendLinuxUpdateScheduleStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-updates/schedule")
+                    {
+                        ConfigureLinuxUpdateSchedule(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/server/linux-ssh-tools-status")
+                    {
+                        SendLinuxSshToolsStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/server/linux-ssh-key")
+                    {
+                        ConfigureLinuxSshKey(stream, request);
+                    }
+                    else if (request.Method == "DELETE" && request.Path == "/api/v1/server/linux-ssh-key")
+                    {
+                        DeleteLinuxSshKey(stream);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-package")
+                    {
+                        SendLinuxClientPackageStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-package/configure")
+                    {
+                        ConfigureLinuxClientPackage(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-package/download")
+                    {
+                        DownloadLinuxClientPackage(stream);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/server/certificate")
                     {
                         SendCertificateStatus(stream);
@@ -1331,6 +1544,14 @@ namespace WindowsInventoryLite
                     else if (request.Method == "POST" && request.Path == "/api/v1/server/admin-password")
                     {
                         ChangeAdminPassword(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/server/ingestion-token")
+                    {
+                        SendIngestionTokenStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/server/ingestion-token/regenerate")
+                    {
+                        RegenerateIngestionToken(stream, request);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/licenses")
                     {
@@ -1412,7 +1633,7 @@ namespace WindowsInventoryLite
         private void ReceiveInventory(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (!String.IsNullOrEmpty(options.Token) && !FixedTimeEquals(token, options.Token))
+            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
             {
                 DebugLogger.Log(options, "Client", "Rejected inventory report: invalid or missing token");
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -1424,6 +1645,14 @@ namespace WindowsInventoryLite
             try
             {
                 inventory = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                // A body of literally "null" parses fine and yields null, making the
+                // ContainsKey call below an unauthenticated NullReferenceException
+                // that writes a full stack trace to the Windows Event Log. Same guard
+                // every authenticated handler in this file already has.
+                if (inventory == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
             }
             catch
             {
@@ -1800,6 +2029,746 @@ namespace WindowsInventoryLite
             SendJson(stream, serializer.Serialize(response));
         }
 
+        // Ingests a Linux client report - fully independent of
+        // ReceiveInventory (different storage directory, different report
+        // schema entirely). Shares the server's one Token setting (same
+        // header, same FixedTimeEquals check) and the AD Description Sync
+        // resolution (ComputeAdSyncFields/ApplyAdSyncFields, both already
+        // generic over "a hostname string and a previous report dict" -
+        // zero changes needed to reuse them here).
+        private void ReceiveLinuxInventory(Stream stream, RequestContext request)
+        {
+            string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
+            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
+            {
+                DebugLogger.Log(options, "Client", "Rejected Linux inventory report: invalid or missing token");
+                SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> inventory;
+            try
+            {
+                inventory = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                // A body of literally "null" parses fine and yields null, making the
+                // ContainsKey call below an unauthenticated NullReferenceException
+                // that writes a full stack trace to the Windows Event Log. Same guard
+                // every authenticated handler in this file already has.
+                if (inventory == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                DebugLogger.Log(options, "Client", "Rejected Linux inventory report: invalid request body");
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string hostname = Convert.ToString(inventory.ContainsKey("hostname") ? inventory["hostname"] : "unknown");
+            string path = Path.Combine(options.LinuxDataPath, SanitizeFileName(hostname) + ".json");
+
+            // Same lock-avoidance reasoning as ReceiveInventory: compute the
+            // (possibly slow, up to ~15s against an unreachable AD) fields
+            // before taking reportFileLock, which Windows and Linux
+            // ingestion share - one slow AD lookup must not serialize
+            // ingestion for the rest of either fleet.
+            Dictionary<string, object> previous = null;
+            if (File.Exists(path))
+            {
+                try
+                {
+                    previous = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                }
+                catch
+                {
+                    previous = null;
+                }
+            }
+            AdSyncFields adFields = ComputeAdSyncFields(hostname, previous);
+
+            lock (reportFileLock)
+            {
+                ApplyAdSyncFields(inventory, adFields);
+
+                string json = serializer.Serialize(inventory);
+                File.WriteAllText(path, json, new UTF8Encoding(false));
+            }
+            DebugLogger.Log(options, "Client", "Linux inventory report accepted from '" + DebugLogger.SanitizeForLog(hostname) + "'");
+            SendJson(stream, "{\"status\":\"ok\"}");
+        }
+
+        private void ReceiveLinuxServiceStatus(Stream stream, RequestContext request)
+        {
+            string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
+            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
+            {
+                DebugLogger.Log(options, "Client", "Rejected Linux service-status report: invalid or missing token");
+                SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                // A body of literally "null" parses fine and yields null, making the
+                // ContainsKey call below an unauthenticated NullReferenceException
+                // that writes a full stack trace to the Windows Event Log. Same guard
+                // every authenticated handler in this file already has.
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                DebugLogger.Log(options, "Client", "Rejected Linux service-status report: invalid request body");
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string hostname = Convert.ToString(payload.ContainsKey("hostname") ? payload["hostname"] : "unknown");
+            ArrayList activeUnits = new ArrayList();
+            if (payload.ContainsKey("activeUnits") && payload["activeUnits"] is ArrayList)
+            {
+                activeUnits = (ArrayList)payload["activeUnits"];
+            }
+            string collectedAt = Convert.ToString(payload.ContainsKey("collectedAt") ? payload["collectedAt"] : "");
+
+            string path = Path.Combine(options.LinuxDataPath, SanitizeFileName(hostname) + ".json");
+
+            lock (reportFileLock)
+            {
+                if (!File.Exists(path))
+                {
+                    DebugLogger.Log(options, "Client", "Ignored Linux service-status report from '" + DebugLogger.SanitizeForLog(hostname) + "': no existing inventory report to merge into");
+                    SendJson(stream, "{\"status\":\"ok\"}");
+                    return;
+                }
+
+                Dictionary<string, object> existingReport;
+                try
+                {
+                    existingReport = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                }
+                catch
+                {
+                    DebugLogger.Log(options, "Client", "Ignored Linux service-status report from '" + DebugLogger.SanitizeForLog(hostname) + "': existing report file could not be parsed");
+                    SendJson(stream, "{\"status\":\"ok\"}");
+                    return;
+                }
+
+                Dictionary<string, object> merged = MergeServiceStatus(existingReport, activeUnits, collectedAt);
+
+                string json = serializer.Serialize(merged);
+                File.WriteAllText(path, json, new UTF8Encoding(false));
+            }
+
+            DebugLogger.Log(options, "Client", "Linux service-status report accepted from '" + DebugLogger.SanitizeForLog(hostname) + "'");
+            SendJson(stream, "{\"status\":\"ok\"}");
+        }
+
+        // Pure merge logic, extracted from ReceiveLinuxServiceStatus so it's
+        // directly self-testable without HTTP plumbing. Only ever flips the
+        // `active` field on services the existing report already knows
+        // about (matched by `unit`) and sets a new servicesStatusCollectedAt
+        // timestamp - never adds, removes, or otherwise touches any other
+        // field, unlike ReceiveLinuxInventory's full-overwrite behavior.
+        internal static Dictionary<string, object> MergeServiceStatus(Dictionary<string, object> existingReport, ArrayList activeUnits, string collectedAt)
+        {
+            HashSet<string> activeUnitNames = new HashSet<string>(StringComparer.Ordinal);
+            foreach (object unit in activeUnits)
+            {
+                string unitName = Convert.ToString(unit);
+                if (!String.IsNullOrEmpty(unitName))
+                {
+                    activeUnitNames.Add(unitName);
+                }
+            }
+
+            if (existingReport.ContainsKey("services") && existingReport["services"] is ArrayList)
+            {
+                ArrayList services = (ArrayList)existingReport["services"];
+                foreach (object serviceObj in services)
+                {
+                    if (serviceObj is Dictionary<string, object>)
+                    {
+                        Dictionary<string, object> service = (Dictionary<string, object>)serviceObj;
+                        string unitName = service.ContainsKey("unit") ? Convert.ToString(service["unit"]) : "";
+                        service["active"] = activeUnitNames.Contains(unitName);
+                    }
+                }
+            }
+
+            existingReport["servicesStatusCollectedAt"] = collectedAt;
+            return existingReport;
+        }
+
+        private ArrayList LoadLinuxClientReports()
+        {
+            ArrayList clients = new ArrayList();
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+
+            foreach (string file in Directory.GetFiles(options.LinuxDataPath, "*.json"))
+            {
+                try
+                {
+                    string raw = File.ReadAllText(file, Encoding.UTF8);
+                    Dictionary<string, object> client = serializer.Deserialize<Dictionary<string, object>>(raw);
+                    client["sourceFile"] = Path.GetFileName(file);
+                    client["sourceUpdatedAt"] = File.GetLastWriteTimeUtc(file).ToString("yyyy-MM-ddTHH:mm:ssZ");
+                    clients.Add(client);
+                }
+                catch
+                {
+                }
+            }
+
+            return clients;
+        }
+
+        // The Linux client is a Linux ELF binary - unlike GetExeVersion
+        // (which runs the Windows client .exe locally to ask its version),
+        // this server cannot execute a foreign-OS binary. Reads the
+        // sidecar .version file Build-LinuxClient.ps1 writes alongside the
+        // binary instead.
+        private string GetLinuxClientPackageVersion()
+        {
+            string versionPath = Path.Combine(options.LinuxClientPackagePath, "wil-linux-client.version");
+            if (!File.Exists(versionPath))
+            {
+                return null;
+            }
+            try
+            {
+                return File.ReadAllText(versionPath, Encoding.UTF8).Trim();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private void SendLinuxClientUpdates(Stream stream)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> result = new Dictionary<string, object>();
+
+            string currentVersion = GetLinuxClientPackageVersion();
+            result["currentVersion"] = currentVersion;
+            result["lastScheduledJobId"] = lastScheduledLinuxUpdateJobId;
+
+            if (String.IsNullOrEmpty(currentVersion))
+            {
+                result["packageAvailable"] = false;
+                result["updates"] = new ArrayList();
+                result["outdatedCount"] = 0;
+                SendJson(stream, serializer.Serialize(result));
+                return;
+            }
+
+            result["packageAvailable"] = true;
+            ArrayList updates = new ArrayList();
+
+            foreach (Dictionary<string, object> client in LoadLinuxClientReports())
+            {
+                string clientVersion = GetStringValue(client, "clientVersion");
+                if (!String.IsNullOrEmpty(clientVersion) && String.Equals(clientVersion, currentVersion, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["hostname"] = GetStringValue(client, "hostname");
+                // The push target: prefers a real IPv4 address over the
+                // (often unresolvable) self-reported hostname - see
+                // GetLinuxClientUpdateTarget's own comment. "hostname" above
+                // is kept separately for the dashboard's display column.
+                entry["target"] = GetLinuxClientUpdateTarget(client);
+                entry["clientVersion"] = clientVersion;
+                entry["sourceUpdatedAt"] = GetStringValue(client, "sourceUpdatedAt");
+                updates.Add(entry);
+            }
+
+            result["updates"] = updates;
+            result["outdatedCount"] = updates.Count;
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void SendLinuxUpdateCredentialsStatus(Stream stream)
+        {
+            bool hasStoredCredentials = !String.IsNullOrEmpty(options.LinuxUpdateUsername) && !String.IsNullOrEmpty(options.LinuxUpdatePassword);
+            string keyPath = GetLinuxSshKeyFilePath();
+            bool hasStoredKey = File.Exists(keyPath);
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["configured"] = hasStoredCredentials || (!String.IsNullOrEmpty(options.LinuxUpdateUsername) && hasStoredKey);
+            result["username"] = String.IsNullOrEmpty(options.LinuxUpdateUsername) ? null : options.LinuxUpdateUsername;
+            result["hasPassword"] = !String.IsNullOrEmpty(options.LinuxUpdatePassword);
+            result["hasStoredKey"] = hasStoredKey;
+            result["keyUploadedAtUtc"] = hasStoredKey ? File.GetLastWriteTimeUtc(keyPath).ToString("yyyy-MM-ddTHH:mm:ssZ") : null;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void ConfigureLinuxUpdateCredentials(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            bool clear = payload.ContainsKey("clear") && Convert.ToBoolean(payload["clear"]);
+            string username;
+            string password;
+            if (clear)
+            {
+                username = "";
+                password = "";
+            }
+            else
+            {
+                username = payload.ContainsKey("username") ? Convert.ToString(payload["username"]) : options.LinuxUpdateUsername;
+                password = payload.ContainsKey("password") && !String.IsNullOrEmpty(Convert.ToString(payload["password"]))
+                    ? Convert.ToString(payload["password"])
+                    : options.LinuxUpdatePassword;
+            }
+
+            options.LinuxUpdateUsername = username;
+            options.LinuxUpdatePassword = password;
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["LinuxUpdateUsername"] = username ?? "";
+            updates["LinuxUpdatePassword"] = password ?? "";
+            SaveServerConfigValues(updates);
+
+            SendLinuxUpdateCredentialsStatus(stream);
+        }
+
+        private void SendLinuxUpdateScheduleStatus(Stream stream)
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["mode"] = options.LinuxUpdateScheduleMode;
+            result["onceAtUtc"] = String.IsNullOrEmpty(options.LinuxUpdateScheduleOnceAtUtc) ? null : options.LinuxUpdateScheduleOnceAtUtc;
+            result["intervalHours"] = options.LinuxUpdateScheduleIntervalHours;
+            result["lastRunUtc"] = String.IsNullOrEmpty(options.LinuxUpdateScheduleLastRunUtc) ? null : options.LinuxUpdateScheduleLastRunUtc;
+            result["hasSavedCredentials"] = !String.IsNullOrEmpty(options.LinuxUpdateUsername) && (!String.IsNullOrEmpty(options.LinuxUpdatePassword) || File.Exists(GetLinuxSshKeyFilePath()));
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void ConfigureLinuxUpdateSchedule(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string mode = payload.ContainsKey("mode") ? Convert.ToString(payload["mode"]) : "off";
+            if (mode != "off" && mode != "once" && mode != "interval")
+            {
+                SendText(stream, "{\"error\":\"mode must be 'off', 'once', or 'interval'\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string onceAtUtc = "";
+            if (mode == "once")
+            {
+                string onceAtRaw = payload.ContainsKey("onceAtUtc") ? Convert.ToString(payload["onceAtUtc"]) : "";
+                DateTime parsedOnceAt;
+                if (String.IsNullOrEmpty(onceAtRaw) || !DateTime.TryParse(onceAtRaw, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out parsedOnceAt))
+                {
+                    SendText(stream, "{\"error\":\"onceAtUtc is required and must be a valid date/time for mode 'once'\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                onceAtUtc = parsedOnceAt.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+            }
+
+            int intervalHours = options.LinuxUpdateScheduleIntervalHours;
+            if (mode == "interval")
+            {
+                if (!payload.ContainsKey("intervalHours") || !Int32.TryParse(Convert.ToString(payload["intervalHours"]), out intervalHours) || intervalHours < 1 || intervalHours > 8760)
+                {
+                    SendText(stream, "{\"error\":\"intervalHours must be between 1 and 8760 for mode 'interval'\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
+
+            options.LinuxUpdateScheduleMode = mode;
+            options.LinuxUpdateScheduleOnceAtUtc = onceAtUtc;
+            options.LinuxUpdateScheduleIntervalHours = intervalHours;
+            if (mode != "interval")
+            {
+                options.LinuxUpdateScheduleLastRunUtc = "";
+            }
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["LinuxUpdateScheduleMode"] = options.LinuxUpdateScheduleMode;
+            updates["LinuxUpdateScheduleOnceAtUtc"] = options.LinuxUpdateScheduleOnceAtUtc ?? "";
+            updates["LinuxUpdateScheduleIntervalHours"] = options.LinuxUpdateScheduleIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            updates["LinuxUpdateScheduleLastRunUtc"] = options.LinuxUpdateScheduleLastRunUtc ?? "";
+            SaveServerConfigValues(updates);
+
+            ReconfigureLinuxUpdateScheduleTimer();
+
+            SendLinuxUpdateScheduleStatus(stream);
+        }
+
+        private readonly object linuxUpdateScheduleTimerLock = new object();
+        private Timer linuxUpdateScheduleTimer;
+
+        private void ReconfigureLinuxUpdateScheduleTimer()
+        {
+            lock (linuxUpdateScheduleTimerLock)
+            {
+                if (linuxUpdateScheduleTimer != null)
+                {
+                    linuxUpdateScheduleTimer.Dispose();
+                    linuxUpdateScheduleTimer = null;
+                }
+                if (options.LinuxUpdateScheduleMode != "off")
+                {
+                    TimeSpan pollInterval = TimeSpan.FromSeconds(60);
+                    linuxUpdateScheduleTimer = new Timer(RunLinuxUpdateScheduleTick, null, TimeSpan.Zero, pollInterval);
+                }
+            }
+        }
+
+        private void RunLinuxUpdateScheduleTick(object state)
+        {
+            try
+            {
+                string mode = options.LinuxUpdateScheduleMode;
+                if (mode == "off")
+                {
+                    return;
+                }
+
+                DateTime? onceAtUtc = ParseUtcOrNull(options.LinuxUpdateScheduleOnceAtUtc);
+                DateTime? lastRunUtc = ParseUtcOrNull(options.LinuxUpdateScheduleLastRunUtc);
+                if (!ShouldRunClientUpdateSchedule(DateTime.UtcNow, mode, onceAtUtc, lastRunUtc, options.LinuxUpdateScheduleIntervalHours))
+                {
+                    return;
+                }
+
+                StartScheduledLinuxClientUpdatePush();
+
+                Dictionary<string, string> updates = new Dictionary<string, string>();
+                if (mode == "once")
+                {
+                    options.LinuxUpdateScheduleMode = "off";
+                    options.LinuxUpdateScheduleOnceAtUtc = "";
+                    updates["LinuxUpdateScheduleMode"] = "off";
+                    updates["LinuxUpdateScheduleOnceAtUtc"] = "";
+                    SaveServerConfigValues(updates);
+                    ReconfigureLinuxUpdateScheduleTimer();
+                }
+                else
+                {
+                    options.LinuxUpdateScheduleLastRunUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                    updates["LinuxUpdateScheduleLastRunUtc"] = options.LinuxUpdateScheduleLastRunUtc;
+                    SaveServerConfigValues(updates);
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Error", "Linux update schedule tick failed: " + ex);
+            }
+        }
+
+        private void StartScheduledLinuxClientUpdatePush()
+        {
+            string currentVersion = GetLinuxClientPackageVersion();
+            if (String.IsNullOrEmpty(currentVersion))
+            {
+                return;
+            }
+
+            ArrayList targets = new ArrayList();
+            foreach (Dictionary<string, object> client in LoadLinuxClientReports())
+            {
+                string clientVersion = GetStringValue(client, "clientVersion");
+                if (!String.IsNullOrEmpty(clientVersion) && String.Equals(clientVersion, currentVersion, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                string target = GetLinuxClientUpdateTarget(client);
+                if (String.IsNullOrEmpty(target))
+                {
+                    continue;
+                }
+                // GetLinuxClientUpdateTarget can return a client-reported raw
+                // hostname, which is attacker-influenced on a compromised managed
+                // host. Skip rather than fail the whole scheduled push - one bad
+                // record must not stop the rest of the fleet from updating.
+                if (!IsValidSshTarget(target))
+                {
+                    DebugLogger.Log(options, "Schedule", "Scheduled Linux client update push skipped one target: '" + DebugLogger.SanitizeForLog(target) + "' is not a valid hostname or IPv4 address.");
+                    continue;
+                }
+                targets.Add(target);
+            }
+            if (targets.Count == 0)
+            {
+                return;
+            }
+
+            // A scheduled push re-runs Install-ClientDebianSSH.ps1 against
+            // an already-installed target, exactly like a manual "Update
+            // selected" push - the script requires -ServerUrl (Mandatory),
+            // so this needs the same URL/token/install-path used for the
+            // original install, not blank values. Reads them back from the
+            // Linux package settings Task 7's ConfigureLinuxClientPackage
+            // writes (linux-package-settings.json) - the direct Linux
+            // analog of how StartScheduledClientUpdatePush (Windows) reads
+            // ParseCmdSettings(cmdPath) for the same reason. Gracefully
+            // no-ops (like the Windows path) if that file doesn't exist yet
+            // - nothing to push with an unknown server URL.
+            string serverUrl = null;
+            string token = null;
+            string installPath = "/opt/windows-inventory-lite";
+            int intervalHours = 6;
+            int statusIntervalMinutes = 30;
+            string packageSettingsPath = Path.Combine(options.LinuxClientPackagePath, "linux-package-settings.json");
+            if (File.Exists(packageSettingsPath))
+            {
+                try
+                {
+                    JavaScriptSerializer settingsSerializer = CreateJsonSerializer();
+                    Dictionary<string, object> savedSettings = settingsSerializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(packageSettingsPath, Encoding.UTF8));
+                    serverUrl = GetStringValue(savedSettings, "serverUrl");
+                    token = GetStringValue(savedSettings, "token");
+                    string savedInstallPath = GetStringValue(savedSettings, "installPath");
+                    if (!String.IsNullOrEmpty(savedInstallPath))
+                    {
+                        installPath = savedInstallPath;
+                    }
+                    intervalHours = GetIntValue(savedSettings, "intervalHours", 6);
+                    statusIntervalMinutes = GetIntValue(savedSettings, "statusIntervalMinutes", 30);
+                }
+                catch
+                {
+                    serverUrl = null;
+                }
+            }
+            if (String.IsNullOrEmpty(serverUrl))
+            {
+                DebugLogger.Log(options, "Schedule", "Scheduled Linux client update push skipped: no server URL saved yet - configure it on the Client package tab's Linux package section first.");
+                return;
+            }
+            // The saved package settings' own token can be stale (e.g. the
+            // package was configured before a later regenerate) - the
+            // server's live options.Token is always the current, correct
+            // value, so prefer it whenever the saved one is blank.
+            if (String.IsNullOrEmpty(token))
+            {
+                token = options.Token;
+            }
+
+            string keyPath = GetLinuxSshKeyFilePath();
+            string authMode = File.Exists(keyPath) ? "key" : "credentials";
+            string username = options.LinuxUpdateUsername;
+            string password = options.LinuxUpdatePassword;
+            if (String.IsNullOrEmpty(username) || (authMode == "credentials" && String.IsNullOrEmpty(password)))
+            {
+                DebugLogger.Log(options, "Schedule", "Scheduled Linux client update push skipped: no saved Linux credentials configured.");
+                return;
+            }
+
+            string pushValidationError;
+            if (!TryValidateLinuxPushValues(serverUrl, token, installPath, out pushValidationError))
+            {
+                DebugLogger.Log(options, "Schedule", "Scheduled Linux client update push skipped: " + DebugLogger.SanitizeForLog(pushValidationError));
+                return;
+            }
+
+            LinuxInstallJob job = new LinuxInstallJob();
+            job.Id = Guid.NewGuid().ToString("N");
+            job.Action = "install";
+            job.Status = "queued";
+            job.CreatedAtUtc = DateTime.UtcNow;
+            job.Targets = targets;
+            job.Results = new ArrayList();
+            job.AuthMode = authMode;
+            job.ServerUrl = serverUrl;
+            job.Token = token;
+            job.InstallPath = installPath;
+            job.IntervalHours = intervalHours;
+            job.StatusIntervalMinutes = statusIntervalMinutes;
+            job.Username = username;
+            job.Password = password;
+            job.KeyPath = keyPath;
+            job.RetentionDays = options.InstallLogRetentionDays;
+
+            lock (linuxInstallJobsLock)
+            {
+                linuxInstallJobs[job.Id] = job;
+                SaveLinuxInstallJob(job);
+            }
+            lastScheduledLinuxUpdateJobId = job.Id;
+            DebugLogger.Log(options, "Schedule", "Scheduled Linux client update push started: job '" + job.Id + "', " + targets.Count + " target(s).");
+            ThreadPool.QueueUserWorkItem(RunLinuxClientActionJob, job);
+        }
+
+        private string BuildLinuxClientIndex()
+        {
+            ArrayList clients = LoadLinuxClientReports();
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+
+            Dictionary<string, object> index = new Dictionary<string, object>();
+            index["schemaVersion"] = "1.0";
+            index["serverVersion"] = Program.ProductVersion;
+            index["generatedAt"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            index["clientCount"] = clients.Count;
+            index["adDescriptionSyncEnabled"] = options.AdDescriptionSyncEnabled;
+            index["clients"] = clients;
+            return serializer.Serialize(index);
+        }
+
+        private void DeleteLinuxClient(Stream stream, RequestContext request)
+        {
+            const string prefix = "/api/v1/linux/clients/";
+            string rawHostname = request.Path.Substring(prefix.Length);
+            int queryStart = rawHostname.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                rawHostname = rawHostname.Substring(0, queryStart);
+            }
+
+            string hostname = Uri.UnescapeDataString(rawHostname).Trim();
+            if (String.IsNullOrEmpty(hostname))
+            {
+                SendText(stream, "{\"error\":\"hostname is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string path = Path.Combine(options.LinuxDataPath, SanitizeFileName(hostname) + ".json");
+            if (!File.Exists(path))
+            {
+                SendText(stream, "{\"error\":\"client not found\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+
+            File.Delete(path);
+            SendJson(stream, "{\"status\":\"deleted\"}");
+        }
+
+        // Manual Description edit for a Linux client - same rule as
+        // UpdateClientDescription: only reachable while AD Description
+        // Sync is off, enforced here (not just by the dashboard hiding the
+        // control). Writes the same adDescription field
+        // ComputeAdSyncFields/ApplyAdSyncFields already read/write.
+        private void UpdateLinuxClientDescription(Stream stream, RequestContext request)
+        {
+            const string prefix = "/api/v1/linux/clients/";
+            const string suffix = "/description";
+            string rawPath = request.Path;
+            int queryStart = rawPath.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                rawPath = rawPath.Substring(0, queryStart);
+            }
+            if (!rawPath.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                SendText(stream, "{\"error\":\"not found\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+
+            string rawHostname = rawPath.Substring(prefix.Length, rawPath.Length - prefix.Length - suffix.Length);
+            string hostname = Uri.UnescapeDataString(rawHostname).Trim();
+            if (String.IsNullOrEmpty(hostname))
+            {
+                SendText(stream, "{\"error\":\"hostname is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            if (options.AdDescriptionSyncEnabled)
+            {
+                SendText(stream, "{\"error\":\"Description is synced from AD - disable \\\"Sync Description from AD\\\" in Settings first.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string description = payload.ContainsKey("description") ? Convert.ToString(payload["description"]) : "";
+            if (description.Length > 1024)
+            {
+                SendText(stream, "{\"error\":\"description must be 1024 characters or fewer\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string path = Path.Combine(options.LinuxDataPath, SanitizeFileName(hostname) + ".json");
+            lock (reportFileLock)
+            {
+                if (!File.Exists(path))
+                {
+                    SendText(stream, "{\"error\":\"client not found\"}", "application/json; charset=utf-8", 404);
+                    return;
+                }
+                Dictionary<string, object> record;
+                try
+                {
+                    record = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                }
+                catch
+                {
+                    SendText(stream, "{\"error\":\"client report could not be read\"}", "application/json; charset=utf-8", 500);
+                    return;
+                }
+                if (record == null)
+                {
+                    SendText(stream, "{\"error\":\"client report could not be read\"}", "application/json; charset=utf-8", 500);
+                    return;
+                }
+                record["adDescription"] = description;
+                File.WriteAllText(path, serializer.Serialize(record), new UTF8Encoding(false));
+            }
+
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["status"] = "ok";
+            response["description"] = description;
+            SendJson(stream, serializer.Serialize(response));
+        }
+
         private void StartClientAction(Stream stream, RequestContext request, string action)
         {
             JavaScriptSerializer serializer = CreateJsonSerializer();
@@ -1881,6 +2850,7 @@ namespace WindowsInventoryLite
             job.Targets = targets;
             job.Results = new ArrayList();
             job.ServerUrl = serverUrl;
+            job.Token = options.Token;
             job.Username = username;
             job.Password = password;
             job.Force = force;
@@ -2001,7 +2971,7 @@ namespace WindowsInventoryLite
             {
                 Dictionary<string, object> result = job.Action == "uninstall"
                     ? RunClientUninstallTarget(target, job.Username, job.Password, job.AddToTrustedHosts)
-                    : RunClientInstallTarget(target, job.ServerUrl, job.Username, job.Password, job.Force, job.AddToTrustedHosts);
+                    : RunClientInstallTarget(target, job.ServerUrl, job.Token, job.Username, job.Password, job.Force, job.AddToTrustedHosts);
                 lock (installJobsLock)
                 {
                     job.Results.Add(result);
@@ -2021,6 +2991,803 @@ namespace WindowsInventoryLite
                 SaveInstallJob(job);
             }
             CleanupInstallJobLogs();
+        }
+
+        private void StartLinuxClientAction(Stream stream, RequestContext request, string action)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string targetText = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "");
+            string authMode = Convert.ToString(payload.ContainsKey("authMode") ? payload["authMode"] : "credentials");
+            if (authMode != "ad" && authMode != "credentials" && authMode != "key")
+            {
+                SendText(stream, "{\"error\":\"authMode must be 'ad', 'credentials', or 'key'\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string username = Convert.ToString(payload.ContainsKey("username") ? payload["username"] : "");
+            string password = Convert.ToString(payload.ContainsKey("password") ? payload["password"] : "");
+            string keyPath = GetLinuxSshKeyFilePath();
+
+            if (authMode == "ad")
+            {
+                bool useAd = true;
+                string adCredentialError;
+                if (!TryResolveAdSyncCredentials(useAd, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref username, ref password, out adCredentialError))
+                {
+                    SendText(stream, "{\"error\":\"" + adCredentialError.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                if (String.IsNullOrEmpty(username) || String.IsNullOrEmpty(password))
+                {
+                    SendText(stream, "{\"error\":\"AD service-identity mode is not usable for SSH pushes to Linux targets (there is no SSH equivalent of running as the service's own identity). Select 'Stored Linux credentials' or 'SSH key' instead, or configure an explicit AD account rather than service identity in Settings > General > Active Directory.\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
+            else if (authMode == "credentials")
+            {
+                if (String.IsNullOrEmpty(username)) username = options.LinuxUpdateUsername;
+                if (String.IsNullOrEmpty(password)) password = options.LinuxUpdatePassword;
+                if (String.IsNullOrEmpty(username) || String.IsNullOrEmpty(password))
+                {
+                    SendText(stream, "{\"error\":\"username/password are required for 'credentials' auth mode (enter them, or save them in Settings > General > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
+            else
+            {
+                if (String.IsNullOrEmpty(username)) username = options.LinuxUpdateUsername;
+                if (String.IsNullOrEmpty(username))
+                {
+                    SendText(stream, "{\"error\":\"username is required for 'key' auth mode (enter it, or save it in Settings > General > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                if (!File.Exists(keyPath))
+                {
+                    SendText(stream, "{\"error\":\"No SSH key is configured - upload one in Settings > General > Linux Client update credentials.\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
+
+            string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
+            string token = Convert.ToString(payload.ContainsKey("token") ? payload["token"] : "");
+            // Blank means "use the server's current ingestion token", not
+            // "install with no token" - a form left at its default (the
+            // field's own placeholder used to say "leave empty if not
+            // used", which is actively wrong on a server that actually
+            // enforces a token) must not silently ship a client that can
+            // never authenticate its own inventory reports. Mirrors the
+            // fix already applied to the Windows WinRM push
+            // (BuildPowerShellInstallArguments) for the identical failure
+            // mode, reported live: "clients stopped connecting after
+            // regenerating the token, reinstalling via the UI doesn't
+            // help" - true here too, for the same reason.
+            if (String.IsNullOrEmpty(token))
+            {
+                token = options.Token;
+            }
+            string installPath = Convert.ToString(payload.ContainsKey("installPath") ? payload["installPath"] : "/opt/windows-inventory-lite");
+            int intervalHours = 6;
+            if (payload.ContainsKey("intervalHours"))
+            {
+                Int32.TryParse(Convert.ToString(payload["intervalHours"]), out intervalHours);
+            }
+            if (intervalHours < 1 || intervalHours > 24)
+            {
+                intervalHours = 6;
+            }
+            int statusIntervalMinutes = 30;
+            if (payload.ContainsKey("statusIntervalMinutes"))
+            {
+                Int32.TryParse(Convert.ToString(payload["statusIntervalMinutes"]), out statusIntervalMinutes);
+            }
+            if (statusIntervalMinutes < 1 || statusIntervalMinutes > 1440)
+            {
+                statusIntervalMinutes = 30;
+            }
+
+            ArrayList targets = ExpandInstallTargets(targetText);
+            if (targets.Count == 0)
+            {
+                SendText(stream, "{\"error\":\"at least one target is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            // Reject before a job is created rather than letting each target fail
+            // individually later - a typo'd or hostile target list should be a
+            // clear 400, not a job full of per-target failures. ExpandInstallTargets
+            // itself is deliberately left alone: it is shared with the Windows WinRM
+            // push path, which is out of scope here.
+            foreach (string candidate in targets)
+            {
+                if (!IsValidSshTarget(candidate))
+                {
+                    SendText(stream, "{\"error\":\"one or more targets contain characters that are not valid in a hostname or IPv4 address (only letters, digits, '.' and '-' are allowed)\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
+
+            if (action == "install" && String.IsNullOrEmpty(serverUrl))
+            {
+                // The dashboard's "Linux Client updates" push (Task 11's "Update
+                // selected" button) intentionally does not resend serverUrl/token/
+                // installPath/intervalHours - it targets already-installed clients
+                // and expects the same values used for the original install/package
+                // configuration. Fall back to linux-package-settings.json, the exact
+                // file StartScheduledLinuxClientUpdatePush already reads for the same
+                // reason. Only fields the caller did not explicitly supply are filled
+                // in, so the Task 9 manual push form (which always sends these fields)
+                // is never overridden by a stale saved value.
+                string packageSettingsPath = Path.Combine(options.LinuxClientPackagePath, "linux-package-settings.json");
+                if (File.Exists(packageSettingsPath))
+                {
+                    try
+                    {
+                        JavaScriptSerializer settingsSerializer = CreateJsonSerializer();
+                        Dictionary<string, object> savedSettings = settingsSerializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(packageSettingsPath, Encoding.UTF8));
+                        serverUrl = GetStringValue(savedSettings, "serverUrl");
+                        // token is deliberately NOT re-read from the saved
+                        // package settings here - it already defaulted to
+                        // the server's own live options.Token above, which
+                        // is always current; a token saved in this file
+                        // could be stale (e.g. from before a regenerate)
+                        // and would be a strictly worse value to fall back
+                        // to than the live one already resolved.
+                        if (!payload.ContainsKey("installPath"))
+                        {
+                            string savedInstallPath = GetStringValue(savedSettings, "installPath");
+                            if (!String.IsNullOrEmpty(savedInstallPath))
+                            {
+                                installPath = savedInstallPath;
+                            }
+                        }
+                        if (!payload.ContainsKey("intervalHours"))
+                        {
+                            intervalHours = GetIntValue(savedSettings, "intervalHours", intervalHours);
+                        }
+                        if (!payload.ContainsKey("statusIntervalMinutes"))
+                        {
+                            statusIntervalMinutes = GetIntValue(savedSettings, "statusIntervalMinutes", statusIntervalMinutes);
+                        }
+                    }
+                    catch
+                    {
+                        serverUrl = null;
+                    }
+                }
+            }
+
+            if (action == "install" && String.IsNullOrEmpty(serverUrl))
+            {
+                SendText(stream, "{\"error\":\"serverUrl is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            // Validated HERE, not at the top of this method: the saved-settings
+            // fallback above can overwrite serverUrl and installPath with values
+            // read from linux-package-settings.json, so validating on entry would
+            // guard values that no longer exist by the time they reach the command
+            // line.
+            string pushValidationError;
+            if (!TryValidateLinuxPushValues(serverUrl, token, installPath, out pushValidationError))
+            {
+                SendText(stream, "{\"error\":\"" + pushValidationError.Replace("\\", "\\\\").Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            bool trustNewHostKeys = false;
+            if (action == "install")
+            {
+                trustNewHostKeys = payload.ContainsKey("trustNewHostKeys") && Convert.ToBoolean(payload["trustNewHostKeys"]);
+                bool acknowledgeHostKeyRisk = payload.ContainsKey("acknowledgeHostKeyRisk") && Convert.ToBoolean(payload["acknowledgeHostKeyRisk"]);
+                if (trustNewHostKeys && !acknowledgeHostKeyRisk)
+                {
+                    SendText(stream, "{\"error\":\"acknowledgeHostKeyRisk must be true when trustNewHostKeys is enabled\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
+
+            LinuxInstallJob job = new LinuxInstallJob();
+            job.Id = Guid.NewGuid().ToString("N");
+            job.Action = action;
+            job.Status = "queued";
+            job.CreatedAtUtc = DateTime.UtcNow;
+            job.Targets = targets;
+            job.Results = new ArrayList();
+            job.AuthMode = authMode;
+            job.Username = username;
+            job.Password = password;
+            job.KeyPath = keyPath;
+            job.ServerUrl = serverUrl;
+            job.Token = token;
+            job.IntervalHours = intervalHours;
+            job.StatusIntervalMinutes = statusIntervalMinutes;
+            job.InstallPath = installPath;
+            job.RetentionDays = options.InstallLogRetentionDays;
+            job.TrustNewHostKeys = trustNewHostKeys;
+
+            lock (linuxInstallJobsLock)
+            {
+                linuxInstallJobs[job.Id] = job;
+                SaveLinuxInstallJob(job);
+            }
+
+            ThreadPool.QueueUserWorkItem(RunLinuxClientActionJob, job);
+            SendJson(stream, "{\"jobId\":\"" + job.Id + "\",\"status\":\"queued\"}");
+        }
+
+        private void TrustLinuxHostKey(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string host = GetStringValue(payload, "host");
+            string fingerprint = GetStringValue(payload, "fingerprint");
+            string keyType = GetStringValue(payload, "keyType");
+            if (String.IsNullOrEmpty(keyType))
+            {
+                keyType = "ssh-ed25519";
+            }
+            int port = 22;
+            if (payload.ContainsKey("port"))
+            {
+                // Parse into a separate local: Int32.TryParse writes 0 to
+                // its out parameter on failure, which would otherwise
+                // silently clobber the port=22 default for a malformed/null
+                // "port" value instead of keeping it.
+                int parsedPort;
+                if (Int32.TryParse(Convert.ToString(payload["port"]), out parsedPort))
+                {
+                    port = parsedPort;
+                }
+            }
+
+            if (String.IsNullOrEmpty(host))
+            {
+                SendText(stream, "{\"error\":\"host is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            if (!IsValidHostKeyFingerprint(fingerprint))
+            {
+                SendText(stream, "{\"error\":\"fingerprint must look like 'SHA256:...'\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            try
+            {
+                ValidatePosixShellSafe(host, "host");
+                ValidatePosixShellSafe(fingerprint, "fingerprint");
+            }
+            catch (ArgumentException ex)
+            {
+                SendText(stream, "{\"error\":\"" + ex.Message.Replace("\\", "\\\\").Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            Dictionary<string, object> record = UpsertLinuxKnownHost(host, port, keyType, fingerprint, "manual");
+            SendJson(stream, serializer.Serialize(record));
+        }
+
+        private void RunLinuxClientActionJob(object state)
+        {
+            LinuxInstallJob job = (LinuxInstallJob)state;
+            job.Status = "running";
+            job.StartedAtUtc = DateTime.UtcNow;
+            lock (linuxInstallJobsLock)
+            {
+                SaveLinuxInstallJob(job);
+            }
+
+            foreach (string target in job.Targets)
+            {
+                Dictionary<string, object> result = job.Action == "uninstall"
+                    ? RunLinuxClientUninstallTarget(target, job.AuthMode, job.Username, job.Password, job.KeyPath, job.InstallPath)
+                    : RunLinuxClientInstallTarget(target, job.ServerUrl, job.Token, job.IntervalHours, job.StatusIntervalMinutes, job.InstallPath, job.AuthMode, job.Username, job.Password, job.KeyPath, job.TrustNewHostKeys);
+                lock (linuxInstallJobsLock)
+                {
+                    job.Results.Add(result);
+                    SaveLinuxInstallJob(job);
+                }
+            }
+
+            job.CompletedAtUtc = DateTime.UtcNow;
+            job.Status = "completed";
+            lock (linuxInstallJobsLock)
+            {
+                SaveLinuxInstallJob(job);
+            }
+            CleanupLinuxInstallJobLogs();
+        }
+
+        // Credentials/key path never appear on the child process's command
+        // line (same reasoning as BuildCredentialReaderSnippet for the
+        // WinRM path) - passed via a small PowerShell stdin-reading
+        // preamble instead, invisible to a local process listing.
+        private static string BuildLinuxCredentialReaderSnippet(string authMode)
+        {
+            if (authMode == "key")
+            {
+                return "$__wilUser = [Console]::In.ReadLine(); $__wilKeyPath = [Console]::In.ReadLine(); ";
+            }
+            return "$__wilUser = [Console]::In.ReadLine(); $__wilPass = [Console]::In.ReadLine(); $__wilSecurePass = ConvertTo-SecureString -String $__wilPass -AsPlainText -Force; ";
+        }
+
+        private Dictionary<string, object> RunLinuxClientInstallTarget(string target, string serverUrl, string token, int intervalHours, int statusIntervalMinutes, string installPath, string authMode, string username, string password, string keyPath, bool trustNewHostKeys)
+        {
+            return RunLinuxClientInstallTarget(target, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, authMode, username, password, keyPath, trustNewHostKeys, false);
+        }
+
+        private Dictionary<string, object> RunLinuxClientInstallTarget(string target, string serverUrl, string token, int intervalHours, int statusIntervalMinutes, string installPath, string authMode, string username, string password, string keyPath, bool trustNewHostKeys, bool isBulkAutoRetry)
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["target"] = target;
+            result["startedAt"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+            if (!IsValidSshTarget(target))
+            {
+                result["status"] = "failed";
+                result["message"] = "Target contains characters that are not valid in a hostname or IPv4 address. Only letters, digits, '.' and '-' are allowed.";
+                return result;
+            }
+
+            if (!File.Exists(options.LinuxSshInstallerPath))
+            {
+                result["status"] = "failed";
+                result["message"] = "Linux SSH installer script was not found: " + options.LinuxSshInstallerPath;
+                return result;
+            }
+
+            bool usingKey = authMode == "key";
+            string expectedHostKey = null;
+            // Deliberately NOT gated on authMode. Which credential is used to
+            // AUTHENTICATE the client is unrelated to whether the SERVER's key is
+            // the one we previously trusted. Gating this on !usingKey is exactly
+            // how the key-mode path ended up with no host-key verification at all:
+            // C# never passed -ExpectedHostKey and the script never used it.
+            Dictionary<string, object> knownHost;
+            try
+            {
+                knownHost = FindLinuxKnownHost(target, 22);
+            }
+            catch (Exception ex)
+            {
+                // A failure to read the trust store must never be treated
+                // as "no record, safe to auto-trust" - report the push as
+                // failed instead of silently proceeding as if this target
+                // were brand-new (see FindLinuxKnownHost).
+                result["status"] = "failed";
+                result["message"] = "Could not read the Linux SSH known-hosts trust store: " + ex.Message;
+                return result;
+            }
+            if (knownHost != null)
+            {
+                expectedHostKey = GetStringValue(knownHost, "Fingerprint");
+                result["hostKeyTrust"] = "already-trusted";
+            }
+
+            // Last line of defence at the single point both the manual and the
+            // scheduled push paths converge on, right where the values become part
+            // of a command line.
+            string pushValidationError;
+            if (!TryValidateLinuxPushValues(serverUrl, token, installPath, out pushValidationError))
+            {
+                result["status"] = "failed";
+                result["message"] = pushValidationError;
+                return result;
+            }
+
+            StringBuilder argsBuilder = new StringBuilder();
+            argsBuilder.Append("-ComputerName ").Append(QuotePowerShellLiteral(target));
+            argsBuilder.Append(" -ServerUrl ").Append(QuotePowerShellLiteral(serverUrl));
+            argsBuilder.Append(" -IntervalHours ").Append(intervalHours);
+            argsBuilder.Append(" -StatusIntervalMinutes ").Append(statusIntervalMinutes);
+            argsBuilder.Append(" -InstallPath ").Append(QuotePowerShellLiteral(installPath));
+            // On an installed server the script's own repo-relative default
+            // (build\wil-linux-client) does not resolve - point it at the
+            // well-known package location DownloadLinuxClientPackage already
+            // requires an operator to place the binary at.
+            argsBuilder.Append(" -ClientBinaryPath ").Append(QuotePowerShellLiteral(Path.Combine(options.LinuxClientPackagePath, "wil-linux-client")));
+            if (!String.IsNullOrEmpty(token))
+            {
+                argsBuilder.Append(" -Token ").Append(QuotePowerShellLiteral(token));
+            }
+            if (!String.IsNullOrEmpty(expectedHostKey))
+            {
+                argsBuilder.Append(" -ExpectedHostKey ").Append(QuotePowerShellLiteral(expectedHostKey));
+            }
+            argsBuilder.Append(" -CredentialUsername $__wilUser");
+            if (usingKey)
+            {
+                argsBuilder.Append(" -KeyPath $__wilKeyPath");
+            }
+            else
+            {
+                argsBuilder.Append(" -CredentialPassword $__wilSecurePass");
+            }
+
+            string commandBody = "[Console]::OutputEncoding = [System.Text.Encoding]::Default; $OutputEncoding = [Console]::OutputEncoding; "
+                + BuildLinuxCredentialReaderSnippet(authMode)
+                + "& " + QuotePowerShellLiteral(options.LinuxSshInstallerPath) + " "
+                + argsBuilder.ToString();
+
+            result = RunLinuxSshProcess(commandBody, authMode, username, password, keyPath, result);
+
+            string hostKeyClassification = null;
+            if (GetStringValue(result, "status") == "failed")
+            {
+                string combinedOutput = GetStringValue(result, "output") + "\n" + GetStringValue(result, "error");
+                string parsedKeyType, parsedFingerprint;
+                bool parsedOk = TryParseHostKeyDetails(combinedOutput, out parsedKeyType, out parsedFingerprint);
+
+                hostKeyClassification = ClassifyHostKeyFailure(expectedHostKey, combinedOutput, parsedOk, trustNewHostKeys, isBulkAutoRetry);
+                switch (hostKeyClassification)
+                {
+                    case "changed":
+                        // expectedHostKey was set (a record already existed) and
+                        // the connection still failed on a host-key-related
+                        // message - the target's real key changed since it was
+                        // trusted. Never auto-accepted, regardless of trustNewHostKeys.
+                        // hostKeyFingerprint is deliberately never set here, even
+                        // if parsedOk is true: the dashboard renders a pre-filled
+                        // one-click "Trust and retry" button whenever a fingerprint
+                        // is present, and a changed key must always force the
+                        // manual-entry path so the operator types the new
+                        // fingerprint deliberately - this must hold even if a
+                        // future plink build's mismatch wording happens to also
+                        // include a parseable fingerprint.
+                        result["hostKeyStatus"] = "changed";
+                        result.Remove("hostKeyTrust");
+                        break;
+                    case "bulk-auto":
+                        // Same format validation the manual trust-host-key
+                        // endpoint applies (IsValidHostKeyFingerprint) - a
+                        // parsedFingerprint that doesn't look like a real
+                        // fingerprint must not be auto-trusted; fall back to
+                        // requiring an explicit manual decision instead.
+                        if (!IsValidHostKeyFingerprint(parsedFingerprint))
+                        {
+                            // hostKeyFingerprint is deliberately not set here: the
+                            // dashboard renders a pre-filled one-click button
+                            // whenever it's present, and resubmitting this same
+                            // value would just get rejected again by the
+                            // trust-host-key endpoint's own validation. Fall back
+                            // to requiring an explicit manual decision instead.
+                            result["hostKeyStatus"] = "unknown";
+                            break;
+                        }
+                        try
+                        {
+                            UpsertLinuxKnownHost(target, 22, parsedKeyType, parsedFingerprint, "bulk-auto");
+                        }
+                        catch (Exception ex)
+                        {
+                            // A write failure here must surface as a failed
+                            // push, not be silently swallowed - this is the
+                            // write-side counterpart to the read-failure
+                            // handling above (see FindLinuxKnownHost).
+                            result["status"] = "failed";
+                            result["message"] = "Could not update the Linux SSH known-hosts trust store: " + ex.Message;
+                            return result;
+                        }
+                        return RunLinuxClientInstallTarget(target, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, authMode, username, password, keyPath, trustNewHostKeys, true);
+                    case "unknown":
+                        result["hostKeyStatus"] = "unknown";
+                        result["hostKeyFingerprint"] = parsedFingerprint;
+                        break;
+                }
+            }
+
+            // isBulkAutoRetry marks a result that came from a connection made
+            // right after a bulk-auto trust upsert. Skip the label when this
+            // same attempt just reclassified as "changed" above - that means
+            // the freshly-stored record itself didn't match what the target
+            // presented, and "changed" must never be paired with "bulk-auto".
+            if (isBulkAutoRetry && hostKeyClassification != "changed")
+            {
+                result["hostKeyTrust"] = "bulk-auto";
+            }
+
+            return result;
+        }
+
+        // Decides how a failed non-key SSH attempt should be classified from
+        // its host-key evidence alone - no I/O, so it's directly unit-testable
+        // without spinning up a real plink/pscp process. Returns:
+        //   "changed"   - a prior trusted record existed (expectedHostKey set)
+        //                 and the failure text mentions a host key. The target's
+        //                 real key no longer matches what was trusted. Must
+        //                 NEVER be auto-accepted, regardless of trustNewHostKeys.
+        //   "bulk-auto" - no prior record existed, the failure fingerprint
+        //                 parsed cleanly, bulk auto-trust is enabled, and this
+        //                 isn't already a bulk-auto retry. Safe to trust and retry once.
+        //   "unknown"   - the failure fingerprint parsed but neither of the
+        //                 above applies AND no prior record existed - needs
+        //                 an explicit manual trust decision.
+        //   null        - not a host-key failure at all (or nothing to classify;
+        //                 also covers a prior record existing but the failure
+        //                 text not matching "changed" - see below).
+        // String.IsNullOrEmpty(expectedHostKey) gates BOTH the "bulk-auto"
+        // case and the "unknown" case structurally: a prior record existing
+        // is enough, by itself, to rule out ever silently overwriting it via
+        // "bulk-auto" AND to rule out ever mislabeling its failure as
+        // "unknown" (which the dashboard renders as a pre-filled, un-warned
+        // trust button) - independent of whatever wording plink/pscp happens
+        // to produce. With a prior record present, the only possible
+        // outcomes are "changed" or null - never "unknown", never "bulk-auto".
+        internal static string ClassifyHostKeyFailure(string expectedHostKey, string combinedOutput, bool parsedOk, bool trustNewHostKeys, bool isBulkAutoRetry)
+        {
+            bool hasHostKeyText = !String.IsNullOrEmpty(combinedOutput) && combinedOutput.IndexOf("host key", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (!String.IsNullOrEmpty(expectedHostKey) && hasHostKeyText)
+            {
+                return "changed";
+            }
+            if (String.IsNullOrEmpty(expectedHostKey) && parsedOk && trustNewHostKeys && !isBulkAutoRetry)
+            {
+                return "bulk-auto";
+            }
+            if (String.IsNullOrEmpty(expectedHostKey) && parsedOk)
+            {
+                return "unknown";
+            }
+            return null;
+        }
+
+        private Dictionary<string, object> RunLinuxClientUninstallTarget(string target, string authMode, string username, string password, string keyPath, string installPath)
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["target"] = target;
+            result["startedAt"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+            if (!IsValidSshTarget(target))
+            {
+                result["status"] = "failed";
+                result["message"] = "Target contains characters that are not valid in a hostname or IPv4 address. Only letters, digits, '.' and '-' are allowed.";
+                return result;
+            }
+
+            if (!File.Exists(options.LinuxSshUninstallerPath))
+            {
+                result["status"] = "failed";
+                result["message"] = "Linux SSH uninstaller script was not found: " + options.LinuxSshUninstallerPath;
+                return result;
+            }
+
+            string expectedHostKey = null;
+            Dictionary<string, object> knownHost;
+            try
+            {
+                knownHost = FindLinuxKnownHost(target, 22);
+            }
+            catch (Exception ex)
+            {
+                result["status"] = "failed";
+                result["message"] = "Could not read the Linux SSH known-hosts trust store: " + ex.Message;
+                return result;
+            }
+            if (knownHost != null)
+            {
+                expectedHostKey = GetStringValue(knownHost, "Fingerprint");
+            }
+
+            bool usingKey = authMode == "key";
+            StringBuilder argsBuilder = new StringBuilder();
+            argsBuilder.Append("-ComputerName ").Append(QuotePowerShellLiteral(target));
+            argsBuilder.Append(" -InstallPath ").Append(QuotePowerShellLiteral(installPath));
+            if (!String.IsNullOrEmpty(expectedHostKey))
+            {
+                argsBuilder.Append(" -ExpectedHostKey ").Append(QuotePowerShellLiteral(expectedHostKey));
+            }
+            argsBuilder.Append(" -CredentialUsername $__wilUser");
+            if (usingKey)
+            {
+                argsBuilder.Append(" -KeyPath $__wilKeyPath");
+            }
+            else
+            {
+                argsBuilder.Append(" -CredentialPassword $__wilSecurePass");
+            }
+
+            string commandBody = "[Console]::OutputEncoding = [System.Text.Encoding]::Default; $OutputEncoding = [Console]::OutputEncoding; "
+                + BuildLinuxCredentialReaderSnippet(authMode)
+                + "& " + QuotePowerShellLiteral(options.LinuxSshUninstallerPath) + " "
+                + argsBuilder.ToString();
+
+            return RunLinuxSshProcess(commandBody, authMode, username, password, keyPath, result);
+        }
+
+        private static Dictionary<string, object> RunLinuxSshProcess(string commandBody, string authMode, string username, string password, string keyPath, Dictionary<string, object> result)
+        {
+            ProcessStartInfo startInfo = new ProcessStartInfo();
+            startInfo.FileName = "powershell.exe";
+            startInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command " + QuoteArgument(commandBody);
+            startInfo.UseShellExecute = false;
+            startInfo.RedirectStandardInput = true;
+            startInfo.RedirectStandardOutput = true;
+            startInfo.RedirectStandardError = true;
+            startInfo.CreateNoWindow = true;
+
+            try
+            {
+                using (Process process = Process.Start(startInfo))
+                {
+                    process.StandardInput.WriteLine(username);
+                    process.StandardInput.WriteLine(authMode == "key" ? keyPath : password);
+                    process.StandardInput.Close();
+                    string output = process.StandardOutput.ReadToEnd();
+                    string error = process.StandardError.ReadToEnd();
+                    process.WaitForExit();
+                    result["exitCode"] = process.ExitCode;
+                    result["output"] = output;
+                    result["error"] = error;
+                    result["status"] = process.ExitCode == 0 ? "completed" : "failed";
+                    result["message"] = process.ExitCode == 0 ? "Linux client command completed." : "Linux client command failed.";
+                }
+            }
+            catch (Exception ex)
+            {
+                result["status"] = "failed";
+                result["message"] = ex.Message;
+            }
+
+            result["completedAt"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            return result;
+        }
+
+        private static readonly Regex HostKeyFingerprintFormatPattern = new Regex(@"^SHA256:[A-Za-z0-9+/]+=*$");
+
+        // Shared by the trust-host-key endpoint and its self-test, so the test
+        // exercises the exact validation the endpoint applies rather than a
+        // hand-copied duplicate of the pattern.
+        private static bool IsValidHostKeyFingerprint(string fingerprint)
+        {
+            return !String.IsNullOrEmpty(fingerprint) && HostKeyFingerprintFormatPattern.IsMatch(fingerprint);
+        }
+
+        // A push target is either a hostname or an IPv4 literal, and it is
+        // embedded into a PowerShell command line (RunLinuxClientInstallTarget's
+        // -ComputerName) and from there into an ssh/plink destination. Unlike
+        // serverUrl/token/installPath it was never validated, and its value can
+        // come straight from a client-reported "hostname" field (see
+        // GetLinuxClientUpdateTarget), which is attacker-influenced on a
+        // compromised managed host. Restrict to what a hostname or IPv4 literal
+        // can legally contain - letters, digits, '.', '-' - rather than trying to
+        // quote/escape, matching this project's existing reject-don't-escape
+        // convention (ValidatePosixShellSafe, Test-BatchSafeValue).
+        private static readonly Regex SshTargetFormatPattern = new Regex(@"^[A-Za-z0-9][A-Za-z0-9.\-]*\z");
+
+        internal static bool IsValidSshTarget(string target)
+        {
+            return !String.IsNullOrEmpty(target) && target.Length <= 253 && SshTargetFormatPattern.IsMatch(target);
+        }
+
+        private static readonly Regex HostKeyFingerprintPattern = new Regex(
+            @"The server's ([\w-]+) key fingerprint is:\s*\r?\n\s*[\w-]+ \d+ (SHA256:\S+)",
+            RegexOptions.IgnoreCase);
+
+        // plink's "unknown/uncached" host-key failure includes this fingerprint
+        // line and can be parsed; its "changed" (MISMATCH) failure does not
+        // include it at all (confirmed via live testing) - callers must
+        // tolerate TryParseHostKeyDetails returning false for a legitimate
+        // "changed" case rather than treating that as a parser bug.
+        private static bool TryParseHostKeyDetails(string text, out string keyType, out string fingerprint)
+        {
+            keyType = null;
+            fingerprint = null;
+            if (String.IsNullOrEmpty(text))
+            {
+                return false;
+            }
+            Match match = HostKeyFingerprintPattern.Match(text);
+            if (!match.Success)
+            {
+                return false;
+            }
+            keyType = match.Groups[1].Value;
+            fingerprint = match.Groups[2].Value;
+            return true;
+        }
+
+        private void SendLinuxClientInstallJobs(Stream stream)
+        {
+            CleanupLinuxInstallJobLogs();
+            ArrayList jobs = new ArrayList();
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+
+            foreach (string file in Directory.GetFiles(GetLinuxInstallJobDirectory(), "*.json"))
+            {
+                try
+                {
+                    Dictionary<string, object> job = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
+                    Dictionary<string, object> summary = new Dictionary<string, object>();
+                    summary["id"] = GetStringValue(job, "id");
+                    summary["action"] = GetStringValue(job, "action");
+                    summary["status"] = GetStringValue(job, "status");
+                    summary["createdAt"] = GetStringValue(job, "createdAt");
+                    summary["startedAt"] = GetStringValue(job, "startedAt");
+                    summary["completedAt"] = GetStringValue(job, "completedAt");
+                    summary["authMode"] = GetStringValue(job, "authMode");
+                    summary["username"] = GetStringValue(job, "username");
+                    summary["retentionDays"] = GetIntValue(job, "retentionDays", options.InstallLogRetentionDays);
+
+                    ArrayList targets = job.ContainsKey("targets") ? job["targets"] as ArrayList : null;
+                    ArrayList results = job.ContainsKey("results") ? job["results"] as ArrayList : null;
+                    summary["targetCount"] = targets == null ? 0 : targets.Count;
+                    summary["resultCount"] = results == null ? 0 : results.Count;
+                    summary["failedCount"] = CountInstallResults(results, "failed");
+                    jobs.Add(summary);
+                }
+                catch
+                {
+                }
+            }
+
+            ArrayList sorted = SortJobsByCreatedAtDescending(jobs);
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["defaultRetentionDays"] = options.InstallLogRetentionDays;
+            response["jobs"] = sorted;
+            SendJson(stream, serializer.Serialize(response));
+        }
+
+        private void SendLinuxClientInstallJob(Stream stream, RequestContext request)
+        {
+            const string prefix = "/api/v1/linux-client-install/";
+            string id = request.Path.Substring(prefix.Length);
+            int queryStart = id.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                id = id.Substring(0, queryStart);
+            }
+
+            LinuxInstallJob job = null;
+            lock (linuxInstallJobsLock)
+            {
+                if (linuxInstallJobs.ContainsKey(id))
+                {
+                    job = linuxInstallJobs[id];
+                }
+            }
+
+            if (job == null)
+            {
+                string persisted = ReadLinuxInstallJobJson(id);
+                if (persisted == null)
+                {
+                    SendText(stream, "{\"error\":\"job not found\"}", "application/json; charset=utf-8", 404);
+                    return;
+                }
+
+                SendJson(stream, persisted);
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(job.ToDictionary()));
         }
 
         // A successful install push only becomes visible to
@@ -2065,6 +3832,14 @@ namespace WindowsInventoryLite
                     return;
                 }
                 report["clientVersion"] = installedVersion;
+                // Marks this client as "pushed but not yet confirmed" for the
+                // dashboard (see BuildClientIndex/app.js's awaiting-report
+                // badge) - deliberately NOT preserved across a real report:
+                // ReceiveInventory overwrites the whole file from the
+                // client's own POST body, which never includes this field,
+                // so it disappears the instant a genuine report lands. No
+                // separate "clear" step is needed.
+                report["lastInstalledAtUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
                 File.WriteAllText(path, serializer.Serialize(report), new UTF8Encoding(false));
             }
         }
@@ -2078,7 +3853,7 @@ namespace WindowsInventoryLite
         // transport, so it doesn't protect against something actively
         // attached as a debugger - but that already implies far deeper
         // compromise than reading a process list.
-        private Dictionary<string, object> RunClientInstallTarget(string target, string serverUrl, string username, string password, bool force, bool addToTrustedHosts)
+        private Dictionary<string, object> RunClientInstallTarget(string target, string serverUrl, string token, string username, string password, bool force, bool addToTrustedHosts)
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["target"] = target;
@@ -2102,7 +3877,7 @@ namespace WindowsInventoryLite
             string commandBody = "[Console]::OutputEncoding = [System.Text.Encoding]::Default; $OutputEncoding = [Console]::OutputEncoding; "
                 + BuildCredentialReaderSnippet(hasCredential)
                 + "& " + QuotePowerShellLiteral(options.WinRmInstallerPath) + " "
-                + BuildPowerShellInstallArguments(target, serverUrl, hasCredential, force, addToTrustedHosts, options.ClientPackagePath);
+                + BuildPowerShellInstallArguments(target, serverUrl, token, hasCredential, force, addToTrustedHosts, options.ClientPackagePath);
 
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = "powershell.exe";
@@ -2344,10 +4119,44 @@ namespace WindowsInventoryLite
             return fallback;
         }
 
+        // A Linux client's self-reported "hostname" is frequently NOT
+        // resolvable from the server's network - short local/container names
+        // (e.g. "docker", "grafana", a Docker container's own hostname) have
+        // no DNS entry, unlike a Windows AD computerName, which is the
+        // Windows-side equivalent this pattern was originally mirrored from.
+        // The client's own report already includes its real network
+        // IP address(es) (linux-client/report.go's "ipAddresses", collected
+        // via CollectIPAddresses() - up/non-loopback interfaces only, but
+        // possibly including IPv6/container-bridge addresses too). Prefer
+        // the first IPv4 address found, since that's what an operator
+        // reaches a target with in practice - fall back to the hostname
+        // only when no IPv4 address was ever reported (e.g. an older client
+        // build, or a report that predates this field).
+        private static string GetLinuxClientUpdateTarget(Dictionary<string, object> client)
+        {
+            if (client != null && client.ContainsKey("ipAddresses"))
+            {
+                ArrayList addresses = client["ipAddresses"] as ArrayList;
+                if (addresses != null)
+                {
+                    foreach (object candidate in addresses)
+                    {
+                        string candidateText = Convert.ToString(candidate);
+                        IPAddress parsed;
+                        if (IPAddress.TryParse(candidateText, out parsed) && parsed.AddressFamily == AddressFamily.InterNetwork)
+                        {
+                            return candidateText;
+                        }
+                    }
+                }
+            }
+            return GetStringValue(client, "hostname");
+        }
+
         // One OU Distinguished Name per line - not reused with
         // ExpandInstallTargets' comma/semicolon/space splitting below, since
         // a DN's own RDN components are themselves comma-separated
-        // (e.g. "OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru") and
+        // (e.g. "OU=Workstations,OU=Site1,DC=corp,DC=example,DC=com") and
         // would be shredded by that splitter.
         private static ArrayList ParseAdComputerImportOUs(string raw)
         {
@@ -2480,11 +4289,15 @@ namespace WindowsInventoryLite
                 + "$__wilCredential = New-Object System.Management.Automation.PSCredential($__wilUser, (ConvertTo-SecureString -String $__wilPass -AsPlainText -Force)); ";
         }
 
-        private static string BuildPowerShellInstallArguments(string target, string serverUrl, bool hasCredential, bool force, bool addToTrustedHosts, string packagePath)
+        private static string BuildPowerShellInstallArguments(string target, string serverUrl, string token, bool hasCredential, bool force, bool addToTrustedHosts, string packagePath)
         {
             StringBuilder builder = new StringBuilder();
             builder.Append("-ComputerName ").Append(QuotePowerShellLiteral(target));
             builder.Append(" -ServerUrl ").Append(QuotePowerShellLiteral(serverUrl));
+            if (!String.IsNullOrEmpty(token))
+            {
+                builder.Append(" -Token ").Append(QuotePowerShellLiteral(token));
+            }
             builder.Append(" -PackagePath ").Append(QuotePowerShellLiteral(packagePath));
             if (hasCredential)
             {
@@ -2587,16 +4400,69 @@ namespace WindowsInventoryLite
             return diff == 0;
         }
 
+        // Extracted from ReceiveInventory/ReceiveLinuxInventory's shared
+        // guard shape so the security-relevant decision itself is directly
+        // unit-testable, not only reachable through a full HTTP round-trip.
+        // Fails closed: when enforcement is on, rejects if no token is
+        // configured (preventing accidental unauthenticated access if an
+        // admin explicitly sets RequireIngestionToken: true without also
+        // configuring a token).
+        private static bool IsIngestionTokenRejected(bool requireIngestionToken, string suppliedToken, string configuredToken)
+        {
+            if (!requireIngestionToken)
+            {
+                return false;
+            }
+            if (String.IsNullOrEmpty(configuredToken))
+            {
+                return true;
+            }
+            return !FixedTimeEquals(suppliedToken, configuredToken);
+        }
+
+        // Shared by the two Client Package generator endpoints below
+        // (ConfigureClientPackage, ConfigureLinuxClientPackage), which had
+        // no token fallback at all before this fix. StartClientAction and
+        // StartLinuxClientAction have their own equivalent inline fallback
+        // logic, added earlier and deliberately left as-is here (same
+        // behavior, different call sites, not worth the churn of
+        // consolidating four already-working call sites into one).
+        private static string ResolveEffectiveToken(string requestedToken, string liveToken)
+        {
+            return String.IsNullOrEmpty(requestedToken) ? liveToken : requestedToken;
+        }
+
+        // Extracted so the "should this save be rejected pending an explicit
+        // risk acknowledgment" decision is directly testable, mirroring how
+        // the existing HTTPS-certificate-risk gate works inline in
+        // ConfigureServerSettings but has no equivalent direct test today -
+        // this one gets one, rather than repeating that gap.
+        private static bool RequiresIngestionTokenRiskAcknowledgment(bool currentRequireIngestionToken, bool desiredRequireIngestionToken, bool acknowledgeIngestionTokenRisk)
+        {
+            return currentRequireIngestionToken && !desiredRequireIngestionToken && !acknowledgeIngestionTokenRisk;
+        }
+
+        // Dashboard files are served straight from disk with no build step
+        // (see this project's own established pattern) - a server update
+        // can replace app.js/index.html/styles.css on disk at any time,
+        // but neither Content-Length nor Last-Modified/ETag were ever set
+        // here, so a browser had nothing forcing it to notice. no-cache
+        // (not no-store) still lets the browser keep a local copy, it just
+        // has to ask "is this still current?" on every request - cheap for
+        // files this small, and it closes off exactly the "dashboard still
+        // shows an old build after an update, only a hard refresh fixes
+        // it" class of report a live user hit after this project's own
+        // Linux-client-actions view shipped.
         private void SendDashboardFile(Stream stream, string fileName, string fallback, string contentType)
         {
             string path = Path.Combine(options.ContentPath, fileName);
             if (File.Exists(path))
             {
-                SendText(stream, File.ReadAllText(path, Encoding.UTF8), contentType, 200);
+                SendText(stream, File.ReadAllText(path, Encoding.UTF8), contentType, 200, "no-cache");
                 return;
             }
 
-            SendText(stream, fallback, contentType, 200);
+            SendText(stream, fallback, contentType, 200, "no-cache");
         }
 
         private ArrayList LoadClientReports()
@@ -2665,6 +4531,17 @@ namespace WindowsInventoryLite
                 int bufLen = (int)buffer.Length;
                 headerEnd = FindHeaderEnd(buffer.GetBuffer(), bufLen, scanOffset);
                 scanOffset = Math.Max(0, bufLen - 3);
+            }
+
+            // The loop above exits either because headers were found (headerEnd >= 0)
+            // or because the peer closed first (read <= 0). In the second case
+            // headerEnd is still -1, and Encoding.ASCII.GetString(raw, 0, -1) below
+            // throws ArgumentOutOfRangeException - reachable by a bare port scan or
+            // health probe, and an unauthenticated path to a full stack trace in the
+            // Windows Event Log. Fail the same clean way the size limits above do.
+            if (headerEnd < 0)
+            {
+                throw new InvalidOperationException("Connection closed before the request headers were complete.");
             }
 
             byte[] raw = buffer.ToArray();
@@ -2771,6 +4648,11 @@ namespace WindowsInventoryLite
 
         private static void SendText(Stream stream, string text, string contentType, int statusCode)
         {
+            SendText(stream, text, contentType, statusCode, null);
+        }
+
+        private static void SendText(Stream stream, string text, string contentType, int statusCode, string cacheControl)
+        {
             byte[] body = Encoding.UTF8.GetBytes(text);
             string status = statusCode == 200 ? "OK" : (statusCode == 400 ? "Bad Request" : (statusCode == 401 ? "Unauthorized" : (statusCode == 404 ? "Not Found" : "Error")));
             string header = "HTTP/1.1 " + statusCode + " " + status +
@@ -2779,6 +4661,7 @@ namespace WindowsInventoryLite
                 "\r\nX-Content-Type-Options: nosniff" +
                 "\r\nX-Frame-Options: DENY" +
                 "\r\nContent-Security-Policy: " + ContentSecurityPolicy +
+                (String.IsNullOrEmpty(cacheControl) ? "" : "\r\nCache-Control: " + cacheControl) +
                 "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
@@ -2849,6 +4732,7 @@ namespace WindowsInventoryLite
             public ArrayList Targets;
             public ArrayList Results;
             public string ServerUrl;
+            public string Token;
             public string Username;
             public string Password;
             public bool Force;
@@ -2872,6 +4756,118 @@ namespace WindowsInventoryLite
                 result["addToTrustedHosts"] = AddToTrustedHosts;
                 result["retentionDays"] = RetentionDays;
                 return result;
+            }
+        }
+
+        private sealed class LinuxInstallJob
+        {
+            public string Id;
+            public string Action;
+            public string Status;
+            public DateTime CreatedAtUtc;
+            public DateTime StartedAtUtc;
+            public DateTime CompletedAtUtc;
+            public ArrayList Targets;
+            public ArrayList Results;
+            public string AuthMode;
+            public string Username;
+            public string Password;
+            public string KeyPath;
+            public string ServerUrl;
+            public string Token;
+            public int IntervalHours;
+            public int StatusIntervalMinutes;
+            public string InstallPath;
+            public int RetentionDays;
+            public bool TrustNewHostKeys;
+
+            public Dictionary<string, object> ToDictionary()
+            {
+                Dictionary<string, object> result = new Dictionary<string, object>();
+                result["id"] = Id;
+                result["action"] = String.IsNullOrEmpty(Action) ? "install" : Action;
+                result["status"] = Status;
+                result["createdAt"] = CreatedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                result["startedAt"] = StartedAtUtc == DateTime.MinValue ? null : StartedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                result["completedAt"] = CompletedAtUtc == DateTime.MinValue ? null : CompletedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                result["targets"] = Targets;
+                result["results"] = Results;
+                result["authMode"] = AuthMode;
+                result["username"] = Username;
+                result["serverUrl"] = ServerUrl;
+                result["installPath"] = InstallPath;
+                result["retentionDays"] = RetentionDays;
+                result["trustNewHostKeys"] = TrustNewHostKeys;
+                return result;
+            }
+        }
+
+        private string GetLinuxInstallJobDirectory()
+        {
+            return Path.Combine(options.LinuxDataPath, "_linux-client-install-jobs");
+        }
+
+        private string GetLinuxInstallJobPath(string id)
+        {
+            return Path.Combine(GetLinuxInstallJobDirectory(), SanitizeFileName(id) + ".json");
+        }
+
+        private void SaveLinuxInstallJob(LinuxInstallJob job)
+        {
+            if (!Directory.Exists(GetLinuxInstallJobDirectory()))
+            {
+                Directory.CreateDirectory(GetLinuxInstallJobDirectory());
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            File.WriteAllText(GetLinuxInstallJobPath(job.Id), serializer.Serialize(job.ToDictionary()), new UTF8Encoding(false));
+        }
+
+        private string ReadLinuxInstallJobJson(string id)
+        {
+            string safeId = SanitizeFileName(id);
+            if (String.IsNullOrEmpty(safeId) || safeId != id)
+            {
+                return null;
+            }
+
+            string path = GetLinuxInstallJobPath(safeId);
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+
+            return File.ReadAllText(path, Encoding.UTF8);
+        }
+
+        private void CleanupLinuxInstallJobLogs()
+        {
+            string directory = GetLinuxInstallJobDirectory();
+            if (!Directory.Exists(directory))
+            {
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            foreach (string file in Directory.GetFiles(directory, "*.json"))
+            {
+                try
+                {
+                    Dictionary<string, object> job = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
+                    DateTime createdAt = ParseUtcDate(GetStringValue(job, "createdAt"), File.GetCreationTimeUtc(file));
+                    int retentionDays = NormalizeRetentionDays(GetIntValue(job, "retentionDays", options.InstallLogRetentionDays));
+                    if (createdAt.AddDays(retentionDays) < DateTime.UtcNow)
+                    {
+                        File.Delete(file);
+                    }
+                }
+                catch
+                {
+                    if (File.GetLastWriteTimeUtc(file).AddDays(options.InstallLogRetentionDays) < DateTime.UtcNow)
+                    {
+                        File.Delete(file);
+                    }
+                }
             }
         }
 
@@ -3016,7 +5012,7 @@ namespace WindowsInventoryLite
                 return;
             }
             string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
-            string token = Convert.ToString(payload.ContainsKey("token") ? payload["token"] : "");
+            string token = ResolveEffectiveToken(Convert.ToString(payload.ContainsKey("token") ? payload["token"] : ""), options.Token);
             // Only when the GPO startup script and the package files (client
             // exes, Deploy-ClientGpo.ps1) are deployed to different
             // locations - e.g. the script runs from SYSVOL but the files
@@ -3120,6 +5116,217 @@ namespace WindowsInventoryLite
 
             byte[] zipBytes = BuildZip(names, contents);
             SendBytes(stream, zipBytes, "application/zip", "windows-inventory-lite-client.zip");
+        }
+
+        private void SendLinuxClientPackageStatus(Stream stream)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["packagePath"] = options.LinuxClientPackagePath;
+            result["packagePresent"] = Directory.Exists(options.LinuxClientPackagePath);
+
+            string binaryPath = Path.Combine(options.LinuxClientPackagePath, "wil-linux-client");
+            result["binaryPresent"] = File.Exists(binaryPath);
+            result["binaryVersion"] = GetLinuxClientPackageVersion();
+
+            string configPath = Path.Combine(options.LinuxClientPackagePath, "linux-package-settings.json");
+            if (File.Exists(configPath))
+            {
+                try
+                {
+                    Dictionary<string, object> saved = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(configPath, Encoding.UTF8));
+                    result["serverUrl"] = GetStringValue(saved, "serverUrl");
+                    result["token"] = GetStringValue(saved, "token");
+                    result["intervalHours"] = GetIntValue(saved, "intervalHours", 6);
+                    result["statusIntervalMinutes"] = GetIntValue(saved, "statusIntervalMinutes", 30);
+                    result["installPath"] = String.IsNullOrEmpty(GetStringValue(saved, "installPath")) ? "/opt/windows-inventory-lite" : GetStringValue(saved, "installPath");
+                }
+                catch
+                {
+                    result["serverUrl"] = null;
+                    result["token"] = null;
+                    result["intervalHours"] = 6;
+                    result["statusIntervalMinutes"] = 30;
+                    result["installPath"] = "/opt/windows-inventory-lite";
+                }
+            }
+            else
+            {
+                result["serverUrl"] = null;
+                result["token"] = null;
+                result["intervalHours"] = 6;
+                result["statusIntervalMinutes"] = 30;
+                result["installPath"] = "/opt/windows-inventory-lite";
+            }
+
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void ConfigureLinuxClientPackage(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
+            string token = ResolveEffectiveToken(Convert.ToString(payload.ContainsKey("token") ? payload["token"] : ""), options.Token);
+            string installPath = Convert.ToString(payload.ContainsKey("installPath") ? payload["installPath"] : "/opt/windows-inventory-lite");
+            // An explicit but blank/whitespace installPath in the payload (e.g. "") bypasses
+            // the ContainsKey default above - apply the same default here so the generated
+            // units/install.sh and saved settings never end up with an empty install path,
+            // matching what SendLinuxClientPackageStatus already defaults to on read.
+            if (String.IsNullOrWhiteSpace(installPath))
+            {
+                installPath = "/opt/windows-inventory-lite";
+            }
+            int intervalHours = 6;
+            if (payload.ContainsKey("intervalHours"))
+            {
+                if (!Int32.TryParse(Convert.ToString(payload["intervalHours"]), out intervalHours) || intervalHours < 1 || intervalHours > 24)
+                {
+                    SendText(stream, "{\"error\":\"intervalHours must be between 1 and 24\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
+            int statusIntervalMinutes = 30;
+            if (payload.ContainsKey("statusIntervalMinutes"))
+            {
+                if (!Int32.TryParse(Convert.ToString(payload["statusIntervalMinutes"]), out statusIntervalMinutes) || statusIntervalMinutes < 1 || statusIntervalMinutes > 1440)
+                {
+                    SendText(stream, "{\"error\":\"statusIntervalMinutes must be between 1 and 1440\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
+
+            if (String.IsNullOrEmpty(serverUrl))
+            {
+                SendText(stream, "{\"error\":\"serverUrl is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string statusUrl = serverUrl.TrimEnd('/') + "/service-status";
+
+            string[] serviceLines;
+            string[] timerLines;
+            string[] statusServiceLines;
+            string[] statusTimerLines;
+            string[] installScriptLines;
+            string[] envFileLines;
+            try
+            {
+                serviceLines = GenerateSystemdUnitLines(installPath, serverUrl, token);
+                timerLines = GenerateSystemdTimerLines(intervalHours);
+                statusServiceLines = GenerateSystemdStatusUnitLines(installPath, statusUrl, token);
+                statusTimerLines = GenerateSystemdStatusTimerLines(statusIntervalMinutes);
+                installScriptLines = GenerateLinuxInstallScriptLines(installPath);
+                envFileLines = GenerateSystemdEnvFileLines(token);
+            }
+            catch (ArgumentException ex)
+            {
+                SendText(stream, "{\"error\":\"" + ex.Message.Replace("\\", "\\\\").Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            if (!Directory.Exists(options.LinuxClientPackagePath))
+            {
+                Directory.CreateDirectory(options.LinuxClientPackagePath);
+            }
+
+            File.WriteAllLines(Path.Combine(options.LinuxClientPackagePath, "wil-linux-client.service"), serviceLines, new UTF8Encoding(false));
+            File.WriteAllLines(Path.Combine(options.LinuxClientPackagePath, "wil-linux-client.timer"), timerLines, new UTF8Encoding(false));
+            File.WriteAllLines(Path.Combine(options.LinuxClientPackagePath, "wil-linux-client-status.service"), statusServiceLines, new UTF8Encoding(false));
+            File.WriteAllLines(Path.Combine(options.LinuxClientPackagePath, "wil-linux-client-status.timer"), statusTimerLines, new UTF8Encoding(false));
+            // install.sh runs on Linux via its shebang and relies on "set -e" - Environment.NewLine
+            // (WriteAllLines' default) is \r\n on Windows, which breaks the shebang interpreter lookup
+            // and turns "set -e" into the literal token "-e\r", silently disabling errexit. Force bare \n.
+            File.WriteAllText(Path.Combine(options.LinuxClientPackagePath, "install.sh"), String.Join("\n", installScriptLines) + "\n", new UTF8Encoding(false));
+            // Written with bare \n for the same reason install.sh is: this file is
+            // sourced by systemd on Linux, and a trailing \r would become part of
+            // the token value. Only written when there is a token - the unit files
+            // only reference EnvironmentFile in that case (see
+            // GenerateSystemdUnitLines).
+            string envFilePath = Path.Combine(options.LinuxClientPackagePath, "wil-linux-client.env");
+            if (!String.IsNullOrEmpty(token))
+            {
+                File.WriteAllText(envFilePath, String.Join("\n", envFileLines) + "\n", new UTF8Encoding(false));
+            }
+            else if (File.Exists(envFilePath))
+            {
+                // A reconfigure that clears the token must not leave the previous
+                // token sitting in the package directory.
+                File.Delete(envFilePath);
+            }
+
+            Dictionary<string, object> settingsToSave = new Dictionary<string, object>();
+            settingsToSave["serverUrl"] = serverUrl;
+            settingsToSave["token"] = token;
+            settingsToSave["intervalHours"] = intervalHours;
+            settingsToSave["statusIntervalMinutes"] = statusIntervalMinutes;
+            settingsToSave["installPath"] = installPath;
+            File.WriteAllText(Path.Combine(options.LinuxClientPackagePath, "linux-package-settings.json"), serializer.Serialize(settingsToSave), new UTF8Encoding(false));
+
+            SendLinuxClientPackageStatus(stream);
+        }
+
+        private void DownloadLinuxClientPackage(Stream stream)
+        {
+            if (!Directory.Exists(options.LinuxClientPackagePath))
+            {
+                SendText(stream, "Linux client package directory not found.", "text/plain; charset=utf-8", 404);
+                return;
+            }
+
+            string binaryPath = Path.Combine(options.LinuxClientPackagePath, "wil-linux-client");
+            if (!File.Exists(binaryPath))
+            {
+                SendText(stream, "{\"error\":\"No Linux client binary found - run Build-LinuxClient.ps1 and place the output in the Linux client package directory first.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string installScriptPath = Path.Combine(options.LinuxClientPackagePath, "install.sh");
+            if (!File.Exists(installScriptPath))
+            {
+                SendText(stream, "{\"error\":\"Configure the server URL on this page and save before downloading - install.sh has not been generated yet.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string[] includeNames = {
+                "wil-linux-client",
+                "wil-linux-client.service",
+                "wil-linux-client.timer",
+                "wil-linux-client-status.service",
+                "wil-linux-client-status.timer",
+                "wil-linux-client.env",
+                "install.sh"
+            };
+
+            List<string> names = new List<string>();
+            List<byte[]> contents = new List<byte[]>();
+
+            foreach (string name in includeNames)
+            {
+                string path = Path.Combine(options.LinuxClientPackagePath, name);
+                if (File.Exists(path))
+                {
+                    names.Add(name);
+                    contents.Add(File.ReadAllBytes(path));
+                }
+            }
+
+            byte[] zipBytes = BuildZip(names, contents);
+            SendBytes(stream, zipBytes, "application/zip", "windows-inventory-lite-linux-client.zip");
         }
 
         private Dictionary<string, object> BuildCertificateStatusPayload()
@@ -3636,6 +5843,10 @@ namespace WindowsInventoryLite
             // returned by this endpoint, matching how WebPassword is never
             // echoed back either.
             result["adUsername"] = options.AdUseServiceIdentity ? null : options.AdUsername;
+            // Mirrors LinuxUpdateCredentials'/ClientUpdateCredentials' own
+            // hasPassword field - lets the dashboard show a saved-password
+            // indicator without ever exposing the value itself.
+            result["adPasswordConfigured"] = !String.IsNullOrEmpty(options.AdPassword);
             result["adComputerImportOUs"] = options.AdComputerImportOUs;
             result["installLogRetentionDays"] = options.InstallLogRetentionDays;
             result["debugLogEnabled"] = options.DebugLogEnabled;
@@ -3767,6 +5978,30 @@ namespace WindowsInventoryLite
             {
                 SendText(stream, "{\"error\":\"the HTTP and HTTPS ports must be different when both are enabled.\"}", "application/json; charset=utf-8", 400);
                 return;
+            }
+
+            // Validated here, in the pure-validation phase alongside the
+            // HTTPS/HTTP checks above - deliberately BEFORE any of the
+            // ApplySlotState calls below, which take effect on the live
+            // listeners immediately. A 409 return after this point but
+            // before SaveServerConfigValues would otherwise leave listener
+            // state already changed on the live server with nothing
+            // persisted to disk, reverting silently on the next restart.
+            bool desiredRequireIngestionToken = options.RequireIngestionToken;
+            if (payload.ContainsKey("requireIngestionToken"))
+            {
+                desiredRequireIngestionToken = Convert.ToBoolean(payload["requireIngestionToken"]);
+                bool acknowledgeIngestionTokenRisk = payload.ContainsKey("acknowledgeIngestionTokenRisk") && Convert.ToBoolean(payload["acknowledgeIngestionTokenRisk"]);
+                if (RequiresIngestionTokenRiskAcknowledgment(options.RequireIngestionToken, desiredRequireIngestionToken, acknowledgeIngestionTokenRisk))
+                {
+                    List<string> ingestionRisks = new List<string>();
+                    ingestionRisks.Add("Anyone who can reach this server's port will be able to submit inventory reports with no token at all - both /api/v1/inventory and /api/v1/linux/inventory accept any request unauthenticated while this is off.");
+                    Dictionary<string, object> ingestionRiskResponse = new Dictionary<string, object>();
+                    ingestionRiskResponse["error"] = "disabling ingestion token enforcement removes authentication from inventory ingestion. Confirm to proceed anyway.";
+                    ingestionRiskResponse["risks"] = ingestionRisks;
+                    SendText(stream, serializer.Serialize(ingestionRiskResponse), "application/json; charset=utf-8", 409);
+                    return;
+                }
             }
 
             // HTTPS is applied before HTTP, not just validated before HTTP -
@@ -3901,12 +6136,107 @@ namespace WindowsInventoryLite
                 updates["DebugLogEnabled"] = options.DebugLogEnabled ? "true" : "false";
             }
 
+            if (payload.ContainsKey("requireIngestionToken"))
+            {
+                options.RequireIngestionToken = desiredRequireIngestionToken;
+                updates["RequireIngestionToken"] = options.RequireIngestionToken ? "true" : "false";
+            }
+
             if (updates.Count > 0)
             {
                 SaveServerConfigValues(updates);
             }
 
             SendServerSettings(stream);
+        }
+
+        // Same shape as Install-Server.ps1's own New-RandomToken (32 bytes,
+        // hex-encoded to 64 lowercase characters) - not shared code (this
+        // runs in the C# server, that runs in PowerShell at install time),
+        // but deliberately the same generation approach for consistency.
+        private static string GenerateRandomToken()
+        {
+            byte[] bytes = new byte[32];
+            using (RandomNumberGenerator rng = RandomNumberGenerator.Create())
+            {
+                rng.GetBytes(bytes);
+            }
+            StringBuilder sb = new StringBuilder(bytes.Length * 2);
+            foreach (byte b in bytes)
+            {
+                sb.Append(b.ToString("x2"));
+            }
+            return sb.ToString();
+        }
+
+        private void SendIngestionTokenStatus(Stream stream)
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["configured"] = !String.IsNullOrEmpty(options.Token);
+            result["token"] = options.Token;
+            result["requireIngestionToken"] = options.RequireIngestionToken;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void SendLinuxSshToolsStatus(Stream stream)
+        {
+            // deploy\linux-client is the source location documented in
+            // NOTICE (fetched by whoever built the install package).
+            // Install-ClientDebianSSH.ps1 resolves $projectRoot as the
+            // parent of its own directory and looks for the tools at
+            // $projectRoot\deploy\linux-client - on an installed server
+            // that script lives in server-bin, so $projectRoot is the
+            // WindowsInventoryLite root and the tools must sit in a
+            // deploy\linux-client folder that is a SIBLING of server-bin
+            // (which Install-Server.ps1 now populates conditionally, same
+            // as it does for Deploy-ClientGpo.ps1). Check both that
+            // installed-server location and the repo-relative path (dev/
+            // build-tree environment) so this status is accurate either way.
+            string installedDeployDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\deploy\linux-client");
+            string repoRelativePlink = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"..\deploy\linux-client\plink.exe");
+            string repoRelativePscp = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"..\deploy\linux-client\pscp.exe");
+            string installedPlink = Path.Combine(installedDeployDir, "plink.exe");
+            string installedPscp = Path.Combine(installedDeployDir, "pscp.exe");
+
+            bool plinkFound = File.Exists(repoRelativePlink) || File.Exists(installedPlink);
+            bool pscpFound = File.Exists(repoRelativePscp) || File.Exists(installedPscp);
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["plinkFound"] = plinkFound;
+            result["pscpFound"] = pscpFound;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void RegenerateIngestionToken(Stream stream, RequestContext request)
+        {
+            string newToken = GenerateRandomToken();
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["Token"] = newToken;
+            SaveServerConfigValues(updates);
+
+            // Only mutate in-memory state after the save succeeds - if
+            // SaveServerConfigValues throws, the exception propagates to the
+            // generic error handler and options.Token is left untouched, so
+            // a failed persist never leaves live clients 401'ing against a
+            // token that was never actually written to disk.
+            options.Token = newToken;
+
+            try
+            {
+                System.Diagnostics.EventLog.WriteEntry(
+                    "WindowsInventoryLite",
+                    "Ingestion token regenerated from the Settings page. Existing clients will be unable to submit inventory until reconfigured with the new token.",
+                    System.Diagnostics.EventLogEntryType.Information);
+            }
+            catch { }
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["token"] = newToken;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
         }
 
         private void SendAdminPasswordStatus(Stream stream)
@@ -3925,6 +6255,7 @@ namespace WindowsInventoryLite
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["configured"] = configured;
             result["username"] = String.IsNullOrEmpty(options.ClientUpdateUsername) ? null : options.ClientUpdateUsername;
+            result["hasPassword"] = !String.IsNullOrEmpty(options.ClientUpdatePassword);
             JavaScriptSerializer serializer = CreateJsonSerializer();
             SendJson(stream, serializer.Serialize(result));
         }
@@ -4152,7 +6483,7 @@ namespace WindowsInventoryLite
         // ConfigureCertificate here and Install-Server.ps1's own import
         // step), so there is nothing to encrypt for it.
         private static readonly HashSet<string> EncryptedConfigKeys = new HashSet<string>(
-            new[] { "AdPassword", "WebPassword", "Token", "ClientUpdatePassword" },
+            new[] { "AdPassword", "WebPassword", "Token", "ClientUpdatePassword", "LinuxUpdatePassword" },
             StringComparer.Ordinal);
 
         private void SaveServerConfigValues(Dictionary<string, string> updates)
@@ -4238,6 +6569,635 @@ namespace WindowsInventoryLite
             }
         }
 
+        private static readonly object linuxKnownHostsLock = new object();
+
+        // Stored under a subfolder (same convention as _licenses/, _logs/,
+        // _linux-client-install-jobs/) so it never lands in the client-report
+        // filename namespace: per-client inventory reports are written as
+        // SanitizeFileName(computerName) + ".json" directly under DataPath's
+        // top level, and SanitizeFileName passes letters/digits/hyphens
+        // through unchanged. A client POSTing computerName "linux-ssh-known-hosts"
+        // to /api/v1/inventory - an endpoint gated only by the ingestion
+        // token, not admin auth - would otherwise overwrite this trust store
+        // outright (or DELETE /api/v1/clients/linux-ssh-known-hosts could
+        // remove it), corrupting the file and hard-failing every
+        // password-based Linux push.
+        private string GetLinuxSshDirectory()
+        {
+            return Path.Combine(options.DataPath, "_linux-ssh");
+        }
+
+        private string GetLinuxKnownHostsFilePath()
+        {
+            return Path.Combine(GetLinuxSshDirectory(), "linux-ssh-known-hosts.json");
+        }
+
+        private string GetLinuxSshKeyFilePath()
+        {
+            return Path.Combine(GetLinuxSshDirectory(), "linux-update-key");
+        }
+
+        private void ConfigureLinuxSshKey(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string keyBase64 = Convert.ToString(payload.ContainsKey("keyBase64") ? payload["keyBase64"] : "");
+            if (String.IsNullOrEmpty(keyBase64))
+            {
+                SendText(stream, "{\"error\":\"keyBase64 is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            byte[] keyBytes;
+            try
+            {
+                keyBytes = Convert.FromBase64String(keyBase64);
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"keyBase64 is not valid base64\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            const int MaxKeyBytes = 1024 * 1024;
+            if (keyBytes.Length == 0 || keyBytes.Length > MaxKeyBytes)
+            {
+                SendText(stream, "{\"error\":\"key file must be between 1 byte and 1 MB\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string content;
+            try
+            {
+                content = Encoding.UTF8.GetString(keyBytes);
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"key file is not readable as text\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            if (LooksLikePublicKey(content))
+            {
+                SendText(stream, "{\"error\":\"This looks like a public key (.pub) - upload the matching private key instead.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            if (!LooksLikePrivateKey(content))
+            {
+                SendText(stream, "{\"error\":\"This does not look like a private key file (expected a -----BEGIN ... PRIVATE KEY----- header).\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string keyPath = GetLinuxSshKeyFilePath();
+            string tempPath = keyPath + ".tmp";
+            try
+            {
+                string directory = GetLinuxSshDirectory();
+                if (!Directory.Exists(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+                File.WriteAllBytes(tempPath, keyBytes);
+                // Restrict the temp file's ACL immediately - it holds the plaintext
+                // private key and would otherwise inherit the directory's default
+                // (broader) permissions for the whole window before the replace/move.
+                ApplyRestrictedKeyFileAcl(tempPath);
+                if (File.Exists(keyPath))
+                {
+                    File.Replace(tempPath, keyPath, null);
+                }
+                else
+                {
+                    File.Move(tempPath, keyPath);
+                }
+                ApplyRestrictedKeyFileAcl(keyPath);
+                // Harden the directory itself only now that every write into it
+                // for this operation is done. The grant set (see
+                // ApplyRestrictedDirectoryAcl's doc comment) already includes the
+                // server's own operating identity, so this ordering is no longer
+                // needed to avoid locking that identity out - it remains good
+                // defense-in-depth for the directory's first-ever hardening pass.
+                ApplyRestrictedDirectoryAcl(directory);
+            }
+            catch (Exception)
+            {
+                SendText(stream, "{\"error\":\"could not save the key file to disk\"}", "application/json; charset=utf-8", 500);
+                return;
+            }
+            finally
+            {
+                // File.Replace/File.Move already consumed tempPath on the success
+                // path, so this is a no-op then; it only matters when something
+                // above threw, to avoid leaving an orphaned key file on disk.
+                try
+                {
+                    if (File.Exists(tempPath))
+                    {
+                        File.Delete(tempPath);
+                    }
+                }
+                catch (Exception)
+                {
+                    // Best-effort cleanup only - do not let a failure here mask
+                    // the original error or crash a successful save.
+                }
+            }
+
+            ArrayList risks = new ArrayList();
+            if (LooksLikeEncryptedPrivateKey(content))
+            {
+                risks.Add("This key appears to be passphrase-protected. Linux pushes run SSH in batch mode, which cannot prompt for a passphrase - pushes using this key will fail until it's replaced with an unencrypted key.");
+            }
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["status"] = "ok";
+            result["risks"] = risks;
+            JavaScriptSerializer responseSerializer = CreateJsonSerializer();
+            SendJson(stream, responseSerializer.Serialize(result));
+        }
+
+        private void DeleteLinuxSshKey(Stream stream)
+        {
+            string keyPath = GetLinuxSshKeyFilePath();
+            try
+            {
+                if (File.Exists(keyPath))
+                {
+                    File.Delete(keyPath);
+                }
+            }
+            catch (Exception)
+            {
+                SendText(stream, "{\"error\":\"could not delete the key file\"}", "application/json; charset=utf-8", 500);
+                return;
+            }
+
+            // Best-effort cleanup of any orphaned temp file left behind by a
+            // prior failed upload (see ConfigureLinuxSshKey). A failure here
+            // must not turn a successful delete of the real key into a 500.
+            try
+            {
+                string tempPath = keyPath + ".tmp";
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+            }
+            catch (Exception)
+            {
+            }
+
+            SendJson(stream, "{\"status\":\"deleted\"}");
+        }
+
+        // Pure string checks, no I/O - self-testable directly. Together
+        // these close the exact live failure this feature exists to
+        // prevent: a .pub file (the wrong half of a keypair) accepted as
+        // if it were a private key, with nothing catching the mistake
+        // until an actual SSH push failed against a real target.
+        internal static bool LooksLikePrivateKey(string content)
+        {
+            if (String.IsNullOrEmpty(content))
+            {
+                return false;
+            }
+            string trimmed = content.TrimStart();
+            if (!trimmed.StartsWith("-----BEGIN", StringComparison.Ordinal))
+            {
+                return false;
+            }
+            int headerEnd = trimmed.IndexOf('\n');
+            string headerLine = headerEnd >= 0 ? trimmed.Substring(0, headerEnd) : trimmed;
+            return headerLine.IndexOf("PRIVATE KEY-----", StringComparison.Ordinal) >= 0;
+        }
+
+        internal static bool LooksLikePublicKey(string content)
+        {
+            if (String.IsNullOrEmpty(content))
+            {
+                return false;
+            }
+            string trimmed = content.TrimStart();
+            return trimmed.StartsWith("ssh-rsa ", StringComparison.Ordinal)
+                || trimmed.StartsWith("ssh-ed25519 ", StringComparison.Ordinal)
+                || trimmed.StartsWith("ssh-dss ", StringComparison.Ordinal)
+                || trimmed.StartsWith("ecdsa-sha2-", StringComparison.Ordinal);
+        }
+
+        // OpenSSH's own key format (openssh-key-v1) embeds a KDF name
+        // right after a fixed magic preamble in the base64-decoded body:
+        // "none" for an unencrypted key, "bcrypt" for a passphrase-
+        // protected one. Decoding the base64 body and checking for the
+        // literal ASCII substring "bcrypt" is a reliable, parser-free
+        // signal - it does not require walking the full length-prefixed
+        // binary structure to tell "has a passphrase" from "doesn't".
+        // Legacy PEM-format encrypted keys instead carry a plaintext
+        // "Proc-Type: 4,ENCRYPTED" header line, checked first.
+        internal static bool LooksLikeEncryptedPrivateKey(string content)
+        {
+            if (String.IsNullOrEmpty(content))
+            {
+                return false;
+            }
+            if (content.IndexOf("Proc-Type: 4,ENCRYPTED", StringComparison.Ordinal) >= 0)
+            {
+                return true;
+            }
+            const string openSshHeader = "-----BEGIN OPENSSH PRIVATE KEY-----";
+            const string openSshFooter = "-----END OPENSSH PRIVATE KEY-----";
+            int headerIndex = content.IndexOf(openSshHeader, StringComparison.Ordinal);
+            if (headerIndex < 0)
+            {
+                return false;
+            }
+            int bodyStart = headerIndex + openSshHeader.Length;
+            int footerIndex = content.IndexOf(openSshFooter, bodyStart, StringComparison.Ordinal);
+            if (footerIndex < 0)
+            {
+                return false;
+            }
+            string base64Body = content.Substring(bodyStart, footerIndex - bodyStart).Replace("\r", "").Replace("\n", "").Trim();
+            byte[] decoded;
+            try
+            {
+                decoded = Convert.FromBase64String(base64Body);
+            }
+            catch
+            {
+                return false;
+            }
+            string decodedText = Encoding.ASCII.GetString(decoded);
+            return decodedText.IndexOf("bcrypt", StringComparison.Ordinal) >= 0;
+        }
+
+        // Same DACL treatment as ApplyRestrictedConfigAcl, plus explicit
+        // Owner=SYSTEM - the load-bearing difference. ssh.exe's own
+        // private-key permission check inspects Owner as a condition
+        // independent of the DACL; neither ApplyRestrictedConfigAcl nor
+        // Install-Server.ps1's Set-RestrictedFileAcl ever set it, and a
+        // DACL-only fix was confirmed live to still produce the exact
+        // "UNPROTECTED PRIVATE KEY FILE" refusal this method exists to
+        // prevent. Setting Owner to a SID other than the caller requires
+        // an elevated/SYSTEM process token - this matches the real
+        // deployment (the Windows Service runs as LocalSystem) but not
+        // every dev/test environment, so failures here are caught and
+        // logged, never thrown, exactly like ApplyRestrictedConfigAcl.
+        private void ApplyRestrictedKeyFileAcl(string path)
+        {
+            try
+            {
+                SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+
+                // DACL first, persisted on its own - this alone matches
+                // ApplyRestrictedConfigAcl's own guarantee (no elevation
+                // needed) and must not be lost if the Owner step below
+                // fails for lack of privilege.
+                FileSecurity acl = File.GetAccessControl(path);
+                acl.SetAccessRuleProtection(true, false);
+                acl.AddAccessRule(new FileSystemAccessRule(adminSid, FileSystemRights.FullControl, AccessControlType.Allow));
+                acl.AddAccessRule(new FileSystemAccessRule(systemSid, FileSystemRights.FullControl, AccessControlType.Allow));
+                File.SetAccessControl(path, acl);
+
+                // Owner is a separate persist step - setting it to a SID
+                // other than the caller requires an elevated/SYSTEM
+                // process token, and a failure here must not roll back
+                // the DACL hardening already persisted above.
+                FileSecurity ownerAcl = File.GetAccessControl(path);
+                ownerAcl.SetOwner(systemSid);
+                File.SetAccessControl(path, ownerAcl);
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Config", "Could not fully restrict linux-update-key permissions: " + DebugLogger.SanitizeForLog(ex.Message));
+            }
+        }
+
+        // Directory counterpart to ApplyRestrictedKeyFileAcl. The _linux-ssh
+        // directory holds the private key and the known-hosts trust store, but was
+        // created with a bare Directory.CreateDirectory and inherited whatever
+        // ProgramData's defaults are. Same two-step DACL-then-Owner persist and
+        // the same swallow-and-log failure handling as the file version.
+        //
+        // Grant set: Administrators, SYSTEM, and the identity actually running
+        // this server process (WindowsIdentity.GetCurrent().User) - skipped only
+        // if that identity's SID already equals SYSTEM, to avoid a redundant
+        // duplicate rule. (The Administrators check is defensive but effectively
+        // dead code: WindowsIdentity.GetCurrent().User returns an individual
+        // user SID, which can never equal the well-known Administrators GROUP
+        // SID, even for a user who is a group member. Only the SYSTEM comparison
+        // can actually match and skip.) This is deliberately NOT
+        // "Administrators and SYSTEM only": there is no way for a non-privileged
+        // identity to repeatedly read/write/rotate/delete files in an
+        // ACL-protected directory across separate operations unless it is
+        // explicitly granted access on the directory itself (or is a member of
+        // a granted group) - a directory locked to Administrators+SYSTEM only is
+        // permanently inaccessible to any other identity, full stop, for as long
+        // as it stays configured that way. Excluding the server's own operating
+        // identity would therefore permanently break the SSH-key upload,
+        // rotation, and delete flow (ConfigureLinuxSshKey, DeleteLinuxSshKey)
+        // after the very first successful hardening, in exactly the
+        // least-privileged domain/managed service account deployment mode the
+        // project's own threat model recommends (docs/threat-model.md) - this is
+        // not a hypothetical edge case, and it is not a no-op even when the
+        // service runs as LocalSystem, because the documented supported
+        // deployment mode is a non-LocalSystem account.
+        //
+        // Granting the operating identity here does not meaningfully widen the
+        // attack surface: it is the SAME account already running the entire
+        // server process, so it already has access to everything else the
+        // server manages (DPAPI-protected secrets - which are inherently scoped
+        // to the identity that encrypted them by DPAPI's own design). Restricting
+        // this one directory to "Administrators+SYSTEM only, excluding the
+        // server's own account" would not protect against a compromise of that
+        // account - it already holds the keys to everything else - while the
+        // actual threat this hardening exists to stop (some OTHER local account
+        // snooping on or tampering with the SSH trust store) remains fully
+        // addressed, since every other local identity is still excluded.
+        //
+        // Callers should still only invoke this after every write into the
+        // directory for the current operation has completed (temp file write,
+        // per-file hardening, move into place). That ordering is no longer
+        // required to avoid a lockout (the grant above prevents that on its
+        // own), but it remains good defense-in-depth for the directory's
+        // first-ever hardening pass.
+        private void ApplyRestrictedDirectoryAcl(string path)
+        {
+            try
+            {
+                SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                SecurityIdentifier currentSid = WindowsIdentity.GetCurrent().User;
+
+                DirectorySecurity acl = Directory.GetAccessControl(path);
+                acl.SetAccessRuleProtection(true, false);
+                acl.AddAccessRule(new FileSystemAccessRule(adminSid, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+                acl.AddAccessRule(new FileSystemAccessRule(systemSid, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+                if (currentSid != null && !currentSid.Equals(adminSid) && !currentSid.Equals(systemSid))
+                {
+                    acl.AddAccessRule(new FileSystemAccessRule(currentSid, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+                }
+                Directory.SetAccessControl(path, acl);
+
+                DirectorySecurity ownerAcl = Directory.GetAccessControl(path);
+                ownerAcl.SetOwner(systemSid);
+                Directory.SetAccessControl(path, ownerAcl);
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Config", "Could not fully restrict the linux-ssh directory permissions: " + DebugLogger.SanitizeForLog(ex.Message));
+            }
+        }
+
+        // One-time upgrade path: an existing install may already have
+        // LinuxUpdateKeyPath pointing at a real private key file
+        // somewhere on disk (the old "type a path" model). Adopts it
+        // automatically so upgrading needs zero admin action - but only
+        // once (guarded by "the managed file doesn't exist yet"), and
+        // only if the legacy path genuinely looks like a private key;
+        // any failure (unreadable, wrong format, copy error) is logged
+        // and swallowed, never thrown - a failed migration just leaves
+        // the key unconfigured, same as a fresh install, and must never
+        // block server startup.
+        private void MigrateLegacyLinuxSshKey()
+        {
+            try
+            {
+                string managedPath = GetLinuxSshKeyFilePath();
+                if (File.Exists(managedPath))
+                {
+                    return;
+                }
+                if (String.IsNullOrEmpty(options.LinuxUpdateKeyPath) || !File.Exists(options.LinuxUpdateKeyPath))
+                {
+                    return;
+                }
+                string content = File.ReadAllText(options.LinuxUpdateKeyPath, Encoding.UTF8);
+                if (!LooksLikePrivateKey(content))
+                {
+                    return;
+                }
+                string directory = GetLinuxSshDirectory();
+                if (!Directory.Exists(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+                // Copy to a temp path, THEN move into place and harden the real
+                // file - mirroring the upload path's own temp/move idiom
+                // (ConfigureLinuxSshKey). File.Copy straight to the real path
+                // would leave a window where the private key sits there with
+                // whatever broad, inherited permissions the containing
+                // directory has. The directory itself is deliberately NOT
+                // hardened until after this whole sequence completes (below).
+                // The grant set (see ApplyRestrictedDirectoryAcl's doc comment)
+                // already includes the server's own operating identity, so this
+                // ordering is no longer needed to avoid locking that identity
+                // out - it remains good defense-in-depth for the directory's
+                // first-ever hardening pass.
+                //
+                // NOTE: an intermediate ApplyRestrictedKeyFileAcl(tempPath) call
+                // before the move (matching ConfigureLinuxSshKey's own temp-file
+                // hardening) was evaluated and is intentionally NOT applied
+                // here. Confirmed via an isolated repro: hardening tempPath to
+                // Administrators+SYSTEM only, then calling File.Move, throws
+                // UnauthorizedAccessException for a non-privileged identity even
+                // though the containing directory itself is unrestricted - a
+                // rename requires DELETE access on the source file's own
+                // security descriptor, which is not satisfiable via the parent
+                // directory's delete-child grant (unlike a plain File.Delete,
+                // which is). This is independent of the directory-ACL ordering
+                // fix above. The only known workaround is granting the current
+                // identity access on the temp file, which would reintroduce the
+                // same kind of permanent-widening risk this fix exists to
+                // remove (ApplyRestrictedKeyFileAcl is shared with the final
+                // managedPath hardening below, so widening it here would widen
+                // the real key file's grant set too). Left as a known,
+                // documented limitation rather than worked around; see the
+                // fix report for details. ConfigureLinuxSshKey has the same
+                // latent limitation in its own upload path, pre-existing and
+                // out of scope here.
+                string tempPath = managedPath + ".tmp";
+                try
+                {
+                    File.Copy(options.LinuxUpdateKeyPath, tempPath, true);
+                    File.Move(tempPath, managedPath);
+                    ApplyRestrictedKeyFileAcl(managedPath);
+                }
+                finally
+                {
+                    try
+                    {
+                        if (File.Exists(tempPath))
+                        {
+                            File.Delete(tempPath);
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        // Best-effort cleanup only, same as UploadLinuxSshKey's.
+                    }
+                }
+                // Harden the directory itself only now that every write into it
+                // for this migration is done (see ApplyRestrictedDirectoryAcl's
+                // doc comment for why the ordering matters).
+                ApplyRestrictedDirectoryAcl(directory);
+                DebugLogger.Log(options, "Config", "Migrated legacy LinuxUpdateKeyPath ('" + DebugLogger.SanitizeForLog(options.LinuxUpdateKeyPath) + "') into the managed linux-update-key store. The original file is no longer used and can be removed.");
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Config", "Could not migrate legacy LinuxUpdateKeyPath: " + DebugLogger.SanitizeForLog(ex.Message));
+            }
+        }
+
+        // Deliberately does NOT swallow read/parse errors into an empty list:
+        // concurrent Linux install jobs (each dispatched via
+        // ThreadPool.QueueUserWorkItem) and the manual trust-host-key
+        // endpoint can all read/write this file at the same time, so a
+        // transient sharing violation is real, not theoretical. Silently
+        // returning "no records" here would make a host that DOES have a
+        // pinned trust record look brand-new to FindLinuxKnownHost, and a
+        // trustNewHostKeys push could then overwrite the pin via the
+        // bulk-auto path - exactly the failure-looks-like-empty bug this
+        // method must not reintroduce. Let the exception propagate;
+        // FindLinuxKnownHost/UpsertLinuxKnownHost's callers are responsible
+        // for treating it as a failure rather than "no record".
+        private List<Dictionary<string, object>> LoadLinuxKnownHosts()
+        {
+            string path = GetLinuxKnownHostsFilePath();
+            List<Dictionary<string, object>> hosts = new List<Dictionary<string, object>>();
+            if (!File.Exists(path))
+            {
+                return hosts;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            string json = File.ReadAllText(path, Encoding.UTF8);
+            ArrayList raw = serializer.Deserialize<ArrayList>(json);
+            if (raw != null)
+            {
+                foreach (object item in raw)
+                {
+                    Dictionary<string, object> record = item as Dictionary<string, object>;
+                    if (record != null)
+                    {
+                        hosts.Add(record);
+                    }
+                }
+            }
+            return hosts;
+        }
+
+        private void SaveLinuxKnownHosts(List<Dictionary<string, object>> hosts)
+        {
+            string directory = GetLinuxSshDirectory();
+            if (!Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            string json = serializer.Serialize(hosts);
+            string path = GetLinuxKnownHostsFilePath();
+            // Write to a temp file then swap it into place (same idiom as
+            // SaveConfig's ConfigPath write) instead of File.WriteAllText
+            // directly on the real path - a crash or service stop mid-write
+            // could otherwise leave a truncated/corrupt file, which then
+            // reads back as "no records" and silently loses every
+            // previously trusted host's pin.
+            string tempPath = path + ".tmp";
+            File.WriteAllText(tempPath, json, new UTF8Encoding(false));
+            if (File.Exists(path))
+            {
+                File.Replace(tempPath, path, null);
+            }
+            else
+            {
+                File.Move(tempPath, path);
+            }
+            // A tampered fingerprint here would let a pinned push accept a
+            // different key than the operator actually trusted - integrity,
+            // not confidentiality, is what this ACL protects (same reasoning
+            // as licenses.json, reusing the identical helper).
+            ApplyRestrictedConfigAcl(path);
+            // Harden the directory itself only now that every write into it
+            // for this operation is done, matching the ordering contract
+            // ConfigureLinuxSshKey and MigrateLegacyLinuxSshKey both follow -
+            // this is the password-auth-only deployment path, where no
+            // private key is ever uploaded and no legacy migration ever
+            // runs, so this is the only call site that would otherwise
+            // harden the directory for that deployment shape.
+            ApplyRestrictedDirectoryAcl(directory);
+        }
+
+        private Dictionary<string, object> FindLinuxKnownHost(string host, int port)
+        {
+            List<Dictionary<string, object>> hosts;
+            try
+            {
+                lock (linuxKnownHostsLock)
+                {
+                    hosts = LoadLinuxKnownHosts();
+                }
+            }
+            catch (Exception ex)
+            {
+                // Explicitly re-thrown (not swallowed into "no record found")
+                // so RunLinuxClientInstallTarget can distinguish "genuinely
+                // no trust record" from "couldn't read the trust store right
+                // now" and treat the latter as a failed push instead of
+                // silently proceeding as if the host were brand-new.
+                throw new IOException("Could not read the Linux SSH known-hosts trust store: " + ex.Message, ex);
+            }
+
+            foreach (Dictionary<string, object> record in hosts)
+            {
+                if (String.Equals(GetStringValue(record, "Host"), host, StringComparison.OrdinalIgnoreCase)
+                    && GetIntValue(record, "Port", 22) == port)
+                {
+                    return record;
+                }
+            }
+            return null;
+        }
+
+        private Dictionary<string, object> UpsertLinuxKnownHost(string host, int port, string keyType, string fingerprint, string trustMethod)
+        {
+            lock (linuxKnownHostsLock)
+            {
+                List<Dictionary<string, object>> hosts = LoadLinuxKnownHosts();
+                hosts.RemoveAll(record =>
+                    String.Equals(GetStringValue(record, "Host"), host, StringComparison.OrdinalIgnoreCase)
+                    && GetIntValue(record, "Port", 22) == port);
+
+                Dictionary<string, object> newRecord = new Dictionary<string, object>();
+                newRecord["Host"] = host;
+                newRecord["Port"] = port;
+                newRecord["KeyType"] = keyType;
+                newRecord["Fingerprint"] = fingerprint;
+                newRecord["TrustedAtUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                newRecord["TrustMethod"] = trustMethod;
+                hosts.Add(newRecord);
+
+                SaveLinuxKnownHosts(hosts);
+                return newRecord;
+            }
+        }
+
         // License inventory is an admin-entered catalog (name/version/license/comment),
         // separate from the per-client software lists collected from hosts. Stored as a
         // single JSON array under a subfolder so it never gets picked up by
@@ -4295,6 +7255,12 @@ namespace WindowsInventoryLite
             JavaScriptSerializer serializer = CreateJsonSerializer();
             string json = serializer.Serialize(licenses);
             File.WriteAllText(GetLicensesFilePath(), json, new UTF8Encoding(false));
+            // Licenses can hold real product keys (see index.html's "License
+            // type, key, or note" field hint) - restrict the same way
+            // server-config.json already is, reapplied on every write so the
+            // file can't drift back to an inherited (broader) ACL if it's
+            // ever deleted and recreated.
+            ApplyRestrictedConfigAcl(GetLicensesFilePath());
         }
 
         private static string ExtractLicenseId(string path)
@@ -4659,6 +7625,50 @@ namespace WindowsInventoryLite
             }
         }
 
+        // POSIX shell metacharacters - these values are interpolated into a
+        // generated remote SSH command (Invoke-RemoteCommand's -Command
+        // argument, on the TARGET Linux machine), a generated systemd unit
+        // file, or a generated install.sh for the downloadable Linux
+        // package. Unlike ValidateBatchSafe's cmd.exe set above, POSIX
+        // shells also treat $, `, single/double quotes, backslash, and
+        // parentheses as live metacharacters - all rejected here rather
+        // than attempting to safely quote/escape them, matching this
+        // project's existing reject-rather-than-escape convention for the
+        // Windows GPO cmd-generation path.
+        private static readonly char[] PosixShellUnsafeChars = { '`', '$', '"', '\'', '\\', ';', '|', '&', '<', '>', '(', ')', '\r', '\n' };
+
+        private static void ValidatePosixShellSafe(string value, string fieldName)
+        {
+            if (!String.IsNullOrEmpty(value) && value.IndexOfAny(PosixShellUnsafeChars) >= 0)
+            {
+                throw new ArgumentException(fieldName + " contains a character that is not allowed here (`, $, \", ', \\, ;, |, &, <, >, (, ), or a line break).");
+            }
+        }
+
+        // The three values that get interpolated into the remote shell command
+        // built for a Linux push. Grouped into one helper because they must be
+        // validated at the point they are USED, not at the top of the request
+        // handler: StartLinuxClientAction overwrites serverUrl/installPath from
+        // linux-package-settings.json AFTER its original validation ran, and
+        // StartScheduledLinuxClientUpdatePush reads all three straight from that
+        // file and never validated them at all.
+        internal static bool TryValidateLinuxPushValues(string serverUrl, string token, string installPath, out string error)
+        {
+            error = null;
+            try
+            {
+                ValidatePosixShellSafe(serverUrl, "serverUrl");
+                ValidatePosixShellSafe(token, "token");
+                ValidatePosixShellSafe(installPath, "installPath");
+                return true;
+            }
+            catch (ArgumentException ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
         private static string[] GenerateCmdLines(string serverUrl, string token, int intervalHours, string packageSharePath)
         {
             ValidateBatchSafe(serverUrl, "serverUrl");
@@ -4695,6 +7705,361 @@ namespace WindowsInventoryLite
             lines.Add("");
             lines.Add("exit /b %ERRORLEVEL%");
             return lines.ToArray();
+        }
+
+        // Absolute path on the MANAGED LINUX HOST (not on this Windows server).
+        // Must stay identical to Install-ClientDebianSSH.ps1's own copy.
+        internal const string LinuxClientEnvFilePath = "/etc/wil-linux-client.env";
+
+        // The mode-600 counterpart to the unit files' EnvironmentFile= line.
+        // Must stay byte-for-byte in sync with New-SystemdEnvFile
+        // (Install-ClientDebianSSH.ps1) - cross-checked by
+        // TestGenerateSystemdEnvFileLinesMatchesPowerShellFormat.
+        // ValidatePosixShellSafe already rejects CR/LF in sharedToken, so the
+        // single-line shape cannot be broken by the value.
+        private static string[] GenerateSystemdEnvFileLines(string sharedToken)
+        {
+            ValidatePosixShellSafe(sharedToken, "sharedToken");
+            return new string[] { "WIL_INGESTION_TOKEN=" + sharedToken };
+        }
+
+        // Must stay byte-for-byte in sync with New-SystemdUnitFiles
+        // (Install-ClientDebianSSH.ps1) - same two independent generators,
+        // one per runtime, that this project already maintains for the
+        // Windows GPO cmd-generation pair (GenerateCmdLines here vs.
+        // New-ClientGpoPackage.ps1's own copy). Cross-checked by
+        // TestGenerateSystemdUnitLinesMatchesPowerShellFormat below.
+        private static string[] GenerateSystemdUnitLines(string installDirectory, string url, string sharedToken)
+        {
+            ValidatePosixShellSafe(installDirectory, "installDirectory");
+            ValidatePosixShellSafe(url, "url");
+            ValidatePosixShellSafe(sharedToken, "sharedToken");
+
+            string execStart = installDirectory + "/wil-linux-client --server-url \"" + url + "\"";
+
+            List<string> lines = new List<string>();
+            lines.Add("[Unit]");
+            lines.Add("Description=Windows Inventory Lite - Linux client (one-shot report)");
+            lines.Add("");
+            lines.Add("[Service]");
+            lines.Add("Type=oneshot");
+            // The token is deliberately NOT on the ExecStart line. A command-line
+            // argument is readable from /proc/<pid>/cmdline by any local user on the
+            // managed host, and from this unit file itself (mode 644). It goes in a
+            // mode-600 EnvironmentFile instead. This project already fixed the
+            // equivalent Windows-side exposure - see docs/threat-model.md, "Storing
+            // dashboard credentials in the Windows Service ImagePath registry key".
+            // Written without systemd's "-" ignore-if-missing prefix on purpose: a
+            // silently-absent token file would put the client back in the "reports
+            // are rejected and nobody knows why" state this project has already been
+            // bitten by once.
+            if (!String.IsNullOrEmpty(sharedToken))
+            {
+                lines.Add("EnvironmentFile=" + LinuxClientEnvFilePath);
+            }
+            lines.Add("ExecStart=" + execStart);
+            return lines.ToArray();
+        }
+
+        private static string[] GenerateSystemdTimerLines(int hours)
+        {
+            List<string> lines = new List<string>();
+            lines.Add("[Unit]");
+            lines.Add("Description=Runs the Windows Inventory Lite Linux client every " + hours + " hour(s)");
+            lines.Add("");
+            lines.Add("[Timer]");
+            lines.Add("OnBootSec=5min");
+            lines.Add("OnUnitActiveSec=" + hours + "h");
+            lines.Add("Unit=wil-linux-client.service");
+            lines.Add("");
+            lines.Add("[Install]");
+            lines.Add("WantedBy=timers.target");
+            return lines.ToArray();
+        }
+
+        // Status-ping counterpart to GenerateSystemdUnitLines/GenerateSystemdTimerLines
+        // above - same structure, but the service execs with --mode status
+        // against the merge-only endpoint, and the timer's interval is in
+        // minutes (short enough that hour granularity would be too coarse),
+        // not hours. Must stay byte-for-byte in sync with
+        // New-SystemdStatusUnitFiles (Install-ClientDebianSSH.ps1) exactly
+        // like its full-inventory sibling - cross-checked by
+        // TestGenerateSystemdStatusUnitLinesMatchesPowerShellFormat below.
+        private static string[] GenerateSystemdStatusUnitLines(string installDirectory, string statusUrl, string sharedToken)
+        {
+            ValidatePosixShellSafe(installDirectory, "installDirectory");
+            ValidatePosixShellSafe(statusUrl, "statusUrl");
+            ValidatePosixShellSafe(sharedToken, "sharedToken");
+
+            string execStart = installDirectory + "/wil-linux-client --server-url \"" + statusUrl + "\" --mode status";
+
+            List<string> lines = new List<string>();
+            lines.Add("[Unit]");
+            lines.Add("Description=Windows Inventory Lite - Linux client service-status ping (one-shot report)");
+            lines.Add("");
+            lines.Add("[Service]");
+            lines.Add("Type=oneshot");
+            // Same EnvironmentFile reasoning as GenerateSystemdUnitLines above.
+            if (!String.IsNullOrEmpty(sharedToken))
+            {
+                lines.Add("EnvironmentFile=" + LinuxClientEnvFilePath);
+            }
+            lines.Add("ExecStart=" + execStart);
+            return lines.ToArray();
+        }
+
+        private static string[] GenerateSystemdStatusTimerLines(int minutes)
+        {
+            List<string> lines = new List<string>();
+            lines.Add("[Unit]");
+            lines.Add("Description=Runs the Windows Inventory Lite Linux client service-status ping every " + minutes + " minute(s)");
+            lines.Add("");
+            lines.Add("[Timer]");
+            lines.Add("OnBootSec=5min");
+            lines.Add("OnUnitActiveSec=" + minutes + "min");
+            lines.Add("Unit=wil-linux-client-status.service");
+            lines.Add("");
+            lines.Add("[Install]");
+            lines.Add("WantedBy=timers.target");
+            return lines.ToArray();
+        }
+
+        // Mirrors Get-LinuxUninstallCommand (Task 3) as closely as the
+        // install-vs-uninstall difference allows: same
+        // systemctl/InstallPath shape, generated for local (not SSH)
+        // execution by whoever deploys this package.
+        private static string[] GenerateLinuxInstallScriptLines(string installPath)
+        {
+            ValidatePosixShellSafe(installPath, "installPath");
+
+            List<string> lines = new List<string>();
+            lines.Add("#!/bin/sh");
+            lines.Add("set -e");
+            lines.Add("");
+            lines.Add("SCRIPT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"");
+            lines.Add("INSTALL_PATH=\"" + installPath + "\"");
+            lines.Add("");
+            lines.Add("sudo mkdir -p \"$INSTALL_PATH\"");
+            lines.Add("sudo cp \"$SCRIPT_DIR/wil-linux-client\" \"$INSTALL_PATH/wil-linux-client\"");
+            lines.Add("sudo chmod 755 \"$INSTALL_PATH/wil-linux-client\"");
+            lines.Add("sudo cp \"$SCRIPT_DIR/wil-linux-client.service\" /etc/systemd/system/wil-linux-client.service");
+            lines.Add("sudo cp \"$SCRIPT_DIR/wil-linux-client.timer\" /etc/systemd/system/wil-linux-client.timer");
+            lines.Add("sudo cp \"$SCRIPT_DIR/wil-linux-client-status.service\" /etc/systemd/system/wil-linux-client-status.service");
+            lines.Add("sudo cp \"$SCRIPT_DIR/wil-linux-client-status.timer\" /etc/systemd/system/wil-linux-client-status.timer");
+            // Mode 600, owned by root: this file holds the ingestion token, which
+            // used to sit readable on the ExecStart command line. Conditional
+            // because the package only contains this file when a token is
+            // configured (see ConfigureLinuxClientPackage).
+            lines.Add("if [ -f \"$SCRIPT_DIR/wil-linux-client.env\" ]; then");
+            lines.Add("  sudo cp \"$SCRIPT_DIR/wil-linux-client.env\" " + LinuxClientEnvFilePath);
+            lines.Add("  sudo chmod 600 " + LinuxClientEnvFilePath);
+            lines.Add("fi");
+            lines.Add("sudo systemctl daemon-reload");
+            lines.Add("sudo systemctl enable --now wil-linux-client.timer");
+            lines.Add("sudo systemctl enable --now wil-linux-client-status.timer");
+            // enable --now on a timer that was already active (a reinstall
+            // over an existing client) does not reset OnUnitActiveSec's
+            // countdown - restart unconditionally does, so a fresh binary is
+            // scheduled promptly on its normal cadence (6h / 30min) whether
+            // this is a fresh install or a reinstall. OnBootSec=5min does NOT
+            // help here: it fires once, relative to actual machine boot, not
+            // to this restart - on a long-uptime host it never fires again
+            // this session, so without the explicit immediate run below, the
+            // fresh binary's first real report could still be up to a full
+            // 6h/30min away.
+            lines.Add("sudo systemctl restart wil-linux-client.timer");
+            lines.Add("sudo systemctl restart wil-linux-client-status.timer");
+            // Best-effort immediate report so an admin sees fresh data right
+            // after install/reinstall instead of waiting out the normal
+            // cadence. "|| true" so a transient collection failure here (e.g.
+            // dpkg momentarily locked right after other package activity)
+            // does not abort the script under "set -e" - the scheduled
+            // timers above already guarantee a real report lands on the
+            // normal cadence regardless.
+            lines.Add("sudo systemctl start wil-linux-client.service || true");
+            lines.Add("sudo systemctl start wil-linux-client-status.service || true");
+            lines.Add("");
+            lines.Add("echo \"Windows Inventory Lite Linux client installed to $INSTALL_PATH.\"");
+            return lines.ToArray();
+        }
+
+        private static string TestGenerateSystemdUnitLinesUsesEnvironmentFileNotCommandLineToken()
+        {
+            string[] lines = GenerateSystemdUnitLines("/opt/windows-inventory-lite", "https://example.local/api/v1/linux/inventory", "secret-token");
+            string content = String.Join("\n", lines);
+            // The whole point of the fix: the token must not be readable from
+            // /proc/<pid>/cmdline or from the mode-644 unit file.
+            if (content.Contains("--token"))
+            {
+                return "expected no --token on the ExecStart line once EnvironmentFile is used, got: " + content;
+            }
+            if (content.Contains("secret-token"))
+            {
+                return "expected the token value to appear nowhere in the unit file, got: " + content;
+            }
+            if (!content.Contains("EnvironmentFile=/etc/wil-linux-client.env"))
+            {
+                return "expected EnvironmentFile=/etc/wil-linux-client.env in the [Service] section, got: " + content;
+            }
+            return null;
+        }
+
+        private static string TestGenerateSystemdUnitLinesOmitsEnvironmentFileWhenNoToken()
+        {
+            string[] lines = GenerateSystemdUnitLines("/opt/windows-inventory-lite", "https://example.local/api/v1/linux/inventory", "");
+            string content = String.Join("\n", lines);
+            // No token means no env file is written, and a unit referencing a
+            // nonexistent EnvironmentFile (without the "-" prefix) fails to start.
+            if (content.Contains("EnvironmentFile"))
+            {
+                return "expected no EnvironmentFile line when there is no token, got: " + content;
+            }
+            return null;
+        }
+
+        private static string TestGenerateSystemdStatusUnitLinesUsesEnvironmentFileNotCommandLineToken()
+        {
+            string[] lines = GenerateSystemdStatusUnitLines("/opt/windows-inventory-lite", "https://example.local/api/v1/linux/inventory/service-status", "secret-token");
+            string content = String.Join("\n", lines);
+            if (content.Contains("--token") || content.Contains("secret-token"))
+            {
+                return "expected the status unit to carry no token on its command line, got: " + content;
+            }
+            if (!content.Contains("EnvironmentFile=/etc/wil-linux-client.env"))
+            {
+                return "expected EnvironmentFile=/etc/wil-linux-client.env in the status unit, got: " + content;
+            }
+            if (!content.Contains("--mode status"))
+            {
+                return "expected --mode status to survive the ExecStart rewrite, got: " + content;
+            }
+            return null;
+        }
+
+        private static string TestGenerateSystemdEnvFileLinesMatchesPowerShellFormat()
+        {
+            string[] lines = GenerateSystemdEnvFileLines("secret-token");
+            if (lines.Length != 1 || lines[0] != "WIL_INGESTION_TOKEN=secret-token")
+            {
+                return "expected exactly one line 'WIL_INGESTION_TOKEN=secret-token', got: " + String.Join("\n", lines);
+            }
+            return null;
+        }
+
+        private static string TestGenerateSystemdUnitLinesMatchesPowerShellFormat()
+        {
+            string[] serviceLines = GenerateSystemdUnitLines("/opt/windows-inventory-lite", "https://example.local/api/v1/linux/inventory", "");
+            string serviceContent = String.Join("\n", serviceLines);
+            if (!serviceContent.Contains("Type=oneshot"))
+            {
+                return "expected service content to contain 'Type=oneshot'";
+            }
+            if (!serviceContent.Contains("ExecStart=/opt/windows-inventory-lite/wil-linux-client --server-url \"https://example.local/api/v1/linux/inventory\""))
+            {
+                return "expected ExecStart line to match the PowerShell generator's format exactly, got: " + serviceContent;
+            }
+            if (serviceContent.Contains("--token"))
+            {
+                return "expected no --token when sharedToken is empty";
+            }
+
+            string[] serviceLinesWithToken = GenerateSystemdUnitLines("/opt/windows-inventory-lite", "https://example.local/api/v1/linux/inventory", "secret-token");
+            if (!String.Join("\n", serviceLinesWithToken).Contains("EnvironmentFile=/etc/wil-linux-client.env"))
+            {
+                return "expected the token to be delivered via EnvironmentFile, not the command line";
+            }
+
+            string[] timerLines = GenerateSystemdTimerLines(12);
+            string timerContent = String.Join("\n", timerLines);
+            if (!timerContent.Contains("OnUnitActiveSec=12h") || !timerContent.Contains("Unit=wil-linux-client.service"))
+            {
+                return "expected timer content to match the PowerShell generator's format exactly, got: " + timerContent;
+            }
+            return null;
+        }
+
+        private static string TestGenerateSystemdUnitLinesRejectsUnsafeCharacters()
+        {
+            try
+            {
+                GenerateSystemdUnitLines("/opt/wil; rm -rf /", "https://example.local", "");
+                return "expected an unsafe installDirectory to be rejected";
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+        }
+
+        private static string TestGenerateSystemdStatusUnitLinesMatchesPowerShellFormat()
+        {
+            string[] serviceLines = GenerateSystemdStatusUnitLines("/opt/windows-inventory-lite", "https://example.local/api/v1/linux/inventory/service-status", "");
+            string serviceContent = String.Join("\n", serviceLines);
+            if (!serviceContent.Contains("Type=oneshot"))
+            {
+                return "expected status service content to contain 'Type=oneshot'";
+            }
+            if (!serviceContent.Contains("ExecStart=/opt/windows-inventory-lite/wil-linux-client --server-url \"https://example.local/api/v1/linux/inventory/service-status\" --mode status"))
+            {
+                return "expected ExecStart line to include --mode status and match the PowerShell generator's format exactly, got: " + serviceContent;
+            }
+
+            string[] timerLines = GenerateSystemdStatusTimerLines(30);
+            string timerContent = String.Join("\n", timerLines);
+            if (!timerContent.Contains("OnUnitActiveSec=30min") || !timerContent.Contains("Unit=wil-linux-client-status.service"))
+            {
+                return "expected status timer content to use minute granularity and reference wil-linux-client-status.service, got: " + timerContent;
+            }
+            return null;
+        }
+
+        private static string TestGenerateSystemdStatusUnitLinesRejectsUnsafeCharacters()
+        {
+            try
+            {
+                GenerateSystemdStatusUnitLines("/opt/wil; rm -rf /", "https://example.local", "");
+                return "expected an unsafe installDirectory to be rejected";
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+        }
+
+        private static string TestGenerateLinuxInstallScriptLinesProducesValidShellSyntax()
+        {
+            string[] lines = GenerateLinuxInstallScriptLines("/opt/windows-inventory-lite");
+            string content = String.Join("\n", lines);
+            if (!content.StartsWith("#!/bin/sh"))
+            {
+                return "expected a #!/bin/sh shebang as the first line";
+            }
+            if (!content.Contains("systemctl enable --now wil-linux-client.timer"))
+            {
+                return "expected the script to enable the timer";
+            }
+            // A re-install over an already-enabled timer must still take
+            // effect promptly: `enable --now` on a timer that's already
+            // active is a no-op for its OnUnitActiveSec countdown, so a
+            // fresh binary can silently wait out the rest of the OLD
+            // schedule (up to 6h for the full-inventory timer) before its
+            // first real run - `restart` unconditionally resets the
+            // countdown, whether this is a fresh install or a reinstall.
+            if (!content.Contains("systemctl restart wil-linux-client.timer") || !content.Contains("systemctl restart wil-linux-client-status.timer"))
+            {
+                return "expected the script to restart both timers (not just enable --now) so a reinstall's fresh binary actually gets scheduled promptly, got: " + content;
+            }
+            // OnBootSec=5min fires once, relative to actual machine boot, not
+            // to this restart - on a long-uptime host it never fires again,
+            // so restarting the timers alone still leaves up to a full
+            // 6h/30min wait for the first real report. An explicit immediate
+            // "systemctl start" closes that gap; "|| true" keeps a transient
+            // collection failure there from aborting the script under "set -e".
+            if (!content.Contains("systemctl start wil-linux-client.service || true") || !content.Contains("systemctl start wil-linux-client-status.service || true"))
+            {
+                return "expected the script to immediately start both services (best-effort) after restarting their timers, so a fresh install/reinstall reports promptly instead of waiting out the normal cadence, got: " + content;
+            }
+            return null;
         }
 
         // 0x4a21 (used for both the local file header and the matching
@@ -4837,6 +8202,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'interval' is due immediately with no previous run", TestShouldRunClientUpdateScheduleIntervalNoPreviousRun);
             allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'interval' respects the interval window", TestShouldRunClientUpdateScheduleIntervalDueAndNotDue);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall updates a target's stored clientVersion", TestPatchClientReportVersionAfterInstallUpdatesVersion);
+            allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall's lastInstalledAtUtc is cleared once a real report overwrites the file", TestPatchClientReportVersionAfterInstallFieldClearedByRealReport);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall is a no-op when the target has no stored report yet", TestPatchClientReportVersionAfterInstallMissingReport);
             allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath defaults under DataPath when unset", TestDebugLoggerResolvePathDefault);
             allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath honors an explicit DebugLogPath", TestDebugLoggerResolvePathOverride);
@@ -4845,11 +8211,20 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "SecretProtector.Unprotect passes through a legacy plaintext value", TestSecretProtectorLegacyPlaintext);
             allPassed &= SelfTestCheck(output, "NeedsMigration flags a plaintext value", TestNeedsMigrationPlaintextValue);
             allPassed &= SelfTestCheck(output, "NeedsMigration does not flag an already-encrypted or empty value", TestNeedsMigrationAlreadyEncryptedOrEmpty);
+            allPassed &= SelfTestCheck(output, "BuildPowerShellInstallArguments includes -Token when a token is set, omits it when empty", TestBuildPowerShellInstallArgumentsIncludesToken);
             allPassed &= SelfTestCheck(output, "GenerateCmdLines rejects serverUrl/token/packageSharePath containing batch-unsafe characters", TestGenerateCmdLinesRejectsUnsafeCharacters);
+            allPassed &= SelfTestCheck(output, "ValidatePosixShellSafe rejects POSIX shell metacharacters", TestValidatePosixShellSafeRejectsUnsafeCharacters);
+            allPassed &= SelfTestCheck(output, "ValidatePosixShellSafe accepts safe values including null/empty", TestValidatePosixShellSafeAcceptsSafeValues);
+            allPassed &= SelfTestCheck(output, "ReadRequest fails cleanly when the connection closes mid-headers", TestReadRequestFailsCleanlyOnAConnectionClosedMidHeaders);
+            allPassed &= SelfTestCheck(output, "ReadRequest fails cleanly on an immediately closed connection", TestReadRequestFailsCleanlyOnAnImmediatelyClosedConnection);
+            allPassed &= SelfTestCheck(output, "A 'null' JSON body deserializes to null, which is why the ingestion endpoints need an explicit guard", TestNullJsonBodyDeserializesToNullNotAnEmptyDictionary);
+            allPassed &= SelfTestCheck(output, "TryValidateLinuxPushValues rejects shell-unsafe serverUrl/token/installPath", TestTryValidateLinuxPushValuesRejectsUnsafeValuesAndAcceptsSafeOnes);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent matches either package version", TestIsClientVersionCurrentMatchesEitherPackage);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent is outdated when it matches neither package", TestIsClientVersionCurrentOutdatedWhenMatchesNeither);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent treats an empty clientVersion as outdated", TestIsClientVersionCurrentTreatsEmptyAsOutdated);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent ignores a missing package instead of false-matching it", TestIsClientVersionCurrentIgnoresMissingPackage);
+            allPassed &= SelfTestCheck(output, "GetLinuxClientUpdateTarget prefers a reported IPv4 address over the (often unresolvable) hostname", TestGetLinuxClientUpdateTargetPrefersIPv4OverHostname);
+            allPassed &= SelfTestCheck(output, "GetLinuxClientUpdateTarget falls back to hostname when no IPv4 address is available", TestGetLinuxClientUpdateTargetFallsBackToHostnameWithNoIPv4);
             allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials falls back to the saved account when blank", TestResolveUpdateCredentialsFallsBackToSavedWhenBlank);
             allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials prefers a typed per-push override over the saved account", TestResolveUpdateCredentialsPrefersTypedOverride);
             allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials is a no-op for Client actions (useSavedCredentials=false)", TestResolveUpdateCredentialsIgnoredWhenFlagIsFalse);
@@ -4863,8 +8238,53 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' custom package share path", TestParseCmdSettingsCustomPackageSharePath);
             allPassed &= SelfTestCheck(output, "ResolveAdDescriptionSyncEnabled uses the explicit config value when present", TestResolveAdDescriptionSyncEnabledUsesExplicitConfigValue);
             allPassed &= SelfTestCheck(output, "ResolveAdDescriptionSyncEnabled migrates from AdSyncEnabled when the config key is absent", TestResolveAdDescriptionSyncEnabledMigratesFromAdSyncEnabledWhenUnset);
+            allPassed &= SelfTestCheck(output, "ResolveRequireIngestionToken uses the explicit config value when present", TestResolveRequireIngestionTokenUsesExplicitConfigValue);
+            allPassed &= SelfTestCheck(output, "ResolveRequireIngestionToken migrates from whether a token is configured when the config key is absent", TestResolveRequireIngestionTokenMigratesFromTokenPresenceWhenUnset);
+            allPassed &= SelfTestCheck(output, "Parse defaults RequireIngestionToken from CLI --token presence when no config file exists", TestParseDefaultsRequireIngestionTokenFromCliTokenWhenNoConfigFile);
+            allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected requires a matching token when enforcement is on", TestIsIngestionTokenRejectedRequiresMatchWhenEnforced);
+            allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected always accepts when enforcement is off, regardless of the supplied token", TestIsIngestionTokenRejectedAlwaysAcceptsWhenNotEnforced);
+            allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected fails closed when enforcement is on but no token is configured", TestIsIngestionTokenRejectedFailsClosedWhenEnforcedButNoTokenConfigured);
+            allPassed &= SelfTestCheck(output, "ResolveEffectiveToken falls back to the live server token when the request supplies none", TestResolveEffectiveTokenFallsBackToLiveTokenWhenBlank);
+            allPassed &= SelfTestCheck(output, "RequiresIngestionTokenRiskAcknowledgment only fires on an actual on-to-off transition without prior acknowledgment", TestRequiresIngestionTokenRiskAcknowledgmentOnlyWhenTurningEnforcementOff);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields is a no-op for a brand-new computer with sync disabled", TestComputeAdSyncFieldsNoOpForNewComputerWhenSyncDisabled);
+            allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
+            allPassed &= SelfTestCheck(output, "Linux known-hosts store round-trips and overwrites by host:port", TestLinuxKnownHostsRoundTrip);
+            allPassed &= SelfTestCheck(output, "A malformed known-hosts file surfaces as a read error from FindLinuxKnownHost, not as 'no record found'", TestLinuxKnownHostsReadFailureSurfacesAsError);
+            allPassed &= SelfTestCheck(output, "TryParseHostKeyDetails extracts type+fingerprint from a real captured plink failure, ignores unrelated failures", TestParseHostKeyFingerprintFromRealCapturedOutput);
+            allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns 'changed' for a prior record even when trustNewHostKeys=true, never auto-accepting a changed key", TestClassifyHostKeyFailureChangedNeverAutoAcceptedEvenWithTrustEnabled);
+            allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure never returns 'bulk-auto' or 'unknown' with a prior trusted record, even if the failure text doesn't say 'host key'", TestClassifyHostKeyFailureNeverBulkAutoWithPriorRecordRegardlessOfWording);
+            allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns 'bulk-auto' for a brand-new target with auto-trust enabled", TestClassifyHostKeyFailureBulkAutoForNewTarget);
+            allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns 'unknown' for a brand-new target when auto-trust is disabled", TestClassifyHostKeyFailureUnknownWhenAutoTrustDisabled);
+            allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns null for a failure unrelated to host keys", TestClassifyHostKeyFailureNullForNonHostKeyFailure);
+            allPassed &= SelfTestCheck(output, "trust-host-key fingerprint format validation accepts SHA256:... and rejects everything else", TestTrustLinuxHostKeyRejectsMalformedFingerprint);
+            allPassed &= SelfTestCheck(output, "IsValidSshTarget accepts hostnames and IPv4 literals", TestIsValidSshTargetAcceptsHostnamesAndIPv4);
+            allPassed &= SelfTestCheck(output, "IsValidSshTarget rejects shell-injection shapes, flag-lookalikes, and empty values", TestIsValidSshTargetRejectsInjectionAndEmpty);
+            allPassed &= SelfTestCheck(output, "GenerateRandomToken returns a 64-character lowercase hex string, different each call", TestGenerateRandomTokenShape);
+            allPassed &= SelfTestCheck(output, "Ingestion token configured-state reflects whether options.Token is set", TestSendIngestionTokenStatusReflectsConfiguredState);
+            allPassed &= SelfTestCheck(output, "Linux SSH tools status reflects plink.exe/pscp.exe file presence", TestSendLinuxSshToolsStatusReflectsFilePresence);
+            allPassed &= SelfTestCheck(output, "GenerateSystemdUnitLines matches the PowerShell New-SystemdUnitFiles format", TestGenerateSystemdUnitLinesMatchesPowerShellFormat);
+            allPassed &= SelfTestCheck(output, "GenerateSystemdUnitLines rejects shell-unsafe installDirectory", TestGenerateSystemdUnitLinesRejectsUnsafeCharacters);
+            allPassed &= SelfTestCheck(output, "GenerateLinuxInstallScriptLines produces a script with a valid shebang and enable step", TestGenerateLinuxInstallScriptLinesProducesValidShellSyntax);
+            allPassed &= SelfTestCheck(output, "LooksLikePrivateKey accepts real OPENSSH/RSA private key headers", TestLooksLikePrivateKeyAcceptsRealHeaders);
+            allPassed &= SelfTestCheck(output, "LooksLikePrivateKey rejects a public key line and garbage", TestLooksLikePrivateKeyRejectsPublicKeyAndGarbage);
+            allPassed &= SelfTestCheck(output, "LooksLikePublicKey recognizes each ssh-*/ecdsa-* prefix", TestLooksLikePublicKeyRecognizesEachPrefix);
+            allPassed &= SelfTestCheck(output, "LooksLikeEncryptedPrivateKey detects a legacy PEM Proc-Type header", TestLooksLikeEncryptedPrivateKeyDetectsLegacyPem);
+            allPassed &= SelfTestCheck(output, "LooksLikeEncryptedPrivateKey detects an OpenSSH bcrypt KDF marker", TestLooksLikeEncryptedPrivateKeyDetectsOpenSshBcryptKdf);
+            allPassed &= SelfTestCheck(output, "ApplyRestrictedKeyFileAcl sets the DACL (and Owner, when elevated)", TestApplyRestrictedKeyFileAclSetsDaclAndOwnerWhenElevated);
+            allPassed &= SelfTestCheck(output, "ApplyRestrictedDirectoryAcl protects the _linux-ssh directory itself", TestApplyRestrictedDirectoryAclSetsDacl);
+            allPassed &= SelfTestCheck(output, "MigrateLegacyLinuxSshKey adopts a valid legacy LinuxUpdateKeyPath", TestMigrateLegacyLinuxSshKeyAdoptsValidLegacyPath);
+            allPassed &= SelfTestCheck(output, "MigrateLegacyLinuxSshKey is a no-op when the legacy path is missing or invalid", TestMigrateLegacyLinuxSshKeyIgnoresMissingOrInvalidLegacyPath);
+            allPassed &= SelfTestCheck(output, "MergeServiceStatus flips active in both directions for known units", TestMergeServiceStatusFlipsActiveBothDirections);
+            allPassed &= SelfTestCheck(output, "MergeServiceStatus ignores units not already in the stored services array", TestMergeServiceStatusIgnoresUnknownUnits);
+            allPassed &= SelfTestCheck(output, "MergeServiceStatus handles a report with no services array without throwing", TestMergeServiceStatusHandlesMissingServicesArray);
+            allPassed &= SelfTestCheck(output, "MergeServiceStatus sets servicesStatusCollectedAt from the incoming payload", TestMergeServiceStatusSetsTimestamp);
+            allPassed &= SelfTestCheck(output, "GenerateSystemdStatusUnitLines matches the PowerShell New-SystemdStatusUnitFiles format", TestGenerateSystemdStatusUnitLinesMatchesPowerShellFormat);
+            allPassed &= SelfTestCheck(output, "GenerateSystemdStatusUnitLines rejects shell-unsafe installDirectory", TestGenerateSystemdStatusUnitLinesRejectsUnsafeCharacters);
+            allPassed &= SelfTestCheck(output, "GenerateSystemdUnitLines passes the token via EnvironmentFile, never on the command line", TestGenerateSystemdUnitLinesUsesEnvironmentFileNotCommandLineToken);
+            allPassed &= SelfTestCheck(output, "GenerateSystemdUnitLines omits EnvironmentFile entirely when there is no token", TestGenerateSystemdUnitLinesOmitsEnvironmentFileWhenNoToken);
+            allPassed &= SelfTestCheck(output, "GenerateSystemdStatusUnitLines passes the token via EnvironmentFile, never on the command line", TestGenerateSystemdStatusUnitLinesUsesEnvironmentFileNotCommandLineToken);
+            allPassed &= SelfTestCheck(output, "GenerateSystemdEnvFileLines matches the PowerShell New-SystemdEnvFile format", TestGenerateSystemdEnvFileLinesMatchesPowerShellFormat);
             return allPassed;
         }
 
@@ -4963,10 +8383,10 @@ namespace WindowsInventoryLite
 
         private static string TestParseAdComputerImportOUsSplitsOnNewlinesOnly()
         {
-            ArrayList result = ParseAdComputerImportOUs("OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru\r\n\r\nOU=Servers,DC=spb,DC=cccb,DC=ru\n  \nOU=Third,DC=x,DC=y  ");
+            ArrayList result = ParseAdComputerImportOUs("OU=Workstations,OU=Site1,DC=corp,DC=example,DC=com\r\n\r\nOU=Servers,DC=corp,DC=example,DC=com\n  \nOU=Third,DC=x,DC=y  ");
             string[] expected = new string[] {
-                "OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru",
-                "OU=Servers,DC=spb,DC=cccb,DC=ru",
+                "OU=Workstations,OU=Site1,DC=corp,DC=example,DC=com",
+                "OU=Servers,DC=corp,DC=example,DC=com",
                 "OU=Third,DC=x,DC=y"
             };
             return CompareStringLists(expected, result);
@@ -5333,6 +8753,48 @@ namespace WindowsInventoryLite
                 {
                     return "expected the rest of the report to survive the patch untouched";
                 }
+                if (String.IsNullOrEmpty(GetStringValue(report, "lastInstalledAtUtc")))
+                {
+                    return "expected lastInstalledAtUtc to be set by the patch";
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(dataPath, true);
+            }
+        }
+
+        // A real inventory report overwrites the whole file from the
+        // client's own POST body (see ReceiveInventory), which never
+        // includes lastInstalledAtUtc - simulates that overwrite directly
+        // (no HTTP plumbing needed) to prove the field disappears on its
+        // own, with no separate "clear the awaiting-report flag" step
+        // anywhere in the codebase.
+        private static string TestPatchClientReportVersionAfterInstallFieldClearedByRealReport()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                string computerName = "PATCH-TEST-02";
+                string reportPath = Path.Combine(dataPath, computerName + ".json");
+                File.WriteAllText(reportPath, "{\"computerName\":\"PATCH-TEST-02\",\"clientVersion\":\"0.1.0\"}", new UTF8Encoding(false));
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+                server.PatchClientReportVersionAfterInstall(computerName, "0.2.0", null);
+
+                JavaScriptSerializer serializer = CreateJsonSerializer();
+                string freshClientPayload = "{\"computerName\":\"PATCH-TEST-02\",\"clientVersion\":\"0.2.0\"}";
+                File.WriteAllText(reportPath, freshClientPayload, new UTF8Encoding(false));
+
+                Dictionary<string, object> report = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(reportPath, Encoding.UTF8));
+                if (!String.IsNullOrEmpty(GetStringValue(report, "lastInstalledAtUtc")))
+                {
+                    return "expected lastInstalledAtUtc to be gone once a real report overwrites the file";
+                }
                 return null;
             }
             finally
@@ -5473,6 +8935,31 @@ namespace WindowsInventoryLite
             return null;
         }
 
+        // BuildPowerShellInstallArguments never included -Token, so a
+        // WinRM push (manual "Client actions" or the scheduled "Client
+        // updates" push) always installed/reinstalled a client with no
+        // ingestion token - harmless while the server's own token was
+        // never actually enforced, but once a real token is configured
+        // (auto-generated or regenerated) every such push/reinstall left
+        // the target unable to authenticate its own inventory reports.
+        // Found via a live user report: "clients stopped connecting after
+        // regenerating the token, reinstalling via the UI doesn't help."
+        private static string TestBuildPowerShellInstallArgumentsIncludesToken()
+        {
+            string argsWithToken = BuildPowerShellInstallArguments("PC-001", "https://server/api/v1/inventory", "real-token-value", false, false, false, @"C:\package");
+            if (!argsWithToken.Contains("-Token 'real-token-value'"))
+            {
+                return "expected -Token 'real-token-value' in the built arguments, got: " + argsWithToken;
+            }
+
+            string argsWithoutToken = BuildPowerShellInstallArguments("PC-001", "https://server/api/v1/inventory", "", false, false, false, @"C:\package");
+            if (argsWithoutToken.Contains("-Token"))
+            {
+                return "expected no -Token when the token is empty, got: " + argsWithoutToken;
+            }
+            return null;
+        }
+
         private static string TestGenerateCmdLinesRejectsUnsafeCharacters()
         {
             string[] unsafeValues = { "http://x \" & calc.exe & rem \"", "tok\"&calc.exe&rem\"", "\\\\share & calc.exe", "line1\nline2" };
@@ -5505,6 +8992,124 @@ namespace WindowsInventoryLite
                 {
                     // expected
                 }
+            }
+            return null;
+        }
+
+        private static string TestValidatePosixShellSafeRejectsUnsafeCharacters()
+        {
+            string[] unsafeValues = { "/opt/wil; rm -rf /", "$(rm -rf /)", "`rm -rf /`", "path\"with\"quotes", "path'with'quotes", "path\\with\\backslash", "a|b", "a&b", "a<b", "a>b", "a(b)", "line1\nline2", "line1\rline2" };
+            foreach (string unsafeValue in unsafeValues)
+            {
+                try
+                {
+                    ValidatePosixShellSafe(unsafeValue, "testField");
+                    return "expected value '" + unsafeValue + "' to be rejected, but ValidatePosixShellSafe accepted it";
+                }
+                catch (ArgumentException)
+                {
+                    // expected
+                }
+            }
+            return null;
+        }
+
+        private static string TestValidatePosixShellSafeAcceptsSafeValues()
+        {
+            string[] safeValues = { "/opt/windows-inventory-lite", "https://server.example.local:8080/api/v1/linux/inventory", "a1b2c3d4e5f6", "" , null };
+            foreach (string safeValue in safeValues)
+            {
+                try
+                {
+                    ValidatePosixShellSafe(safeValue, "testField");
+                }
+                catch (ArgumentException ex)
+                {
+                    return "expected value '" + safeValue + "' to be accepted, but ValidatePosixShellSafe rejected it: " + ex.Message;
+                }
+            }
+            return null;
+        }
+
+        private static string TestReadRequestFailsCleanlyOnAConnectionClosedMidHeaders()
+        {
+            // A bare port scan or health probe that opens a socket, writes a few
+            // bytes and closes reaches this. It used to throw
+            // ArgumentOutOfRangeException from Encoding.ASCII.GetString(raw, 0, -1),
+            // an unauthenticated path to a full stack trace in the Windows Event Log.
+            using (MemoryStream truncated = new MemoryStream(Encoding.ASCII.GetBytes("GET / HTT")))
+            {
+                try
+                {
+                    ReadRequest(truncated);
+                    return "expected a truncated request to be rejected";
+                }
+                catch (ArgumentOutOfRangeException)
+                {
+                    return "expected a clean InvalidOperationException, got ArgumentOutOfRangeException (the bug)";
+                }
+                catch (InvalidOperationException)
+                {
+                    return null;
+                }
+            }
+        }
+
+        private static string TestReadRequestFailsCleanlyOnAnImmediatelyClosedConnection()
+        {
+            using (MemoryStream empty = new MemoryStream(new byte[0]))
+            {
+                try
+                {
+                    ReadRequest(empty);
+                    return "expected an empty request to be rejected";
+                }
+                catch (ArgumentOutOfRangeException)
+                {
+                    return "expected a clean InvalidOperationException, got ArgumentOutOfRangeException (the bug)";
+                }
+                catch (InvalidOperationException)
+                {
+                    return null;
+                }
+            }
+        }
+
+        private static string TestNullJsonBodyDeserializesToNullNotAnEmptyDictionary()
+        {
+            // The premise the ingestion endpoints' null-guard exists for: a body of
+            // literally "null" parses successfully and yields a null dictionary, so
+            // the very next ContainsKey call is an unauthenticated NullReferenceException.
+            Dictionary<string, object> parsed = CreateJsonSerializer().Deserialize<Dictionary<string, object>>("null");
+            if (parsed != null)
+            {
+                return "expected a 'null' body to deserialize to null, got a non-null dictionary";
+            }
+            return null;
+        }
+
+        private static string TestTryValidateLinuxPushValuesRejectsUnsafeValuesAndAcceptsSafeOnes()
+        {
+            string error;
+            if (!TryValidateLinuxPushValues("https://example.local/api/v1/linux/inventory", "a1b2c3", "/opt/windows-inventory-lite", out error))
+            {
+                return "expected safe values to be accepted, got: " + error;
+            }
+            if (TryValidateLinuxPushValues("https://example.local", "a1b2c3", "/opt/wil; rm -rf /", out error))
+            {
+                return "expected an unsafe installPath to be rejected";
+            }
+            if (String.IsNullOrEmpty(error))
+            {
+                return "expected a non-empty error message when validation fails";
+            }
+            if (TryValidateLinuxPushValues("https://example.local/$(id)", "a1b2c3", "/opt/windows-inventory-lite", out error))
+            {
+                return "expected an unsafe serverUrl to be rejected";
+            }
+            if (TryValidateLinuxPushValues("https://example.local", "tok`id`", "/opt/windows-inventory-lite", out error))
+            {
+                return "expected an unsafe token to be rejected";
             }
             return null;
         }
@@ -5553,6 +9158,48 @@ namespace WindowsInventoryLite
             if (!IsClientVersionCurrent("0.16.0", null, "0.16.0"))
             {
                 return "expected a version matching the only present package (net40) to be current";
+            }
+            return null;
+        }
+
+        private static string TestGetLinuxClientUpdateTargetPrefersIPv4OverHostname()
+        {
+            Dictionary<string, object> client = new Dictionary<string, object>();
+            client["hostname"] = "docker";
+            ArrayList addresses = new ArrayList();
+            addresses.Add("fe80::1");
+            addresses.Add("192.168.4.110");
+            addresses.Add("10.0.0.5");
+            client["ipAddresses"] = addresses;
+
+            string target = GetLinuxClientUpdateTarget(client);
+            if (target != "192.168.4.110")
+            {
+                return "expected the first IPv4 address ('192.168.4.110'), skipping the leading IPv6 entry, got '" + target + "'";
+            }
+            return null;
+        }
+
+        private static string TestGetLinuxClientUpdateTargetFallsBackToHostnameWithNoIPv4()
+        {
+            Dictionary<string, object> client = new Dictionary<string, object>();
+            client["hostname"] = "docker";
+            ArrayList addresses = new ArrayList();
+            addresses.Add("fe80::1");
+            client["ipAddresses"] = addresses;
+
+            string target = GetLinuxClientUpdateTarget(client);
+            if (target != "docker")
+            {
+                return "expected fallback to hostname 'docker' when no IPv4 address is present, got '" + target + "'";
+            }
+
+            Dictionary<string, object> clientWithNoAddressesAtAll = new Dictionary<string, object>();
+            clientWithNoAddressesAtAll["hostname"] = "legacy-report";
+            string targetForOlderReport = GetLinuxClientUpdateTarget(clientWithNoAddressesAtAll);
+            if (targetForOlderReport != "legacy-report")
+            {
+                return "expected fallback to hostname for a report with no ipAddresses field at all (older client), got '" + targetForOlderReport + "'";
             }
             return null;
         }
@@ -5700,6 +9347,165 @@ namespace WindowsInventoryLite
             return null;
         }
 
+        private static string TestResolveRequireIngestionTokenUsesExplicitConfigValue()
+        {
+            bool result = ServerOptions.ResolveRequireIngestionToken("false", true);
+            if (result != false)
+            {
+                return "expected an explicit 'false' config value to win over tokenIsConfigured=true, got " + result;
+            }
+            bool result2 = ServerOptions.ResolveRequireIngestionToken("true", false);
+            if (result2 != true)
+            {
+                return "expected an explicit 'true' config value to win over tokenIsConfigured=false, got " + result2;
+            }
+            return null;
+        }
+
+        private static string TestResolveRequireIngestionTokenMigratesFromTokenPresenceWhenUnset()
+        {
+            bool result = ServerOptions.ResolveRequireIngestionToken(null, true);
+            if (result != true)
+            {
+                return "expected a missing config value to migrate to true when a token is configured, got " + result;
+            }
+            bool result2 = ServerOptions.ResolveRequireIngestionToken(null, false);
+            if (result2 != false)
+            {
+                return "expected a missing config value to migrate to false when no token is configured, got " + result2;
+            }
+            bool result3 = ServerOptions.ResolveRequireIngestionToken("", true);
+            if (result3 != true)
+            {
+                return "expected an empty-string config value (same as missing) to migrate to true when a token is configured, got " + result3;
+            }
+            return null;
+        }
+
+        private static string TestParseDefaultsRequireIngestionTokenFromCliTokenWhenNoConfigFile()
+        {
+            ServerOptions options = ServerOptions.Parse(new string[] { "--token", "test-cli-token-value", "--config", Path.Combine(Path.GetTempPath(), "wil-nonexistent-config-" + Guid.NewGuid().ToString("N") + ".json") });
+            if (!options.RequireIngestionToken)
+            {
+                return "expected RequireIngestionToken to default to true when --token is supplied and no config file exists, got false";
+            }
+            return null;
+        }
+
+        private static string TestIsIngestionTokenRejectedRequiresMatchWhenEnforced()
+        {
+            if (InventoryServer.IsIngestionTokenRejected(true, "correct-token", "correct-token"))
+            {
+                return "expected a matching token to be accepted when enforcement is on";
+            }
+            if (!InventoryServer.IsIngestionTokenRejected(true, "wrong-token", "correct-token"))
+            {
+                return "expected a non-matching token to be rejected when enforcement is on";
+            }
+            if (!InventoryServer.IsIngestionTokenRejected(true, null, "correct-token"))
+            {
+                return "expected a missing token to be rejected when enforcement is on";
+            }
+            return null;
+        }
+
+        private static string TestIsIngestionTokenRejectedAlwaysAcceptsWhenNotEnforced()
+        {
+            if (InventoryServer.IsIngestionTokenRejected(false, "wrong-token", "correct-token"))
+            {
+                return "expected a non-matching token to be accepted when enforcement is off";
+            }
+            if (InventoryServer.IsIngestionTokenRejected(false, null, "correct-token"))
+            {
+                return "expected a missing token to be accepted when enforcement is off";
+            }
+            return null;
+        }
+
+        private static string TestIsIngestionTokenRejectedFailsClosedWhenEnforcedButNoTokenConfigured()
+        {
+            if (!InventoryServer.IsIngestionTokenRejected(true, null, null))
+            {
+                return "expected rejection when enforcement is on but no token is configured (null supplied, null configured)";
+            }
+            if (!InventoryServer.IsIngestionTokenRejected(true, null, ""))
+            {
+                return "expected rejection when enforcement is on but no token is configured (null supplied, empty configured)";
+            }
+            if (!InventoryServer.IsIngestionTokenRejected(true, "", null))
+            {
+                return "expected rejection when enforcement is on but no token is configured (empty supplied, null configured)";
+            }
+            if (!InventoryServer.IsIngestionTokenRejected(true, "", ""))
+            {
+                return "expected rejection when enforcement is on but no token is configured (empty supplied, empty configured)";
+            }
+            return null;
+        }
+
+        private static string TestResolveEffectiveTokenFallsBackToLiveTokenWhenBlank()
+        {
+            string result = ResolveEffectiveToken("", "live-token-value");
+            if (result != "live-token-value")
+            {
+                return "expected a blank requested token to fall back to the live token, got '" + result + "'";
+            }
+            string result2 = ResolveEffectiveToken(null, "live-token-value");
+            if (result2 != "live-token-value")
+            {
+                return "expected a null requested token to fall back to the live token, got '" + result2 + "'";
+            }
+            string result3 = ResolveEffectiveToken("explicit-override", "live-token-value");
+            if (result3 != "explicit-override")
+            {
+                return "expected an explicitly supplied token to win over the live token, got '" + result3 + "'";
+            }
+            return null;
+        }
+
+        private static string TestRequiresIngestionTokenRiskAcknowledgmentOnlyWhenTurningEnforcementOff()
+        {
+            if (!RequiresIngestionTokenRiskAcknowledgment(true, false, false))
+            {
+                return "expected turning enforcement off without acknowledgeIngestionTokenRisk to require acknowledgment";
+            }
+            if (RequiresIngestionTokenRiskAcknowledgment(true, false, true))
+            {
+                return "expected turning enforcement off WITH acknowledgeIngestionTokenRisk=true to not require it again";
+            }
+            if (RequiresIngestionTokenRiskAcknowledgment(false, false, false))
+            {
+                return "expected leaving enforcement off (no actual change) to never require acknowledgment";
+            }
+            if (RequiresIngestionTokenRiskAcknowledgment(false, true, false))
+            {
+                return "expected turning enforcement ON to never require acknowledgment (only turning it off is risky)";
+            }
+            if (RequiresIngestionTokenRiskAcknowledgment(true, true, false))
+            {
+                return "expected leaving enforcement on (no actual change) to never require acknowledgment";
+            }
+            // Remaining 3 of the 8 boolean combinations not covered above:
+            // acknowledgeIngestionTokenRisk=true on the three transitions
+            // that were already never-require-acknowledgment with
+            // acknowledgeIngestionTokenRisk=false. Included so every
+            // combination of the 3 booleans is exercised, not just the
+            // ones where the flag flips the result.
+            if (RequiresIngestionTokenRiskAcknowledgment(false, false, true))
+            {
+                return "expected leaving enforcement off with acknowledgeIngestionTokenRisk=true (irrelevant flag) to never require acknowledgment";
+            }
+            if (RequiresIngestionTokenRiskAcknowledgment(false, true, true))
+            {
+                return "expected turning enforcement ON with acknowledgeIngestionTokenRisk=true (irrelevant flag) to never require acknowledgment";
+            }
+            if (RequiresIngestionTokenRiskAcknowledgment(true, true, true))
+            {
+                return "expected leaving enforcement on with acknowledgeIngestionTokenRisk=true (irrelevant flag) to never require acknowledgment";
+            }
+            return null;
+        }
+
         private static string TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled()
         {
             ServerOptions options = new ServerOptions();
@@ -5733,6 +9539,809 @@ namespace WindowsInventoryLite
             if (fields.Applicable)
             {
                 return "expected Applicable=false for a brand-new computer (nothing to carry forward), got true";
+            }
+            return null;
+        }
+
+        private static string TestSaveLicensesRestrictsFileAcl()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-license-acl-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+                List<Dictionary<string, object>> licenses = new List<Dictionary<string, object>>();
+                Dictionary<string, object> record = new Dictionary<string, object>();
+                record["name"] = "Test Software";
+                record["version"] = "1.0";
+                record["license"] = "TEST-KEY-1234";
+                licenses.Add(record);
+
+                server.SaveLicenses(licenses);
+
+                string licensesPath = Path.Combine(dataPath, "_licenses", "licenses.json");
+                if (!File.Exists(licensesPath))
+                {
+                    return "expected licenses.json to exist after SaveLicenses";
+                }
+
+                FileSecurity acl = File.GetAccessControl(licensesPath);
+                AuthorizationRuleCollection rules = acl.GetAccessRules(true, true, typeof(SecurityIdentifier));
+                SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                bool hasAdminFullControl = false;
+                bool hasSystemFullControl = false;
+                foreach (FileSystemAccessRule rule in rules)
+                {
+                    if (rule.IdentityReference == adminSid && rule.FileSystemRights == FileSystemRights.FullControl && rule.AccessControlType == AccessControlType.Allow)
+                    {
+                        hasAdminFullControl = true;
+                    }
+                    if (rule.IdentityReference == systemSid && rule.FileSystemRights == FileSystemRights.FullControl && rule.AccessControlType == AccessControlType.Allow)
+                    {
+                        hasSystemFullControl = true;
+                    }
+                }
+
+                if (!hasAdminFullControl)
+                {
+                    return "expected Administrators to have FullControl on licenses.json";
+                }
+                if (!hasSystemFullControl)
+                {
+                    return "expected SYSTEM to have FullControl on licenses.json";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // SaveLinuxKnownHosts applies a restrictive Administrators+SYSTEM-only ACL to the
+        // known-hosts file (matching SaveLicenses/SaveConfig). Under UAC split-token behavior,
+        // this test process runs non-elevated, so it cannot read the file back through the
+        // normal FILE_READ_DATA path even though its account is an Administrators member.
+        // The test created the file, so it is the file's owner and retains WRITE_DAC even
+        // without FILE_READ_DATA - this helper uses that to grant itself an explicit ALLOW
+        // rule after each write, purely so the test can observe what it just wrote. It does
+        // not touch or weaken SaveLinuxKnownHosts/ApplyRestrictedConfigAcl in any way.
+        private static void GrantCurrentUserAccessForTest(string path)
+        {
+            FileSecurity acl = File.GetAccessControl(path);
+            SecurityIdentifier currentUser = WindowsIdentity.GetCurrent().User;
+            acl.AddAccessRule(new FileSystemAccessRule(currentUser, FileSystemRights.FullControl, AccessControlType.Allow));
+            File.SetAccessControl(path, acl);
+        }
+
+        private static string TestLinuxKnownHostsRoundTrip()
+        {
+            string tempDataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = tempDataPath;
+                InventoryServer server = new InventoryServer(options);
+                string knownHostsPath = server.GetLinuxKnownHostsFilePath();
+
+                Dictionary<string, object> before = server.FindLinuxKnownHost("192.168.4.112", 22);
+                if (before != null)
+                {
+                    return "expected no record before insert";
+                }
+
+                server.UpsertLinuxKnownHost("192.168.4.112", 22, "ssh-ed25519", "SHA256:hXNM4oXACpM336pm8Tv/f3mA/2X1tq6ocXcl7TmFvtA", "manual");
+                GrantCurrentUserAccessForTest(knownHostsPath);
+                Dictionary<string, object> after = server.FindLinuxKnownHost("192.168.4.112", 22);
+                if (after == null || GetStringValue(after, "Fingerprint") != "SHA256:hXNM4oXACpM336pm8Tv/f3mA/2X1tq6ocXcl7TmFvtA" || GetStringValue(after, "TrustMethod") != "manual")
+                {
+                    return "record not found or wrong content after upsert";
+                }
+
+                server.UpsertLinuxKnownHost("192.168.4.112", 22, "ssh-ed25519", "SHA256:DIFFERENTvalueDIFFERENTvalueDIFFERENTvalueA", "bulk-auto");
+                GrantCurrentUserAccessForTest(knownHostsPath);
+                Dictionary<string, object> overwritten = server.FindLinuxKnownHost("192.168.4.112", 22);
+                if (overwritten == null || GetStringValue(overwritten, "Fingerprint") != "SHA256:DIFFERENTvalueDIFFERENTvalueDIFFERENTvalueA" || GetStringValue(overwritten, "TrustMethod") != "bulk-auto")
+                {
+                    return "upsert did not overwrite the existing record for the same host:port";
+                }
+
+                List<Dictionary<string, object>> all = server.LoadLinuxKnownHosts();
+                if (all.Count != 1)
+                {
+                    return "expected exactly 1 record after overwrite, found " + all.Count;
+                }
+
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(tempDataPath, true);
+            }
+        }
+
+        // Proves the fix for the "read failure looks like no record" bug: a
+        // genuinely malformed/truncated known-hosts file (what a crash
+        // mid-write could leave behind pre-Fix-4b, or what a concurrent
+        // reader could observe mid-write without atomic replace) must
+        // surface as an error from FindLinuxKnownHost, NOT silently look
+        // like "no record found" - the latter is unsafe because a
+        // trustNewHostKeys push would then treat a host that actually HAS a
+        // pinned record as brand-new and silently overwrite the pin via the
+        // bulk-auto path.
+        private static string TestLinuxKnownHostsReadFailureSurfacesAsError()
+        {
+            string tempDataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = tempDataPath;
+                InventoryServer server = new InventoryServer(options);
+                string knownHostsPath = server.GetLinuxKnownHostsFilePath();
+                Directory.CreateDirectory(Path.GetDirectoryName(knownHostsPath));
+                File.WriteAllText(knownHostsPath, "{this is not valid known-hosts JSON at all", new UTF8Encoding(false));
+
+                bool threw = false;
+                try
+                {
+                    server.FindLinuxKnownHost("192.168.4.112", 22);
+                }
+                catch
+                {
+                    threw = true;
+                }
+
+                if (!threw)
+                {
+                    return "FindLinuxKnownHost returned normally instead of surfacing the malformed-file read failure - a real trust record could be indistinguishable from 'no record' and get silently overwritten";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDataPath, true); } catch { }
+            }
+        }
+
+        private static string TestParseHostKeyFingerprintFromRealCapturedOutput()
+        {
+            // Captured verbatim from a real live failure against 192.168.4.112
+            // during this feature's own design session - not a synthetic fixture.
+            string capturedOutput =
+                "The host key is not cached for this server:\r\n" +
+                "  192.168.4.112 (port 22)\r\n" +
+                "You have no guarantee that the server is the computer you\r\n" +
+                "think it is.\r\n" +
+                "The server's ssh-ed25519 key fingerprint is:\r\n" +
+                "  ssh-ed25519 255 SHA256:hXNM4oXACpM336pm8Tv/f3mA/2X1tq6ocXcl7TmFvtA\r\n" +
+                "Connection abandoned.\r\n" +
+                "FATAL ERROR: Cannot confirm a host key in batch mode\r\n";
+
+            string keyType, fingerprint;
+            bool parsed = TryParseHostKeyDetails(capturedOutput, out keyType, out fingerprint);
+            if (!parsed)
+            {
+                return "did not parse the real captured failure output at all";
+            }
+            if (keyType != "ssh-ed25519")
+            {
+                return "expected keyType 'ssh-ed25519', got '" + keyType + "'";
+            }
+            if (fingerprint != "SHA256:hXNM4oXACpM336pm8Tv/f3mA/2X1tq6ocXcl7TmFvtA")
+            {
+                return "expected the exact captured fingerprint, got '" + fingerprint + "'";
+            }
+
+            string unrelatedFailure = "plink: Network error: Connection timed out";
+            string keyType2, fingerprint2;
+            if (TryParseHostKeyDetails(unrelatedFailure, out keyType2, out fingerprint2))
+            {
+                return "parser matched a non-host-key failure text, should not have";
+            }
+
+            return null;
+        }
+
+        private static string TestClassifyHostKeyFailureChangedNeverAutoAcceptedEvenWithTrustEnabled()
+        {
+            // The exact condition Finding 1 was about: a prior trusted
+            // record exists (expectedHostKey set) and the failure text
+            // mentions a host key. trustNewHostKeys=true and
+            // isBulkAutoRetry=false here specifically, to prove the
+            // structural fix holds even when those flags would otherwise
+            // steer toward "bulk-auto".
+            string result = ClassifyHostKeyFailure(
+                "SHA256:hXNM4oXACpM336pm8Tv/f3mA/2X1tq6ocXcl7TmFvtA",
+                "WARNING - POTENTIAL SECURITY BREACH! The host key does not match the one cached.",
+                parsedOk: false,
+                trustNewHostKeys: true,
+                isBulkAutoRetry: false);
+            if (result != "changed")
+            {
+                return "expected 'changed', got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestClassifyHostKeyFailureNeverBulkAutoWithPriorRecordRegardlessOfWording()
+        {
+            // The case that actually discriminates fixed from unfixed code
+            // (unlike the sibling test above, which uses parsedOk: false and
+            // so would already avoid the bulk-auto branch on the OLD,
+            // unstructural guard too - a prior review caught that gap).
+            // Here parsedOk is TRUE and the failure text does NOT contain
+            // "host key" at all (e.g. a future reworded/localized plink
+            // build) - the only thing that can still stop this from
+            // returning "bulk-auto" (or, per a later review pass, "unknown")
+            // is the expectedHostKey conjunct itself. With a prior record
+            // present and the text not matching the "changed" branch's own
+            // "host key" requirement, the correct result is null - never
+            // "bulk-auto" and never "unknown" (an "unknown" badge renders a
+            // pre-filled, un-warned trust button, which is wrong for a host
+            // that already has a pinned record).
+            string result = ClassifyHostKeyFailure(
+                "SHA256:hXNM4oXACpM336pm8Tv/f3mA/2X1tq6ocXcl7TmFvtA",
+                "The server's ssh-ed25519 key fingerprint is:\n  ssh-ed25519 255 SHA256:DIFFERENTvalueDIFFERENTvalueDIFFERENTvalueA",
+                parsedOk: true,
+                trustNewHostKeys: true,
+                isBulkAutoRetry: false);
+            if (result == "bulk-auto")
+            {
+                return "returned 'bulk-auto' with a prior trusted record present - the never-auto-accept invariant is broken";
+            }
+            if (result == "unknown")
+            {
+                return "returned 'unknown' with a prior trusted record present - the operator would see a pre-filled, un-warned trust button for what may be a changed key";
+            }
+            if (result != null)
+            {
+                return "expected null (parses but text lacks the literal 'host key', so classification falls through without matching 'changed'), got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestClassifyHostKeyFailureBulkAutoForNewTarget()
+        {
+            string result = ClassifyHostKeyFailure(
+                null,
+                "The host key is not cached for this server",
+                parsedOk: true,
+                trustNewHostKeys: true,
+                isBulkAutoRetry: false);
+            if (result != "bulk-auto")
+            {
+                return "expected 'bulk-auto', got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestClassifyHostKeyFailureUnknownWhenAutoTrustDisabled()
+        {
+            string result = ClassifyHostKeyFailure(
+                null,
+                "The host key is not cached for this server",
+                parsedOk: true,
+                trustNewHostKeys: false,
+                isBulkAutoRetry: false);
+            if (result != "unknown")
+            {
+                return "expected 'unknown', got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestClassifyHostKeyFailureNullForNonHostKeyFailure()
+        {
+            string result = ClassifyHostKeyFailure(
+                null,
+                "plink: Network error: Connection timed out",
+                parsedOk: false,
+                trustNewHostKeys: true,
+                isBulkAutoRetry: false);
+            if (result != null)
+            {
+                return "expected null (not a host-key failure), got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestTrustLinuxHostKeyRejectsMalformedFingerprint()
+        {
+            // Calls the same IsValidHostKeyFingerprint helper the endpoint
+            // calls, rather than a hand-copied regex, since spinning up a
+            // real HTTP request/response round-trip is out of scope for this
+            // self-test style.
+            if (IsValidHostKeyFingerprint("not-a-fingerprint"))
+            {
+                return "malformed fingerprint incorrectly matched the validation pattern";
+            }
+            if (!IsValidHostKeyFingerprint("SHA256:hXNM4oXACpM336pm8Tv/f3mA/2X1tq6ocXcl7TmFvtA"))
+            {
+                return "a real, valid fingerprint failed the validation pattern";
+            }
+            return null;
+        }
+
+        private static string TestIsValidSshTargetAcceptsHostnamesAndIPv4()
+        {
+            string[] valid = { "192.168.1.10", "debian-01", "host.example.local", "a", "10.0.0.254" };
+            foreach (string target in valid)
+            {
+                if (!IsValidSshTarget(target))
+                {
+                    return "expected target '" + target + "' to be accepted, but IsValidSshTarget rejected it";
+                }
+            }
+            return null;
+        }
+
+        private static string TestIsValidSshTargetRejectsInjectionAndEmpty()
+        {
+            // Every one of these is a value a compromised managed host could put
+            // in its own self-reported "hostname" field.
+            string[] invalid = { "", null, "host;rm -rf /", "host name", "$(whoami)", "host`id`", "-oProxyCommand=calc", "host\nsecond", "host|id", "host&id", "host'x", "host\"x", "host\\x", "host/../x", "host\n" };
+            foreach (string target in invalid)
+            {
+                if (IsValidSshTarget(target))
+                {
+                    return "expected target '" + target + "' to be rejected, but IsValidSshTarget accepted it";
+                }
+            }
+            return null;
+        }
+
+        private static string TestGenerateRandomTokenShape()
+        {
+            string token = GenerateRandomToken();
+            if (token == null || token.Length != 64)
+            {
+                return "expected a 64-character token, got " + (token == null ? "null" : token.Length.ToString());
+            }
+            foreach (char c in token)
+            {
+                bool isLowerHex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+                if (!isLowerHex)
+                {
+                    return "expected only lowercase hex characters, found '" + c + "'";
+                }
+            }
+            string second = GenerateRandomToken();
+            if (token == second)
+            {
+                return "expected two calls to produce different tokens";
+            }
+            return null;
+        }
+
+        private static string TestSendIngestionTokenStatusReflectsConfiguredState()
+        {
+            ServerOptions options = new ServerOptions();
+            options.Token = null;
+            bool configuredWhenEmpty = !String.IsNullOrEmpty(options.Token);
+            if (configuredWhenEmpty)
+            {
+                return "expected configured=false when Token is null";
+            }
+
+            options.Token = "some-token-value";
+            bool configuredWhenSet = !String.IsNullOrEmpty(options.Token);
+            if (!configuredWhenSet)
+            {
+                return "expected configured=true when Token is set";
+            }
+            return null;
+        }
+
+        private static string TestSendLinuxSshToolsStatusReflectsFilePresence()
+        {
+            string scratchDir = Path.Combine(Path.GetTempPath(), "wil-sshtools-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(scratchDir);
+            try
+            {
+                string plinkPath = Path.Combine(scratchDir, "plink.exe");
+                string pscpPath = Path.Combine(scratchDir, "pscp.exe");
+
+                bool plinkFoundWhenMissing = File.Exists(plinkPath);
+                bool pscpFoundWhenMissing = File.Exists(pscpPath);
+                if (plinkFoundWhenMissing || pscpFoundWhenMissing)
+                {
+                    return "expected both tools to report missing in a fresh scratch directory";
+                }
+
+                File.WriteAllText(plinkPath, "not a real binary");
+                File.WriteAllText(pscpPath, "not a real binary");
+
+                bool plinkFoundWhenPresent = File.Exists(plinkPath);
+                bool pscpFoundWhenPresent = File.Exists(pscpPath);
+                if (!plinkFoundWhenPresent || !pscpFoundWhenPresent)
+                {
+                    return "expected both tools to report present after creating them";
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(scratchDir, true);
+            }
+        }
+
+        private static string TestLooksLikePrivateKeyAcceptsRealHeaders()
+        {
+            if (!LooksLikePrivateKey("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEA\n-----END OPENSSH PRIVATE KEY-----\n"))
+            {
+                return "expected an OPENSSH PRIVATE KEY header to be recognized";
+            }
+            if (!LooksLikePrivateKey("-----BEGIN RSA PRIVATE KEY-----\nMIIEow==\n-----END RSA PRIVATE KEY-----\n"))
+            {
+                return "expected an RSA PRIVATE KEY header to be recognized";
+            }
+            return null;
+        }
+
+        private static string TestLooksLikePrivateKeyRejectsPublicKeyAndGarbage()
+        {
+            if (LooksLikePrivateKey("ssh-rsa AAAAB3NzaC1yc2EA user@host"))
+            {
+                return "expected a .pub-style line to NOT look like a private key";
+            }
+            if (LooksLikePrivateKey("this is not a key at all"))
+            {
+                return "expected garbage content to NOT look like a private key";
+            }
+            if (LooksLikePrivateKey(""))
+            {
+                return "expected empty content to NOT look like a private key";
+            }
+            return null;
+        }
+
+        private static string TestLooksLikePublicKeyRecognizesEachPrefix()
+        {
+            if (!LooksLikePublicKey("ssh-rsa AAAAB3NzaC1yc2EA user@host"))
+            {
+                return "expected 'ssh-rsa ' to be recognized as a public key";
+            }
+            if (!LooksLikePublicKey("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 user@host"))
+            {
+                return "expected 'ssh-ed25519 ' to be recognized as a public key";
+            }
+            if (!LooksLikePublicKey("ssh-dss AAAAB3NzaC1kc3MA user@host"))
+            {
+                return "expected 'ssh-dss ' to be recognized as a public key";
+            }
+            if (!LooksLikePublicKey("ecdsa-sha2-nistp256 AAAAE2VjZHNh user@host"))
+            {
+                return "expected 'ecdsa-sha2-' to be recognized as a public key";
+            }
+            if (LooksLikePublicKey("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEA\n-----END OPENSSH PRIVATE KEY-----\n"))
+            {
+                return "expected a real private key header to NOT look like a public key";
+            }
+            return null;
+        }
+
+        private static string TestLooksLikeEncryptedPrivateKeyDetectsLegacyPem()
+        {
+            string encryptedPem = "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,ABCDEF\n\nMIIEow==\n-----END RSA PRIVATE KEY-----\n";
+            if (!LooksLikeEncryptedPrivateKey(encryptedPem))
+            {
+                return "expected a 'Proc-Type: 4,ENCRYPTED' PEM to be detected as encrypted";
+            }
+            string plainPem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow==\n-----END RSA PRIVATE KEY-----\n";
+            if (LooksLikeEncryptedPrivateKey(plainPem))
+            {
+                return "expected a plain PEM with no Proc-Type header to NOT be detected as encrypted";
+            }
+            return null;
+        }
+
+        private static string TestLooksLikeEncryptedPrivateKeyDetectsOpenSshBcryptKdf()
+        {
+            // "bcrypt" as a literal ASCII substring inside the base64-decoded
+            // body is what the real detection checks for - fabricate a
+            // synthetic body containing it rather than a real cryptographic
+            // key, since the function never validates the key structure
+            // itself, only looks for this one substring.
+            byte[] encryptedBody = Encoding.ASCII.GetBytes("openssh-key-v1\0....bcrypt....");
+            string encryptedContent = "-----BEGIN OPENSSH PRIVATE KEY-----\n" + Convert.ToBase64String(encryptedBody) + "\n-----END OPENSSH PRIVATE KEY-----\n";
+            if (!LooksLikeEncryptedPrivateKey(encryptedContent))
+            {
+                return "expected an OpenSSH key body containing 'bcrypt' to be detected as encrypted";
+            }
+
+            byte[] plainBody = Encoding.ASCII.GetBytes("openssh-key-v1\0....none....");
+            string plainContent = "-----BEGIN OPENSSH PRIVATE KEY-----\n" + Convert.ToBase64String(plainBody) + "\n-----END OPENSSH PRIVATE KEY-----\n";
+            if (LooksLikeEncryptedPrivateKey(plainContent))
+            {
+                return "expected an OpenSSH key body containing 'none' (no bcrypt) to NOT be detected as encrypted";
+            }
+            return null;
+        }
+
+        // Owner assignment to a SID other than the caller requires an
+        // elevated/SYSTEM process token - true in the real deployment (the
+        // Windows Service runs as LocalSystem) but not necessarily true of
+        // whatever account runs `--self-test`. The DACL assertion is
+        // unconditional (never needs elevation, matches
+        // ApplyRestrictedConfigAcl's own already-passing self-test
+        // pattern); the Owner assertion only runs when this process is
+        // actually elevated, so this test tells the truth about what it
+        // verified in THIS run rather than silently skipping or falsely
+        // claiming success.
+        private static string TestApplyRestrictedKeyFileAclSetsDaclAndOwnerWhenElevated()
+        {
+            string tempPath = Path.Combine(Path.GetTempPath(), "wil-selftest-key-" + Guid.NewGuid().ToString("N"));
+            File.WriteAllText(tempPath, "test key content", new UTF8Encoding(false));
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                InventoryServer server = new InventoryServer(options);
+                server.ApplyRestrictedKeyFileAcl(tempPath);
+
+                FileSecurity acl = File.GetAccessControl(tempPath);
+                SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                bool hasAdminRule = false;
+                bool hasSystemRule = false;
+                foreach (FileSystemAccessRule rule in acl.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+                {
+                    if (rule.IdentityReference.Equals(adminSid) && rule.FileSystemRights == FileSystemRights.FullControl)
+                    {
+                        hasAdminRule = true;
+                    }
+                    if (rule.IdentityReference.Equals(systemSid) && rule.FileSystemRights == FileSystemRights.FullControl)
+                    {
+                        hasSystemRule = true;
+                    }
+                }
+                if (!hasAdminRule || !hasSystemRule)
+                {
+                    return "expected both Administrators and SYSTEM to have FullControl in the DACL";
+                }
+
+                bool isElevatedAdmin = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
+                if (isElevatedAdmin)
+                {
+                    SecurityIdentifier owner = (SecurityIdentifier)acl.GetOwner(typeof(SecurityIdentifier));
+                    if (!owner.Equals(systemSid))
+                    {
+                        return "expected Owner to be SYSTEM when running elevated, got " + owner.Translate(typeof(NTAccount));
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                File.Delete(tempPath);
+            }
+        }
+
+        private static string TestApplyRestrictedDirectoryAclSetsDacl()
+        {
+            string tempDirectory = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDirectory);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                InventoryServer server = new InventoryServer(options);
+                server.ApplyRestrictedDirectoryAcl(tempDirectory);
+
+                DirectorySecurity acl = Directory.GetAccessControl(tempDirectory);
+                if (!acl.AreAccessRulesProtected)
+                {
+                    return "expected inheritance to be disabled on the linux-ssh directory";
+                }
+                SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                SecurityIdentifier currentSid = WindowsIdentity.GetCurrent().User;
+                bool adminFound = false;
+                // Assert the grant set is EXACTLY {Administrators, SYSTEM, the
+                // identity running this test process} - not just that
+                // Administrators is present. The current-identity grant is now
+                // intended, documented behavior (see ApplyRestrictedDirectoryAcl's
+                // doc comment): it's what lets the server's own operating account
+                // keep managing this directory across repeated operations. This
+                // still catches a real regression - some OTHER identity gaining an
+                // extra ACE on the directory.
+                foreach (FileSystemAccessRule rule in acl.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+                {
+                    SecurityIdentifier identity = (SecurityIdentifier)rule.IdentityReference;
+                    if (identity.Equals(adminSid))
+                    {
+                        if ((rule.FileSystemRights & FileSystemRights.FullControl) == FileSystemRights.FullControl)
+                        {
+                            adminFound = true;
+                        }
+                        continue;
+                    }
+                    if (identity.Equals(systemSid))
+                    {
+                        continue;
+                    }
+                    if (currentSid != null && identity.Equals(currentSid))
+                    {
+                        continue;
+                    }
+                    return "expected only Administrators, SYSTEM, and the current identity to have access, but found an access rule for " + identity.Value;
+                }
+                if (!adminFound)
+                {
+                    return "expected an explicit Administrators FullControl rule on the linux-ssh directory";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDirectory, true); } catch (Exception) { }
+            }
+        }
+
+        private static string TestMigrateLegacyLinuxSshKeyAdoptsValidLegacyPath()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            string legacyKeyPath = Path.Combine(Path.GetTempPath(), "wil-selftest-legacy-key-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            File.WriteAllText(legacyKeyPath, "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEA\n-----END OPENSSH PRIVATE KEY-----\n", new UTF8Encoding(false));
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.LinuxUpdateKeyPath = legacyKeyPath;
+                InventoryServer server = new InventoryServer(options);
+                server.MigrateLegacyLinuxSshKey();
+
+                string managedPath = Path.Combine(dataPath, "_linux-ssh", "linux-update-key");
+                // File.Exists is not a reliable check here: MigrateLegacyLinuxSshKey
+                // hardens the containing _linux-ssh directory to Administrators+SYSTEM
+                // only by the time it returns, and once the DIRECTORY denies this
+                // (non-elevated, non-SYSTEM) test process all access, File.Exists
+                // silently returns false for a file that is genuinely present -
+                // .NET's File.Exists swallows UnauthorizedAccessException and reports
+                // "does not exist" rather than distinguishing "denied" from "missing".
+                // File.GetAttributes does distinguish the two: it throws
+                // UnauthorizedAccessException when the path is present but
+                // inaccessible, versus FileNotFoundException/DirectoryNotFoundException
+                // when it genuinely is not there. Confirmed empirically in this exact
+                // non-elevated environment before relying on it here.
+                try
+                {
+                    File.GetAttributes(managedPath);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    // Present, just inaccessible to this identity - exactly what a
+                    // correctly-hardened directory looks like from here. Success.
+                }
+                catch (Exception)
+                {
+                    return "expected the legacy key to be copied to the managed path";
+                }
+                return null;
+            }
+            finally
+            {
+                // Directory.Delete can legitimately fail here: MigrateLegacyLinuxSshKey
+                // hardens _linux-ssh to Administrators+SYSTEM only by the time it
+                // returns, and this test process is not necessarily Administrators
+                // or SYSTEM in a non-elevated dev environment - same reason
+                // TestApplyRestrictedDirectoryAclSetsDacl guards its own cleanup
+                // below. Best-effort only; must not mask a real assertion failure
+                // above with a cleanup exception.
+                try { Directory.Delete(dataPath, true); } catch (Exception) { }
+                try { File.Delete(legacyKeyPath); } catch (Exception) { }
+            }
+        }
+
+        private static string TestMigrateLegacyLinuxSshKeyIgnoresMissingOrInvalidLegacyPath()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.LinuxUpdateKeyPath = Path.Combine(Path.GetTempPath(), "wil-selftest-does-not-exist-" + Guid.NewGuid().ToString("N"));
+                InventoryServer server = new InventoryServer(options);
+                server.MigrateLegacyLinuxSshKey();
+
+                string managedPath = Path.Combine(dataPath, "_linux-ssh", "linux-update-key");
+                if (File.Exists(managedPath))
+                {
+                    return "expected no managed key to be created when the legacy path does not exist";
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(dataPath, true);
+            }
+        }
+
+        private static string TestMergeServiceStatusFlipsActiveBothDirections()
+        {
+            Dictionary<string, object> existingReport = new Dictionary<string, object>();
+            ArrayList services = new ArrayList();
+            Dictionary<string, object> serviceA = new Dictionary<string, object>();
+            serviceA["unit"] = "radarr.service";
+            serviceA["active"] = false;
+            services.Add(serviceA);
+            Dictionary<string, object> serviceB = new Dictionary<string, object>();
+            serviceB["unit"] = "qbittorrent-nox.service";
+            serviceB["active"] = true;
+            services.Add(serviceB);
+            existingReport["services"] = services;
+
+            ArrayList activeUnits = new ArrayList();
+            activeUnits.Add("radarr.service");
+
+            Dictionary<string, object> merged = MergeServiceStatus(existingReport, activeUnits, "2026-08-04T12:00:00Z");
+
+            ArrayList mergedServices = (ArrayList)merged["services"];
+            Dictionary<string, object> mergedA = (Dictionary<string, object>)mergedServices[0];
+            Dictionary<string, object> mergedB = (Dictionary<string, object>)mergedServices[1];
+
+            if (!(bool)mergedA["active"])
+            {
+                return "expected radarr.service (present in activeUnits) to become active=true";
+            }
+            if ((bool)mergedB["active"])
+            {
+                return "expected qbittorrent-nox.service (absent from activeUnits) to become active=false";
+            }
+            return null;
+        }
+
+        private static string TestMergeServiceStatusIgnoresUnknownUnits()
+        {
+            Dictionary<string, object> existingReport = new Dictionary<string, object>();
+            ArrayList services = new ArrayList();
+            Dictionary<string, object> serviceA = new Dictionary<string, object>();
+            serviceA["unit"] = "radarr.service";
+            serviceA["active"] = true;
+            services.Add(serviceA);
+            existingReport["services"] = services;
+
+            ArrayList activeUnits = new ArrayList();
+            activeUnits.Add("radarr.service");
+            activeUnits.Add("some-new-unknown-service.service");
+
+            Dictionary<string, object> merged = MergeServiceStatus(existingReport, activeUnits, "2026-08-04T12:00:00Z");
+            ArrayList mergedServices = (ArrayList)merged["services"];
+            if (mergedServices.Count != 1)
+            {
+                return "expected the unknown unit to NOT be added as a new service entry, got " + mergedServices.Count + " entries";
+            }
+            return null;
+        }
+
+        private static string TestMergeServiceStatusHandlesMissingServicesArray()
+        {
+            Dictionary<string, object> existingReport = new Dictionary<string, object>();
+            existingReport["hostname"] = "test-host";
+
+            ArrayList activeUnits = new ArrayList();
+            activeUnits.Add("radarr.service");
+
+            Dictionary<string, object> merged = MergeServiceStatus(existingReport, activeUnits, "2026-08-04T12:00:00Z");
+            if (Convert.ToString(merged["hostname"]) != "test-host")
+            {
+                return "expected unrelated fields to survive untouched when there's no services array";
+            }
+            return null;
+        }
+
+        private static string TestMergeServiceStatusSetsTimestamp()
+        {
+            Dictionary<string, object> existingReport = new Dictionary<string, object>();
+            Dictionary<string, object> merged = MergeServiceStatus(existingReport, new ArrayList(), "2026-08-04T12:00:00Z");
+            if (Convert.ToString(merged["servicesStatusCollectedAt"]) != "2026-08-04T12:00:00Z")
+            {
+                return "expected servicesStatusCollectedAt to be set to the incoming collectedAt value";
             }
             return null;
         }

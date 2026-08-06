@@ -201,19 +201,21 @@ function Test-ServiceExists {
     return ($LASTEXITCODE -eq 0)
 }
 
+# Reads via WMI (Win32_Service.PathName), not sc.exe qc + a regex on
+# BINARY_PATH_NAME (the original approach here): that field label is
+# localized by the OS's own display language, so the regex never matches
+# on a non-English Windows host - confirmed missing entirely on a live
+# Russian-language machine, which made $needsInstall always true below
+# (a null $currentCommand never equals $desiredCommand) - every GPO
+# startup-script run silently reinstalled the client, even when nothing
+# had changed. WMI property names are stable regardless of OS language.
 function Get-ServiceBinaryPath {
-    $output = & sc.exe qc $ServiceName 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    $service = Get-WmiObject -Class Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
+    if (-not $service) {
         return $null
     }
 
-    foreach ($line in $output) {
-        if ($line -match 'BINARY_PATH_NAME\s*:\s*(.+)$') {
-            return $matches[1].Trim()
-        }
-    }
-
-    return $null
+    return $service.PathName
 }
 
 function ConvertTo-ServiceArgValue {

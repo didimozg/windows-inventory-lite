@@ -22,7 +22,7 @@ jobs:
       # Windows PowerShell 5.1 (not pwsh/PowerShell 7): this project's tests
       # touch System.Web.Extensions types that only resolve via the .NET
       # Framework GAC, which PowerShell 7's .NET Core runtime doesn't have -
-      # pwsh reproducibly fails Test-InstallServerRefreshOnly with a
+      # pwsh reproducibly fails the Get-InstallServerMode tests with a
       # WebResourceAttribute load error unrelated to the code under test.
       # -SkipPublisherCheck/-Force are needed to replace Windows PowerShell
       # 5.1's own pre-installed Pester 3.4.0 (different signing cert) with
@@ -45,3 +45,16 @@ jobs:
         run: |
           .\src\Build-Client.ps1 -TargetFramework Net40 -OutputPath .\build\WindowsInventoryLiteClient-net40.exe
           .\build\WindowsInventoryLiteClient-net40.exe --version
+
+      # windows-latest GitHub-hosted runners ship with Go preinstalled - no
+      # actions/setup-go step needed. This doesn't rebuild/recommit
+      # linux-client/prebuilt/wil-linux-client (that stays a deliberate
+      # human step, see the Pester staleness check above) - it only proves
+      # the current Go source still builds, vets, and passes its own tests.
+      - name: Build and test Linux client
+        shell: pwsh
+        working-directory: linux-client
+        run: |
+          go build ./...
+          go vet ./...
+          go test ./...

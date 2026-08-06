@@ -6,13 +6,280 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
-## [0.22.2] - 2026-07-22
+## [0.37.6]
+
+### Fixed
+
+- SSH-key-mode Linux pushes now verify the target's host key against the fingerprint stored when the host was trusted, the same way password-mode pushes already did. Previously the server never passed the stored fingerprint in key mode and the installer script ignored it even when present, so a key-mode push would connect to whatever host answered. Windows' OpenSSH client has no fingerprint-pinning flag, so the script now fetches the keys the target presents, fingerprints them locally, and pins `ssh`/`scp` to the one that matches. A first push to a never-seen host still uses trust-on-first-use, unchanged, matching the password path.
+- Installing the Linux client over SSH as a non-root user now works. The staging directory under `/tmp` was created with `sudo`, making it root-owned, so every subsequent unprivileged file copy into it failed. It is now created by the connecting user, at mode 700, and removed first if anything already exists at that path - which also closes a window where a local user on the target could pre-create or symlink the fixed `/tmp/wil-linux-client-install` path and substitute files that the install then moved into `/etc/systemd/system/`.
+- The ingestion token no longer appears on the Linux client's systemd `ExecStart` line, where any local user on the managed host could read it from `/proc/<pid>/cmdline` or from the mode-644 unit file. It is delivered through a mode-600 `EnvironmentFile` at `/etc/wil-linux-client.env` instead, mirroring the fix already applied to the Windows service `ImagePath` in v0.1.0. The client reads `WIL_INGESTION_TOKEN`, falling back to `--token` for standalone runs.
+- Push targets are now validated against what a hostname or IPv4 address can legally contain before they reach the command line. Scheduled update pushes derive their target from the client's own self-reported hostname, which was never checked.
+- The Linux client now runs `systemctl` and `dpkg` from absolute paths. As a root systemd service it inherited a default `PATH` with the group-writable `/usr/local/bin` ahead of `/usr/bin`, so a bare command name was a local privilege-escalation route on Debian and Ubuntu.
+- A failure to collect running services no longer discards the whole Linux inventory report. OS, CPU, RAM, and disk data are now sent with an empty service list, matching how every other collector in the client already degrades.
+- A malformed `systemctl` response in status-ping mode is no longer reported as "no services running". The parser now distinguishes a genuine parse failure from a legitimately empty list, and a parse failure skips the ping instead of telling the server every service on the host just stopped.
+- Linux service collection now batches its `dpkg` lookups into a single invocation instead of one per running service, roughly halving the process spawns on hosts with many active units, where the old fan-out could approach systemd's 90-second start timeout.
+- The three inventory ingestion endpoints now reject a `null` JSON body with a 400 instead of an unauthenticated null-reference error that wrote a full stack trace to the Windows Event Log. A connection closed before its headers finished, which a bare port scan produces, now also fails cleanly instead of throwing.
+- Shell-safety validation on the Linux push path and path validation in `Install-Server.ps1` now run immediately before the values are used, not at the start of the function. Both could be overwritten from a saved settings file after validation had already run. `Install-Server.ps1` also validates `LinuxClientPackagePath`, which was never on the list.
+- The `_linux-ssh` directory that holds the managed SSH private key and known-hosts trust store now gets a restricted ACL (Administrators, SYSTEM, and the server's own operating identity), closing a gap where it was created with default inherited permissions. Migrating a private key from a legacy `LinuxUpdateKeyPath` still copies it to a temporary file and moves that into place before hardening the final path, the same copy-then-move-then-harden sequence the direct upload path already used.
+- `server-config.json` is now created and restricted before any secret is written into it. On a first install there was a window where DPAPI-scoped credentials sat in a file with inherited permissions.
+- SSH-key-mode pushes now check that the OpenSSH tools they need are present before starting, and reset `$LASTEXITCODE` before each native call. A missing `scp.exe` after a successful `ssh.exe` call previously read the earlier success code and reported a push that copied nothing as a success.
+- The temporary file holding a target's password during a password-mode push is now overwritten before deletion, and a failed deletion produces a warning instead of failing silently and leaving a plaintext credential in `%TEMP%`.
+- Deleting a Linux client from the dashboard now refreshes the Dashboard tiles, the merged Hardware view, and the Linux Software table immediately. Since the Dashboard/Hardware merge these all read the same data and kept counting the deleted client until the next poll.
+- **Linux client version bumped to 0.1.3** (independent of the server's own version above), covering the client-side changes listed here.
+
+## [0.37.5]
+
+### Fixed
+
+- `Install-Server.ps1` now rebuilds the Linux client from current source on every install/update that uses the default binary path, the same way it already does for the two Windows client executables - previously it only ever copied whatever binary already happened to sit at `build\wil-linux-client`, so a server update could silently leave the Linux client package on an old version. If the Go toolchain isn't installed, this is a soft skip with a visible warning (Go is optional - a Windows-only deployment has no reason to install it) rather than a failure; an actual build error (source doesn't compile) still aborts the install, matching how the Windows client rebuilds already behave.
+- The install/update summary log now also reports "Linux client package version" alongside the existing Windows client package version lines, read from the Go binary's `.version` sidecar (the binary itself is a Linux ELF executable and can't be run on the Windows host to ask its own `--version`) - makes a version mismatch between the server and the Linux client package visible at a glance instead of only discoverable later via the dashboard.
+
+## [0.37.4]
+
+### Fixed
+
+- The Licenses tab's Name/Version fields (native `<input list>`/`<datalist>` autocomplete) now always reopen their suggestion list on click, even after a value has already been picked. Chromium-based browsers refuse to reopen a datalist's dropdown once the field's value exactly matches one of its options - previously this meant an admin had to manually erase the current name before a different one could be selected. Both fields now clear on focus (forcing the browser to treat them as empty, which always shows the full list) and restore the original value on blur only if the user left the field empty without picking or typing anything else.
+
+## [0.37.3]
+
+### Fixed
+
+- The Logout and theme-toggle buttons now stay pinned to the top-right corner on every dashboard view, not just Inventory views (the ones with a search bar). `.topbar-actions` used to rely on `justify-content: space-between` on its parent to stay right-aligned, but that only works with two flex children - once `#searchInput` is hidden on a non-Inventory view, `.topbar-actions` became the sole child and collapsed to the left edge instead. Fixed with `margin-left: auto` on `.topbar-actions`, which keeps it right-pinned regardless of the search box's visibility.
+
+## [0.37.2]
+
+### Fixed
+
+- Reinstalling the Linux client no longer waits out its full normal cadence (up to 6 hours for a full inventory, up to 30 minutes for a status ping) before its first report. `OnBootSec=5min` in the generated systemd timers, previously assumed to give a short grace period after any `systemctl restart`, does not actually do that - it fires once, relative to real machine boot, not to the restart, so on an already-running host it never fires again. Both install paths (the Client Package ZIP-download's `install.sh` and the SSH-push `Install-ClientDebianSSH.ps1`) now also run an explicit, best-effort immediate `systemctl start` for both services right after restarting their timers, so an admin sees fresh data promptly after install/reinstall instead of waiting out the normal cadence. A failure in that immediate run doesn't fail the install job - the scheduled timers still guarantee a real report on the normal cadence regardless.
+- **Linux client version bumped to 0.1.2** (independent of the server's own version above) - no client binary change, but bumped alongside this install-flow fix per explicit instruction.
+
+## [0.37.1]
+
+### Fixed
+
+- The merged Hardware page's CPU grouping no longer includes core count in its grouping key. Virtualized fleets routinely allocate different vCPU counts to VMs sharing the same underlying physical/model CPU, so keying on cores fragmented "the same processor" into multiple rows (e.g. a single physical Intel N150 host showed as two or more separate entries). CPU rows now group by model name alone; core count (and clock speed, already per-computer) is shown per machine in the expanded row instead of as a group-level column.
+- Fixed a Storage table row id collision: two disk groups sharing a model and size but differing on type (e.g. an SSD and an HDD variant reported under the same model/size) collided on one expand/collapse id, so expanding one row toggled the other's hidden state instead. The id now includes type, matching the table's actual grouping key.
+
+## [0.37.0]
+
+### Added
+
+- The Dashboard's Clients and Stale tiles now count Windows and Linux machines together, and the Hardware card's CPU/RAM/Storage charts span both platforms. Windows activated and Office activated stay Windows-only - neither concept has a Linux equivalent.
+- A new "OS versions" chart on the Dashboard's Software card, covering both platforms in one breakdown (Windows `caption`, Linux `prettyName`). The existing Top software chart is unchanged and stays Windows-only.
+- Linux inventory data is now fetched on page load rather than only when a Linux tab is opened, and is refreshed by the 30-second poll while the Dashboard or Hardware view is open - so a user who lands on the Dashboard first sees the full fleet immediately.
+
+### Changed
+
+- "Hardware" is now a single top-level section covering both platforms, replacing the two separate Hardware entries that lived under Windows Inventory and Linux Inventory. Each configuration row lists every machine that has it, Windows and Linux together, tagged by platform in the expanded row.
+- The merged Hardware tables drop the CPU "Clock" and RAM "Modules" columns: neither field exists on the Linux side, so they cannot honestly describe a row that spans both platforms. Both values are still shown, per machine, in the expanded row. Storage keeps its USB badge, now meaning "at least one machine in this group has this disk over USB".
+- The three hardware CSV exports now cover both platforms and list each computer as `NAME (Platform)`; the Linux-specific hardware exports are gone along with the Linux Hardware tab. The `#linux-hardware` URL still works and lands on the merged section.
+
+## [0.36.1]
+
+### Fixed
+
+- The Linux Client updates sidebar badge now populates on page load and on every 30-second poll tick, matching the existing Windows Client-updates badge behavior - previously it only ever appeared as a side effect of opening the Linux Client updates tab directly.
+- Reinstalling the Linux client over an already-running install (via either the Client package ZIP-download path or Linux Client actions' SSH-push) now `systemctl restart`s both the full-inventory and status-ping timers, not just `enable --now`. `enable --now` on a timer that was already active does not reset its `OnUnitActiveSec` countdown, so a freshly deployed binary could silently wait out the rest of the OLD schedule (up to 6 hours for the full-inventory timer) before its first real run - found live, a reinstalled host kept reporting its old version and package list for hours despite the new binary being correctly on disk.
+
+## [0.36.0]
+
+### Added
+
+- The Linux client now inventories running systemd services (name, version, active state) instead of every installed dpkg package - base-OS services are filtered out automatically via dpkg's own Priority classification, and each service's version comes from the dpkg package that owns its unit file, where one can be found. This replaces the `packages` field in the Linux client's report with a `services` field; the dashboard's Linux Software view and Linux Clients table now show services accordingly.
+- A second, faster "is it still running" status ping (default every 30 minutes, configurable) now runs independently of the full inventory cadence (default every 6 hours, unchanged) - it updates just the active/inactive state of already-known services via a new `POST /api/v1/linux/inventory/service-status` endpoint, without re-scanning OS/CPU/RAM/disks or re-resolving package versions. Both the Client Package tab and Linux Client actions gained a "Status check interval (minutes)" field alongside the existing "Interval (hours)" field.
+- **Linux client version bumped to 0.1.1** (independent of the server's own version above, per this project's established per-agent versioning convention) - this client-side change (new inventory field, new report mode) is exactly the kind of update that convention calls for bumping the client on its own schedule.
+
+## [0.35.0]
+
+### Added
+
+- Linux SSH pushes now use one server-managed private key, uploaded through the dashboard (Settings > General > Linux Client update credentials) instead of a raw file path typed in up to three separate places (global settings, and per-push overrides on both Linux Client actions and Linux Client updates - the latter two are removed by this change). The server validates the upload (rejects a `.pub` file or anything that doesn't look like a private key, warns if the key is passphrase-protected) and enforces both NTFS DACL and Owner on the stored file. Existing installs with a previously-configured key path adopt it automatically on first startup after upgrading, no admin action required.
+
+### Fixed
+
+- Closes the root cause of a live `UNPROTECTED PRIVATE KEY FILE` push failure: the stored key file's NTFS **Owner**, not just its access rules, is now explicitly set to SYSTEM - the DACL-only hardening this project's other "restrict this file" helpers use was confirmed insufficient on its own, since `ssh.exe` checks Owner as an independent condition.
+
+## [0.34.2]
+
+### Fixed
+
+- Linux Client updates' "Authentication" field (the auth-mode dropdown) had the same missing-grid-wrapper layout bug the Ingestion Token block had before its v0.30.3 fix - the label text sat cramped against the dropdown with no real gap. A full review of every other field using the same CSS pattern found no other instances (L22).
+
+## [0.34.1]
+
+### Changed
+
+- Moved the theme-toggle button out of the sidebar header, next to the Logout button in the top bar (L21) - both top-level page controls now live in one place.
+
+## [0.34.0]
+
+### Added
+
+- The Clients table now shows an "AWAITING REPORT" badge (replacing STALE) for a client that was just pushed/updated by the server but hasn't sent its own real inventory report back yet - previously this state was indistinguishable from a genuinely stale, unresponsive client. The badge clears itself automatically the moment the client's own next report lands; it does not count toward the Dashboard's "Stale" tile or the CSV export's Stale column while showing.
+
+## [0.33.0]
+
+### Added
+
+- Linux Client updates' manual "Update selected" push can now override the Linux user/password or SSH key path for that push only, instead of always using the account saved in Settings > General > Linux Client update credentials (or AD reuse). Mirrors the per-push override fields Linux Client actions already had; the server-side endpoint already accepted these fields, so this closes a dashboard-only gap.
+
+## [0.32.0]
+
+### Added
+
+- Dashboard gained a "Log out" button in the top bar. Basic Auth (this project's own auth model) has no server-side session to invalidate, so this is a best-effort client-side clear: it sends a request with a deliberately invalid credential so the browser has a chance to drop its cached sign-in, then shows a "Logged out" screen explaining that some browsers only fully clear the cached sign-in once every tab using the site is closed.
+
+## [0.31.1]
+
+### Fixed
+
+- Unified button height/footprint (`min-height: 40px`) across `.primary-button`, `.danger-button`, `.danger-button-ghost`, `.edit-button`, and `.export-button` - previously each used a different sizing strategy, most visibly on the Licenses toolbar where "Add license" and "Export CSV" rendered at noticeably different heights next to each other.
+
+## [0.31.0]
+
+### Added
+
+- AD password, Linux Client update password, and Windows Client updates (WinRM) password fields now show a dots indicator ("••••••••") in place of their usual hint text when a password is currently saved, so an admin can tell at a glance whether a value is configured without it ever being displayed or leaving the field pre-filled.
+
+## [0.30.3]
+
+### Fixed
+
+- The Ingestion Token block on Settings > General had unbounded field width (the token input stretched edge-to-edge for a fixed-length string) and cramped, inconsistent spacing before the "Require ingestion token" checkbox and the Regenerate button - the only field group on the page not wrapped in a grid row. Capped the field width and added proper spacing, matching every other field group's rhythm.
+
+## [0.30.2]
+
+### Fixed
+
+- Dashboard CSS now draws its spacing (`gap`/`padding`) and font sizes from a shared scale (`--space-xs` through `--space-2xl`, `--font-size-xs` through `--font-size-display`) instead of ad-hoc one-off pixel values accumulated across many past sessions. Fixes two concrete layout bugs found during a design review: the Linux Client actions "Targets" field rendered visibly shifted down with an empty gap above it, and General settings' narrow numeric fields (Stale threshold, retention days, HTTP/HTTPS ports) stretched to their full grid-column width instead of a sensible compact size. Also fixes a truncated placeholder on the Client package tab's "Package share path" field. `border-radius`, `margin`, and small (1-2px) chrome spacing were deliberately left untouched.
+
+## [0.30.1]
+
+### Fixed
+
+- Removed the persistent Clients/Windows activated/Office activated/Stale summary bar that duplicated the Dashboard's own tiles on every Clients/Software/Hardware view (and the Linux equivalent). Now shown only on the Dashboard.
+
+## [0.30.0]
+
+### Added
+
+- Linux Client updates gained the same "Trust new host keys automatically" checkbox (paired with a required risk-acknowledgment checkbox) that Linux Client actions already had - previously, recovering from an untrusted-SSH-host-key failure during an update push required switching to the Linux Client actions tab, even though both panels already share the same push pipeline and the same on-disk trust store.
+
+## [0.29.0]
+
+### Added
+
+- Ingestion token enforcement is now an explicit, always-visible "Require ingestion token" setting in Settings > General, decoupled from the token's own value. The token itself is now shown in plaintext at all times (previously write-only, revealed only once immediately after a Regenerate). Turning enforcement off requires an explicit risk acknowledgment - a client-side confirmation, backed by a server-side 409+risk check with its own dedicated acknowledgment field, independent from the unrelated HTTPS-certificate risk gate so acknowledging one can never silently bypass the other in the same save. Disabling enforcement without acknowledgment is rejected before any other settings in the same request (listener rebinds, AD changes) are applied, so a rejected save never leaves live server state ahead of what's persisted to disk. Existing installations upgrading to this version keep their exact current enforcement behavior automatically - enforced if a token was already configured, matching today's real behavior, with no admin action required - and a config-less command-line invocation that supplies `--token` now correctly defaults to enforced as well.
+
+### Fixed
+
+- The two Client Package generator endpoints (Windows GPO `.cmd`, Linux systemd/`install.sh`) now fall back to the server's current live token when the token field is left blank, instead of silently baking in no token at all - matching the already-correct behavior of the direct WinRM/SSH push paths. Placeholder text corrected to describe the actual fallback ("leave empty to use the server's current token").
+- Regenerating the ingestion token now refreshes the always-visible token display and blanks the Client Package tab's token fields, so an immediate rebuild picks up the fresh token instead of silently resubmitting the one that was just replaced.
+- The ingestion status text on the General Settings page distinguishes "configured", "configured but not enforced", and "configured and required", instead of only reporting whether a token exists; the Regenerate confirmation text is likewise conditioned on the actual current enforcement state, and defaults to the stronger warning rather than the weaker one if that state ever fails to load.
+- The token display renders in the app's monospace `.mono` style, consistent with every other machine-fact value (IPs, versions, certificate thumbprints).
+
+## [0.28.0]
+
+### Added
+
+- Two new dashboard tabs, "Linux Client actions" and "Linux Client updates", bring Linux client deployment to full parity with the existing Windows flow: SSH-based install/uninstall, automatic outdated-client detection, and an independent push schedule separate from the Windows one.
+- Three SSH authentication modes for Linux pushes: stored Linux credentials, an SSH key, or a reused AD account. AD service-identity mode (the server's own running identity) is rejected with a clear error, since there is no SSH equivalent of "run as the service's own identity" - an explicit AD account works fine.
+- New `Uninstall-ClientDebianSSH.ps1` script - Linux clients previously had no scripted uninstall path at all.
+- Settings > General gains a "Linux Client update credentials" block (username/password/SSH key path) and a `plink.exe`/`pscp.exe` presence check (checked in both an installed-server layout and a dev/build-tree layout), so a missing SSH tool is caught before a push is attempted rather than mid-job. Password-based auth needs `plink.exe`/`pscp.exe`; key-based auth uses Windows' built-in `ssh.exe` and needs neither.
+- The Client package tab gains a "Linux package" section: a downloadable zip (client binary, systemd unit files, a self-contained `install.sh`) for environments without SSH connectivity from the dashboard server. This path never shells out to `plink.exe`/`pscp.exe`.
+
+### Changed
+
+- The existing "Client actions"/"Client updates" tabs are now labeled "Windows Client actions"/"Windows Client updates" - label text only, no behavior change.
+- `plink.exe`/`pscp.exe` (PuTTY, MIT-licensed) are now bundled directly in `deploy\linux-client\` and tracked in the repository - Authenticode signature and SHA-256 verified against the official 0.84 release before being added (recorded in `deploy\linux-client\NOTICE`) - instead of requiring every deployer to download them separately before password-based Linux SSH push would work at all.
+
+### Fixed
+
+- Every field that reaches a generated SSH command, a generated systemd unit file, or a generated `install.sh` is validated against a POSIX shell-metacharacter denylist (`ValidatePosixShellSafe`/`Test-PosixShellSafe`, shared with the existing Windows-side validator's design) before it's used to build a string, closing off shell-injection via hostnames, paths, or other operator-supplied values in the new Linux SSH job pipeline.
+- SSH credentials (password, SSH key path) are passed to `ssh.exe`/`plink.exe` over redirected stdin, never as child-process command-line arguments, matching the existing Windows WinRM push path's own approach - keeps secrets out of process listings and command-line-based logging.
+- The new `LinuxUpdatePassword` setting is DPAPI-encrypted at rest (`server-config.json` stores a `dpapi:`-prefixed value, never plaintext) and round-trips correctly across a server restart, matching how the existing AD/WebUI/ingestion-token/Windows-update passwords are already protected.
+- The generated `install.sh` is written with forced LF line endings (not the .NET default `Environment.NewLine`, which produced CRLF and broke the script's shebang/`set -e` behavior on the actual Linux target); the paired `GenerateSystemdUnitLines`/`New-SystemdUnitFiles` (C#/PowerShell) generators produce character-for-character identical `ExecStart`/`OnUnitActiveSec` output for the same inputs.
+- The Windows WinRM client push (manual "Windows Client actions" push and the scheduled "Windows Client updates" push) now sends the server's current ingestion token to every install/reinstall - it never did before, so any client (re)installed through either push has been getting no token at all since ingestion authentication was introduced. Harmless while the server's own token was never actually enforced; once a real token is configured (auto-generated or regenerated), every such push left the target unable to authenticate its inventory reports, with no indication why - reported live as "clients stopped connecting after regenerating the token, reinstalling via the UI doesn't help."
+- The Linux SSH push (manual "Linux Client actions" and the scheduled "Linux Client updates" push) had the identical gap: a blank "Ingestion token" field (the default state - its placeholder used to say "leave empty if not used") or a stale token saved with an older Linux package now falls back to the server's current live token instead of silently installing/reinstalling with none.
+- Dashboard static files (`app.js`, `index.html`, `styles.css`, `favicon.svg`) are now served with `Cache-Control: no-cache`, so a browser revalidates before using a cached copy instead of potentially showing a stale dashboard build after a server update until a hard refresh.
+- `Install-Server.ps1` now mirrors the Windows GPO client's own "copy in if present" behavior for the Linux client binary: new `-LinuxClientPackagePath`/`-LinuxClientBinarySourcePath` parameters (the latter defaulting to `build\wil-linux-client`, `Build-LinuxClient.ps1`'s own default output) copy the binary and its version sidecar into the Linux client package folder on every install/reinstall. Previously nothing populated that folder at all, so every dashboard-driven Linux install/update push failed with "Linux client binary was not found" on every server, even freshly installed ones - reported live after hitting the error on the first real install attempt through the new Linux Client actions tab. The script's own error message now also explains where to place the built binary.
+- Password-based Linux SSH pushes (plink/pscp) can now recover from an untrusted/unknown SSH host key without interactive access to the Windows account the service runs under (commonly `LocalSystem`, which has no practical way to accept a PuTTY host-key prompt at all): a new per-target trust store (`linux-ssh-known-hosts.json`) pins a fingerprint via plink/pscp's own `-hostkey` flag once confirmed - either manually, via a "Trust and retry" button in the Linux Client actions job log, or automatically for a whole push via an explicit, risk-acknowledged "trust new host keys automatically" opt-in. A host key that changes after being pinned always hard-fails and is never silently re-trusted, even under that opt-in - reported live after a push to a real target failed with "the target's SSH host key is not yet trusted by this machine."
+
+## [0.27.0]
+
+### Added
+
+- Settings > General gains an "Ingestion Token" section: shows whether an ingestion token is configured and lets an admin regenerate it. Write-only on this page, matching the Admin Password page - the current value is not shown here, only revealed once immediately after a regenerate action (it remains viewable in plaintext on the Client package tab's build-package field, as before). The new token is persisted before it takes effect, so a failed save can't leave the server requiring a token that was never written to disk. Regenerating does not rewrite an already-built GPO client package (`Install-ClientGpo.cmd`) - a package built before a regenerate keeps the old token baked in and must be rebuilt from the Client package tab, not just redeployed.
+
+### Fixed
+
+- `_licenses/licenses.json` is now restricted to Administrators+SYSTEM, matching the protection `server-config.json` already had - the license form's "License" field can hold a real product key, not just a category label.
+- `Install-Server.ps1` now actually auto-generates a random ingestion token when none is provided and none was previously saved, matching what the wizard's own prompt text has always claimed ("leave blank to auto-generate"). Previously, leaving the token blank left inventory ingestion completely unauthenticated instead of protected by an unseen random value - affected every install that used the Quick Install path (W9), since the ingestion token is not one of its 4 asked questions.
+
+## [0.26.0]
+
+### Added
+
+- Dashboard sidebar now splits inventory into "Windows Inventory" and "Linux Inventory" top-level nav-groups. Linux Inventory gains Software and Hardware (CPU/Storage/RAM) sub-views, grouped and rendered the same way the Windows side already works (client-side aggregation, no server changes - all data already reported by the Linux client). The existing Linux Clients table gains pagination, row expand-for-details (CPU/RAM/Disks summary plus a nested packages table), a Delete button, search filtering, CSV export, and live 30-second refresh, matching the Windows Clients table's own behavior. A new Linux-only summary tile row (Clients/Stale) is shown while any Linux Inventory tab is active.
+
+## [0.25.2]
+
+### Fixed
+
+- `Get-ClientServiceBinaryPath` (Install-Wizard.ps1) and `Get-ServiceBinaryPath` (Deploy-ClientGpo.ps1) read a service's binPath via WMI (`Win32_Service.PathName`) instead of parsing `sc.exe qc`'s text output for a `BINARY_PATH_NAME` label. That label is localized by the OS's own display language, so the previous regex never matched on a non-English Windows host - confirmed missing entirely on a live Russian-language machine. Effects of the bug: Install-Wizard.ps1's "Install client (local)" just-refresh detection (0.25.1) silently never triggered on such hosts, always falling back to asking every question; separately, and more consequentially, Deploy-ClientGpo.ps1's own already-current-skip-reinstall check always saw a `$null` binPath, so `$needsInstall` was always true - every GPO startup-script run silently reinstalled the client, even when nothing had changed, on any non-English-locale machine. Both were the same pre-existing bug in `Deploy-ClientGpo.ps1`; Install-Wizard.ps1 inherited it when it copied the same pattern in 0.25.1.
+
+## [0.25.1]
+
+### Added
+
+- Install-Wizard.ps1's "Install client (local)" flow now offers the same "Just refresh"/"Full reconfigure" choice the "Install server" flow already has, when a client is already installed - reconstructed from the running service's own command line (server URL, share path, token, interval, install path), not a new config file, so it works regardless of whether the client was originally installed via this wizard, a WinRM push, or a GPO package. Falls back to asking every question, unchanged, if the service's command line can't be parsed.
+
+## [0.25.0]
+
+### Added
+
+- Install-Wizard.ps1's "Install server" flow now asks only 4 questions on a genuinely fresh install (listen prefix/port, open-firewall, dashboard username/password) instead of ~21, letting `Install-Server.ps1`'s own defaults apply to everything else (HTTPS, AD sync, ingestion token, client GPO package, debug logging, log retention). Prints a summary after install of what was defaulted and where to change it - HTTPS/AD sync via Settings, the GPO client package via the Client package tab; the auto-generated ingestion token itself isn't shown anywhere in the dashboard, so the summary points at re-running with `-Token <value>` (or "Full reconfigure") instead. The existing "Just refresh"/"Full reconfigure" choice for an already-installed server is unchanged.
+
+## [0.24.0]
+
+### Added
+
+- Column sorting on the Linux Clients dashboard table (Computer/Client version/OS/Software count/Collected), mirroring the existing Windows Clients table's sort pattern - same click-to-sort/click-again-to-reverse behavior, same visual indicator.
+
+### Fixed
+
+- The Description column (both Windows and Linux Clients tables) showed the literal word "Unknown" in the editable input whenever a client had no Description yet - including on a client's very first appearance - instead of a blank field. Root cause: `escapeHtml()` routes every value through the dashboard's generic `text()` helper, which turns an empty string into `"Unknown"` for cells that are meant to show a placeholder word - correct for most columns, wrong for a text input the admin is meant to type into. Fixed by switching the three affected render functions (`formatDescriptionEditor`, `formatLinuxDescriptionEditor`, `formatLinuxAdDescription`) to the existing `escapeHtmlOrEmpty()` helper, which was already built for exactly this case but not used here. Found via live testing while verifying the Description column behaves correctly - confirmed via Playwright against a local console-mode instance with a freshly-reported client that had genuinely never had a Description set.
+
+Version `0.23.1` → `0.24.0` (MINOR - the sorting addition; the Description fix rides along in the same bump since both landed in the same change).
+
+## [0.23.1]
+
+### Fixed
+
+- `Install-ClientDebianSSH.ps1` password-based push was broken end to end against a real fleet, found only by live testing (never caught by Pester, since the affected code paths are always mocked in tests):
+  - `ProcessStartInfo.ArgumentList` does not exist on the .NET Framework build Windows PowerShell 5.1 ships with (needs .NET Framework 4.7.1+), so every password-auth attempt failed immediately with a PowerShell property error.
+  - Answering plink's interactive host-key/password prompts by watching redirected stdout/stderr and writing to redirected stdin cannot work at all: plink writes those prompts directly to the process's console, not the redirected streams, so the prompt text was never seen and the typed answer was never delivered - this silently hung every password-auth call that actually needed a password (as opposed to authenticating for free via an already-loaded SSH agent key). Replaced with `-pwfile` (reads the password from a short-lived, current-user-only temp file - added in PuTTY 0.81) plus `-batch`, which needs no interactive prompt handling at all and fails fast with a clear, actionable message if a target's host key isn't yet trusted by this machine.
+  - `$ErrorActionPreference = 'Stop'` combined with `2>&1` turned any stderr output from ssh.exe/plink.exe - including completely normal, successful output like `systemctl enable`'s own "Created symlink ..." confirmation - into a terminating error, so a fully successful remote install could be reported as a failure. Native command output is now captured with a temporarily relaxed `$ErrorActionPreference`, judged by exit code instead.
+  - The install commands unconditionally prefixed every remote step with `sudo`, which fails outright on a minimal Debian image where the connecting user is already `root` and `sudo` was never installed at all (a real, confirmed case on this project's own test fleet). The `sudo` prefix is now skipped when `-CredentialUsername` is `root`.
+  - `ssh.exe`/`scp.exe` (key-auth path) had no `-o ConnectTimeout`, so an unreachable or slow-to-respond target could stall a multi-host push run with no bound.
+- `ScriptSyntax.Tests.ps1`'s English-only Cyrillic scan read every file under `deploy\` (among others) as UTF8 text with no extension filter - a legitimately gitignored, user-downloaded `plink.exe`/`pscp.exe` binary in `deploy\linux-client\` produced false-positive Cyrillic matches from raw PE bytes. The scan now skips known binary extensions.
+
+Live-verified against this project's own real Debian/Ubuntu test fleet (13 machines): a real password-based install completed successfully end to end (client binary copied, systemd timer installed and confirmed `active`) on a `sudo`-less root-only target; a 13-host capability survey (key vs. password auth, `sudo` presence) was recorded locally, outside git, per this feature's own design note.
+
+## [0.23.0]
+
+### Added
+
+- Linux client v1 (Debian/Ubuntu, amd64) - a minimal Go-based collector (hostname, OS, CPU, RAM, disks, IP addresses, installed packages), reporting once per run via a systemd timer. Fully independent of the Windows client: its own `/api/v1/linux/*` API and storage, its own "Linux Clients" dashboard tab. The Description field reuses the existing AD Description Sync resolution unchanged - AD-sourced when the host is AD-joined and sync is on, manually editable otherwise.
+- `Install-ClientDebianSSH.ps1` - remote install over SSH, supporting both key-based (Windows' built-in OpenSSH client) and password-based (bundled PuTTY `plink.exe`/`pscp.exe`, since the built-in client cannot authenticate with a password non-interactively at all) authentication.
+
+## [0.22.2]
 
 ### Fixed
 
 - `Install-Server.ps1` threw `VariableIsUndefined` for `$listenPrefixPort` whenever `-OpenFirewall` was used with HTTPS left disabled (the common case: HTTP-only install, firewall rule requested) - the variable was only ever computed inside an `if ($UseHttps ...)` block, but read unconditionally later by the firewall-rule step. Found via a real install attempt. The port is now parsed unconditionally.
 
-## [0.22.1] - 2026-07-22
+## [0.22.1]
 
 ### Fixed
 
@@ -22,7 +289,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Refreshed all 7 dashboard screenshots in `docs/images/` - the previous set predated the dark theme, tree sidebar navigation, and most of this project's feature history since (AD integration, Client Auto-Update, AD-editable Description, and more). Captured against a local console-mode instance seeded with synthetic, clearly non-production data (generic hostnames, RFC 5737 documentation IP ranges, a placeholder domain) - same convention the README already documents for its screenshots section.
 
-## [0.22.0] - 2026-07-22
+## [0.22.0]
 
 ### Changed
 
@@ -33,7 +300,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 `deploy\client\Deploy-ClientGpo.ps1`, `src\Install-Client.ps1`, and `src\Uninstall-ClientWinRM.ps1` each gained an `if ($MyInvocation.InvocationName -ne '.')` guard around their real install/uninstall logic, matching the pattern `src\Install-Wizard.ps1` already used - this lets Pester dot-source each script to unit-test its pure helper functions without performing a real service install/uninstall.
 
-## [0.21.3] - 2026-07-21
+## [0.21.3]
 
 ### Fixed
 
@@ -42,7 +309,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `TryResolveAdSyncCredentials`'s rejection message still said "Enable AD sync in Settings..." after "Enable AD sync" was renamed to "Configure AD User" - corrected.
 - AD Computer Import ("Load all PC from AD" / "Load PC without client from AD") never checked "Configure AD User" at all, so it kept working off a previously-saved AD account even with the checkbox unchecked - inconsistent with Client actions'/Client updates' own credential checks, and with this feature's own documented scope ("Configure AD User" makes AD credentials available to Client actions, Client updates, **and AD Computer Import**). Now rejects with the same message the other two features use when the checkbox is off.
 
-## [0.21.2] - 2026-07-21
+## [0.21.2]
 
 ### Fixed
 
@@ -50,7 +317,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Comment accuracy pass across the whole codebase ahead of merging to `home`: removed 11 dangling references to internal AI-development planning documents/task numbers (`docs/superpowers/...`, `(Task N)`) that a reader outside this repo's own development history has no way to resolve; corrected one comment left over from the `AdSyncEnabled`/`AdDescriptionSyncEnabled` split that still described the old single-flag meaning; added missing explanations for two previously-uncommented magic numbers (a fixed ZIP timestamp constant, and an undocumented `.254` vs `.255` inconsistency between `ExpandInstallTarget`'s two input forms - the inconsistency itself is pre-existing and intentionally left as-is, only now documented); removed disabled, unexplained dead code (`Deploy-ClientGpo.ps1`'s commented-out central-log fragments); corrected the Install Wizard's AD question, which still asked to "Enable Active Directory description sync" when `-AdSyncEnabled` now configures AD identity, not Description sync specifically.
 - README.md/README_RU.md: added the `Client package` tab's package-share-path capability to four descriptions that had omitted it in both languages; documented the new WinRM friendly-error-message behavior; removed a hardcoded version reference in README_RU.md.
 
-## [0.21.1] - 2026-07-21
+## [0.21.1]
 
 ### Fixed
 
@@ -61,7 +328,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - The `Certificate` tab's "Delete installed certificate" button had no spacing below it, crowding the "Certificate file (.pfx / .p12)" field directly underneath.
 - `Install-ClientWinRM.ps1`/`Uninstall-ClientWinRM.ps1` surfaced a WinRM connection failure's raw, OS-localized exception text verbatim (e.g. Russian text on a Russian-locale target, unreadable to an admin on a different locale) - both scripts now classify the failure by its .NET exception type/error code (not by matching locale-dependent message text) into one of two short, English explanations - "Computer unreachable - could not resolve its name" or "WinRM service is not reachable on this computer" - with the original message still appended for real troubleshooting. Only the name-resolution-failure error code is mapped with real confidence; every other WinRM transport failure falls into the second, more general bucket pending further verification against a live fleet.
 
-## [0.21.0] - 2026-07-21
+## [0.21.0]
 
 ### Added
 
@@ -77,26 +344,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - CSV export (`Clients` tab) always showed "Not found in AD"/"AD unreachable" for a client whose `adSyncStatus` was set that way the last time AD Description Sync ran, even after Sync was turned off and the Description manually edited - the table itself already ignored `adSyncStatus` once sync was off, but the export didn't. The export now checks `adDescriptionSyncEnabled` the same way the table does, so a manually-set Description shows correctly in the export once sync is off.
 - `README_RU.md`: fixed reversed word order ("identity AD" -> "AD identity") in the two `Client actions`/`Client updates` paragraphs describing the "Use global AD settings" checkbox requirement.
 
-## [0.20.2] - 2026-07-21
+## [0.20.2]
 
 ### Fixed
 
 - The `Clients` table joined a computer's IP addresses onto one comma-separated line, so a machine with several IPs visually stretched the whole Computer column. Now each address renders on its own line (CSV export and the search-match text still use the comma-joined form - only the table cell's HTML rendering changed).
 
-## [0.20.1] - 2026-07-21
+## [0.20.1]
 
 ### Fixed
 
 - The `Client actions` panel's narrow-viewport layout bug (documented at the `0.19.x` breakpoint, caused by a `.install-grid .primary-button` selector-specificity conflict with the `@media (max-width: 900px)` reset) turned out to already be resolved as a side effect of the `0.19.2`/`0.19.3` restructuring - the affected controls are no longer direct children of `.install-grid`. Re-verified clean at 900/800/600px.
 - Found and fixed a narrower, previously-undiscovered overflow: `.install-right-fields` (the Action/Server URL/WinRM user/password sub-grid introduced in `0.19.2`) kept its 2-column layout down to true phone widths, where its `minmax(180px, ...)`/`minmax(140px, ...)` combined minimum (332px) no longer fit and caused real horizontal page overflow. Added a `@media (max-width: 480px)` rule collapsing it to one column, matching the existing `.install-grid` collapse pattern.
 
-## [0.20.0] - 2026-07-21
+## [0.20.0]
 
 ### Added
 
 - `Client actions` has a "Use global AD settings" checkbox next to WinRM user/password: reuses the AD Domain/credentials already configured for AD Description Sync (Settings > General > Active Directory) instead of typing them per push - the server's own service identity if "Use service account identity" is set there, or the saved AD account otherwise. Requires AD sync to actually be enabled and, when not using the service identity, a saved username and password - rejected with a clear error otherwise. The WinRM user/password fields are disabled while it's checked.
 
-## [0.19.3] - 2026-07-21
+## [0.19.3]
 
 ### Fixed
 
@@ -107,20 +374,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - "Log retention days" moved out of the `Client actions` form into Settings > General ("Client action log retention (days)", in the Inventory block) as a real global setting, persisted across restarts - every install/uninstall/update push now uses it, instead of re-typing a value (that silently reset to 30 on every page load) on each push.
 - Force reinstall/Add to TrustedHosts/Install client moved from their own row at the bottom of the panel into the same block as Action/Server URL/WinRM user/password, right below them - the whole set of install controls now reads as one cluster next to Action instead of split across two separate areas of the page.
 
-## [0.19.2] - 2026-07-21
+## [0.19.2]
 
 ### Fixed
 
 - Growing the Targets textarea still made the "Load from AD" buttons scroll out of view (they lived inside the same fixed-height, scrollable wrap as the textarea). Moved them - and the result/warning message area - outside that wrap, into `.install-targets-field`'s normal flow, so they always stay visible and in place regardless of how tall Targets is dragged.
 - Action/Server URL/WinRM user/password sat at inconsistent heights depending on which fields were visible (e.g. Install vs Uninstall mode changed how the leftover row height split between them, since each field independently negotiated its own row against the much taller Targets field). Bundled all four into one `.install-right-fields` sub-grid, placed as a single item spanning the same rows Targets does - the outer grid now only ever compares one block's height against Targets', not four independent fields', so they stay pinned together at a consistent top-aligned position in both modes.
 
-## [0.19.1] - 2026-07-21
+## [0.19.1]
 
 ### Fixed
 
 - The `0.19.0` textarea `max-height` fix wasn't enough - `.install-targets-field` (the grid cell containing Targets, spanning the same two rows as Action/Server URL/WinRM user/password) still grew along with the bounded textarea, so dragging it still shifted the other fields. Gave the cell itself a fixed 320px height, fully decoupled from its content - dragging Targets now never moves anything else, content past 320px just scrolls internally.
 
-## [0.19.0] - 2026-07-21
+## [0.19.0]
 
 ### Added
 
@@ -131,19 +398,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - "Load from AD" (now "Load all PC from AD") switched from the quiet `.export-button` style to `.primary-button` - it was reading as too easy to miss next to the Targets field.
 - The Targets textarea's manual resize handle is now capped (`max-height: 400px`, scrolls internally past that) instead of unbounded - dragging it taller previously inflated the shared grid row it sits in alongside Action/Server URL/WinRM user/password, scattering them apart from each other.
 
-## [0.18.0] - 2026-07-20
+## [0.18.0]
 
 ### Added
 
 - `Client actions` has a "Load from AD" button next to Targets: pulls a computer list directly from Active Directory (scoped to one or more Organizational Units configured in Settings > General, or the whole domain if none are set) and replaces the Targets field with it. Reuses the existing AD Domain/credentials already configured for AD Description Sync - nothing new to set up if that's already in use. A single bad/unreachable OU is skipped with a warning rather than failing the whole load.
 
-## [0.17.4] - 2026-07-20
+## [0.17.4]
 
 ### Added
 
 - The debug log (`--debug-log-enabled` / General settings) now records a `[Schedule]` line whenever a scheduled client-update push actually starts (job ID, mode, target count) - previously the schedule tick only logged on failure, so there was no way to tell from the log whether a schedule had fired at all, only that it hadn't crashed.
 
-## [0.17.3] - 2026-07-20
+## [0.17.3]
 
 ### Fixed
 
@@ -153,7 +420,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Every settings panel's "Saved."/"Settings saved."/similar confirmation message stayed visible forever once shown, across all six Save actions (WinRM credentials, Client Update Schedule, Client package, General settings, Admin password, plus the "Saved credentials deleted." message) - none of them ever hid it again except on the next save. Extracted the shared `showSavedMessage` helper: a success message now auto-hides after 30s (tracking its own pending timer so repeated saves don't stack them); error messages are left alone, as before.
 - Interval-mode schedule pushes could redundantly re-push to a machine they had just finished updating: a successful push only becomes visible to the outdated-clients calculation once that client's own next inventory report arrives, so a schedule interval shorter than the client's own reporting interval kept re-selecting it as still outdated. A successful install push now patches the target's stored report version immediately, closing the gap - the client's own next report just confirms the same version once it arrives.
 
-## [0.17.2] - 2026-07-20
+## [0.17.2]
 
 ### Security
 
@@ -172,38 +439,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 All of the above were found by two review passes (server/PowerShell/dashboard-client security review, and frontend/API design consistency review) requested against the full codebase, plus additional gaps found during independent verification of the reviewers' findings. Verified via the C# self-test suite (45/45), the Pester suite (18/18), and live Playwright/HTTP checks against a local console-mode instance.
 
-## [0.17.1] - 2026-07-18
+## [0.17.1]
 
 ### Security
 
 - **Critical: command injection via `serverUrl` on the WinRM push path (`POST /api/v1/client-install`), leading to remote code execution on target machines.** `Deploy-ClientGpo.ps1`'s `sc.exe create` command line (introduced by the `0.16.4` quoting fix, which switched service creation to `cmd.exe /c` for a different bug) escaped only `"` before embedding `ServerUrl`/`Token`, but `cmd.exe`'s `&`/`|`/`<`/`>`/`^` are not neutralized by surrounding double quotes - a well-known quirk, confirmed by direct reproduction against the real code path. `Client actions`' `serverUrl` field reached this sink completely unvalidated (the `0.15.1` metacharacter guard only covered the separate GPO-`.cmd`-generation path), and with no credential supplied the resulting WinRM session runs as the server's own service identity - a dashboard user could push an install with a crafted `serverUrl` and run arbitrary commands, as that privileged identity, on every target machine. Fixed by rejecting the same unsafe characters at the server's entry point (`StartClientAction`) and, for defense-in-depth, at the `sc.exe` sink itself in `Deploy-ClientGpo.ps1`, `Install-Client.ps1`, and `Install-Server.ps1`. Confirmed the fix blocks the exact reproduced payload and does not reject a legitimate URL, verified live against a running instance. Found via a dedicated security review of the PowerShell scripts.
 
-## [0.17.0] - 2026-07-18
+## [0.17.0]
 
 ### Added
 
 - `Client updates` has a Schedule section: push automatically once at a chosen date/time, or every N hours, targeting whichever clients are outdated when the schedule fires. Configured entirely from the dashboard; persists across service restarts; uses the same saved-account/service-identity credential fallback as a manual push with blank fields.
 
-## [0.16.11] - 2026-07-18
+## [0.16.11]
 
 ### Changed
 
 - "Sync mode" moved out of the old wide top row into the same fixed-width panel as "Enable AD sync" (420px, matching the identity panel below it). "Sync interval (hours)" is now hidden entirely when Sync mode is "On inventory report" (it has no effect in that mode) and appears next to "Sync mode" only when "Periodic timer" is selected. Verified with Playwright, both sync modes.
 
-## [0.16.10] - 2026-07-18
+## [0.16.10]
 
 ### Changed
 
 - Reworked the Active Directory settings layout: "Domain", "Use service account identity", "AD username", and "AD password" moved out of the wide multi-column `general-grid` into their own single-column panel capped at 420px, instead of stretching a domain/account field edge-to-edge or packing it into a row with unrelated fields. "Enable AD sync", "Sync mode", and "Sync interval" stay in the original row layout above it. Verified with Playwright against a local console-mode instance, light and dark theme.
 
-## [0.16.9] - 2026-07-18
+## [0.16.9]
 
 ### Fixed
 
 - The Active Directory settings grid (`general-grid`, 3 columns) packed "Domain" into the same row as "Use service account identity"/"AD username" once the identity checkbox was unchecked and those two extra fields became visible - straddling two unrelated field groups across one row. "Domain" now spans the full row, keeping "Enable AD sync/Sync mode/Sync interval" as one row and "Use service account identity/AD username/AD password" as the next.
 - `Client package`'s "outdated" warning (`net35VersionMismatch`/`net40VersionMismatch`) compared the packaged client's version against the *server's* own version - a check that only made sense back when both tracked one shared project version. Now that the client version is decoupled from the server version (see the versioning note above), this comparison is permanently meaningless and would have permanently flagged every correctly-built package as outdated. Removed the check, the warning UI, and the download confirmation prompt it drove; `Install-Server.ps1`'s existing unconditional rebuild-and-copy of the client package on every run (0.14.0) is what actually keeps this package fresh.
 
-## [0.16.8] - 2026-07-18
+## [0.16.8]
 
 ### Added
 
@@ -213,13 +480,13 @@ All of the above were found by two review passes (server/PowerShell/dashboard-cl
 
 - The sidebar "Client updates" badge count never refreshed on its own - it only updated on page load or when the Client updates tab was opened, unlike the rest of the dashboard's 30-second live auto-refresh (v0.15.0). `pollForUpdates()` now also polls `GET /api/v1/client-updates` on every tick and updates the badge, without touching the tab's own table/checkboxes (a full re-render there would have silently cleared an in-progress selection if the tab happened to be open when a poll landed).
 
-## [0.16.7] - 2026-07-18
+## [0.16.7]
 
 ### Fixed
 
 - `Client updates`' "Save" button cleared the password field after a successful save but left the username field exactly as typed, so clicking "Update selected" right after "Save" without retyping anything reproduced the identical mismatched-credential-pair bug fixed in 0.16.6 (real username paired with a blank password sent straight to WinRM), just triggered by the save action instead of a page load. Confirmed live: `klg-wsw8-004` failed with "Access denied" after this exact save-then-push sequence. `saveClientUpdateCredentials` now clears both fields on success and refreshes the read-only "Saved account" hint, so the push form always returns to genuinely blank after a save.
 
-## [0.16.6] - 2026-07-18
+## [0.16.6]
 
 ### Fixed
 
@@ -229,31 +496,31 @@ All of the above were found by two review passes (server/PowerShell/dashboard-cl
 
 - `Client updates` has a "Delete saved credentials" button to clear the saved WinRM account, useful when re-testing the fallback-to-service-identity path without having to overwrite the saved fields with blanks by hand.
 
-## [0.16.5] - 2026-07-18
+## [0.16.5]
 
 ### Fixed
 
 - `Install-Server.ps1 -ClientPackagePath\Deploy-ClientGpo.ps1` (the script every WinRM push - both `Client actions` and `Client updates` - actually deploys to targets, since the server always sources it from `ClientPackagePath`) was never refreshed by a plain "Just refresh" server reinstall, only by the rarer `-ClientServerUrl`/`-ClientPackageSourcePath` paths. The two client executables in `ClientPackagePath` were already kept current on every run (fixed in 0.14.0), but `Deploy-ClientGpo.ps1` was missed - meaning a server upgrade that only bumped the exe silently left every future WinRM push deploying whatever version of that script happened to exist the last time a full package request was made, including the pre-0.16.4 version with the `sc.exe` 1639 bug this session's testing had just fixed at the source. Now copied unconditionally alongside the two executables on every server install/reinstall.
 
-## [0.16.4] - 2026-07-18
+## [0.16.4]
 
 ### Fixed
 
 - Service creation (`Install-Client.ps1`, `Install-Server.ps1`, and `Deploy-ClientGpo.ps1`, the script a GPO/WinRM push runs on the target) failed with `sc.exe exit code: 1639` ("invalid command line", `sc.exe` printing its own usage text instead of a specific error) on at least Windows PowerShell 4.0. Root cause, confirmed live on a real Windows 8 target: `sc.exe create`'s `binPath=` value must itself contain embedded double quotes around the executable path, and passing that as one element of a PowerShell array via `& sc.exe @Arguments` does not reliably preserve those embedded quotes in the command line `sc.exe` actually receives - some PowerShell engines corrupt it, breaking the argument apart. Verified two ways on the affected machine: the array form reproduced the exact failure in isolation (no WinRM involved), and building the same command as one string with the quotes backslash-escaped and invoking through `cmd.exe /c` succeeded. All three scripts' `create` call now goes through this `cmd.exe /c` form; every other `sc.exe` call (query/stop/delete/description/start) has no embedded quotes in its arguments and was unaffected, so those are unchanged.
 
-## [0.16.3] - 2026-07-18
+## [0.16.3]
 
 ### Fixed
 
 - `Client updates`' saved WinRM credentials (`Client update username`/`Client update password`) were stored correctly but never actually used by a push. The dashboard's password field is cleared right after a successful Save (the real value is never sent back to the browser), and `Update selected` read straight from that same now-empty field - so every push after the first Save silently ran under the server's own service identity instead of the saved account, with no error until that identity turned out to lack rights on a target ("Access denied" from WinRM, reported live against a real Windows 8 target that a manually-supplied credential could reach fine). Fixed by having the dashboard send a `useSavedCredentials` flag with the push request; the server now falls back to the saved account when both the request's username and password are blank, still letting a freshly-typed per-push override take priority, and leaving `Client actions` (which never sends the flag) completely unaffected.
 
-## [0.16.2] - 2026-07-17
+## [0.16.2]
 
 ### Fixed
 
 - Dark theme reset to light on every page reload. Root cause: the `Content-Security-Policy` header added in 0.15.1 set `script-src 'self'` with no `'unsafe-inline'` or hash, which silently blocked `index.html`'s inline theme-restore `<script>` (reads `localStorage` before `styles.css` loads, to avoid a flash of the wrong theme on load). The script never ran, so the page always fell back to the OS's `prefers-color-scheme`, ignoring the saved preference - `toggleTheme()` itself still worked and still saved to `localStorage` correctly, only the on-load restore was broken. Fixed by adding that script's exact `sha256` hash to `script-src`, allowing only this one specific, unchanging inline script rather than a blanket `'unsafe-inline'` that would have reopened the original XSS backstop the CSP was added for.
 
-## [0.16.1] - 2026-07-17
+## [0.16.1]
 
 ### Changed
 
@@ -263,13 +530,13 @@ All of the above were found by two review passes (server/PowerShell/dashboard-cl
 
 - `Install-Client.ps1` and `Collect-WindowsInventoryLite.ps1` (the two client-side scripts meant to run directly on a client machine, not just build/deploy from a server) used `$PSScriptRoot`, which is unset for a top-level script under Windows PowerShell 2.0 - it only started working outside modules in PS 3.0. Both scripts declared `#requires -Version 2.0` but would fail immediately on a real PS 2.0 host. Fixed by resolving the script's own path via `$MyInvocation.MyCommand.Path` instead, which works correctly back to PS 2.0. Server-side scripts (`Install-Server.ps1`, `Install-Wizard.ps1`, `New-ClientGpoPackage.ps1`, `Build-Server.ps1`, `Build-Client.ps1`) keep using `$PSScriptRoot` unchanged - they run on the server/build machine, which this project now assumes is PowerShell 5.1+.
 
-## [0.16.0] - 2026-07-17
+## [0.16.0]
 
 ### Added
 
 - Dashboard `Client updates` tab (Installation section): shows which reporting clients are running a version other than the current client package, with a WinRM push to update selected clients. Windows 7/8/8.1 targets are listed but not selectable, since WinRM is unreliable against them. An optional dedicated WinRM credential can be saved as a fallback to the service's own identity, encrypted at rest the same way as other stored secrets.
 
-## [0.15.1] - 2026-07-17
+## [0.15.1]
 
 ### Security
 
@@ -280,7 +547,7 @@ All of the above were found by two review passes (server/PowerShell/dashboard-cl
 - `server-config.json`'s restrictive ACL (Administrators + SYSTEM only) is now reapplied on every write by the server itself, not just at install time, so it cannot drift back to a broader inherited ACL if the file is ever deleted and recreated while the service is running.
 - The dashboard now sends a `Content-Security-Policy` header on every response, as a backstop against a future unescaped rendering sink.
 
-## [0.15.0] - 2026-07-17
+## [0.15.0]
 
 ### Added
 
@@ -290,7 +557,7 @@ All of the above were found by two review passes (server/PowerShell/dashboard-cl
 
 - Expanded detail rows (Clients/Software/Hardware "show details") no longer collapse when the table re-renders for an unrelated reason (e.g. clicking the pager's Next/Prev buttons).
 
-## [0.14.0] - 2026-07-17
+## [0.14.0]
 
 ### Fixed
 
@@ -301,14 +568,14 @@ All of the above were found by two review passes (server/PowerShell/dashboard-cl
 
 - `Install-Wizard.ps1`'s "Install server" flow now detects an existing installation and offers a "just refresh" option that skips all questions and reapplies the current saved settings as-is, instead of requiring every question to be re-answered on a re-run.
 
-## [0.13.0] - 2026-07-17
+## [0.13.0]
 
 ### Added
 
 - `Install-Wizard.ps1` - an interactive console menu covering all install/uninstall actions (server, local client, remote client via WinRM, and their uninstalls), for administrators unfamiliar with the project's flag-based scripts. Supports `-WhatIf` to preview the resolved command before running anything.
 - `Uninstall-Server.ps1` - previously only client-side uninstall scripts existed; this adds the missing server-side counterpart. Preserves inventory data and configuration by default; `-RemoveData` opts into full removal.
 
-## [0.12.0] - 2026-07-16
+## [0.12.0]
 
 ### Added
 
@@ -316,7 +583,7 @@ All of the above were found by two review passes (server/PowerShell/dashboard-cl
 - The Inventory summary tiles (client count, activation counts, stale count) moved to the top of the Inventory section and are more compact.
 - Swapped the `Collected`/`AD Description` column order in the Clients table.
 
-## [0.11.0] - 2026-07-16
+## [0.11.0]
 
 ### Added
 
@@ -326,14 +593,14 @@ All of the above were found by two review passes (server/PowerShell/dashboard-cl
 
 - Confirmed `CertificatePfxPassword` was never persisted to `server-config.json` in the first place (it is used once, transiently, for a PFX import) - corrected an earlier design assumption to the contrary before it shipped.
 
-## [0.10.1] - 2026-07-16
+## [0.10.1]
 
 ### Fixed
 
 - The Client Package page's grid layout broke when the "Package share path" field was added (a 4th field, but the shared `.pkg-grid` CSS was still templated for 3) - `Ingestion token` and `Interval` were squeezed into the wrong tracks and the Save/Download buttons wrapped onto their own row. Found via a live Playwright design review.
 - The first fix attempt (an ID-scoped override) introduced a worse bug: it silently un-collapsed the grid on mobile, overflowing a 480px viewport, since an ID selector outranks the mobile breakpoint's plain-class collapse rule regardless of source order. Replaced with a modifier class instead, matching the existing `.general-grid`/`.admin-password-grid` pattern.
 
-## [0.10.0] - 2026-07-16
+## [0.10.0]
 
 ### Added
 
@@ -341,7 +608,7 @@ All of the above were found by two review passes (server/PowerShell/dashboard-cl
 - `Install-Server.ps1` gains `-ClientServerUrl` (opt-in, no derived default - guessing wrong would silently ship a broken GPO package): when set, it produces a complete, ready-to-deploy GPO package (both client executables, `Deploy-ClientGpo.ps1`, and a fully configured `Install-ClientGpo.cmd`) directly in `ClientPackagePath` by calling `New-ClientGpoPackage.ps1`, instead of a separate manual packaging step or dashboard visit. New `-ClientIntervalHours` (default 6) and `-PackageSharePath` accompany it; `-Token` is reused from the server's own ingestion token.
 - Moved "Package share path" up to sit directly under "Server URL" on the Client Package dashboard page - it was easy to miss below the interval field.
 
-## [0.9.0] - 2026-07-16
+## [0.9.0]
 
 Client-package deployment usability, driven by a real GPO deployment failure on the live test stand: the client wasn't installing because the GPO startup script's package share path had no dashboard-configurable equivalent, and the deployed client package could silently go stale relative to the server with no warning.
 
@@ -356,7 +623,7 @@ Client-package deployment usability, driven by a real GPO deployment failure on 
 
 - An off-by-one in the new `ParseCmdSettings` extension (parsing `PACKAGE_ROOT` back out of the generated `.cmd`) miscounted the `"set PACKAGE_ROOT="` prefix length, corrupting the round-tripped default value - caught immediately via a new self-test before it shipped.
 
-## [0.8.2] - 2026-07-16
+## [0.8.2]
 
 Whole-branch review pass (security + code quality) covering everything added for AD Description Sync, including the live-stand follow-ups. No Critical or Important findings in security or concurrency; documentation and build-script findings fixed below.
 
@@ -369,13 +636,13 @@ Whole-branch review pass (security + code quality) covering everything added for
 - A stale code comment in `AdLookupService.cs` still referenced `InventoryServer.ApplyAdSync`, a method split into `ComputeAdSyncFields`/`ApplyAdSyncFields` earlier in this branch.
 - The AD username is now sanitized (CRLF-escaped) before being written into a log line, matching the computer name right next to it.
 
-## [0.8.1] - 2026-07-16
+## [0.8.1]
 
 ### Fixed
 
 - Timer-mode AD sync's background sweep did not run for a full `AdSyncIntervalHours` (24h by default) after being enabled or reconfigured - its due time was set to the interval itself instead of firing almost immediately, making timer mode look completely inert for the first day of use. The sweep now starts right after enabling/reconfiguring; each computer's own AD data still only refreshes on its own schedule.
 
-## [0.8.0] - 2026-07-16
+## [0.8.0]
 
 Live-stand follow-up to 0.7.0's AD Description sync, driven by testing against a real Active Directory environment.
 
@@ -393,7 +660,7 @@ Live-stand follow-up to 0.7.0's AD Description sync, driven by testing against a
 - A CSS specificity bug hid the AD credential fields incorrectly in some cases; `.hidden` now reliably wins over more specific component rules.
 - Client-supplied computer names are now escaped before being written into Event Log or debug-log lines, closing a log-forging gap.
 
-## [0.7.0] - 2026-07-15
+## [0.7.0]
 
 ### Added
 
@@ -403,7 +670,7 @@ Live-stand follow-up to 0.7.0's AD Description sync, driven by testing against a
 - New `Description` column on the Clients table and in its CSV export, showing "Not found in AD" or "AD unreachable" when a lookup can't resolve.
 - `AdLookupService` escapes client-reported computer names per RFC 4515 before building LDAP filters, closing off LDAP injection from a client-controlled value.
 
-## [0.6.1] - 2026-07-15
+## [0.6.1]
 
 Follow-up review of 0.6.0's new code and comments.
 
@@ -434,7 +701,7 @@ Design pass based on a live review of the running dashboard (seeded with sample 
 - Dropped the always-visible "Computers" comma-list column from the Hardware (CPU/Storage/RAM) and Software tables - it duplicated the same computer list already available one click away (clicking the model/name link expands a details row with the full list), and became an unreadable wall of text once more than a handful of machines shared a value.
 - "Delete" buttons for routine, frequent, reversible-ish actions (removing a host record, a license entry, a certificate-history log line) are now a quiet outlined style, red only on hover. The solid red fill is reserved for the one genuinely consequential delete in the app - removing the installed certificate, which can turn HTTPS off.
 
-## [0.5.0] - 2026-07-14
+## [0.5.0]
 
 This entry consolidates everything built in this release cycle — dual HTTP/HTTPS listeners, a security and code-quality review, a dark theme, a project icon, and dashboard design-token/typography work — into one version instead of the string of point releases (0.5.1 through 0.10.0) it actually shipped as internally. Only the net result is documented below.
 
@@ -442,7 +709,7 @@ This entry consolidates everything built in this release cycle — dual HTTP/HTT
 
 - New Dashboard "Software" card: the Licenses tile (moved out of the top count row) plus a "Top software" bar chart — the 5 most commonly installed titles across the fleet, counted by distinct computer regardless of which version is installed.
 - HTTP and HTTPS now run as two independent listeners on two independent ports instead of one listener that switches protocol. Default HTTP port is `8080` (`-ListenPrefix`, unchanged), default HTTPS port is `8443` (new `-HttpsPort`). Both can run together, HTTPS-only, or HTTP-only.
-- HTTP can be disabled entirely once HTTPS is confirmed working, from Settings > General or `Install-Server.ps1 -DisableHttp`. The server refuses the change unless HTTPS is genuinely active at that moment, so the settings page can never turn off both listeners and lock the dashboard out. Recovery procedure for a certificate that later breaks after HTTP was disabled is documented in the README's [Recovering from an HTTPS lockout](./README.md#recovering-from-an-https-lockout) section.
+- HTTP can be disabled entirely once HTTPS is confirmed working, from Settings > General or `Install-Server.ps1 -DisableHttp`. The server refuses the change unless HTTPS is genuinely active at that moment, so the settings page can never turn off both listeners and lock the dashboard out. Recovery procedure for a certificate that later breaks after HTTP was disabled is documented in the threat model's [Recovering from an HTTPS lockout](./docs/threat-model.md#recovering-from-an-https-lockout) section.
 - Settings > General can now change the HTTP port directly from the dashboard (previously only available via `-ListenPrefix` at install time, and previously did not survive a plain service restart - see Fixed).
 - Settings > General reorganized into three blocks: Inventory (stale threshold), Network (HTTP port, Enable HTTP), HTTPS (HTTPS port, Enable HTTPS).
 - The Dashboard's Hardware and Software cards draw a visible border/background around each mini-chart (CPU models, RAM, Storage type, Top software), so it's clear at a glance which values belong to which chart.
@@ -474,7 +741,7 @@ This entry consolidates everything built in this release cycle — dual HTTP/HTT
 
 - Existing installs with HTTPS already enabled were serving it on the same port as HTTP. After upgrading, HTTPS moves to its own port (default `8443`) on the next service restart. Reconfigure firewall rules and any bookmarked `https://` URLs to use the new port, or set `-HttpsPort` to the old port explicitly during the next `Install-Server.ps1` run to keep it unchanged.
 
-## [0.4.0] - 2026-07-13
+## [0.4.0]
 
 Project versioning is now unified: client and server report the same project version instead of drifting independently (client was stuck at 0.1.0 while the server moved ahead).
 
@@ -510,7 +777,7 @@ This entry consolidates everything built in this release cycle — dashboard nav
 - Uploading a certificate while HTTPS was already active hot-swapped the live TLS certificate immediately with no risk check, unlike enabling HTTPS from Settings > General. The live listener now keeps serving its current certificate until the operator explicitly switches to a risky one from Settings > General; a risk-free upload still hot-swaps immediately.
 - Deleting a license record didn't refresh the Software table, so its License button could keep pointing at a record that no longer existed until the next navigation.
 
-## [0.3.0] - 2026-07-13
+## [0.3.0]
 
 ### Added
 
@@ -529,7 +796,7 @@ This entry consolidates everything built in this release cycle — dashboard nav
 
 - `Install-Server.ps1` restricted `server-config.json`'s ACL using the literal account names `Administrators` and `SYSTEM`, which only resolve on English-locale Windows. On localized installs this threw `IdentityNotMappedException` from `AddAccessRule` and aborted the install. Now resolves both groups by well-known SID, which works regardless of the OS display language.
 
-## [0.2.0] - 2026-06-11
+## [0.2.0]
 
 ### Added
 
@@ -539,7 +806,7 @@ This entry consolidates everything built in this release cycle — dashboard nav
 - `GET /api/v1/client-package/download` endpoint streams the GPO package as a ZIP archive (`WindowsInventoryLiteGpoPackage.zip`). ZIP is built in-process using uncompressed PKZIP format without requiring .NET 4.5.
 - `Install-Server.ps1` now copies `Deploy-ClientGpo.ps1` from the project `deploy/client/` directory into the server install path so the configure endpoint can include it in downloaded packages.
 
-## [0.1.0] - 2026-06-11
+## [0.1.0]
 
 Initial public release as Windows Inventory Lite. Previously an internal tool.
 

@@ -48,7 +48,6 @@
             <span class="brand-word-sub">Lite</span>
           </span>
         </div>
-        <button id="themeToggle" class="theme-toggle" type="button" title="Toggle color theme" aria-label="Toggle color theme">&#9790;</button>
       </div>
       <nav class="nav-tree">
         <button id="dashboardTab" class="nav-item nav-item-root active" type="button">
@@ -56,7 +55,7 @@
           Dashboard
         </button>
         <div class="nav-group">
-          <div class="nav-group-title">Inventory</div>
+          <div class="nav-group-title">Windows Inventory</div>
           <button id="clientsTab" class="nav-item" type="button">
             <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="10" rx="1.2"/><line x1="7" y1="17" x2="13" y2="17"/><line x1="10" y1="13.5" x2="10" y2="17"/></svg>
             Clients
@@ -65,11 +64,22 @@
             <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5 L17.5 6.5 L17.5 13.5 L10 17.5 L2.5 13.5 L2.5 6.5 Z"/><line x1="10" y1="10" x2="17.3" y2="6.3"/><line x1="10" y1="10" x2="2.7" y2="6.3"/><line x1="10" y1="10" x2="10" y2="17.5"/></svg>
             Software
           </button>
-          <button id="hardwareTab" class="nav-item" type="button">
-            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="5" width="10" height="10" rx="1"/><line x1="8" y1="1.5" x2="8" y2="5"/><line x1="12" y1="1.5" x2="12" y2="5"/><line x1="8" y1="15" x2="8" y2="18.5"/><line x1="12" y1="15" x2="12" y2="18.5"/><line x1="1.5" y1="8" x2="5" y2="8"/><line x1="1.5" y1="12" x2="5" y2="12"/><line x1="15" y1="8" x2="18.5" y2="8"/><line x1="15" y1="12" x2="18.5" y2="12"/></svg>
-            Hardware
+        </div>
+        <div class="nav-group">
+          <div class="nav-group-title">Linux Inventory</div>
+          <button id="linuxClientsTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="10" rx="1.2"/><line x1="7" y1="17" x2="13" y2="17"/><line x1="10" y1="13.5" x2="10" y2="17"/></svg>
+            Clients
+          </button>
+          <button id="linuxSoftwareTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5 L17.5 6.5 L17.5 13.5 L10 17.5 L2.5 13.5 L2.5 6.5 Z"/><line x1="10" y1="10" x2="17.3" y2="6.3"/><line x1="10" y1="10" x2="2.7" y2="6.3"/><line x1="10" y1="10" x2="10" y2="17.5"/></svg>
+            Software
           </button>
         </div>
+        <button id="hardwareTab" class="nav-item nav-item-root" type="button">
+          <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="5" width="10" height="10" rx="1"/><line x1="8" y1="1.5" x2="8" y2="5"/><line x1="12" y1="1.5" x2="12" y2="5"/><line x1="8" y1="15" x2="8" y2="18.5"/><line x1="12" y1="15" x2="12" y2="18.5"/><line x1="1.5" y1="8" x2="5" y2="8"/><line x1="1.5" y1="12" x2="5" y2="12"/><line x1="15" y1="8" x2="18.5" y2="8"/><line x1="15" y1="12" x2="18.5" y2="12"/></svg>
+          Hardware
+        </button>
         <button id="licensesTab" class="nav-item nav-item-root" type="button">
           <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 2.5 h7 l3 3 v12 h-10 z"/><path d="M12 2.5 v3 h3"/><line x1="7" y1="11" x2="13" y2="11"/><line x1="7" y1="14" x2="11" y2="14"/></svg>
           Licenses
@@ -78,16 +88,25 @@
           <div class="nav-group-title">Installation</div>
           <button id="installTab" class="nav-item" type="button">
             <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M11 2 L4 11.5 H9.5 L8.5 18 L16 8 H10.5 Z"/></svg>
-            Client actions
+            Windows Client actions
+          </button>
+          <button id="updatesTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 a7 7 0 1 1 -6.3 4"/><path d="M3 3 v4 h4"/></svg>
+            Windows Client updates
+            <span id="updatesBadge" class="nav-badge hidden">0</span>
+          </button>
+          <button id="linuxInstallTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M11 2 L4 11.5 H9.5 L8.5 18 L16 8 H10.5 Z"/></svg>
+            Linux Client actions
+          </button>
+          <button id="linuxUpdatesTab" class="nav-item" type="button">
+            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 a7 7 0 1 1 -6.3 4"/><path d="M3 3 v4 h4"/></svg>
+            Linux Client updates
+            <span id="linuxUpdatesBadge" class="nav-badge hidden">0</span>
           </button>
           <button id="packageTab" class="nav-item" type="button">
             <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="4" width="15" height="3.5" rx="0.8"/><path d="M3.5 7.5 v8 h13 v-8"/><line x1="8" y1="10.5" x2="12" y2="10.5"/></svg>
             Client package
-          </button>
-          <button id="updatesTab" class="nav-item" type="button">
-            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 a7 7 0 1 1 -6.3 4"/><path d="M3 3 v4 h4"/></svg>
-            Client updates
-            <span id="updatesBadge" class="nav-badge hidden">0</span>
           </button>
         </div>
         <div class="nav-group">
@@ -115,16 +134,13 @@
     <div class="content-area">
       <header class="topbar">
         <input id="searchInput" type="search" placeholder="Filter computers, OS, Office, software, hardware">
+        <div class="topbar-actions">
+          <button id="themeToggle" class="theme-toggle" type="button" title="Toggle color theme" aria-label="Toggle color theme">&#9790;</button>
+          <button id="logoutButton" class="logout-button" type="button" title="Log out">Log out</button>
+        </div>
       </header>
 
       <main>
-        <section id="summarySection" class="summary summary-compact" aria-label="Inventory summary">
-          <div><span id="clientCount">0</span><small>Clients</small></div>
-          <div><span id="windowsActivated">0</span><small>Windows activated</small></div>
-          <div><span id="officeActivated">0</span><small>Office activated</small></div>
-          <div id="staleTile"><span id="staleCount">0</span><small id="staleLabel">Stale &gt;48h</small></div>
-        </section>
-
         <section id="dashboardView" class="install-panel" aria-label="Dashboard">
           <div id="dashboardTiles" class="summary dashboard-tiles">
             <div><span id="dashClientCount">0</span><small>Clients</small></div>
@@ -142,6 +158,10 @@
               <div class="dash-chart">
                 <h3>Top software</h3>
                 <div id="dashSoftwareChart" class="bar-chart"></div>
+              </div>
+              <div class="dash-chart">
+                <h3>OS versions</h3>
+                <div id="dashOsChart" class="bar-chart"></div>
               </div>
             </div>
           </div>
@@ -259,6 +279,55 @@
               </label>
             </div>
             <p class="cert-hint">"Configure AD User" makes the domain/credentials below available to Client actions, Client updates, and AD Computer Import. "Sync Description from AD" additionally writes each computer's Active Directory description into its inventory record, read-only in the Clients table while it's on. Turn it off to edit Description manually instead - re-enabling it later overwrites any manual edits on the next sync. Reading the description attribute is allowed to any authenticated domain user by default AD ACLs, so the service account identity usually needs no special AD delegation.</p>
+          </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Linux Client update credentials</h2>
+            <p class="cert-hint">Used by Linux Client actions/updates pushes when "Stored Linux credentials" or "SSH key" auth mode is selected on those pages. Leave password blank to keep the currently saved value.</p>
+            <div class="pkg-grid client-update-grid">
+              <label class="pkg-token-field">
+                Linux update username
+                <input id="linuxCredsUsername" type="text" autocomplete="username" placeholder="root">
+              </label>
+              <label class="pkg-token-field">
+                Linux update password
+                <input id="linuxCredsPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current one">
+              </label>
+              <div class="pkg-buttons">
+                <button id="linuxCredsSaveButton" class="primary-button" type="button">Save</button>
+                <button id="linuxCredsClearButton" class="danger-button-ghost" type="button">Delete saved credentials</button>
+              </div>
+            </div>
+            <p id="linuxSshToolsStatus" class="cert-hint">Checking plink.exe/pscp.exe status...</p>
+            <div id="linuxCredsMessage" class="pkg-message hidden"></div>
+            <h2 class="settings-block-title">SSH key</h2>
+            <p id="linuxSshKeyStatus" class="pkg-status">Loading SSH key status...</p>
+            <div class="pkg-grid">
+              <label class="pkg-url-field">
+                Private key file
+                <input id="linuxSshKeyFile" type="file">
+              </label>
+              <div class="pkg-buttons">
+                <button id="linuxSshKeyUploadButton" class="primary-button" type="button">Upload key</button>
+                <button id="linuxSshKeyDeleteButton" class="danger-button-ghost" type="button">Delete key</button>
+              </div>
+            </div>
+            <div id="linuxSshKeyMessage" class="pkg-message hidden"></div>
+          </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Ingestion Token</h2>
+            <p id="ingestionTokenStatusText" class="pkg-status">Loading status...</p>
+            <label class="token-value-field">
+              Current token
+              <input id="ingestionTokenValue" type="text" class="mono" readonly value="">
+            </label>
+            <label class="check-label ingestion-require-token-field">
+              <input id="generalRequireIngestionToken" type="checkbox" checked>
+              Require ingestion token
+            </label>
+            <div class="pkg-buttons">
+              <button id="ingestionTokenRegenerateButton" class="danger-button" type="button">Regenerate</button>
+            </div>
+            <div id="ingestionTokenMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Diagnostics</h2>
@@ -419,32 +488,111 @@
           </div>
         </section>
 
-        <section id="packageView" class="install-panel hidden" aria-label="Client package">
-          <p id="pkgStatus" class="pkg-status">Loading package status...</p>
-          <div class="pkg-grid pkg-grid-package">
-            <label class="pkg-url-field">
-              Server URL
-              <input id="pkgServerUrl" type="text" placeholder="http://192.168.1.1:8080/api/v1/inventory">
-            </label>
-            <label class="pkg-url-field">
-              Package share path
-              <input id="pkgSharePath" type="text" placeholder="leave blank to use the folder the .cmd itself runs from">
-            </label>
-            <label class="pkg-token-field">
-              Ingestion token
-              <input id="pkgToken" type="text" autocomplete="off" placeholder="leave empty if not used">
-            </label>
-            <label class="pkg-interval-field">
-              Interval (hours)
-              <input id="pkgIntervalHours" type="number" min="1" max="24" value="6">
-            </label>
-            <div class="pkg-buttons">
-              <button id="pkgSaveButton" class="primary-button" type="button">Save</button>
-              <button id="pkgDownloadButton" class="export-button" type="button">Download GPO package</button>
-            </div>
+        <section id="linuxClientsView" class="hidden" aria-label="Linux clients">
+          <div class="view-toolbar">
+            <button id="exportLinuxClientsBtn" class="export-button" type="button">Export CSV</button>
           </div>
-          <p class="cert-hint">By default the GPO startup script (<code>Install-ClientGpo.cmd</code>) looks for the client files in its own folder. Set this only when the script and the client files are deployed to different locations (for example, the script runs from SYSVOL but the client executables live on a separate file share) - an UNC path such as <code>\\server\share\gpo-client</code>.</p>
-          <div id="pkgMessage" class="pkg-message hidden"></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th data-sort-table="linuxClients" data-sort-key="hostname" class="sortable">Computer</th>
+                  <th data-sort-table="linuxClients" data-sort-key="clientVersion" class="sortable">Client</th>
+                  <th data-sort-table="linuxClients" data-sort-key="os" class="sortable">OS</th>
+                  <th>IP</th>
+                  <th data-sort-table="linuxClients" data-sort-key="softwareCount" class="sortable">Software</th>
+                  <th id="linuxDescriptionColumnHeader">AD Description</th>
+                  <th data-sort-table="linuxClients" data-sort-key="collectedAt" class="sortable">Collected</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="linuxClientsBody"></tbody>
+            </table>
+          </div>
+          <div id="linuxClientsPager" class="pager"></div>
+        </section>
+
+        <section id="linuxSoftwareView" class="hidden" aria-label="Linux software inventory">
+          <div class="view-toolbar">
+            <button id="exportLinuxSoftwareBtn" class="export-button" type="button">Export CSV</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th data-sort-table="linuxSoftware" data-sort-key="name" class="sortable">Software</th>
+                  <th data-sort-table="linuxSoftware" data-sort-key="version" class="sortable">Version</th>
+                  <th data-sort-table="linuxSoftware" data-sort-key="count" class="sortable">Installations</th>
+                </tr>
+              </thead>
+              <tbody id="linuxSoftwareBody"></tbody>
+            </table>
+          </div>
+          <div id="linuxSoftwarePager" class="pager"></div>
+        </section>
+
+        <section id="packageView" class="install-panel hidden" aria-label="Client package">
+          <div class="settings-block">
+            <h2 class="settings-block-title">Windows package</h2>
+            <p id="pkgStatus" class="pkg-status">Loading package status...</p>
+            <div class="pkg-grid pkg-grid-package">
+              <label class="pkg-url-field">
+                Server URL
+                <input id="pkgServerUrl" type="text" placeholder="http://192.168.1.1:8080/api/v1/inventory">
+              </label>
+              <label class="pkg-token-field">
+                Ingestion token
+                <input id="pkgToken" type="text" autocomplete="off" placeholder="leave empty to use the server's current token">
+              </label>
+              <label class="pkg-url-field">
+                Package share path
+                <input id="pkgSharePath" type="text" placeholder="leave blank to use the .cmd's own folder">
+              </label>
+              <label class="pkg-interval-field">
+                Interval (hours)
+                <input id="pkgIntervalHours" type="number" min="1" max="24" value="6">
+              </label>
+              <div class="pkg-buttons">
+                <button id="pkgSaveButton" class="primary-button" type="button">Save</button>
+                <button id="pkgDownloadButton" class="export-button" type="button">Download GPO package</button>
+              </div>
+            </div>
+            <p class="cert-hint">By default the GPO startup script (<code>Install-ClientGpo.cmd</code>) looks for the client files in its own folder. Set this only when the script and the client files are deployed to different locations (for example, the script runs from SYSVOL but the client executables live on a separate file share) - an UNC path such as <code>\\server\share\gpo-client</code>.</p>
+            <div id="pkgMessage" class="pkg-message hidden"></div>
+          </div>
+
+          <div class="settings-block">
+            <h2 class="settings-block-title">Linux package</h2>
+            <p class="cert-hint">A self-contained download for environments without SSH connectivity from this server: the Linux client binary, its systemd unit files, and an install.sh script an admin runs locally on the target (or via any config-management tool) - no plink/pscp/SSH involved on this path.</p>
+            <p id="linuxPkgStatus" class="pkg-status">Loading Linux package status...</p>
+            <div class="pkg-grid pkg-grid-package">
+              <label class="pkg-url-field">
+                Server URL
+                <input id="linuxPkgServerUrl" type="text" placeholder="http://192.168.1.1:8080/api/v1/linux/inventory">
+              </label>
+              <label class="pkg-token-field">
+                Ingestion token
+                <input id="linuxPkgToken" type="text" autocomplete="off" placeholder="leave empty to use the server's current token">
+              </label>
+              <label class="pkg-url-field">
+                Install path
+                <input id="linuxPkgInstallPath" type="text" value="/opt/windows-inventory-lite">
+              </label>
+              <label class="pkg-interval-field">
+                Interval (hours)
+                <input id="linuxPkgIntervalHours" type="number" min="1" max="24" value="6">
+              </label>
+              <label class="pkg-interval-field">
+                Status check interval (minutes)
+                <input id="linuxPkgStatusIntervalMinutes" type="number" min="1" max="1440" value="30">
+              </label>
+              <div class="pkg-buttons">
+                <button id="linuxPkgSaveButton" class="primary-button" type="button">Save</button>
+                <button id="linuxPkgDownloadButton" class="export-button" type="button">Download Linux package</button>
+              </div>
+            </div>
+            <div id="linuxPkgMessage" class="pkg-message hidden"></div>
+          </div>
         </section>
 
         <section id="updatesView" class="install-panel hidden" aria-label="Client updates">
@@ -573,6 +721,149 @@
           <div id="installHistory" class="install-history empty">No saved client action logs.</div>
         </section>
 
+        <section id="linuxInstallView" class="install-panel hidden" aria-label="Linux client actions">
+          <div class="install-grid">
+            <div class="install-targets-field">
+              <div class="install-targets-textarea-wrap">
+                <label>
+                  Targets (hostnames or IPs)
+                  <textarea id="linuxInstallTargets" rows="4" placeholder="192.168.4.100&#10;192.168.4.101&#10;192.168.4.102-192.168.4.112"></textarea>
+                </label>
+              </div>
+            </div>
+            <div class="linux-install-right-fields">
+              <label>
+                Action
+                <select id="linuxClientAction">
+                  <option value="install">Install client</option>
+                  <option value="uninstall">Uninstall client</option>
+                </select>
+              </label>
+              <label class="install-only">
+                Server URL
+                <input id="linuxInstallServerUrl" type="text" placeholder="http://192.168.1.1:8080/api/v1/linux/inventory">
+              </label>
+              <label class="install-only">
+                Ingestion token
+                <input id="linuxInstallToken" type="text" autocomplete="off" placeholder="leave empty to use the server's current token">
+              </label>
+              <label class="install-only">
+                Interval (hours)
+                <input id="linuxInstallIntervalHours" type="number" min="1" max="24" value="6">
+              </label>
+              <label class="install-only">
+                Status check interval (minutes)
+                <input id="linuxInstallStatusIntervalMinutes" type="number" min="1" max="1440" value="30">
+              </label>
+              <label>
+                Install path
+                <input id="linuxInstallPath" type="text" value="/opt/windows-inventory-lite">
+              </label>
+              <label>
+                Authentication
+                <select id="linuxInstallAuthMode">
+                  <option value="credentials">Stored Linux credentials</option>
+                  <option value="key">SSH key</option>
+                  <option value="ad">Use global AD settings</option>
+                </select>
+              </label>
+              <label id="linuxInstallCredentialsField" class="hidden">
+                Linux user
+                <input id="linuxInstallUsername" type="text" autocomplete="username" placeholder="root">
+              </label>
+              <label id="linuxInstallPasswordField" class="hidden">
+                Linux password
+                <input id="linuxInstallPassword" type="password" autocomplete="current-password">
+              </label>
+              <label id="linuxTrustNewHostKeysField" class="check-label install-only">
+                <input id="linuxTrustNewHostKeys" type="checkbox">
+                Trust new host keys automatically (skip verification)
+              </label>
+              <label id="linuxAcknowledgeHostKeyRiskField" class="check-label install-only hidden">
+                <input id="linuxAcknowledgeHostKeyRisk" type="checkbox">
+                I understand this accepts an unverified SSH host key on first connection
+              </label>
+              <button id="linuxInstallButton" class="primary-button install-submit-field" type="button">Install client</button>
+            </div>
+          </div>
+          <div id="linuxInstallStatus" class="install-status empty">No install job started.</div>
+          <div id="linuxInstallHistory" class="install-history empty">No saved client action logs.</div>
+        </section>
+
+        <section id="linuxUpdatesView" class="install-panel hidden" aria-label="Linux client updates">
+          <div class="settings-block">
+            <h2 class="settings-block-title">Authentication</h2>
+            <p class="cert-hint">Uses the credentials saved in Settings &gt; General &gt; Linux Client update credentials by default - enter values below to override them for this push only, or select "Use global AD settings".</p>
+            <label class="linux-updates-credential-field">
+              Authentication
+              <select id="linuxUpdatesAuthMode">
+                <option value="credentials">Stored Linux credentials</option>
+                <option value="key">SSH key</option>
+                <option value="ad">Use global AD settings</option>
+              </select>
+            </label>
+            <label id="linuxUpdatesCredentialsField" class="linux-updates-credential-field hidden">
+              Linux user (leave blank to use the saved Settings account)
+              <input id="linuxUpdatesUsername" type="text" autocomplete="username" placeholder="root">
+            </label>
+            <label id="linuxUpdatesPasswordField" class="linux-updates-credential-field hidden">
+              Linux password (leave blank to use the saved Settings password)
+              <input id="linuxUpdatesPassword" type="password" autocomplete="current-password">
+            </label>
+            <label class="check-label">
+              <input id="linuxUpdatesTrustNewHostKeys" type="checkbox">
+              Trust new host keys automatically (skip verification)
+            </label>
+            <label id="linuxUpdatesAcknowledgeHostKeyRiskField" class="check-label hidden">
+              <input id="linuxUpdatesAcknowledgeHostKeyRisk" type="checkbox">
+              I understand this accepts an unverified SSH host key on first connection
+            </label>
+          </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Schedule</h2>
+            <p class="cert-hint">Automatically pushes to whichever Linux clients are outdated when the schedule fires - independent of the Windows Client updates schedule. Uses the saved Linux credentials above (AD reuse is not available for the scheduled path, only for a manual "Update selected" push).</p>
+            <div class="pkg-grid client-update-schedule-panel">
+              <label class="pkg-token-field">
+                Schedule
+                <select id="linuxUpdatesScheduleMode">
+                  <option value="off">Off</option>
+                  <option value="once">Run once</option>
+                  <option value="interval">Every N hours</option>
+                </select>
+              </label>
+              <label id="linuxUpdatesScheduleOnceField" class="pkg-token-field hidden">
+                Run at
+                <input id="linuxUpdatesScheduleOnceAt" type="datetime-local">
+              </label>
+              <label id="linuxUpdatesScheduleIntervalField" class="pkg-token-field hidden">
+                Every (hours)
+                <input id="linuxUpdatesScheduleIntervalHours" type="number" min="1" max="8760" value="24">
+              </label>
+              <div class="pkg-buttons">
+                <button id="linuxUpdatesScheduleSaveButton" class="primary-button" type="button">Save</button>
+              </div>
+            </div>
+            <div id="linuxUpdatesScheduleMessage" class="pkg-message hidden"></div>
+          </div>
+          <p id="linuxUpdatesPackageStatus" class="pkg-status">Loading client update status...</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Hostname</th>
+                  <th>Current version</th>
+                  <th>Available version</th>
+                  <th>Last collected</th>
+                  <th><input id="linuxUpdatesSelectAll" type="checkbox" title="Select all"></th>
+                </tr>
+              </thead>
+              <tbody id="linuxUpdatesBody"></tbody>
+            </table>
+          </div>
+          <button id="linuxUpdatesPushButton" class="primary-button" type="button" disabled>Update selected</button>
+          <div id="linuxUpdatesStatus" class="install-status empty">No update job started.</div>
+        </section>
+
         <section id="clientsView" aria-label="Client inventory">
           <div class="view-toolbar">
             <button id="exportClientsBtn" class="export-button" type="button">Export CSV</button>
@@ -631,8 +922,6 @@
                 <thead>
                   <tr>
                     <th data-sort-table="hwCpu" data-sort-key="name" class="sortable">Model</th>
-                    <th data-sort-table="hwCpu" data-sort-key="cores" class="sortable">Cores</th>
-                    <th data-sort-table="hwCpu" data-sort-key="clockMhz" class="sortable">Clock</th>
                     <th data-sort-table="hwCpu" data-sort-key="count" class="sortable">Machines</th>
                   </tr>
                 </thead>
@@ -671,7 +960,6 @@
                 <thead>
                   <tr>
                     <th data-sort-table="hwRam" data-sort-key="totalMb" class="sortable">Total</th>
-                    <th data-sort-table="hwRam" data-sort-key="moduleCount" class="sortable">Modules</th>
                     <th data-sort-table="hwRam" data-sort-key="count" class="sortable">Machines</th>
                   </tr>
                 </thead>
@@ -682,6 +970,14 @@
           </div>
         </section>
       </main>
+    </div>
+  </div>
+
+  <div id="logoutOverlay" class="logout-overlay hidden" role="alertdialog" aria-label="Logged out">
+    <div class="logout-overlay-card">
+      <h2>Logged out</h2>
+      <p>Your saved sign-in for this tab has been cleared where the browser allows it. Some browsers keep it cached until every tab using this site is closed - for full security on a shared computer, close this browser tab or window.</p>
+      <button id="logoutReloadButton" class="primary-button" type="button">Log back in</button>
     </div>
   </div>
 
