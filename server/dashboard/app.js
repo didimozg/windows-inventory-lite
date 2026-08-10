@@ -2446,6 +2446,7 @@
         applyPasswordPlaceholder('generalAdPassword', !!data.adPasswordConfigured, 'leave blank to keep the current password');
         byId('generalAdComputerImportOUs').value = data.adComputerImportOUs || '';
         updateAdIdentityFields();
+        byId('generalPreferredLinuxSubnet').value = data.preferredLinuxSubnet || '';
         byId('generalDebugLogEnabled').checked = !!data.debugLogEnabled;
         byId('generalDebugLogPath').textContent = data.debugLogPath || '-';
         renderConnectionStatus(data);
@@ -2543,6 +2544,7 @@
         adUsername: byId('generalAdUsername').value.trim(),
         adPassword: byId('generalAdPassword').value,
         adComputerImportOUs: byId('generalAdComputerImportOUs').value,
+        preferredLinuxSubnet: byId('generalPreferredLinuxSubnet').value.trim(),
         debugLogEnabled: byId('generalDebugLogEnabled').checked
       })
     })
