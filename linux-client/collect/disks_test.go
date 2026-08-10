@@ -119,6 +119,47 @@ func TestParseBlockDevicesFiltersToMountedDevicesOnly(t *testing.T) {
 	}
 }
 
+// TestParseBlockDevicesDetectsDiskMountedViaPartition reproduces a real
+// regression found on a Proxmox host: /sys/block only lists whole disks
+// (e.g. "sdc"), but a disk that uses a traditional partition table is
+// mounted via one of its PARTITIONS ("sdc1"), which has its own, different
+// major:minor from the whole disk. The original mount-filter only ever
+// compared the whole disk's own "dev" id against mountinfo, so any disk
+// mounted through a partition (the common case - only a bare LVM/dm volume
+// used directly, with no partition table, escaped this bug by coincidence)
+// was wrongly treated as unmounted and dropped. Confirmed live: "sdc" (8:32)
+// itself is never in mountinfo, only its partition "sdc1" (8:33) is, mounted
+// at /mnt/pve/SSD.
+func TestParseBlockDevicesDetectsDiskMountedViaPartition(t *testing.T) {
+	root := t.TempDir()
+	// Whole disk - never appears in mountinfo itself, only its partition does.
+	writeFixtureFile(t, filepath.Join(root, "sdc", "size"), "1000215216\n")
+	writeFixtureFile(t, filepath.Join(root, "sdc", "dev"), "8:32\n")
+	// Its partition, expressed in sysfs as a subdirectory of the disk -
+	// this is what's actually mounted.
+	writeFixtureFile(t, filepath.Join(root, "sdc", "sdc1", "dev"), "8:33\n")
+	// A disk with no mounted partition at all - must still be excluded.
+	writeFixtureFile(t, filepath.Join(root, "sdb", "size"), "2952790016\n")
+	writeFixtureFile(t, filepath.Join(root, "sdb", "dev"), "8:16\n")
+	writeFixtureFile(t, filepath.Join(root, "sdb", "sdb1", "dev"), "8:17\n")
+
+	mountinfoPath := filepath.Join(t.TempDir(), "mountinfo")
+	mountinfoContent := strings.Join([]string{
+		`52 32 8:33 / /mnt/pve/SSD rw,relatime shared:45 - xfs /dev/sdc1 rw,inode64`,
+		`567 566 0:65 / /dev rw,relatime shared:312 - tmpfs none rw,size=492k,mode=755`,
+	}, "\n") + "\n"
+	writeFixtureFile(t, mountinfoPath, mountinfoContent)
+
+	disks := ParseBlockDevices(root, mountinfoPath)
+
+	if len(disks) != 1 {
+		t.Fatalf("got %d disks, want 1 (only sdc, matched via its mounted partition sdc1): %+v", len(disks), disks)
+	}
+	if disks[0].SizeGb < 476 || disks[0].SizeGb > 478 {
+		t.Errorf("SizeGb = %d, want ~477 (sdc's own size)", disks[0].SizeGb)
+	}
+}
+
 // TestParseBlockDevicesFallsBackToAllDevicesWhenMountinfoUnavailable covers
 // the case where mountinfo can't be read or parses to nothing useful (should
 // never happen on a real Linux host, but a missing/unreadable mountinfo must

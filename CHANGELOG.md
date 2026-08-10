@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [Linux client 0.1.5]
+
+Server/dashboard unchanged in this release - the server version stays at 0.37.8.
+
+### Fixed
+
+- The 0.1.4 mount-based disk filter dropped disks that were mounted through a partition instead of directly - the common case on a traditionally partitioned server. `/sys/block` only lists whole disks (e.g. `sda`), never partitions, but a partitioned disk's mount shows up in `/proc/self/mountinfo` under its partition's own device id (e.g. `sda1`), not the disk's. The filter now also matches on any of a disk's partitions being mounted, not just the disk itself. Confirmed live on a Proxmox host: a disk with a single mounted partition (`sdc1`, mounted at `/mnt/pve/SSD`) was incorrectly excluded from the report; only a disk used directly as an LVM volume with no partition table, the original 0.1.4 test case, was reporting correctly.
+
 ## [Linux client 0.1.4]
 
 Server/dashboard unchanged in this release - the server version stays at 0.37.7.
