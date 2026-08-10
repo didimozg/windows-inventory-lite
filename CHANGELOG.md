@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.39.2]
+
+### Fixed
+
+- A `.cert-hint` hint paragraph had a top margin but no bottom margin, so it sat almost touching whatever came right after it - most visible on the Linux Client updates page's "Authentication" and new "Linux client targeting" blocks, where a hint immediately precedes a field label. Also fixed the new "Linux client targeting" field itself using `.pkg-token-field`, a class that only supplies its internal label layout inside a `.pkg-grid` ancestor - this block has none, the same known gap already worked around for the Authentication block above it (`.linux-updates-credential-field`), so it inherited no spacing at all until switched to that class too.
+
 ## [0.39.1]
 
 ### Changed
