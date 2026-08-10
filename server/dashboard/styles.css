@@ -1384,6 +1384,15 @@ th.sort-desc::after {
   align-items: end;
 }
 
+/* SSH key's file picker is the only field in its row (Upload/Delete are
+   the row's other grid item), so it fell into .pkg-grid's first column -
+   sized as a 2fr share meant for a URL field, not a "Choose File" button
+   plus filename. Reported live at 957px wide on a 1920px screen for what
+   never needs more than a few hundred pixels. */
+.pkg-grid-ssh-key {
+  grid-template-columns: minmax(240px, 420px) auto;
+}
+
 /* The Client Package grid has one more field (Server URL, Package share
    path, Ingestion token, Interval) than the base .pkg-grid template
    accounts for (used elsewhere, e.g. the Certificate page, with 3 items) -

@@ -311,7 +311,7 @@
             <div id="linuxCredsMessage" class="pkg-message hidden"></div>
             <h2 class="settings-block-title">SSH key</h2>
             <p id="linuxSshKeyStatus" class="pkg-status">Loading SSH key status...</p>
-            <div class="pkg-grid">
+            <div class="pkg-grid pkg-grid-ssh-key">
               <label class="pkg-url-field">
                 Private key file
                 <input id="linuxSshKeyFile" type="file">
@@ -757,6 +757,14 @@
                 Ingestion token
                 <input id="linuxInstallToken" type="text" autocomplete="off" placeholder="leave empty to use the server's current token">
               </label>
+              <label>
+                Authentication
+                <select id="linuxInstallAuthMode">
+                  <option value="credentials">Stored Linux credentials</option>
+                  <option value="key">SSH key</option>
+                  <option value="ad">Use global AD settings</option>
+                </select>
+              </label>
               <label class="install-only">
                 Interval (hours)
                 <input id="linuxInstallIntervalHours" type="number" min="1" max="24" value="6">
@@ -775,15 +783,6 @@
                   <input id="linuxInstallPreferredSubnet" type="text" placeholder="192.168.4.0/24">
                   <button id="linuxInstallPreferredSubnetSaveButton" class="edit-button" type="button">Save</button>
                 </div>
-                <small class="cert-hint">Shared with Settings &gt; General &gt; Linux client targeting and the Client updates page - editing it here updates that same saved value. Only affects target resolution on the Client updates page; Targets above are always used exactly as typed.</small>
-              </label>
-              <label>
-                Authentication
-                <select id="linuxInstallAuthMode">
-                  <option value="credentials">Stored Linux credentials</option>
-                  <option value="key">SSH key</option>
-                  <option value="ad">Use global AD settings</option>
-                </select>
               </label>
               <label id="linuxInstallCredentialsField" class="hidden">
                 Linux user
@@ -811,7 +810,6 @@
         <section id="linuxUpdatesView" class="install-panel hidden" aria-label="Linux client updates">
           <div class="settings-block">
             <h2 class="settings-block-title">Authentication</h2>
-            <p class="cert-hint">Uses the credentials saved in Settings &gt; General &gt; Linux Client update credentials by default - enter values below to override them for this push only, or select "Use global AD settings".</p>
             <label class="linux-updates-credential-field">
               Authentication
               <select id="linuxUpdatesAuthMode">
@@ -839,7 +837,6 @@
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Linux client targeting</h2>
-            <p class="cert-hint">Shared with Settings &gt; General &gt; Linux client targeting and the Client actions page - saving it here updates that same value and refreshes the list below with it applied.</p>
             <label class="linux-updates-credential-field">
               Preferred subnet (CIDR)
               <input id="linuxUpdatesPreferredSubnet" type="text" placeholder="192.168.4.0/24">
@@ -851,7 +848,7 @@
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Schedule</h2>
-            <p class="cert-hint">Automatically pushes to whichever Linux clients are outdated when the schedule fires - independent of the Windows Client updates schedule. Uses the saved Linux credentials above (AD reuse is not available for the scheduled path, only for a manual "Update selected" push).</p>
+            <p class="cert-hint">Auto-pushes outdated clients using the credentials above (no AD reuse for scheduled pushes).</p>
             <div class="pkg-grid client-update-schedule-panel">
               <label class="pkg-token-field">
                 Schedule

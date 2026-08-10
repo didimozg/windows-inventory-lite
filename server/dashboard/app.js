@@ -182,6 +182,19 @@
     return `<span class="status-dot ${isActivated ? 'status-dot-on' : 'status-dot-off'}" role="img" aria-label="${escapeHtml(text)}" title="${escapeHtml(text)}">${icon}</span>`;
   }
 
+  // Same on/off dot as activationBadge, but for a Linux service's own
+  // active/inactive state (per the client's latest status report) rather
+  // than Windows/Office activation - activationBadge's "Activated"/"Not
+  // detected" wording doesn't fit a service. Previously this column only
+  // rendered anything for the false case (an INACTIVE text badge), leaving
+  // a confirmed-running service's cell blank under an "Active" header -
+  // indistinguishable from "no data" at a glance.
+  function serviceActiveDot(isActive) {
+    const text = `Active: ${isActive ? 'Yes' : 'No'}`;
+    const icon = isActive ? CHECK_DOT_SVG : '';
+    return `<span class="status-dot ${isActive ? 'status-dot-on' : 'status-dot-off'}" role="img" aria-label="${escapeHtml(text)}" title="${escapeHtml(text)}">${icon}</span>`;
+  }
+
   // AD Description column for the Clients table. `<small>` already renders
   // muted (see the site-wide `small { color: var(--muted) }` rule), so the
   // placeholder strings need no extra styling class.
@@ -343,7 +356,7 @@
         <td>${escapeHtml(item.name)}</td>
         <td>${escapeHtml(item.unit || '')}</td>
         <td>${escapeHtml(item.version)}</td>
-        <td>${item.active === false ? '<span class="usb-badge">INACTIVE</span>' : ''}</td>
+        <td>${serviceActiveDot(item.active !== false)}</td>
       </tr>`).join('');
 
       const cpu = client.cpu || {};

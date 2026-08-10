@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.39.5]
+
+### Fixed
+
+- "Private key file" (Settings > General > SSH key) was 957px wide on a 1920px screen - the only field in its row, it fell into the base `.pkg-grid` template's first column, sized as a 2fr share meant for a URL field. Given its own `.pkg-grid-ssh-key` modifier, capped at 420px like every other standalone field.
+- Client actions: "Interval (hours)" and "Status check interval (minutes)" are now paired in one row, and "Install path"/"Preferred subnet (CIDR)" in another - previously each was paired with an unrelated neighbor by coincidence of field order. Removed the redundant hint paragraph under Preferred subnet on this page (Client updates and Settings already explain it).
+- Client actions: "Authentication" rendered at 104px tall (2.5x a normal field) because it shared a grid row with the old, taller Preferred-subnet block (input + button + a 2-line hint). Reordering fields (Authentication now follows Ingestion token) removed the shared row entirely, fixing the height at its root rather than patching the symptom.
+- Client updates: the Authentication/Linux client targeting/Schedule hint paragraphs were long enough that the outdated-clients table needed scrolling to reach. Shortened or removed each (the field labels already carry the necessary context), keeping the block order (Authentication -> Linux client targeting -> Schedule) that already matched what was asked.
+- Linux Clients' per-client service table has an "Active" column header but only ever rendered anything for the inactive case (a text badge) - a confirmed-running service's cell was blank, indistinguishable from missing data. Added a positive indicator too, reusing the same on/off status-dot pattern already used for Windows/Office activation elsewhere in the dashboard (green check for active, muted dash for inactive) instead of a badge that only ever fires one way.
+
 ## [0.39.3]
 
 ### Fixed
