@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.38.0]
+
+### Changed
+
+- The "Linux Software" dashboard tab is now "Linux Services", matching what it has actually shown since the running-services collector replaced the package collector: `Service`/`Version`/`Installations` columns, `#linux-services` URL hash (no redirect from the old `#linux-software` hash - internal admin tool, not treated as a stable public link), `linux-services-<date>.csv` export filename.
+
+### Added
+
+- The Linux Services grouped view now marks a computer `INACTIVE` in a service's expanded computer list when that service isn't in the client's most recent status report, mirroring the badge already shown in the per-client Linux Clients detail view.
+
 ## [Linux client 0.1.5]
 
 Server/dashboard unchanged in this release - the server version stays at 0.37.8.

@@ -1,6 +1,6 @@
 (function () {
   const inventoryViews = ['clients', 'software', 'hardware'];
-  const linuxInventoryViews = ['linux', 'linuxSoftware'];
+  const linuxInventoryViews = ['linux', 'linuxServices'];
   // Views whose rendered content depends on state.linuxClients, so the 30s
   // poll keeps Linux data fresh while one of them is open. Deliberately a
   // separate list from linuxInventoryViews, which drives the search box and
@@ -8,7 +8,7 @@
   // tables themselves - the Dashboard reads Linux data but is not an
   // inventory view, and the merged Hardware view is already covered for
   // search purposes by inventoryViews.
-  const linuxDataViews = ['linux', 'linuxSoftware', 'dashboard', 'hardware'];
+  const linuxDataViews = ['linux', 'linuxServices', 'dashboard', 'hardware'];
   const state = {
     clients: [], linuxClients: [], view: getInitialView(), installJobId: null, installPollTimer: null, installJobs: [],
     updateJobId: null, updatePollTimer: null,
@@ -32,16 +32,16 @@
       hwRam: { key: 'totalMb', dir: -1 },
       licenses: { key: 'name', dir: 1 },
       linuxClients: { key: 'hostname', dir: 1 },
-      linuxSoftware: { key: 'name', dir: 1 }
+      linuxServices: { key: 'name', dir: 1 }
     },
-    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxClients: 1, linuxSoftware: 1 },
+    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxClients: 1, linuxServices: 1 },
     // clients/software start at a reasonable fallback and are corrected to
     // the real viewport-fitting value the first time their table becomes
     // visible (see computeLiveRowsPerPage/recalculateActivePagination).
     // hwCpu/hwDisk/hwRam are fixed (see HW_PAGE_SIZE) - the three Hardware
     // sub-tables render stacked in one view and are rarely large enough to
     // need viewport-adaptive sizing.
-    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20, linuxClients: 20, linuxSoftware: 20 },
+    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20, linuxClients: 20, linuxServices: 20 },
     // Prefixed keys ('client:'/'software:'/'hw:' + id) so the three
     // separate data-*-details attribute namespaces can't collide in one
     // Set. Drives each render function's initial hidden/visible class for
@@ -130,7 +130,7 @@
     if (hash === 'certificate') return 'certificate';
     if (hash === 'licenses') return 'licenses';
     if (hash === 'linux-clients' || hash === 'linux') return 'linux';
-    if (hash === 'linux-software') return 'linuxSoftware';
+    if (hash === 'linux-services') return 'linuxServices';
     if (hash === 'admin-password' || hash === 'admin') return 'admin';
     if (hash === 'linux-client-actions') return 'linuxInstall';
     if (hash === 'linux-client-updates') return 'linuxUpdates';
@@ -139,7 +139,7 @@
 
   function setView(view) {
     state.view = view;
-    const hash = view === 'install' ? 'client-actions' : view === 'linuxInstall' ? 'linux-client-actions' : view === 'linuxUpdates' ? 'linux-client-updates' : view === 'package' ? 'client-package' : view === 'updates' ? 'client-updates' : view === 'admin' ? 'admin-password' : view === 'linux' ? 'linux-clients' : view === 'linuxSoftware' ? 'linux-software' : view;
+    const hash = view === 'install' ? 'client-actions' : view === 'linuxInstall' ? 'linux-client-actions' : view === 'linuxUpdates' ? 'linux-client-updates' : view === 'package' ? 'client-package' : view === 'updates' ? 'client-updates' : view === 'admin' ? 'admin-password' : view === 'linux' ? 'linux-clients' : view === 'linuxServices' ? 'linux-services' : view;
     if (window.location.hash.replace(/^#/, '') !== hash) {
       window.location.hash = hash;
       return;
@@ -156,7 +156,7 @@
     // 'hardware' is in this list because the merged Hardware view reads Linux
     // data too - opening the tab re-fetches it rather than waiting up to 30s
     // for the next poll tick.
-    if (view === 'linux' || view === 'linuxSoftware' || view === 'hardware') loadLinuxClients();
+    if (view === 'linux' || view === 'linuxServices' || view === 'hardware') loadLinuxClients();
     if (view === 'admin') loadAdminPasswordStatus();
   }
 
@@ -243,7 +243,7 @@
         state.linuxClients = data.clients || [];
         state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
         renderLinuxClientsTable(state.linuxClients);
-        renderLinuxSoftwareTable(state.linuxClients);
+        renderLinuxServicesTable(state.linuxClients);
         // Both of these read Windows and Linux data together, so they have
         // to be redrawn whenever the Linux half lands - including on the
         // unconditional page-load call, which can resolve after render().
@@ -288,12 +288,12 @@
         // Every view that reads state.linuxClients has to be redrawn, not just the
         // Linux Clients table. Since the Dashboard/Hardware merge, the combined
         // tiles and the merged Hardware section both read getAllClients(), and
-        // Linux Software reads state.linuxClients directly - all three kept
+        // Linux Services reads state.linuxClients directly - all three kept
         // counting a deleted client until the next 30s poll, and only then if the
         // active view happened to be in linuxDataViews. This is the same set
         // loadLinuxClients re-renders after every fetch.
         renderLinuxClientsTable(state.linuxClients);
-        renderLinuxSoftwareTable(state.linuxClients);
+        renderLinuxServicesTable(state.linuxClients);
         renderHardwarePage(getAllClients());
         renderDashboardTiles();
         byId('generatedAt').textContent = `Updated: ${formatDateTime(new Date().toISOString())}`;
@@ -598,7 +598,7 @@
     }
   }
 
-  function linuxSoftwareSortValue(group, key) {
+  function linuxServicesSortValue(group, key) {
     switch (key) {
       case 'name': return (group.name || '').toLowerCase();
       case 'version': return group.version || '';
@@ -744,14 +744,14 @@
     downloadCsv('linux-clients-' + csvDate() + '.csv', rows);
   }
 
-  function exportLinuxSoftware() {
+  function exportLinuxServices() {
     const query = byId('searchInput').value.trim();
-    const { key: sortKey, dir: sortDir } = state.sort.linuxSoftware;
-    const groups = applySort(getLinuxSoftwareGroups(state.linuxClients).filter(g => linuxSoftwareMatches(g, query)), g => linuxSoftwareSortValue(g, sortKey), sortDir);
-    const rows = [['Software', 'Version', 'Installations', 'Computers']].concat(
-      groups.map(g => [g.name, g.version, g.clients.length, g.clients.map(c => c.hostname).join(', ')])
+    const { key: sortKey, dir: sortDir } = state.sort.linuxServices;
+    const groups = applySort(getLinuxServicesGroups(state.linuxClients).filter(g => linuxServicesMatches(g, query)), g => linuxServicesSortValue(g, sortKey), sortDir);
+    const rows = [['Service', 'Version', 'Installations', 'Computers']].concat(
+      groups.map(g => [g.name, g.version, g.clients.length, g.clients.map(c => c.hostname + (c.active === false ? ' (inactive)' : '')).join(', ')])
     );
-    downloadCsv('linux-software-' + csvDate() + '.csv', rows);
+    downloadCsv('linux-services-' + csvDate() + '.csv', rows);
   }
 
   function exportSoftware() {
@@ -3060,7 +3060,7 @@
   // Mirrors getSoftwareGroups (Windows) - groups by name+version only.
   // Linux ServiceInfo (linux-client/collect/services.go) has no publisher
   // field, unlike Windows software entries.
-  function getLinuxSoftwareGroups(clients) {
+  function getLinuxServicesGroups(clients) {
     const groups = new Map();
     clients.forEach(client => {
       (client.services || []).forEach(item => {
@@ -3073,7 +3073,10 @@
         const clientKey = String(client.hostname || '').toLowerCase();
         if (!group.clientKeys.has(clientKey)) {
           group.clientKeys.add(clientKey);
-          group.clients.push(client);
+          // Only hostname + this client's own active status for THIS
+          // service are kept (not the whole client object) - per the
+          // client's latest report, per L33.
+          group.clients.push({ hostname: client.hostname, active: item.active !== false });
         }
       });
     });
@@ -3322,7 +3325,7 @@
     return haystack.indexOf(query.toLowerCase()) !== -1;
   }
 
-  function linuxSoftwareMatches(group, query) {
+  function linuxServicesMatches(group, query) {
     if (!query) return true;
     const computers = group.clients.map(client => client.hostname).join(' ');
     const haystack = [group.name, group.version, computers].join(' ').toLowerCase();
@@ -3528,27 +3531,30 @@
   // computers have this service (no License column, no publisher - this
   // project has no Linux licensing concept and ServiceInfo has no
   // publisher field).
-  function renderLinuxSoftwareTable(clients) {
-    const tbody = byId('linuxSoftwareBody');
+  function renderLinuxServicesTable(clients) {
+    const tbody = byId('linuxServicesBody');
     if (!tbody) return;
 
     const query = byId('searchInput').value.trim();
-    const { key: sortKey, dir: sortDir } = state.sort.linuxSoftware;
-    const filtered = applySort(getLinuxSoftwareGroups(clients).filter(g => linuxSoftwareMatches(g, query)), g => linuxSoftwareSortValue(g, sortKey), sortDir);
-    const { items: pageItems, page, totalPages } = paginate(filtered, state.page.linuxSoftware, state.pageSize.linuxSoftware);
-    state.page.linuxSoftware = page;
+    const { key: sortKey, dir: sortDir } = state.sort.linuxServices;
+    const filtered = applySort(getLinuxServicesGroups(clients).filter(g => linuxServicesMatches(g, query)), g => linuxServicesSortValue(g, sortKey), sortDir);
+    const { items: pageItems, page, totalPages } = paginate(filtered, state.page.linuxServices, state.pageSize.linuxServices);
+    state.page.linuxServices = page;
 
     const rows = pageItems.map(group => {
-      const computers = group.clients.map(client => `<li>${escapeHtml(client.hostname)}</li>`).join('');
+      const computers = group.clients.map(client => {
+        const badge = client.active === false ? ' <span class="usb-badge">INACTIVE</span>' : '';
+        return `<li>${escapeHtml(client.hostname)}${badge}</li>`;
+      }).join('');
       const groupId = safeId('linux:' + group.name + '\u001f' + group.version);
-      const detailsHidden = state.expandedDetails.has('linux-software:' + groupId) ? '' : 'hidden';
+      const detailsHidden = state.expandedDetails.has('linux-services:' + groupId) ? '' : 'hidden';
 
       return `<tr>
-        <td><button class="link-button" type="button" data-linux-software="${groupId}">${escapeHtml(group.name)}</button></td>
+        <td><button class="link-button" type="button" data-linux-services="${groupId}">${escapeHtml(group.name)}</button></td>
         <td>${escapeHtml(group.version)}</td>
         <td class="hw-num">${group.clients.length}</td>
       </tr>
-      <tr class="details-row ${detailsHidden}" data-linux-software-details="${groupId}">
+      <tr class="details-row ${detailsHidden}" data-linux-services-details="${groupId}">
         <td colspan="3">
           <div class="details">
             <h2>${escapeHtml(group.name)}</h2>
@@ -3558,8 +3564,8 @@
       </tr>`;
     });
 
-    tbody.innerHTML = rows.join('') || '<tr><td colspan="3" class="empty">No matching software records.</td></tr>';
-    renderPager('linuxSoftwarePager', 'linuxSoftware', page, totalPages, () => renderLinuxSoftwareTable(state.linuxClients));
+    tbody.innerHTML = rows.join('') || '<tr><td colspan="3" class="empty">No matching service records.</td></tr>';
+    renderPager('linuxServicesPager', 'linuxServices', page, totalPages, () => renderLinuxServicesTable(state.linuxClients));
   }
 
   // One <li> per computer inside an expanded hardware group. Cross-platform:
@@ -3675,7 +3681,7 @@
     byId('certificateView').classList.toggle('hidden', state.view !== 'certificate');
     byId('licensesView').classList.toggle('hidden', state.view !== 'licenses');
     byId('linuxClientsView').classList.toggle('hidden', state.view !== 'linux');
-    byId('linuxSoftwareView').classList.toggle('hidden', state.view !== 'linuxSoftware');
+    byId('linuxServicesView').classList.toggle('hidden', state.view !== 'linuxServices');
     byId('adminPasswordView').classList.toggle('hidden', state.view !== 'admin');
     byId('dashboardTab').classList.toggle('active', state.view === 'dashboard');
     byId('clientsTab').classList.toggle('active', state.view === 'clients');
@@ -3690,7 +3696,7 @@
     byId('certificateTab').classList.toggle('active', state.view === 'certificate');
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
     byId('linuxClientsTab').classList.toggle('active', state.view === 'linux');
-    byId('linuxSoftwareTab').classList.toggle('active', state.view === 'linuxSoftware');
+    byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
     byId('adminPasswordTab').classList.toggle('active', state.view === 'admin');
     const isInventoryView = inventoryViews.includes(state.view);
     const isLinuxInventoryView = linuxInventoryViews.includes(state.view);
@@ -3918,12 +3924,12 @@
     state.page.hwDisk = 1;
     state.page.hwRam = 1;
     state.page.linuxClients = 1;
-    state.page.linuxSoftware = 1;
+    state.page.linuxServices = 1;
     render();
     if (state.view === 'linux') {
       renderLinuxClientsTable(state.linuxClients);
-    } else if (state.view === 'linuxSoftware') {
-      renderLinuxSoftwareTable(state.linuxClients);
+    } else if (state.view === 'linuxServices') {
+      renderLinuxServicesTable(state.linuxClients);
     }
   });
 
@@ -3959,7 +3965,7 @@
     if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (state.view === 'licenses') loadLicenses();
-    if (state.view === 'linux' || state.view === 'linuxSoftware' || state.view === 'hardware') loadLinuxClients();
+    if (state.view === 'linux' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
     if (state.view === 'admin') loadAdminPasswordStatus();
   });
   byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
@@ -4018,8 +4024,8 @@
       // main Windows-side render pipeline) - re-render it directly instead.
       if (table === 'linuxClients') {
         renderLinuxClientsTable(state.linuxClients);
-      } else if (table === 'linuxSoftware') {
-        renderLinuxSoftwareTable(state.linuxClients);
+      } else if (table === 'linuxServices') {
+        renderLinuxServicesTable(state.linuxClients);
       } else {
         render();
       }
@@ -4070,10 +4076,10 @@
       return;
     }
 
-    const linuxSoftwareBtn = e.target.closest('[data-linux-software]');
-    if (linuxSoftwareBtn) {
-      const key = 'linux-software:' + linuxSoftwareBtn.dataset.linuxSoftware;
-      const row = document.querySelector(`[data-linux-software-details="${linuxSoftwareBtn.dataset.linuxSoftware}"]`);
+    const linuxServicesBtn = e.target.closest('[data-linux-services]');
+    if (linuxServicesBtn) {
+      const key = 'linux-services:' + linuxServicesBtn.dataset.linuxServices;
+      const row = document.querySelector(`[data-linux-services-details="${linuxServicesBtn.dataset.linuxServices}"]`);
       if (row) {
         const nowHidden = row.classList.toggle('hidden');
         if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
@@ -4126,9 +4132,9 @@
   byId('certDeleteButton').addEventListener('click', deleteCertificate);
   byId('licensesTab').addEventListener('click', () => setView('licenses'));
   byId('linuxClientsTab').addEventListener('click', () => setView('linux'));
-  byId('linuxSoftwareTab').addEventListener('click', () => setView('linuxSoftware'));
+  byId('linuxServicesTab').addEventListener('click', () => setView('linuxServices'));
   byId('exportLinuxClientsBtn').addEventListener('click', exportLinuxClients);
-  byId('exportLinuxSoftwareBtn').addEventListener('click', exportLinuxSoftware);
+  byId('exportLinuxServicesBtn').addEventListener('click', exportLinuxServices);
   byId('exportLicensesBtn').addEventListener('click', exportLicenses);
   byId('licenseAddButton').addEventListener('click', () => openLicenseForm(null));
   byId('licenseSaveButton').addEventListener('click', saveLicense);

@@ -71,9 +71,9 @@
             <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="10" rx="1.2"/><line x1="7" y1="17" x2="13" y2="17"/><line x1="10" y1="13.5" x2="10" y2="17"/></svg>
             Clients
           </button>
-          <button id="linuxSoftwareTab" class="nav-item" type="button">
+          <button id="linuxServicesTab" class="nav-item" type="button">
             <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5 L17.5 6.5 L17.5 13.5 L10 17.5 L2.5 13.5 L2.5 6.5 Z"/><line x1="10" y1="10" x2="17.3" y2="6.3"/><line x1="10" y1="10" x2="2.7" y2="6.3"/><line x1="10" y1="10" x2="10" y2="17.5"/></svg>
-            Software
+            Services
           </button>
         </div>
         <button id="hardwareTab" class="nav-item nav-item-root" type="button">
@@ -512,23 +512,23 @@
           <div id="linuxClientsPager" class="pager"></div>
         </section>
 
-        <section id="linuxSoftwareView" class="hidden" aria-label="Linux software inventory">
+        <section id="linuxServicesView" class="hidden" aria-label="Linux services inventory">
           <div class="view-toolbar">
-            <button id="exportLinuxSoftwareBtn" class="export-button" type="button">Export CSV</button>
+            <button id="exportLinuxServicesBtn" class="export-button" type="button">Export CSV</button>
           </div>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th data-sort-table="linuxSoftware" data-sort-key="name" class="sortable">Software</th>
-                  <th data-sort-table="linuxSoftware" data-sort-key="version" class="sortable">Version</th>
-                  <th data-sort-table="linuxSoftware" data-sort-key="count" class="sortable">Installations</th>
+                  <th data-sort-table="linuxServices" data-sort-key="name" class="sortable">Service</th>
+                  <th data-sort-table="linuxServices" data-sort-key="version" class="sortable">Version</th>
+                  <th data-sort-table="linuxServices" data-sort-key="count" class="sortable">Installations</th>
                 </tr>
               </thead>
-              <tbody id="linuxSoftwareBody"></tbody>
+              <tbody id="linuxServicesBody"></tbody>
             </table>
           </div>
-          <div id="linuxSoftwarePager" class="pager"></div>
+          <div id="linuxServicesPager" class="pager"></div>
         </section>
 
         <section id="packageView" class="install-panel hidden" aria-label="Client package">
