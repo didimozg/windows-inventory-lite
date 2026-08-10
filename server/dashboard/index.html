@@ -769,6 +769,14 @@
                 Install path
                 <input id="linuxInstallPath" type="text" value="/opt/windows-inventory-lite">
               </label>
+              <label class="pkg-token-field">
+                Preferred subnet (CIDR)
+                <div class="install-inline-field-row">
+                  <input id="linuxInstallPreferredSubnet" type="text" placeholder="192.168.4.0/24">
+                  <button id="linuxInstallPreferredSubnetSaveButton" class="edit-button" type="button">Save</button>
+                </div>
+                <small class="cert-hint">Shared with Settings &gt; General &gt; Linux client targeting and the Client updates page - editing it here updates that same saved value. Only affects target resolution on the Client updates page; Targets above are always used exactly as typed.</small>
+              </label>
               <label>
                 Authentication
                 <select id="linuxInstallAuthMode">
@@ -828,6 +836,18 @@
               <input id="linuxUpdatesAcknowledgeHostKeyRisk" type="checkbox">
               I understand this accepts an unverified SSH host key on first connection
             </label>
+          </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Linux client targeting</h2>
+            <p class="cert-hint">Shared with Settings &gt; General &gt; Linux client targeting and the Client actions page - saving it here updates that same value and refreshes the list below with it applied.</p>
+            <label class="pkg-token-field">
+              Preferred subnet (CIDR)
+              <input id="linuxUpdatesPreferredSubnet" type="text" placeholder="192.168.4.0/24">
+            </label>
+            <div class="pkg-buttons">
+              <button id="linuxUpdatesPreferredSubnetSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="linuxUpdatesPreferredSubnetMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Schedule</h2>

@@ -502,6 +502,16 @@ main {
   color: var(--danger);
 }
 
+.install-inline-field-row {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+.install-inline-field-row input {
+  flex: 1;
+}
+
 .edit-button {
   min-height: 40px;
   min-width: 72px;

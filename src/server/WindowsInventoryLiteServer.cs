@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.39.0";
+        internal const string ProductVersion = "0.39.1";
 
         private static int Main(string[] args)
         {
@@ -2272,6 +2272,10 @@ namespace WindowsInventoryLite
             string currentVersion = GetLinuxClientPackageVersion();
             result["currentVersion"] = currentVersion;
             result["lastScheduledJobId"] = lastScheduledLinuxUpdateJobId;
+            // Lets the dashboard's Client updates page pre-fill its own
+            // "Preferred subnet" field with the currently saved value,
+            // without a separate round trip to /api/v1/server/settings.
+            result["preferredLinuxSubnet"] = options.PreferredLinuxSubnet;
 
             if (String.IsNullOrEmpty(currentVersion))
             {

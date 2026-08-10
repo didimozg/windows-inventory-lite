@@ -146,7 +146,7 @@
     }
     render();
     if (view === 'install') loadInstallHistory();
-    if (view === 'linuxInstall') loadLinuxInstallHistory();
+    if (view === 'linuxInstall') { loadLinuxInstallHistory(); loadLinuxInstallPreferredSubnet(); }
     if (view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
     if (view === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
     if (view === 'updates') loadClientUpdates();
@@ -1055,6 +1055,43 @@
       });
   }
 
+  // The Preferred subnet field on this page and on Client updates both edit
+  // the SAME saved server setting (see Settings > General > Linux client
+  // targeting) - this only pre-fills the current value; saving goes through
+  // saveLinuxInstallPreferredSubnet below.
+  function loadLinuxInstallPreferredSubnet() {
+    fetch('/api/v1/server/settings', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('linuxInstallPreferredSubnet').value = data.preferredLinuxSubnet || '';
+      })
+      .catch(() => {});
+  }
+
+  function saveLinuxInstallPreferredSubnet() {
+    const preferredLinuxSubnet = byId('linuxInstallPreferredSubnet').value.trim();
+    byId('linuxInstallPreferredSubnetSaveButton').disabled = true;
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preferredLinuxSubnet })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+      })
+      .catch(error => {
+        window.alert(`Failed to save preferred subnet: ${error.message}`);
+      })
+      .finally(() => {
+        byId('linuxInstallPreferredSubnetSaveButton').disabled = false;
+      });
+  }
+
   function renderLinuxInstallHistory() {
     const jobs = state.linuxInstallJobs || [];
     if (jobs.length === 0) {
@@ -1534,10 +1571,38 @@
       })
       .then(data => {
         state.linuxClientUpdates = data;
+        byId('linuxUpdatesPreferredSubnet').value = data.preferredLinuxSubnet || '';
         renderLinuxClientUpdates(data);
       })
       .catch(error => {
         byId('linuxUpdatesPackageStatus').textContent = `Client update status unavailable: ${error.message}`;
+      });
+  }
+
+  // Saves the SAME server setting Client actions' own field and Settings >
+  // General > Linux client targeting edit - reloading afterward re-resolves
+  // every outdated client's push target (entry.target, the hidden checkbox
+  // value in the table below) using the newly saved preference.
+  function saveLinuxUpdatesPreferredSubnet() {
+    const preferredLinuxSubnet = byId('linuxUpdatesPreferredSubnet').value.trim();
+    byId('linuxUpdatesPreferredSubnetSaveButton').disabled = true;
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preferredLinuxSubnet })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        showSavedMessage(byId('linuxUpdatesPreferredSubnetMessage'), 'Saved.', false);
+        loadLinuxClientUpdates();
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxUpdatesPreferredSubnetMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('linuxUpdatesPreferredSubnetSaveButton').disabled = false;
       });
   }
 
@@ -3960,7 +4025,7 @@
     state.view = getInitialView();
     render();
     if (state.view === 'install') loadInstallHistory();
-    if (state.view === 'linuxInstall') loadLinuxInstallHistory();
+    if (state.view === 'linuxInstall') { loadLinuxInstallHistory(); loadLinuxInstallPreferredSubnet(); }
     if (state.view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
     if (state.view === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
     if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
@@ -3976,6 +4041,7 @@
   byId('linuxClientAction').addEventListener('change', updateLinuxClientActionUi);
   byId('linuxInstallAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField'));
   byId('linuxInstallButton').addEventListener('click', startLinuxClientActionJob);
+  byId('linuxInstallPreferredSubnetSaveButton').addEventListener('click', saveLinuxInstallPreferredSubnet);
   byId('linuxTrustNewHostKeys').addEventListener('change', updateLinuxTrustNewHostKeysUi);
   byId('linuxAcknowledgeHostKeyRisk').addEventListener('change', updateLinuxTrustNewHostKeysUi);
   byId('linuxUpdatesAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField'));
@@ -3985,6 +4051,7 @@
     updateLinuxUpdatesPushButtonState();
   });
   byId('linuxUpdatesPushButton').addEventListener('click', startLinuxUpdatesPush);
+  byId('linuxUpdatesPreferredSubnetSaveButton').addEventListener('click', saveLinuxUpdatesPreferredSubnet);
   byId('linuxUpdatesTrustNewHostKeys').addEventListener('change', updateLinuxUpdatesTrustNewHostKeysUi);
   byId('linuxUpdatesAcknowledgeHostKeyRisk').addEventListener('change', updateLinuxUpdatesTrustNewHostKeysUi);
   byId('linuxUpdatesScheduleMode').addEventListener('change', updateLinuxUpdatesScheduleFieldVisibility);
@@ -4177,5 +4244,5 @@
   updateLinuxClientActionUi();
   updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField');
   updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField');
-  if (state.view === 'linuxInstall') loadLinuxInstallHistory();
+  if (state.view === 'linuxInstall') { loadLinuxInstallHistory(); loadLinuxInstallPreferredSubnet(); }
 }());
