@@ -1374,6 +1374,7 @@ th.sort-desc::after {
   margin-bottom: var(--space-md);
   color: var(--muted);
   font-size: var(--font-size-sm);
+  max-width: 420px;
 }
 
 .pkg-grid {
@@ -1396,6 +1397,18 @@ th.sort-desc::after {
    field count in sync with index.html's #packageView .pkg-grid. */
 .pkg-grid-package {
   grid-template-columns: minmax(220px, 1.4fr) minmax(200px, 1.2fr) minmax(140px, 1fr) 110px auto;
+}
+
+/* Linux package has one more field than Windows package (Status check
+   interval, added alongside L1's dual-cadence status pinging) - reusing
+   .pkg-grid-package's 5-column template here left its 6th item (the
+   Save/Download button pair) with no track to sit in, wrapping it onto
+   its own row below while Windows package's identical-looking button
+   pair stayed inline - the exact "поехали" misalignment reported live.
+   A dedicated 6-column modifier, not a change to .pkg-grid-package
+   itself, so Windows package's own (correct) 5-column layout is untouched. */
+.pkg-grid-linux-package {
+  grid-template-columns: minmax(220px, 1.4fr) minmax(200px, 1.2fr) minmax(140px, 1fr) 110px 110px auto;
 }
 
 .pkg-grid label {
@@ -1488,8 +1501,14 @@ th.sort-desc::after {
   margin-top: 12px;
 }
 
+/* A short username/password field has no reason to grow with the
+   viewport - unlike a Server URL or install path, there's no long
+   content that benefits from extra width. Capped at the same 420px
+   this project already uses for a standalone settings field
+   (.ad-sync-panel/.ad-identity-panel below) instead of the previous
+   unbounded 1fr, which ballooned to 500px+ on a wide monitor. */
 .client-update-grid {
-  grid-template-columns: minmax(200px, 1fr) minmax(200px, 1fr) auto;
+  grid-template-columns: minmax(200px, 420px) minmax(200px, 420px) auto;
 }
 
 /* Same narrow single-column treatment as .ad-sync-panel/.ad-identity-panel -

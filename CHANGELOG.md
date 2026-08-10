@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.39.3]
+
+### Fixed
+
+- Reported live from a real deployment: "Linux update username"/"Linux update password" (Settings > General > Linux Client update credentials) and the new Preferred subnet field stretched to 500px+ wide on a wide monitor - their grid columns used unbounded `1fr` with no maximum, so short-content fields grew with the browser window instead of staying a sane size. Capped at 420px, the same maximum this project already uses for a standalone settings field.
+- The Linux package row on the Client package page (Server URL/Ingestion token/Install path/Interval/Status check interval) has one more field than Windows package's row, but both shared a 5-column grid template sized for Windows package only - Linux package's Save/Download buttons had no 6th column to sit in and wrapped onto their own line below, while Windows package's identical-looking buttons stayed inline right after its fields. Linux package now uses its own 6-column template; Windows package's is untouched.
+
 ## [0.39.2]
 
 ### Fixed
