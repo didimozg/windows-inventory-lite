@@ -1534,6 +1534,33 @@ th.sort-desc::after {
   border-bottom: 1px solid var(--line);
 }
 
+/* Authentication/Linux client targeting/Schedule side by side instead of
+   stacked - each is a narrow, max-420px block (see
+   .linux-updates-credential-field/.client-update-schedule-panel), so
+   three of them fit one row on any normal desktop width without
+   crowding, and stacking them pushed the actual outdated-clients table
+   below the fold. Wraps to stacked automatically on a narrow viewport
+   via flex-wrap, no separate breakpoint needed. The row-dividing border
+   moves to the wrapper; the three .settings-block children lose their
+   own (which would otherwise draw a divider under each column instead
+   of under the row). */
+.linux-updates-top-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-lg);
+  margin-bottom: 18px;
+  padding-bottom: var(--space-lg);
+  border-bottom: 1px solid var(--line);
+}
+
+.linux-updates-top-row .settings-block {
+  flex: 1 1 280px;
+  min-width: 280px;
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
 .settings-block-title {
   margin: 0 0 12px;
   color: var(--heading);
