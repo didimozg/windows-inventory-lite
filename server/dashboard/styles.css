@@ -1413,7 +1413,7 @@ th.sort-desc::after {
    .pkg-grid-package's 5-column template here left its 6th item (the
    Save/Download button pair) with no track to sit in, wrapping it onto
    its own row below while Windows package's identical-looking button
-   pair stayed inline - the exact "поехали" misalignment reported live.
+   pair stayed inline - the exact misalignment reported live.
    A dedicated 6-column modifier, not a change to .pkg-grid-package
    itself, so Windows package's own (correct) 5-column layout is untouched. */
 .pkg-grid-linux-package {

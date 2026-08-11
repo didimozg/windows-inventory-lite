@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.39.8]
+
+### Fixed
+
+- Re-running `Install-Server.ps1` with no parameters at all (`Install-Wizard.ps1`'s "Just refresh" option) silently re-checked "Use service account identity" even when an admin had deliberately unchecked it and configured explicit AD credentials - the flag was always derived from whether the saved `AdUsername` happened to be non-empty, which doesn't hold when AD sync itself is off (a state where the dashboard's own validation allows a saved `AdUseServiceIdentity=false` with a blank username). The installer now prefers the saved `AdUseServiceIdentity` value directly whenever this run isn't actively passing `-AdUsername`, only falling back to the old derivation for a fresh install with no saved config yet.
+- A Russian word had accidentally been quoted verbatim inside an English source comment (`styles.css`); translated to English.
+
 ## [0.39.7]
 
 ### Changed

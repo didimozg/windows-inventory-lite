@@ -430,6 +430,29 @@ function Resolve-InstallToken {
     return New-RandomToken
 }
 
+# When this run is actively (re)configuring AD credentials (-AdUsername
+# passed explicitly), the flag follows that decision directly - a blank
+# AdUsername means service identity, a real one means explicit credentials.
+# Otherwise (e.g. Install-Wizard.ps1's "Just refresh", which passes no
+# parameters at all) prefer the saved AdUseServiceIdentity from the
+# existing config when one exists, rather than re-deriving it from
+# AdUsername alone - AdUsername can legitimately be blank while
+# AdUseServiceIdentity is saved as false (AD sync itself off, a
+# combination the dashboard's own validation allows), and deriving from
+# AdUsername alone would silently re-check "use service account identity"
+# on every refresh even though nothing about AD was meant to change.
+function Resolve-AdUseServiceIdentity {
+    param(
+        [bool]$AdUsernameExplicitlyProvided,
+        [string]$AdUsername,
+        [string]$SavedAdUseServiceIdentity
+    )
+    if (-not $AdUsernameExplicitlyProvided -and $SavedAdUseServiceIdentity) {
+        return $SavedAdUseServiceIdentity -eq 'true'
+    }
+    return [string]::IsNullOrEmpty($AdUsername)
+}
+
 # Encrypts a secret with Windows DPAPI (LocalMachine scope, not CurrentUser -
 # the server may run as LocalSystem/NetworkService/a service account with no
 # loaded interactive profile, so LocalMachine is the only scope any process
@@ -750,7 +773,7 @@ if (-not $PSBoundParameters.ContainsKey('AdUsername')) {
 # require re-supplying it if it's already saved, but the *existing* saved
 # value is what server-config.json already has and $config.AdPassword
 # below only overwrites it when a new one was actually passed this run.
-$adUseServiceIdentity = [string]::IsNullOrEmpty($AdUsername)
+$adUseServiceIdentity = Resolve-AdUseServiceIdentity -AdUsernameExplicitlyProvided:($PSBoundParameters.ContainsKey('AdUsername')) -AdUsername $AdUsername -SavedAdUseServiceIdentity (Get-ConfigValue -Config $existingConfig -Name 'AdUseServiceIdentity')
 if ($AdSyncEnabled -and -not $adUseServiceIdentity -and -not $AdPassword -and -not (Get-ConfigValue -Config $existingConfig -Name 'AdPassword')) {
     throw "-AdUsername was supplied without -AdPassword, and no AD password is already saved - provide -AdPassword."
 }
