@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.37.8";
+        internal const string ProductVersion = "0.39.8";
 
         private static int Main(string[] args)
         {
@@ -108,6 +108,13 @@ namespace WindowsInventoryLite
         public string LinuxUpdatePassword;
         public string LinuxUpdateKeyPath;
         public string LinuxClientPackagePath;
+        // CIDR block (e.g. "192.168.1.0/24") an admin can set in Settings >
+        // General when a Linux host reports several NICs and the "wrong"
+        // one (a storage/cluster network, not the one reachable from this
+        // server) would otherwise win GetLinuxClientUpdateTarget's plain
+        // first-IPv4 heuristic. Empty by default - no filtering, unchanged
+        // behavior for a single-NIC fleet.
+        public string PreferredLinuxSubnet;
         // Independent of ClientUpdateSchedule* above - a separate Linux
         // fleet with separate credentials needs its own schedule, per
         // explicit user choice during design.
@@ -520,6 +527,10 @@ namespace WindowsInventoryLite
                 if (String.IsNullOrEmpty(options.AdComputerImportOUs))
                 {
                     options.AdComputerImportOUs = GetConfigString(config, "AdComputerImportOUs");
+                }
+                if (String.IsNullOrEmpty(options.PreferredLinuxSubnet))
+                {
+                    options.PreferredLinuxSubnet = GetConfigString(config, "PreferredLinuxSubnet");
                 }
                 if (String.IsNullOrEmpty(options.ClientUpdateUsername))
                 {
@@ -2261,6 +2272,10 @@ namespace WindowsInventoryLite
             string currentVersion = GetLinuxClientPackageVersion();
             result["currentVersion"] = currentVersion;
             result["lastScheduledJobId"] = lastScheduledLinuxUpdateJobId;
+            // Lets the dashboard's Client updates page pre-fill its own
+            // "Preferred subnet" field with the currently saved value,
+            // without a separate round trip to /api/v1/server/settings.
+            result["preferredLinuxSubnet"] = options.PreferredLinuxSubnet;
 
             if (String.IsNullOrEmpty(currentVersion))
             {
@@ -2288,7 +2303,7 @@ namespace WindowsInventoryLite
                 // (often unresolvable) self-reported hostname - see
                 // GetLinuxClientUpdateTarget's own comment. "hostname" above
                 // is kept separately for the dashboard's display column.
-                entry["target"] = GetLinuxClientUpdateTarget(client);
+                entry["target"] = GetLinuxClientUpdateTarget(client, options.PreferredLinuxSubnet);
                 entry["clientVersion"] = clientVersion;
                 entry["sourceUpdatedAt"] = GetStringValue(client, "sourceUpdatedAt");
                 updates.Add(entry);
@@ -2517,7 +2532,7 @@ namespace WindowsInventoryLite
                 {
                     continue;
                 }
-                string target = GetLinuxClientUpdateTarget(client);
+                string target = GetLinuxClientUpdateTarget(client, options.PreferredLinuxSubnet);
                 if (String.IsNullOrEmpty(target))
                 {
                     continue;
@@ -4127,30 +4142,123 @@ namespace WindowsInventoryLite
         // The client's own report already includes its real network
         // IP address(es) (linux-client/report.go's "ipAddresses", collected
         // via CollectIPAddresses() - up/non-loopback interfaces only, but
-        // possibly including IPv6/container-bridge addresses too). Prefer
-        // the first IPv4 address found, since that's what an operator
-        // reaches a target with in practice - fall back to the hostname
-        // only when no IPv4 address was ever reported (e.g. an older client
-        // build, or a report that predates this field).
-        private static string GetLinuxClientUpdateTarget(Dictionary<string, object> client)
+        // possibly including IPv6/container-bridge addresses too). On a host
+        // with several NICs, the array's order is whatever order the Linux
+        // kernel happened to enumerate interfaces in (net.Interfaces()) -
+        // NOT necessarily the address actually reachable from this server.
+        // Confirmed live: a Proxmox host with a dedicated storage/cluster
+        // network reported that network's address BEFORE its real LAN
+        // address, so a plain "first IPv4 wins" pick tried the unreachable
+        // one and every scheduled update push to it failed. When
+        // preferredSubnetCidr is configured (Settings > General), an
+        // address inside it wins regardless of array position; otherwise -
+        // or if nothing matches - falls back to the first IPv4 seen, same
+        // as before this option existed. Falls back to the hostname only
+        // when no IPv4 address was ever reported at all (e.g. an older
+        // client build, or a report that predates this field).
+        private static string GetLinuxClientUpdateTarget(Dictionary<string, object> client, string preferredSubnetCidr)
         {
             if (client != null && client.ContainsKey("ipAddresses"))
             {
                 ArrayList addresses = client["ipAddresses"] as ArrayList;
                 if (addresses != null)
                 {
+                    string firstIPv4 = null;
                     foreach (object candidate in addresses)
                     {
                         string candidateText = Convert.ToString(candidate);
                         IPAddress parsed;
                         if (IPAddress.TryParse(candidateText, out parsed) && parsed.AddressFamily == AddressFamily.InterNetwork)
                         {
-                            return candidateText;
+                            if (firstIPv4 == null)
+                            {
+                                firstIPv4 = candidateText;
+                            }
+                            if (!String.IsNullOrEmpty(preferredSubnetCidr) && IsIPv4InCidr(candidateText, preferredSubnetCidr))
+                            {
+                                return candidateText;
+                            }
                         }
+                    }
+                    if (firstIPv4 != null)
+                    {
+                        return firstIPv4;
                     }
                 }
             }
             return GetStringValue(client, "hostname");
+        }
+
+        // Returns true if ipText (a dotted-quad IPv4 address) falls within
+        // the CIDR block cidrText (e.g. "192.168.1.0/24"). Malformed input
+        // in either argument returns false rather than throwing - a bad or
+        // typo'd saved CIDR value must degrade to "no match" (the caller
+        // then falls back to its own first-IPv4 heuristic), not break
+        // target resolution for the whole fleet.
+        private static bool IsIPv4InCidr(string ipText, string cidrText)
+        {
+            if (String.IsNullOrEmpty(ipText) || String.IsNullOrEmpty(cidrText))
+            {
+                return false;
+            }
+
+            string[] parts = cidrText.Split('/');
+            if (parts.Length != 2)
+            {
+                return false;
+            }
+
+            IPAddress network;
+            int prefixLength;
+            if (!IPAddress.TryParse(parts[0], out network) || network.AddressFamily != AddressFamily.InterNetwork
+                || !Int32.TryParse(parts[1], out prefixLength) || prefixLength < 0 || prefixLength > 32)
+            {
+                return false;
+            }
+
+            IPAddress candidate;
+            if (!IPAddress.TryParse(ipText, out candidate) || candidate.AddressFamily != AddressFamily.InterNetwork)
+            {
+                return false;
+            }
+
+            uint networkBits = IPv4ToUInt32(network.GetAddressBytes());
+            uint candidateBits = IPv4ToUInt32(candidate.GetAddressBytes());
+            uint mask = prefixLength == 0 ? 0u : 0xFFFFFFFFu << (32 - prefixLength);
+
+            return (networkBits & mask) == (candidateBits & mask);
+        }
+
+        // Builds a uint from network-byte-order (big-endian) octets
+        // explicitly, rather than via BitConverter, so the result is
+        // correct regardless of this machine's own endianness.
+        private static uint IPv4ToUInt32(byte[] octets)
+        {
+            return ((uint)octets[0] << 24) | ((uint)octets[1] << 16) | ((uint)octets[2] << 8) | octets[3];
+        }
+
+        // Save-time validation for the Settings > General "preferred Linux
+        // subnet" field - blank clears the setting (always valid); a
+        // non-blank value must be a well-formed IPv4 CIDR block so a typo
+        // is rejected at save time with a clear error, rather than silently
+        // falling back to the old first-IPv4 behavior forever (which
+        // IsIPv4InCidr does deliberately at USE time, since that path must
+        // never break target resolution for an already-saved value).
+        private static bool IsValidCidr(string cidrText)
+        {
+            if (String.IsNullOrEmpty(cidrText))
+            {
+                return true;
+            }
+            string[] parts = cidrText.Split('/');
+            if (parts.Length != 2)
+            {
+                return false;
+            }
+            IPAddress network;
+            int prefixLength;
+            return IPAddress.TryParse(parts[0], out network) && network.AddressFamily == AddressFamily.InterNetwork
+                && Int32.TryParse(parts[1], out prefixLength) && prefixLength >= 0 && prefixLength <= 32;
         }
 
         // One OU Distinguished Name per line - not reused with
@@ -5848,6 +5956,7 @@ namespace WindowsInventoryLite
             // indicator without ever exposing the value itself.
             result["adPasswordConfigured"] = !String.IsNullOrEmpty(options.AdPassword);
             result["adComputerImportOUs"] = options.AdComputerImportOUs;
+            result["preferredLinuxSubnet"] = options.PreferredLinuxSubnet;
             result["installLogRetentionDays"] = options.InstallLogRetentionDays;
             result["debugLogEnabled"] = options.DebugLogEnabled;
             result["debugLogPath"] = DebugLogger.ResolvePath(options);
@@ -6125,6 +6234,18 @@ namespace WindowsInventoryLite
                 updates["AdUsername"] = options.AdUsername ?? "";
                 updates["AdPassword"] = options.AdPassword ?? "";
                 updates["AdComputerImportOUs"] = options.AdComputerImportOUs ?? "";
+            }
+
+            if (payload.ContainsKey("preferredLinuxSubnet"))
+            {
+                string preferredLinuxSubnet = Convert.ToString(payload["preferredLinuxSubnet"]).Trim();
+                if (!IsValidCidr(preferredLinuxSubnet))
+                {
+                    SendText(stream, "{\"error\":\"preferredLinuxSubnet must be blank or a valid IPv4 CIDR block, e.g. 192.168.1.0/24\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.PreferredLinuxSubnet = preferredLinuxSubnet;
+                updates["PreferredLinuxSubnet"] = options.PreferredLinuxSubnet;
             }
 
             if (payload.ContainsKey("debugLogEnabled"))
@@ -8225,6 +8346,13 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent ignores a missing package instead of false-matching it", TestIsClientVersionCurrentIgnoresMissingPackage);
             allPassed &= SelfTestCheck(output, "GetLinuxClientUpdateTarget prefers a reported IPv4 address over the (often unresolvable) hostname", TestGetLinuxClientUpdateTargetPrefersIPv4OverHostname);
             allPassed &= SelfTestCheck(output, "GetLinuxClientUpdateTarget falls back to hostname when no IPv4 address is available", TestGetLinuxClientUpdateTargetFallsBackToHostnameWithNoIPv4);
+            allPassed &= SelfTestCheck(output, "GetLinuxClientUpdateTarget prefers an address inside the configured preferred subnet over the first-seen IPv4", TestGetLinuxClientUpdateTargetPrefersConfiguredSubnet);
+            allPassed &= SelfTestCheck(output, "GetLinuxClientUpdateTarget falls back to the first-seen IPv4 when no address matches the configured subnet", TestGetLinuxClientUpdateTargetFallsBackWhenNoAddressMatchesSubnet);
+            allPassed &= SelfTestCheck(output, "GetLinuxClientUpdateTarget ignores a malformed configured subnet instead of failing target resolution", TestGetLinuxClientUpdateTargetIgnoresMalformedSubnet);
+            allPassed &= SelfTestCheck(output, "IsIPv4InCidr matches an address inside the subnet", TestIsIPv4InCidrMatchesInsideSubnet);
+            allPassed &= SelfTestCheck(output, "IsIPv4InCidr rejects an address outside the subnet", TestIsIPv4InCidrRejectsOutsideSubnet);
+            allPassed &= SelfTestCheck(output, "IsIPv4InCidr handles /0 (matches everything) and /32 (matches only itself)", TestIsIPv4InCidrHandlesEdgePrefixLengths);
+            allPassed &= SelfTestCheck(output, "IsIPv4InCidr returns false for malformed CIDR text or IP text instead of throwing", TestIsIPv4InCidrRejectsMalformedInput);
             allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials falls back to the saved account when blank", TestResolveUpdateCredentialsFallsBackToSavedWhenBlank);
             allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials prefers a typed per-push override over the saved account", TestResolveUpdateCredentialsPrefersTypedOverride);
             allPassed &= SelfTestCheck(output, "ResolveUpdateCredentials is a no-op for Client actions (useSavedCredentials=false)", TestResolveUpdateCredentialsIgnoredWhenFlagIsFalse);
@@ -9172,7 +9300,7 @@ namespace WindowsInventoryLite
             addresses.Add("10.0.0.5");
             client["ipAddresses"] = addresses;
 
-            string target = GetLinuxClientUpdateTarget(client);
+            string target = GetLinuxClientUpdateTarget(client, "");
             if (target != "192.168.4.110")
             {
                 return "expected the first IPv4 address ('192.168.4.110'), skipping the leading IPv6 entry, got '" + target + "'";
@@ -9188,7 +9316,7 @@ namespace WindowsInventoryLite
             addresses.Add("fe80::1");
             client["ipAddresses"] = addresses;
 
-            string target = GetLinuxClientUpdateTarget(client);
+            string target = GetLinuxClientUpdateTarget(client, "");
             if (target != "docker")
             {
                 return "expected fallback to hostname 'docker' when no IPv4 address is present, got '" + target + "'";
@@ -9196,10 +9324,123 @@ namespace WindowsInventoryLite
 
             Dictionary<string, object> clientWithNoAddressesAtAll = new Dictionary<string, object>();
             clientWithNoAddressesAtAll["hostname"] = "legacy-report";
-            string targetForOlderReport = GetLinuxClientUpdateTarget(clientWithNoAddressesAtAll);
+            string targetForOlderReport = GetLinuxClientUpdateTarget(clientWithNoAddressesAtAll, "");
             if (targetForOlderReport != "legacy-report")
             {
                 return "expected fallback to hostname for a report with no ipAddresses field at all (older client), got '" + targetForOlderReport + "'";
+            }
+            return null;
+        }
+
+        // Reproduces the real bug this session: a Proxmox host reporting a
+        // storage/cluster-network address (192.168.253.x) BEFORE its real
+        // LAN address (192.168.4.x) in ipAddresses - the plain first-IPv4
+        // heuristic picked the unreachable one. With a preferred subnet
+        // configured, the matching address wins regardless of array order.
+        private static string TestGetLinuxClientUpdateTargetPrefersConfiguredSubnet()
+        {
+            Dictionary<string, object> client = new Dictionary<string, object>();
+            client["hostname"] = "minipveone";
+            ArrayList addresses = new ArrayList();
+            addresses.Add("192.168.253.12");
+            addresses.Add("192.168.4.12");
+            addresses.Add("192.168.240.1");
+            client["ipAddresses"] = addresses;
+
+            string target = GetLinuxClientUpdateTarget(client, "192.168.4.0/24");
+            if (target != "192.168.4.12")
+            {
+                return "expected the address inside the preferred subnet ('192.168.4.12'), got '" + target + "'";
+            }
+            return null;
+        }
+
+        private static string TestGetLinuxClientUpdateTargetFallsBackWhenNoAddressMatchesSubnet()
+        {
+            Dictionary<string, object> client = new Dictionary<string, object>();
+            client["hostname"] = "minipveone";
+            ArrayList addresses = new ArrayList();
+            addresses.Add("192.168.253.12");
+            addresses.Add("192.168.240.1");
+            client["ipAddresses"] = addresses;
+
+            string target = GetLinuxClientUpdateTarget(client, "192.168.4.0/24");
+            if (target != "192.168.253.12")
+            {
+                return "expected fallback to the first-seen IPv4 ('192.168.253.12') when nothing matches the preferred subnet, got '" + target + "'";
+            }
+            return null;
+        }
+
+        private static string TestGetLinuxClientUpdateTargetIgnoresMalformedSubnet()
+        {
+            Dictionary<string, object> client = new Dictionary<string, object>();
+            client["hostname"] = "minipveone";
+            ArrayList addresses = new ArrayList();
+            addresses.Add("192.168.253.12");
+            addresses.Add("192.168.4.12");
+            client["ipAddresses"] = addresses;
+
+            string target = GetLinuxClientUpdateTarget(client, "not-a-cidr-value");
+            if (target != "192.168.253.12")
+            {
+                return "expected fallback to the first-seen IPv4 ('192.168.253.12') when the configured subnet is malformed, got '" + target + "'";
+            }
+            return null;
+        }
+
+        private static string TestIsIPv4InCidrMatchesInsideSubnet()
+        {
+            if (!IsIPv4InCidr("192.168.4.12", "192.168.4.0/24"))
+            {
+                return "expected 192.168.4.12 to match 192.168.4.0/24";
+            }
+            return null;
+        }
+
+        private static string TestIsIPv4InCidrRejectsOutsideSubnet()
+        {
+            if (IsIPv4InCidr("192.168.253.12", "192.168.4.0/24"))
+            {
+                return "expected 192.168.253.12 to NOT match 192.168.4.0/24";
+            }
+            return null;
+        }
+
+        private static string TestIsIPv4InCidrHandlesEdgePrefixLengths()
+        {
+            if (!IsIPv4InCidr("10.20.30.40", "0.0.0.0/0"))
+            {
+                return "expected /0 to match every address";
+            }
+            if (!IsIPv4InCidr("192.168.4.12", "192.168.4.12/32"))
+            {
+                return "expected /32 to match only the identical address";
+            }
+            if (IsIPv4InCidr("192.168.4.13", "192.168.4.12/32"))
+            {
+                return "expected /32 to NOT match a different address";
+            }
+            return null;
+        }
+
+        private static string TestIsIPv4InCidrRejectsMalformedInput()
+        {
+            if (IsIPv4InCidr("192.168.4.12", "not-a-cidr-value"))
+            {
+                return "expected a CIDR value with no '/' to return false, not throw";
+            }
+            if (IsIPv4InCidr("192.168.4.12", "192.168.4.0/33"))
+            {
+                return "expected an out-of-range prefix length (/33) to return false";
+            }
+            if (IsIPv4InCidr("not-an-ip", "192.168.4.0/24"))
+            {
+                return "expected a malformed IP address to return false, not throw";
+            }
+            if (IsIPv4InCidr("fe80::1", "192.168.4.0/24"))
+            {
+                return "expected an IPv6 address to return false against an IPv4 CIDR";
             }
             return null;
         }

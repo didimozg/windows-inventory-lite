@@ -502,6 +502,16 @@ main {
   color: var(--danger);
 }
 
+.install-inline-field-row {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+.install-inline-field-row input {
+  flex: 1;
+}
+
 .edit-button {
   min-height: 40px;
   min-width: 72px;
@@ -1364,6 +1374,7 @@ th.sort-desc::after {
   margin-bottom: var(--space-md);
   color: var(--muted);
   font-size: var(--font-size-sm);
+  max-width: 420px;
 }
 
 .pkg-grid {
@@ -1371,6 +1382,15 @@ th.sort-desc::after {
   grid-template-columns: minmax(240px, 2fr) minmax(160px, 1fr) 110px auto;
   gap: var(--space-md);
   align-items: end;
+}
+
+/* SSH key's file picker is the only field in its row (Upload/Delete are
+   the row's other grid item), so it fell into .pkg-grid's first column -
+   sized as a 2fr share meant for a URL field, not a "Choose File" button
+   plus filename. Reported live at 957px wide on a 1920px screen for what
+   never needs more than a few hundred pixels. */
+.pkg-grid-ssh-key {
+  grid-template-columns: minmax(240px, 420px) auto;
 }
 
 /* The Client Package grid has one more field (Server URL, Package share
@@ -1386,6 +1406,18 @@ th.sort-desc::after {
    field count in sync with index.html's #packageView .pkg-grid. */
 .pkg-grid-package {
   grid-template-columns: minmax(220px, 1.4fr) minmax(200px, 1.2fr) minmax(140px, 1fr) 110px auto;
+}
+
+/* Linux package has one more field than Windows package (Status check
+   interval, added alongside L1's dual-cadence status pinging) - reusing
+   .pkg-grid-package's 5-column template here left its 6th item (the
+   Save/Download button pair) with no track to sit in, wrapping it onto
+   its own row below while Windows package's identical-looking button
+   pair stayed inline - the exact misalignment reported live.
+   A dedicated 6-column modifier, not a change to .pkg-grid-package
+   itself, so Windows package's own (correct) 5-column layout is untouched. */
+.pkg-grid-linux-package {
+  grid-template-columns: minmax(220px, 1.4fr) minmax(200px, 1.2fr) minmax(140px, 1fr) 110px 110px auto;
 }
 
 .pkg-grid label {
@@ -1434,6 +1466,7 @@ th.sort-desc::after {
 
 .cert-hint {
   margin-top: 12px;
+  margin-bottom: var(--space-md);
   font-size: var(--font-size-xs);
 }
 
@@ -1477,8 +1510,14 @@ th.sort-desc::after {
   margin-top: 12px;
 }
 
+/* A short username/password field has no reason to grow with the
+   viewport - unlike a Server URL or install path, there's no long
+   content that benefits from extra width. Capped at the same 420px
+   this project already uses for a standalone settings field
+   (.ad-sync-panel/.ad-identity-panel below) instead of the previous
+   unbounded 1fr, which ballooned to 500px+ on a wide monitor. */
 .client-update-grid {
-  grid-template-columns: minmax(200px, 1fr) minmax(200px, 1fr) auto;
+  grid-template-columns: minmax(200px, 420px) minmax(200px, 420px) auto;
 }
 
 /* Same narrow single-column treatment as .ad-sync-panel/.ad-identity-panel -
@@ -1493,6 +1532,33 @@ th.sort-desc::after {
   padding-bottom: var(--space-lg);
   margin-bottom: 18px;
   border-bottom: 1px solid var(--line);
+}
+
+/* Authentication/Linux client targeting/Schedule side by side instead of
+   stacked - each is a narrow, max-420px block (see
+   .linux-updates-credential-field/.client-update-schedule-panel), so
+   three of them fit one row on any normal desktop width without
+   crowding, and stacking them pushed the actual outdated-clients table
+   below the fold. Wraps to stacked automatically on a narrow viewport
+   via flex-wrap, no separate breakpoint needed. The row-dividing border
+   moves to the wrapper; the three .settings-block children lose their
+   own (which would otherwise draw a divider under each column instead
+   of under the row). */
+.linux-updates-top-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-lg);
+  margin-bottom: 18px;
+  padding-bottom: var(--space-lg);
+  border-bottom: 1px solid var(--line);
+}
+
+.linux-updates-top-row .settings-block {
+  flex: 1 1 280px;
+  min-width: 280px;
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
 }
 
 .settings-block-title {

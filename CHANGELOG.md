@@ -6,6 +6,78 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.39.8]
+
+### Fixed
+
+- Re-running `Install-Server.ps1` with no parameters at all (`Install-Wizard.ps1`'s "Just refresh" option) silently re-checked "Use service account identity" even when an admin had deliberately unchecked it and configured explicit AD credentials - the flag was always derived from whether the saved `AdUsername` happened to be non-empty, which doesn't hold when AD sync itself is off (a state where the dashboard's own validation allows a saved `AdUseServiceIdentity=false` with a blank username). The installer now prefers the saved `AdUseServiceIdentity` value directly whenever this run isn't actively passing `-AdUsername`, only falling back to the old derivation for a fresh install with no saved config yet.
+- A Russian word had accidentally been quoted verbatim inside an English source comment (`styles.css`); translated to English.
+
+## [0.39.7]
+
+### Changed
+
+- Removed real infrastructure details that had leaked into example/placeholder text: the Organizational Units field showed a real AD OU path (city/region/org identifiers), and several IPv4 examples (Client actions' Targets field, the three Preferred subnet fields, two code comments, and a validation error message) used one specific real subnet. Targets now uses the IANA documentation range (192.0.2.0/24, RFC 5737), matching the existing Windows Client actions field; the OU example and the CIDR examples match this project's other existing generic examples.
+
+## [0.39.6]
+
+### Changed
+
+- Linux Client updates' Authentication/Linux client targeting/Schedule blocks are now laid out side by side in one row instead of stacked - each is a narrow (max ~420px) block, so three fit comfortably on any normal desktop width, and stacking them was pushing the actual outdated-clients table below the fold. Wraps to stacked automatically on a narrow viewport.
+
+## [0.39.5]
+
+### Fixed
+
+- "Private key file" (Settings > General > SSH key) was 957px wide on a 1920px screen - the only field in its row, it fell into the base `.pkg-grid` template's first column, sized as a 2fr share meant for a URL field. Given its own `.pkg-grid-ssh-key` modifier, capped at 420px like every other standalone field.
+- Client actions: "Interval (hours)" and "Status check interval (minutes)" are now paired in one row, and "Install path"/"Preferred subnet (CIDR)" in another - previously each was paired with an unrelated neighbor by coincidence of field order. Removed the redundant hint paragraph under Preferred subnet on this page (Client updates and Settings already explain it).
+- Client actions: "Authentication" rendered at 104px tall (2.5x a normal field) because it shared a grid row with the old, taller Preferred-subnet block (input + button + a 2-line hint). Reordering fields (Authentication now follows Ingestion token) removed the shared row entirely, fixing the height at its root rather than patching the symptom.
+- Client updates: the Authentication/Linux client targeting/Schedule hint paragraphs were long enough that the outdated-clients table needed scrolling to reach. Shortened or removed each (the field labels already carry the necessary context), keeping the block order (Authentication -> Linux client targeting -> Schedule) that already matched what was asked.
+- Linux Clients' per-client service table has an "Active" column header but only ever rendered anything for the inactive case (a text badge) - a confirmed-running service's cell was blank, indistinguishable from missing data. Added a positive indicator too, reusing the same on/off status-dot pattern already used for Windows/Office activation elsewhere in the dashboard (green check for active, muted dash for inactive) instead of a badge that only ever fires one way.
+
+## [0.39.3]
+
+### Fixed
+
+- Reported live from a real deployment: "Linux update username"/"Linux update password" (Settings > General > Linux Client update credentials) and the new Preferred subnet field stretched to 500px+ wide on a wide monitor - their grid columns used unbounded `1fr` with no maximum, so short-content fields grew with the browser window instead of staying a sane size. Capped at 420px, the same maximum this project already uses for a standalone settings field.
+- The Linux package row on the Client package page (Server URL/Ingestion token/Install path/Interval/Status check interval) has one more field than Windows package's row, but both shared a 5-column grid template sized for Windows package only - Linux package's Save/Download buttons had no 6th column to sit in and wrapped onto their own line below, while Windows package's identical-looking buttons stayed inline right after its fields. Linux package now uses its own 6-column template; Windows package's is untouched.
+
+## [0.39.2]
+
+### Fixed
+
+- A `.cert-hint` hint paragraph had a top margin but no bottom margin, so it sat almost touching whatever came right after it - most visible on the Linux Client updates page's "Authentication" and new "Linux client targeting" blocks, where a hint immediately precedes a field label. Also fixed the new "Linux client targeting" field itself using `.pkg-token-field`, a class that only supplies its internal label layout inside a `.pkg-grid` ancestor - this block has none, the same known gap already worked around for the Authentication block above it (`.linux-updates-credential-field`), so it inherited no spacing at all until switched to that class too.
+
+## [0.39.1]
+
+### Changed
+
+- The "Preferred subnet (CIDR)" setting (added in 0.39.0) is now also editable directly from the Linux Client updates and Linux Client actions pages, not only Settings > General - all three edit the same saved value, and saving from Client updates immediately re-resolves the outdated-clients list with it applied. Client actions' own free-text Targets field is unaffected either way - it's always used exactly as typed.
+
+## [0.39.0]
+
+### Added
+
+- Settings > General gained "Linux client targeting", a preferred-subnet (CIDR) field for Client updates/actions pushes. On a host with several NICs, the target address previously defaulted to the first IPv4 the client happened to report, in whatever order the kernel enumerated interfaces - not necessarily the one reachable from this server. Confirmed live on two real Proxmox hosts: each reported a dedicated storage/cluster-network address before its real LAN address, so every scheduled update push to them failed with a connection timeout. With a preferred subnet configured, an address inside it wins regardless of its position in the report; leaving the field blank keeps the old first-address behavior unchanged.
+
+## [0.38.0]
+
+### Changed
+
+- The "Linux Software" dashboard tab is now "Linux Services", matching what it has actually shown since the running-services collector replaced the package collector: `Service`/`Version`/`Installations` columns, `#linux-services` URL hash (no redirect from the old `#linux-software` hash - internal admin tool, not treated as a stable public link), `linux-services-<date>.csv` export filename.
+
+### Added
+
+- The Linux Services grouped view now marks a computer `INACTIVE` in a service's expanded computer list when that service isn't in the client's most recent status report, mirroring the badge already shown in the per-client Linux Clients detail view.
+
+## [Linux client 0.1.5]
+
+Server/dashboard unchanged in this release - the server version stays at 0.37.8.
+
+### Fixed
+
+- The 0.1.4 mount-based disk filter dropped disks that were mounted through a partition instead of directly - the common case on a traditionally partitioned server. `/sys/block` only lists whole disks (e.g. `sda`), never partitions, but a partitioned disk's mount shows up in `/proc/self/mountinfo` under its partition's own device id (e.g. `sda1`), not the disk's. The filter now also matches on any of a disk's partitions being mounted, not just the disk itself. Confirmed live on a Proxmox host: a disk with a single mounted partition (`sdc1`, mounted at `/mnt/pve/SSD`) was incorrectly excluded from the report; only a disk used directly as an LVM volume with no partition table, the original 0.1.4 test case, was reporting correctly.
+
 ## [Linux client 0.1.4]
 
 Server/dashboard unchanged in this release - the server version stays at 0.37.7.

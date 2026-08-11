@@ -71,9 +71,9 @@
             <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="10" rx="1.2"/><line x1="7" y1="17" x2="13" y2="17"/><line x1="10" y1="13.5" x2="10" y2="17"/></svg>
             Clients
           </button>
-          <button id="linuxSoftwareTab" class="nav-item" type="button">
+          <button id="linuxServicesTab" class="nav-item" type="button">
             <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5 L17.5 6.5 L17.5 13.5 L10 17.5 L2.5 13.5 L2.5 6.5 Z"/><line x1="10" y1="10" x2="17.3" y2="6.3"/><line x1="10" y1="10" x2="2.7" y2="6.3"/><line x1="10" y1="10" x2="10" y2="17.5"/></svg>
-            Software
+            Services
           </button>
         </div>
         <button id="hardwareTab" class="nav-item nav-item-root" type="button">
@@ -275,10 +275,20 @@
               </label>
               <label class="pkg-token-field">
                 Organizational Units (DN, one per line)
-                <textarea id="generalAdComputerImportOUs" rows="3" placeholder="OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru"></textarea>
+                <textarea id="generalAdComputerImportOUs" rows="3" placeholder="OU=Workstations,OU=Site1,DC=corp,DC=example,DC=com"></textarea>
               </label>
             </div>
             <p class="cert-hint">"Configure AD User" makes the domain/credentials below available to Client actions, Client updates, and AD Computer Import. "Sync Description from AD" additionally writes each computer's Active Directory description into its inventory record, read-only in the Clients table while it's on. Turn it off to edit Description manually instead - re-enabling it later overwrites any manual edits on the next sync. Reading the description attribute is allowed to any authenticated domain user by default AD ACLs, so the service account identity usually needs no special AD delegation.</p>
+          </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Linux client targeting</h2>
+            <p class="cert-hint">When a Linux host reports several network interfaces, Client updates/actions picks the first IPv4 address it sees by default - not necessarily the one reachable from this server (e.g. a dedicated storage/cluster network reported ahead of the real LAN address). Set a preferred subnet to make that address win instead, regardless of its position in the report. Leave blank to keep the plain first-address behavior.</p>
+            <div class="pkg-grid client-update-grid">
+              <label class="pkg-token-field">
+                Preferred subnet (CIDR)
+                <input id="generalPreferredLinuxSubnet" type="text" placeholder="192.168.1.0/24">
+              </label>
+            </div>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Linux Client update credentials</h2>
@@ -301,7 +311,7 @@
             <div id="linuxCredsMessage" class="pkg-message hidden"></div>
             <h2 class="settings-block-title">SSH key</h2>
             <p id="linuxSshKeyStatus" class="pkg-status">Loading SSH key status...</p>
-            <div class="pkg-grid">
+            <div class="pkg-grid pkg-grid-ssh-key">
               <label class="pkg-url-field">
                 Private key file
                 <input id="linuxSshKeyFile" type="file">
@@ -512,23 +522,23 @@
           <div id="linuxClientsPager" class="pager"></div>
         </section>
 
-        <section id="linuxSoftwareView" class="hidden" aria-label="Linux software inventory">
+        <section id="linuxServicesView" class="hidden" aria-label="Linux services inventory">
           <div class="view-toolbar">
-            <button id="exportLinuxSoftwareBtn" class="export-button" type="button">Export CSV</button>
+            <button id="exportLinuxServicesBtn" class="export-button" type="button">Export CSV</button>
           </div>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th data-sort-table="linuxSoftware" data-sort-key="name" class="sortable">Software</th>
-                  <th data-sort-table="linuxSoftware" data-sort-key="version" class="sortable">Version</th>
-                  <th data-sort-table="linuxSoftware" data-sort-key="count" class="sortable">Installations</th>
+                  <th data-sort-table="linuxServices" data-sort-key="name" class="sortable">Service</th>
+                  <th data-sort-table="linuxServices" data-sort-key="version" class="sortable">Version</th>
+                  <th data-sort-table="linuxServices" data-sort-key="count" class="sortable">Installations</th>
                 </tr>
               </thead>
-              <tbody id="linuxSoftwareBody"></tbody>
+              <tbody id="linuxServicesBody"></tbody>
             </table>
           </div>
-          <div id="linuxSoftwarePager" class="pager"></div>
+          <div id="linuxServicesPager" class="pager"></div>
         </section>
 
         <section id="packageView" class="install-panel hidden" aria-label="Client package">
@@ -565,7 +575,7 @@
             <h2 class="settings-block-title">Linux package</h2>
             <p class="cert-hint">A self-contained download for environments without SSH connectivity from this server: the Linux client binary, its systemd unit files, and an install.sh script an admin runs locally on the target (or via any config-management tool) - no plink/pscp/SSH involved on this path.</p>
             <p id="linuxPkgStatus" class="pkg-status">Loading Linux package status...</p>
-            <div class="pkg-grid pkg-grid-package">
+            <div class="pkg-grid pkg-grid-linux-package">
               <label class="pkg-url-field">
                 Server URL
                 <input id="linuxPkgServerUrl" type="text" placeholder="http://192.168.1.1:8080/api/v1/linux/inventory">
@@ -727,7 +737,7 @@
               <div class="install-targets-textarea-wrap">
                 <label>
                   Targets (hostnames or IPs)
-                  <textarea id="linuxInstallTargets" rows="4" placeholder="192.168.4.100&#10;192.168.4.101&#10;192.168.4.102-192.168.4.112"></textarea>
+                  <textarea id="linuxInstallTargets" rows="4" placeholder="192.0.2.10&#10;192.0.2.11&#10;192.0.2.20-192.0.2.30"></textarea>
                 </label>
               </div>
             </div>
@@ -747,6 +757,14 @@
                 Ingestion token
                 <input id="linuxInstallToken" type="text" autocomplete="off" placeholder="leave empty to use the server's current token">
               </label>
+              <label>
+                Authentication
+                <select id="linuxInstallAuthMode">
+                  <option value="credentials">Stored Linux credentials</option>
+                  <option value="key">SSH key</option>
+                  <option value="ad">Use global AD settings</option>
+                </select>
+              </label>
               <label class="install-only">
                 Interval (hours)
                 <input id="linuxInstallIntervalHours" type="number" min="1" max="24" value="6">
@@ -759,13 +777,12 @@
                 Install path
                 <input id="linuxInstallPath" type="text" value="/opt/windows-inventory-lite">
               </label>
-              <label>
-                Authentication
-                <select id="linuxInstallAuthMode">
-                  <option value="credentials">Stored Linux credentials</option>
-                  <option value="key">SSH key</option>
-                  <option value="ad">Use global AD settings</option>
-                </select>
+              <label class="pkg-token-field">
+                Preferred subnet (CIDR)
+                <div class="install-inline-field-row">
+                  <input id="linuxInstallPreferredSubnet" type="text" placeholder="192.168.1.0/24">
+                  <button id="linuxInstallPreferredSubnetSaveButton" class="edit-button" type="button">Save</button>
+                </div>
               </label>
               <label id="linuxInstallCredentialsField" class="hidden">
                 Linux user
@@ -791,9 +808,9 @@
         </section>
 
         <section id="linuxUpdatesView" class="install-panel hidden" aria-label="Linux client updates">
+          <div class="linux-updates-top-row">
           <div class="settings-block">
             <h2 class="settings-block-title">Authentication</h2>
-            <p class="cert-hint">Uses the credentials saved in Settings &gt; General &gt; Linux Client update credentials by default - enter values below to override them for this push only, or select "Use global AD settings".</p>
             <label class="linux-updates-credential-field">
               Authentication
               <select id="linuxUpdatesAuthMode">
@@ -820,8 +837,19 @@
             </label>
           </div>
           <div class="settings-block">
+            <h2 class="settings-block-title">Linux client targeting</h2>
+            <label class="linux-updates-credential-field">
+              Preferred subnet (CIDR)
+              <input id="linuxUpdatesPreferredSubnet" type="text" placeholder="192.168.1.0/24">
+            </label>
+            <div class="pkg-buttons">
+              <button id="linuxUpdatesPreferredSubnetSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="linuxUpdatesPreferredSubnetMessage" class="pkg-message hidden"></div>
+          </div>
+          <div class="settings-block">
             <h2 class="settings-block-title">Schedule</h2>
-            <p class="cert-hint">Automatically pushes to whichever Linux clients are outdated when the schedule fires - independent of the Windows Client updates schedule. Uses the saved Linux credentials above (AD reuse is not available for the scheduled path, only for a manual "Update selected" push).</p>
+            <p class="cert-hint">Auto-pushes outdated clients using the credentials above (no AD reuse for scheduled pushes).</p>
             <div class="pkg-grid client-update-schedule-panel">
               <label class="pkg-token-field">
                 Schedule
@@ -844,6 +872,7 @@
               </div>
             </div>
             <div id="linuxUpdatesScheduleMessage" class="pkg-message hidden"></div>
+          </div>
           </div>
           <p id="linuxUpdatesPackageStatus" class="pkg-status">Loading client update status...</p>
           <div class="table-wrap">

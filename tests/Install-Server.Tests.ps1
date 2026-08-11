@@ -68,6 +68,65 @@ Describe 'Windows Inventory Lite Install-Server ingestion token resolution' {
     }
 }
 
+# Reproduces a real bug: "Just refresh" (re-running the installer with no
+# parameters at all, per Install-Wizard.ps1's own "no questions asked" mode)
+# was silently re-checking "Use service account identity" even when an
+# admin had deliberately unchecked it, whenever the saved AdUsername
+# happened to be empty - a legitimate saved state when AD sync itself is
+# off, since the dashboard's own validation only requires a non-empty
+# AdUsername while AD sync is enabled.
+Describe 'Windows Inventory Lite Install-Server AdUseServiceIdentity resolution' {
+    BeforeAll {
+        $script:ProjectRoot = Split-Path -Parent $PSScriptRoot
+        $scriptPath = Join-Path -Path $script:ProjectRoot -ChildPath 'src\Install-Server.ps1'
+        $scriptContent = Get-Content -LiteralPath $scriptPath -Raw
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($scriptContent, [ref]$tokens, [ref]$errors)
+        $targetNames = @('Resolve-AdUseServiceIdentity')
+        $functionAsts = $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $targetNames -contains $node.Name
+        }, $true)
+        if ($functionAsts.Count -ne 1) {
+            throw "Expected to find Resolve-AdUseServiceIdentity in Install-Server.ps1, found $($functionAsts.Count)"
+        }
+        foreach ($functionAst in $functionAsts) {
+            . ([scriptblock]::Create($functionAst.Extent.Text))
+        }
+    }
+
+    It 'reuses the saved false value on a parameterless refresh even when AdUsername is empty' {
+        $result = Resolve-AdUseServiceIdentity -AdUsernameExplicitlyProvided $false -AdUsername '' -SavedAdUseServiceIdentity 'false'
+
+        $result | Should -Be $false
+    }
+
+    It 'reuses the saved true value on a parameterless refresh' {
+        $result = Resolve-AdUseServiceIdentity -AdUsernameExplicitlyProvided $false -AdUsername '' -SavedAdUseServiceIdentity 'true'
+
+        $result | Should -Be $true
+    }
+
+    It 'derives from AdUsername when a saved value is unavailable (fresh install, no existing config)' {
+        $result = Resolve-AdUseServiceIdentity -AdUsernameExplicitlyProvided $false -AdUsername '' -SavedAdUseServiceIdentity $null
+
+        $result | Should -Be $true
+    }
+
+    It 'derives from the explicitly-passed AdUsername when this run is actively reconfiguring AD, ignoring any saved value' {
+        $result = Resolve-AdUseServiceIdentity -AdUsernameExplicitlyProvided $true -AdUsername 'realuser' -SavedAdUseServiceIdentity 'true'
+
+        $result | Should -Be $false
+    }
+
+    It 'derives false-to-true from an explicitly-passed blank AdUsername, ignoring any saved value' {
+        $result = Resolve-AdUseServiceIdentity -AdUsernameExplicitlyProvided $true -AdUsername '' -SavedAdUseServiceIdentity 'false'
+
+        $result | Should -Be $true
+    }
+}
+
 # Same AST-extraction approach as above, applied to the functions that
 # guard config-file ACL ordering (3e) and install-path validation (3c-PS).
 # Write-ServerConfig depends on Set-RestrictedFileAcl and ConvertTo-JsonString,

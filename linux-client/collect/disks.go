@@ -39,10 +39,50 @@ func parseMountedMajorMinors(r io.Reader) map[string]bool {
 	return ids
 }
 
+// isDiskMounted reports whether the disk at root/name has something mounted
+// on it, either directly (its own "dev" id) or via one of its partitions
+// (sysfs represents each as a subdirectory of the disk, e.g.
+// "sda/sda1/dev") - see ParseBlockDevices for why both must be checked.
+func isDiskMounted(root, name string, mountedIds map[string]bool) bool {
+	if devId, err := os.ReadFile(filepath.Join(root, name, "dev")); err == nil {
+		if mountedIds[strings.TrimSpace(string(devId))] {
+			return true
+		}
+	}
+
+	entries, err := os.ReadDir(filepath.Join(root, name))
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		devId, err := os.ReadFile(filepath.Join(root, name, entry.Name(), "dev"))
+		if err != nil {
+			continue
+		}
+		if mountedIds[strings.TrimSpace(string(devId))] {
+			return true
+		}
+	}
+	return false
+}
+
 // ParseBlockDevices reads a Linux /sys/block-style layout under root (pass
 // "/sys/block" in production, a fixture directory in tests) and returns one
 // DiskInfo per block device that this host/container actually has something
 // mounted on, per mountinfoPath (pass "/proc/self/mountinfo" in production).
+// A disk counts as mounted if EITHER its own "dev" id is mounted (the case
+// for a bare LVM/dm volume used directly, with no partition table) OR any of
+// its partitions' "dev" id is mounted (the common case for a disk with a
+// traditional partition table, e.g. "sda" mounted via "sda1") - /sys/block
+// only ever lists whole disks, never partitions, but mountinfo records
+// whichever device is actually mounted, which for a partitioned disk is the
+// partition, not the disk itself. Missing this originally caused a real
+// regression: on a Proxmox host, a disk ("sdc") whose only partition
+// ("sdc1") was mounted at /mnt/pve/SSD was wrongly dropped from the report,
+// because only the whole disk's own (never-mounted) id was being checked.
 //
 // The mount-based filter exists because /sys/block is not namespace-isolated
 // under LXC: a container sees the block-device list of the whole physical
@@ -56,7 +96,9 @@ func parseMountedMajorMinors(r io.Reader) map[string]bool {
 // inside detected containers, keeps this function's behavior uniform and
 // avoids maintaining a separate container-detection code path. The one
 // accepted trade-off: a physical disk that is inserted but never mounted
-// anywhere (a spare, unpartitioned drive) no longer appears in the report.
+// anywhere, directly or through any partition (a spare, unpartitioned
+// drive, or one used raw by e.g. ZFS/mdadm without ever appearing in
+// mountinfo), no longer appears in the report.
 //
 // If mountinfoPath cannot be read or contains no real (non-pseudo-fs) mount
 // at all, every /sys/block entry is reported unfiltered instead of silently
@@ -94,11 +136,8 @@ func ParseBlockDevices(root string, mountinfoPath string) []DiskInfo {
 			continue
 		}
 
-		if filterByMount {
-			devId, err := os.ReadFile(filepath.Join(root, name, "dev"))
-			if err != nil || !mountedIds[strings.TrimSpace(string(devId))] {
-				continue
-			}
+		if filterByMount && !isDiskMounted(root, name, mountedIds) {
+			continue
 		}
 
 		disk := DiskInfo{
