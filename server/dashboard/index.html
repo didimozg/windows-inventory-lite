@@ -275,7 +275,7 @@
               </label>
               <label class="pkg-token-field">
                 Organizational Units (DN, one per line)
-                <textarea id="generalAdComputerImportOUs" rows="3" placeholder="OU=Workstations,OU=Kaliningrad,DC=spb,DC=cccb,DC=ru"></textarea>
+                <textarea id="generalAdComputerImportOUs" rows="3" placeholder="OU=Workstations,OU=Site1,DC=corp,DC=example,DC=com"></textarea>
               </label>
             </div>
             <p class="cert-hint">"Configure AD User" makes the domain/credentials below available to Client actions, Client updates, and AD Computer Import. "Sync Description from AD" additionally writes each computer's Active Directory description into its inventory record, read-only in the Clients table while it's on. Turn it off to edit Description manually instead - re-enabling it later overwrites any manual edits on the next sync. Reading the description attribute is allowed to any authenticated domain user by default AD ACLs, so the service account identity usually needs no special AD delegation.</p>
@@ -286,7 +286,7 @@
             <div class="pkg-grid client-update-grid">
               <label class="pkg-token-field">
                 Preferred subnet (CIDR)
-                <input id="generalPreferredLinuxSubnet" type="text" placeholder="192.168.4.0/24">
+                <input id="generalPreferredLinuxSubnet" type="text" placeholder="192.168.1.0/24">
               </label>
             </div>
           </div>
@@ -737,7 +737,7 @@
               <div class="install-targets-textarea-wrap">
                 <label>
                   Targets (hostnames or IPs)
-                  <textarea id="linuxInstallTargets" rows="4" placeholder="192.168.4.100&#10;192.168.4.101&#10;192.168.4.102-192.168.4.112"></textarea>
+                  <textarea id="linuxInstallTargets" rows="4" placeholder="192.0.2.10&#10;192.0.2.11&#10;192.0.2.20-192.0.2.30"></textarea>
                 </label>
               </div>
             </div>
@@ -780,7 +780,7 @@
               <label class="pkg-token-field">
                 Preferred subnet (CIDR)
                 <div class="install-inline-field-row">
-                  <input id="linuxInstallPreferredSubnet" type="text" placeholder="192.168.4.0/24">
+                  <input id="linuxInstallPreferredSubnet" type="text" placeholder="192.168.1.0/24">
                   <button id="linuxInstallPreferredSubnetSaveButton" class="edit-button" type="button">Save</button>
                 </div>
               </label>
@@ -840,7 +840,7 @@
             <h2 class="settings-block-title">Linux client targeting</h2>
             <label class="linux-updates-credential-field">
               Preferred subnet (CIDR)
-              <input id="linuxUpdatesPreferredSubnet" type="text" placeholder="192.168.4.0/24">
+              <input id="linuxUpdatesPreferredSubnet" type="text" placeholder="192.168.1.0/24">
             </label>
             <div class="pkg-buttons">
               <button id="linuxUpdatesPreferredSubnetSaveButton" class="primary-button" type="button">Save</button>

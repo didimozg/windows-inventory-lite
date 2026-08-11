@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.39.7]
+
+### Changed
+
+- Removed real infrastructure details that had leaked into example/placeholder text: the Organizational Units field showed a real AD OU path (city/region/org identifiers), and several IPv4 examples (Client actions' Targets field, the three Preferred subnet fields, two code comments, and a validation error message) used one specific real subnet. Targets now uses the IANA documentation range (192.0.2.0/24, RFC 5737), matching the existing Windows Client actions field; the OU example and the CIDR examples match this project's other existing generic examples.
+
 ## [0.39.6]
 
 ### Changed

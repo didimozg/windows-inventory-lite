@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.39.6";
+        internal const string ProductVersion = "0.39.7";
 
         private static int Main(string[] args)
         {
@@ -108,7 +108,7 @@ namespace WindowsInventoryLite
         public string LinuxUpdatePassword;
         public string LinuxUpdateKeyPath;
         public string LinuxClientPackagePath;
-        // CIDR block (e.g. "192.168.4.0/24") an admin can set in Settings >
+        // CIDR block (e.g. "192.168.1.0/24") an admin can set in Settings >
         // General when a Linux host reports several NICs and the "wrong"
         // one (a storage/cluster network, not the one reachable from this
         // server) would otherwise win GetLinuxClientUpdateTarget's plain
@@ -4190,7 +4190,7 @@ namespace WindowsInventoryLite
         }
 
         // Returns true if ipText (a dotted-quad IPv4 address) falls within
-        // the CIDR block cidrText (e.g. "192.168.4.0/24"). Malformed input
+        // the CIDR block cidrText (e.g. "192.168.1.0/24"). Malformed input
         // in either argument returns false rather than throwing - a bad or
         // typo'd saved CIDR value must degrade to "no match" (the caller
         // then falls back to its own first-IPv4 heuristic), not break
@@ -6241,7 +6241,7 @@ namespace WindowsInventoryLite
                 string preferredLinuxSubnet = Convert.ToString(payload["preferredLinuxSubnet"]).Trim();
                 if (!IsValidCidr(preferredLinuxSubnet))
                 {
-                    SendText(stream, "{\"error\":\"preferredLinuxSubnet must be blank or a valid IPv4 CIDR block, e.g. 192.168.4.0/24\"}", "application/json; charset=utf-8", 400);
+                    SendText(stream, "{\"error\":\"preferredLinuxSubnet must be blank or a valid IPv4 CIDR block, e.g. 192.168.1.0/24\"}", "application/json; charset=utf-8", 400);
                     return;
                 }
                 options.PreferredLinuxSubnet = preferredLinuxSubnet;
