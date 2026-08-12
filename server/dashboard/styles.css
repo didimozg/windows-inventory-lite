@@ -53,7 +53,7 @@
 }
 
 /* Dark theme: follows the OS preference by default, or an explicit choice
-   saved by the sidebar toggle (see index.html's inline head script and
+   saved by the theme toggle (see index.html's inline head script and
    app.js's toggleTheme, which set/read [data-theme] on <html> to avoid a
    flash of the wrong theme on load). */
 @media (prefers-color-scheme: dark) {
