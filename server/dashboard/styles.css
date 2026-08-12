@@ -227,35 +227,72 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-.app-shell {
-  display: flex;
-  min-height: 100vh;
-  align-items: stretch;
+.nav-badge {
+  margin-left: auto;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: var(--font-size-xs);
+  font-weight: 650;
+  line-height: 1;
+  padding: 2px var(--space-sm);
+  border-radius: 999px;
 }
 
-.sidebar {
-  width: 240px;
-  flex-shrink: 0;
+.subtab-strip {
+  display: flex;
+  gap: var(--space-xs);
+  padding: var(--space-md) var(--space-2xl) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.subtab-item {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  padding: var(--space-sm) var(--space-md);
+}
+
+.subtab-item:hover {
+  color: var(--text);
+}
+
+.subtab-item.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.generated-at-flash {
+  color: var(--accent);
+}
+
+.content-area {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-xs);
-  padding: var(--space-xl) var(--space-md);
-  background: var(--panel);
-  border-right: 1px solid var(--line);
-  position: sticky;
-  top: 0;
-  align-self: flex-start;
-  height: 100vh;
-  overflow-y: auto;
 }
 
-.sidebar-header {
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.topnav {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-sm);
-  margin-bottom: 16px;
-  padding: 0 var(--space-md);
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-2xl);
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  z-index: 10;
 }
 
 .brand {
@@ -263,6 +300,7 @@ body {
   align-items: center;
   gap: var(--space-sm);
   min-width: 0;
+  margin-right: var(--space-xl);
 }
 
 .brand-mark {
@@ -306,6 +344,7 @@ body {
   cursor: pointer;
   font-size: var(--font-size-base);
   line-height: 1;
+  margin-left: var(--space-md);
 }
 
 .theme-toggle:hover {
@@ -313,51 +352,33 @@ body {
   color: var(--accent);
 }
 
-.nav-tree {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.nav-group {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-bottom: 6px;
-}
-
-.nav-group-title {
-  margin: 4px 0 2px;
-  padding: var(--space-sm) var(--space-md) var(--space-xs) var(--space-md);
-  color: var(--muted);
-  font-size: var(--font-size-base);
-  font-weight: 650;
-}
-
-.nav-item,
-.link-button {
+.topnav-item {
   border: 0;
   background: transparent;
   color: var(--text);
   cursor: pointer;
   font: inherit;
-}
-
-.nav-item {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: 8px;
   display: flex;
   align-items: center;
-  gap: var(--space-md);
-  padding: var(--space-sm) var(--space-md) var(--space-sm) var(--space-lg);
-  border-left: 3px solid transparent;
-  border-radius: 0 6px 6px 0;
-  text-align: left;
-  font-size: var(--font-size-base);
+  gap: var(--space-xs);
 }
 
-.nav-icon {
-  flex-shrink: 0;
-  width: 17px;
-  height: 17px;
+.topnav-item:hover {
+  background: var(--hover-bg);
+}
+
+.topnav-item.active {
+  background: var(--active-bg);
+  color: var(--accent);
+}
+
+.topnav-caret {
+  width: 9px;
+  height: 6px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.6;
@@ -365,122 +386,69 @@ body {
   stroke-linejoin: round;
 }
 
-.nav-item:hover {
-  background: var(--hover-bg);
+.topnav-dropdown {
+  position: relative;
 }
 
-.nav-item.active {
-  border-left-color: var(--accent);
-  background: var(--active-bg);
-  color: var(--accent);
-  font-weight: 650;
+.topnav-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .12);
+  padding: 6px;
+  min-width: 200px;
+  z-index: 20;
 }
 
-.nav-item-root {
-  margin: 4px 0 10px;
-  padding-left: var(--space-md);
-  font-weight: 650;
-}
-
-.nav-badge {
-  margin-left: auto;
-  background: var(--accent);
-  color: var(--accent-text);
-  font-size: var(--font-size-xs);
-  font-weight: 650;
-  line-height: 1;
-  padding: 2px var(--space-sm);
-  border-radius: 999px;
-}
-
-.subtab-strip {
+.topnav-dropdown-item {
   display: flex;
-  gap: var(--space-xs);
-  padding: var(--space-md) var(--space-2xl) 0;
-  border-bottom: 1px solid var(--line);
-}
-
-.subtab-item {
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
   border: 0;
-  border-bottom: 2px solid transparent;
   background: transparent;
-  color: var(--muted);
+  color: var(--text);
   cursor: pointer;
   font: inherit;
   font-size: var(--font-size-base);
-  font-weight: 600;
+  text-align: left;
   padding: var(--space-sm) var(--space-md);
+  border-radius: 7px;
 }
 
-.subtab-item:hover {
-  color: var(--text);
+.topnav-dropdown-item:hover {
+  background: var(--hover-bg);
 }
 
-.subtab-item.active {
+.topnav-dropdown-item.active {
+  background: var(--accent-soft);
   color: var(--accent);
-  border-bottom-color: var(--accent);
+  font-weight: 650;
 }
 
-/* A dotted "spine" running down the section list, echoing the connector
-   lines in the app's own logo (an org-chart of nodes) instead of a plain
-   solid divider - the sidebar's own section list is, structurally, the
-   same kind of tree the logo depicts. Only sets border/padding, not
-   margin, so it layers onto each element's own existing spacing instead
-   of fighting it for specificity. Vertical-only: doesn't make sense once
-   the sidebar switches to a horizontal bar below 900px, see media query. */
-.nav-tree > * + * {
-  padding-top: var(--space-sm);
-  border-top: 1px dotted var(--line);
+.topnav-spacer {
+  flex: 1;
 }
 
-.sidebar-footer {
-  margin-top: auto;
-  padding: var(--space-md);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
+.nav-status-text {
   color: var(--muted);
   font-size: var(--font-size-xs);
+  white-space: nowrap;
 }
 
-.sidebar-footer #generatedAt {
-  font-size: var(--font-size-xs);
+#generatedAt {
   transition: color 0.3s ease;
-}
-
-.generated-at-flash {
-  color: var(--accent);
-}
-
-.content-area {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
 }
 
 .topbar {
   display: flex;
-  gap: var(--space-xl);
   align-items: center;
-  justify-content: space-between;
   padding: var(--space-lg) var(--space-2xl);
   background: var(--panel);
   border-bottom: 1px solid var(--line);
-}
-
-.topbar-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  flex-shrink: 0;
-  /* #searchInput (the .topbar's other child) is hidden on non-Inventory
-     views, leaving this as the sole flex child - justify-content:
-     space-between on the parent has no effect with only one item, so it
-     was collapsing to the left edge instead of staying pinned right.
-     margin-left: auto keeps it right-pinned regardless of the sibling's
-     visibility. */
-  margin-left: auto;
 }
 
 .logout-button {
@@ -1747,67 +1715,6 @@ th.sort-desc::after {
 }
 
 @media (max-width: 900px) {
-  .app-shell {
-    flex-direction: column;
-  }
-
-  .sidebar {
-    width: 100%;
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-xs) var(--space-md);
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-    position: static;
-    height: auto;
-    overflow-y: visible;
-  }
-
-  .sidebar-header {
-    margin-bottom: 0;
-    padding: 0 var(--space-md) 0 0;
-    flex-basis: 100%;
-  }
-
-  .nav-tree {
-    flex-direction: row;
-    flex-wrap: wrap;
-  }
-
-  .nav-tree > * + * {
-    padding-top: 0;
-    border-top: 0;
-  }
-
-  .nav-group {
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: center;
-    margin-bottom: 0;
-  }
-
-  .nav-group-title {
-    padding: var(--space-xs) var(--space-sm) var(--space-xs) 0;
-  }
-
-  .nav-item {
-    padding: var(--space-sm) var(--space-md);
-    border-left: 0;
-    border-bottom: 3px solid transparent;
-    border-radius: 6px 6px 0 0;
-  }
-
-  .nav-item.active {
-    border-left-color: transparent;
-    border-bottom-color: var(--accent);
-  }
-
-  .nav-item-root {
-    margin: 0;
-    padding: var(--space-sm) var(--space-md);
-  }
-
   .topbar {
     align-items: stretch;
     flex-direction: column;

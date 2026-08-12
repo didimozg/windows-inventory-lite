@@ -3811,21 +3811,10 @@
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
     byId('linuxClientsTab').classList.toggle('active', state.view === 'linux');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
-    // The 8 old Deploy/Settings buttons now all just toggle 'active' whenever
-    // their consolidated destination is open, regardless of which specific
-    // one was clicked to get there (e.g. installTab and linuxInstallTab are
-    // both 'active' together once on deploy/actions) - this is deliberately
-    // provisional; Task 3 removes all 8 of these buttons for good.
-    const onDeployActions = state.view === 'deploy' && state.subview === 'actions';
-    const onDeployUpdates = state.view === 'deploy' && state.subview === 'updates';
-    byId('installTab').classList.toggle('active', onDeployActions);
-    byId('linuxInstallTab').classList.toggle('active', onDeployActions);
-    byId('updatesTab').classList.toggle('active', onDeployUpdates);
-    byId('linuxUpdatesTab').classList.toggle('active', onDeployUpdates);
-    byId('packageTab').classList.toggle('active', state.view === 'deploy' && state.subview === 'package');
-    byId('generalTab').classList.toggle('active', state.view === 'settings' && state.subview === 'general');
-    byId('certificateTab').classList.toggle('active', state.view === 'settings' && state.subview === 'certificate');
-    byId('adminPasswordTab').classList.toggle('active', state.view === 'settings' && state.subview === 'adminPassword');
+    byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linux', 'linuxServices', 'hardware', 'licenses'].includes(state.view));
+    byId('manageDropdownButton').classList.toggle('active', state.view === 'deploy' || state.view === 'settings');
+    byId('deployTab').classList.toggle('active', state.view === 'deploy');
+    byId('settingsTab').classList.toggle('active', state.view === 'settings');
     const isInventoryView = inventoryViews.includes(state.view);
     const isLinuxInventoryView = linuxInventoryViews.includes(state.view);
     byId('searchInput').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
@@ -4079,10 +4068,6 @@
   byId('hardwareTab').addEventListener('click', () => {
     setView('hardware');
   });
-  byId('installTab').addEventListener('click', () => {
-    setView('deploy', 'actions');
-  });
-  byId('linuxInstallTab').addEventListener('click', () => setView('deploy', 'actions'));
   window.addEventListener('hashchange', () => {
     Object.assign(state, getInitialViewState());
     render();
@@ -4112,7 +4097,6 @@
   byId('linuxUpdatesAcknowledgeHostKeyRisk').addEventListener('change', updateLinuxUpdatesTrustNewHostKeysUi);
   byId('linuxUpdatesScheduleMode').addEventListener('change', updateLinuxUpdatesScheduleFieldVisibility);
   byId('linuxUpdatesScheduleSaveButton').addEventListener('click', saveLinuxUpdateSchedule);
-  byId('linuxUpdatesTab').addEventListener('click', () => setView('deploy', 'updates'));
   byId('installUseAdCredentials').addEventListener('change', updateInstallCredentialFieldsUi);
   byId('updatesUseAdCredentials').addEventListener('change', updateUpdatesCredentialFieldsUi);
   byId('installButton').addEventListener('click', startClientActionJob);
@@ -4223,14 +4207,48 @@
       deleteLinuxClient(deleteLinuxBtn.dataset.deleteLinuxClient);
     }
   });
-  byId('packageTab').addEventListener('click', () => setView('deploy', 'package'));
-  byId('updatesTab').addEventListener('click', () => setView('deploy', 'updates'));
   byId('deploySubtabActions').addEventListener('click', () => setView('deploy', 'actions'));
   byId('deploySubtabUpdates').addEventListener('click', () => setView('deploy', 'updates'));
   byId('deploySubtabPackage').addEventListener('click', () => setView('deploy', 'package'));
   byId('settingsSubtabGeneral').addEventListener('click', () => setView('settings', 'general'));
   byId('settingsSubtabCertificate').addEventListener('click', () => setView('settings', 'certificate'));
   byId('settingsSubtabAdminPassword').addEventListener('click', () => setView('settings', 'adminPassword'));
+  byId('deployTab').addEventListener('click', () => setView('deploy', 'actions'));
+  byId('settingsTab').addEventListener('click', () => setView('settings', 'general'));
+
+  function toggleDropdown(buttonId, menuId, forceClosed) {
+    const button = byId(buttonId);
+    const menu = byId(menuId);
+    const shouldOpen = forceClosed ? false : menu.classList.contains('hidden');
+    menu.classList.toggle('hidden', !shouldOpen);
+    button.setAttribute('aria-expanded', String(shouldOpen));
+  }
+
+  byId('fleetDropdownButton').addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu');
+    toggleDropdown('manageDropdownButton', 'manageDropdownMenu', true);
+  });
+  byId('manageDropdownButton').addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleDropdown('manageDropdownButton', 'manageDropdownMenu');
+    toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu', true);
+  });
+  // Clicking any dropdown item closes its own menu (the item's own click
+  // handler, registered above/in earlier tasks, has already fired and set
+  // the view by the time this delegated listener runs).
+  document.querySelectorAll('.topnav-dropdown-menu').forEach((menu) => {
+    menu.addEventListener('click', (event) => {
+      if (event.target.closest('.topnav-dropdown-item')) {
+        menu.classList.add('hidden');
+        menu.previousElementSibling.setAttribute('aria-expanded', 'false');
+      }
+    });
+  });
+  document.addEventListener('click', () => {
+    toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu', true);
+    toggleDropdown('manageDropdownButton', 'manageDropdownMenu', true);
+  });
   byId('updatesSaveCredentialsButton').addEventListener('click', saveClientUpdateCredentials);
   byId('updatesClearCredentialsButton').addEventListener('click', clearClientUpdateCredentials);
   byId('updatesPushButton').addEventListener('click', startClientUpdateJob);
@@ -4252,13 +4270,11 @@
   byId('pkgDownloadButton').addEventListener('click', () => {
     window.location.href = '/api/v1/client-package/download';
   });
-  byId('generalTab').addEventListener('click', () => setView('settings', 'general'));
   byId('generalSaveButton').addEventListener('click', () => saveGeneralSettings(false));
   byId('generalAdUseServiceIdentity').addEventListener('change', updateAdIdentityFields);
   byId('generalAdSyncMode').addEventListener('change', updateAdSyncIntervalField);
   byId('updatesScheduleMode').addEventListener('change', updateScheduleFieldVisibility);
   byId('updatesScheduleSaveButton').addEventListener('click', saveClientUpdateSchedule);
-  byId('certificateTab').addEventListener('click', () => setView('settings', 'certificate'));
   byId('certUploadButton').addEventListener('click', uploadCertificate);
   byId('certDeleteButton').addEventListener('click', deleteCertificate);
   byId('licensesTab').addEventListener('click', () => setView('licenses'));
@@ -4283,7 +4299,6 @@
       addLicenseComputerFromInput();
     }
   });
-  byId('adminPasswordTab').addEventListener('click', () => setView('settings', 'adminPassword'));
   byId('adminPasswordSaveButton').addEventListener('click', changeAdminPassword);
   byId('ingestionTokenRegenerateButton').addEventListener('click', regenerateIngestionToken);
   byId('linuxCredsSaveButton').addEventListener('click', saveLinuxUpdateCredentials);
