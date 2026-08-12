@@ -307,7 +307,7 @@
         // Both of these read Windows and Linux data together, so they have
         // to be redrawn whenever the Linux half lands - including on the
         // unconditional page-load call, which can resolve after render().
-        renderHardwarePage(getAllClients());
+        renderFilteredHardwarePage();
         renderDashboardTiles();
       })
       .catch(() => {});
@@ -354,7 +354,7 @@
         // loadLinuxClients re-renders after every fetch.
         renderLinuxClientsTable(state.linuxClients);
         renderLinuxServicesTable(state.linuxClients);
-        renderHardwarePage(getAllClients());
+        renderFilteredHardwarePage();
         renderDashboardTiles();
         byId('generatedAt').textContent = `Updated: ${formatDateTime(new Date().toISOString())}`;
       })
