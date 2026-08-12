@@ -159,6 +159,7 @@
 .card-glow {
   border-radius: var(--card-radius);
   box-shadow: var(--card-glow);
+  background: var(--panel);
 }
 
 .card-hero {
@@ -178,6 +179,11 @@
   font-weight: 700;
   background: var(--icon-chip-bg);
   color: var(--icon-chip-fg);
+}
+
+.icon-chip svg {
+  width: 18px;
+  height: 18px;
 }
 
 * {
@@ -687,8 +693,10 @@ main {
 }
 
 .summary div {
-  background: var(--panel);
   padding: var(--space-lg);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
 }
 
 .summary span {
@@ -699,20 +707,16 @@ main {
   font-weight: 700;
 }
 
-/* .summary div's (0,1,1) specificity otherwise beats .card-hero's own
-   (0,1,0) background declaration regardless of source order, so the
-   hero tile never showed its gradient. Two classes = (0,2,0), which
-   wins on class count alone. */
-.summary .card-hero {
-  background: var(--accent-gradient);
-}
-
 /* One hero tile per page (see docs/superpowers/specs/2026-08-12-dashboard-ui-redesign-design.md,
    Visual System) - the .card-hero class itself (Phase 1) supplies the
    gradient background and glow; this override makes its number readable
    against that background instead of the neutral --accent color every
    other .summary tile's number uses. */
 .summary .card-hero span {
+  color: var(--accent-text);
+}
+
+.summary .card-hero small {
   color: var(--accent-text);
 }
 
