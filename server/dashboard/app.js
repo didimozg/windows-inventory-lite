@@ -833,7 +833,7 @@
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.hwCpu;
     const groups = applySort(
-      getCpuGroups(getAllClients()).filter(g => hwMatches([g.name].concat(g.clients.map(c => clientDisplayName(c))).join(' '), query)),
+      getCpuGroups(filterClientsByOs(getAllClients(), state.osFilter.hardware)).filter(g => hwMatches([g.name].concat(g.clients.map(c => clientDisplayName(c))).join(' '), query)),
       g => cpuSortValue(g, sortKey), sortDir
     );
     const rows = [['Model', 'Machines', 'Computers']].concat(
@@ -846,7 +846,7 @@
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.hwDisk;
     const groups = applySort(
-      getDiskGroups(getAllClients()).filter(g => hwMatches([g.model, g.type].concat(g.clients.map(c => clientDisplayName(c))).join(' '), query)),
+      getDiskGroups(filterClientsByOs(getAllClients(), state.osFilter.hardware)).filter(g => hwMatches([g.model, g.type].concat(g.clients.map(c => clientDisplayName(c))).join(' '), query)),
       g => diskSortValue(g, sortKey), sortDir
     );
     const rows = [['Model', 'Type', 'Size GB', 'USB', 'Machines', 'Computers']].concat(
@@ -859,7 +859,7 @@
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.hwRam;
     const groups = applySort(
-      getRamGroups(getAllClients()).filter(g => hwMatches([g.totalGb].concat(g.clients.map(c => clientDisplayName(c))).join(' '), query)),
+      getRamGroups(filterClientsByOs(getAllClients(), state.osFilter.hardware)).filter(g => hwMatches([g.totalGb].concat(g.clients.map(c => clientDisplayName(c))).join(' '), query)),
       g => ramSortValue(g, sortKey), sortDir
     );
     const rows = [['Total RAM', 'Machines', 'Computers']].concat(
