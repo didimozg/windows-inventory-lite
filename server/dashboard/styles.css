@@ -39,6 +39,17 @@
   --success-bg: #f0f8ef;
   --success-border: #b8ddb0;
   --success-text: #2d5e26;
+  /* New component layer for the 2026-08-12 dashboard redesign ("Bold Card
+     System"), see docs/superpowers/specs/2026-08-12-dashboard-ui-redesign-design.md.
+     Additive only - nothing in index.html/app.js references these yet.
+     rgba() values below are the decimal form of --accent (#126f8f = 18,111,143),
+     used for a colored glow instead of a flat border. */
+  --card-radius: 14px;
+  --card-glow: 0 0 0 1px var(--line), 0 0 20px rgba(18, 111, 143, .12);
+  --card-glow-hero: 0 0 24px rgba(18, 111, 143, .3);
+  --accent-gradient: linear-gradient(135deg, #126f8f, #1c93bc);
+  --icon-chip-bg: var(--accent-soft);
+  --icon-chip-fg: var(--accent);
 }
 
 /* Dark theme: follows the OS preference by default, or an explicit choice
