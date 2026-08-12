@@ -701,6 +701,14 @@ main {
   font-weight: 700;
 }
 
+/* .summary div's (0,1,1) specificity otherwise beats .card-hero's own
+   (0,1,0) background declaration regardless of source order, so the
+   hero tile never showed its gradient. Two classes = (0,2,0), which
+   wins on class count alone. */
+.summary .card-hero {
+  background: var(--accent-gradient);
+}
+
 /* One hero tile per page (see docs/superpowers/specs/2026-08-12-dashboard-ui-redesign-design.md,
    Visual System) - the .card-hero class itself (Phase 1) supplies the
    gradient background and glow; this override makes its number readable
@@ -708,6 +716,17 @@ main {
    other .summary tile's number uses. */
 .summary .card-hero span {
   color: var(--accent-text);
+}
+
+/* .summary span's (0,1,1) otherwise beats .icon-chip's own (0,1,0)
+   display/color declarations, and its "big number" typography
+   (28px display font, 4px margin) leaks onto the 34x34 badges too.
+   .summary span.icon-chip = (0,2,1), which wins on class count alone. */
+.summary span.icon-chip {
+  display: flex;
+  color: var(--icon-chip-fg);
+  font-size: inherit;
+  margin-bottom: 0;
 }
 
 /* Declared after .summary div/span so it wins at the equal class+type
