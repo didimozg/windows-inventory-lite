@@ -616,8 +616,6 @@ main {
 .dashboard-card {
   padding: var(--space-lg);
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 8px;
 }
 
 .dash-single-stat {
