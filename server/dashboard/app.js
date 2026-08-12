@@ -10,7 +10,7 @@
   // search purposes by inventoryViews.
   const linuxDataViews = ['linux', 'linuxServices', 'dashboard', 'hardware'];
   const state = {
-    clients: [], linuxClients: [], view: getInitialView(), installJobId: null, installPollTimer: null, installJobs: [],
+    clients: [], linuxClients: [], ...getInitialViewState(), installJobId: null, installPollTimer: null, installJobs: [],
     updateJobId: null, updatePollTimer: null,
     // Baselined from the first client-updates poll response, then compared
     // on every later one - lets an open dashboard tab pick up a scheduled
@@ -115,49 +115,75 @@
     });
   }
 
-  function getInitialView() {
+  // Returns { view, subview }. Deploy and Settings are consolidated
+  // destinations (see docs/superpowers/specs/2026-08-12-dashboard-ui-redesign-design.md,
+  // decisions 6-7) - every hash that used to point at one of the 5 old
+  // Installation pages or 3 old Settings pages now resolves to 'deploy' or
+  // 'settings' plus a subview. Old hashes are kept as aliases (matching this
+  // function's existing #linux-hardware precedent) so bookmarks/links still
+  // land correctly; deploy-*/settings-* are the new canonical hashes setView
+  // itself produces going forward.
+  function getInitialViewState() {
     const hash = window.location.hash.replace(/^#/, '').toLowerCase();
-    if (hash === 'clients') return 'clients';
-    if (hash === 'software') return 'software';
-    // #linux-hardware is kept as an alias so existing bookmarks/links to the
-    // retired Linux Hardware tab land on the merged view instead of silently
-    // falling through to the Dashboard.
-    if (hash === 'hardware' || hash === 'linux-hardware') return 'hardware';
-    if (hash === 'client-actions' || hash === 'actions' || hash === 'install') return 'install';
-    if (hash === 'client-package' || hash === 'package') return 'package';
-    if (hash === 'client-updates' || hash === 'updates') return 'updates';
-    if (hash === 'general') return 'general';
-    if (hash === 'certificate') return 'certificate';
-    if (hash === 'licenses') return 'licenses';
-    if (hash === 'linux-clients' || hash === 'linux') return 'linux';
-    if (hash === 'linux-services') return 'linuxServices';
-    if (hash === 'admin-password' || hash === 'admin') return 'admin';
-    if (hash === 'linux-client-actions') return 'linuxInstall';
-    if (hash === 'linux-client-updates') return 'linuxUpdates';
-    return 'dashboard';
+    if (hash === 'clients') return { view: 'clients', subview: null };
+    if (hash === 'software') return { view: 'software', subview: null };
+    if (hash === 'hardware' || hash === 'linux-hardware') return { view: 'hardware', subview: null };
+    if (hash === 'licenses') return { view: 'licenses', subview: null };
+    if (hash === 'linux-clients' || hash === 'linux') return { view: 'linux', subview: null };
+    if (hash === 'linux-services') return { view: 'linuxServices', subview: null };
+    if (hash === 'deploy' || hash === 'deploy-actions' || hash === 'client-actions' || hash === 'actions' || hash === 'install' || hash === 'linux-client-actions') return { view: 'deploy', subview: 'actions' };
+    if (hash === 'deploy-updates' || hash === 'client-updates' || hash === 'updates' || hash === 'linux-client-updates') return { view: 'deploy', subview: 'updates' };
+    if (hash === 'deploy-package' || hash === 'client-package' || hash === 'package') return { view: 'deploy', subview: 'package' };
+    if (hash === 'settings' || hash === 'settings-general' || hash === 'general') return { view: 'settings', subview: 'general' };
+    if (hash === 'settings-certificate' || hash === 'certificate') return { view: 'settings', subview: 'certificate' };
+    if (hash === 'settings-admin-password' || hash === 'admin-password' || hash === 'admin') return { view: 'settings', subview: 'adminPassword' };
+    return { view: 'dashboard', subview: null };
   }
 
-  function setView(view) {
+  // View -> canonical hash. Deploy/Settings map through their subview;
+  // linux/linuxServices keep their existing multi-word hashes; everything
+  // else's hash equals its view name unchanged.
+  function computeHashForView(view, subview) {
+    if (view === 'deploy') return subview === 'updates' ? 'deploy-updates' : subview === 'package' ? 'deploy-package' : 'deploy-actions';
+    if (view === 'settings') return subview === 'certificate' ? 'settings-certificate' : subview === 'adminPassword' ? 'settings-admin-password' : 'settings-general';
+    if (view === 'linux') return 'linux-clients';
+    if (view === 'linuxServices') return 'linux-services';
+    return view;
+  }
+
+  function loadDeploySubviewData(subview) {
+    if (subview === 'actions') loadInstallHistory();
+    if (subview === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
+    if (subview === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
+    // Both platforms' Actions/Updates content is stacked on one subview now
+    // (see the design spec's Phase 2 scope note - no OS filter yet), so a
+    // single subview load must trigger both platforms' own loaders.
+    if (subview === 'actions') { loadLinuxInstallHistory(); loadLinuxInstallPreferredSubnet(); }
+    if (subview === 'updates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
+  }
+
+  function loadSettingsSubviewData(subview) {
+    if (subview === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
+    if (subview === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
+    if (subview === 'adminPassword') loadAdminPasswordStatus();
+  }
+
+  function setView(view, subview) {
     state.view = view;
-    const hash = view === 'install' ? 'client-actions' : view === 'linuxInstall' ? 'linux-client-actions' : view === 'linuxUpdates' ? 'linux-client-updates' : view === 'package' ? 'client-package' : view === 'updates' ? 'client-updates' : view === 'admin' ? 'admin-password' : view === 'linux' ? 'linux-clients' : view === 'linuxServices' ? 'linux-services' : view;
+    state.subview = subview || null;
+    const hash = computeHashForView(view, subview);
     if (window.location.hash.replace(/^#/, '') !== hash) {
       window.location.hash = hash;
       return;
     }
     render();
-    if (view === 'install') loadInstallHistory();
-    if (view === 'linuxInstall') { loadLinuxInstallHistory(); loadLinuxInstallPreferredSubnet(); }
-    if (view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
-    if (view === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
-    if (view === 'updates') loadClientUpdates();
-    if (view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
-    if (view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
+    if (view === 'deploy') loadDeploySubviewData(state.subview);
+    if (view === 'settings') loadSettingsSubviewData(state.subview);
     if (view === 'licenses') loadLicenses();
     // 'hardware' is in this list because the merged Hardware view reads Linux
     // data too - opening the tab re-fetches it rather than waiting up to 30s
     // for the next poll tick.
     if (view === 'linux' || view === 'linuxServices' || view === 'hardware') loadLinuxClients();
-    if (view === 'admin') loadAdminPasswordStatus();
   }
 
   function text(value) {
@@ -1798,7 +1824,7 @@
     }
     if (scheduledJobId && scheduledJobId !== state.knownScheduledJobId) {
       state.knownScheduledJobId = scheduledJobId;
-      if (state.view === 'updates' && !state.updatePollTimer) {
+      if (state.view === 'deploy' && state.subview === 'updates' && !state.updatePollTimer) {
         state.updateJobId = scheduledJobId;
         pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', pruneCompletedUpdateTargets);
         state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', pruneCompletedUpdateTargets), 3000);
@@ -3751,33 +3777,44 @@
     byId('clientsView').classList.toggle('hidden', state.view !== 'clients');
     byId('softwareView').classList.toggle('hidden', state.view !== 'software');
     byId('hardwareView').classList.toggle('hidden', state.view !== 'hardware');
-    byId('installView').classList.toggle('hidden', state.view !== 'install');
-    byId('linuxInstallView').classList.toggle('hidden', state.view !== 'linuxInstall');
-    byId('linuxUpdatesView').classList.toggle('hidden', state.view !== 'linuxUpdates');
-    byId('packageView').classList.toggle('hidden', state.view !== 'package');
-    byId('updatesView').classList.toggle('hidden', state.view !== 'updates');
-    byId('generalView').classList.toggle('hidden', state.view !== 'general');
-    byId('generalStatusView').classList.toggle('hidden', state.view !== 'general');
-    byId('certificateView').classList.toggle('hidden', state.view !== 'certificate');
     byId('licensesView').classList.toggle('hidden', state.view !== 'licenses');
     byId('linuxClientsView').classList.toggle('hidden', state.view !== 'linux');
     byId('linuxServicesView').classList.toggle('hidden', state.view !== 'linuxServices');
-    byId('adminPasswordView').classList.toggle('hidden', state.view !== 'admin');
+    // Deploy: Actions shows both platforms' sections together (stacked, own
+    // headings - see Task 2), Updates likewise, Package is already
+    // cross-platform on one section (no stacking needed).
+    byId('installView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
+    byId('linuxInstallView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
+    byId('updatesView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'updates'));
+    byId('linuxUpdatesView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'updates'));
+    byId('packageView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'package'));
+    // Settings: exactly one of the three shows at a time (no stacking).
+    byId('generalView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'general'));
+    byId('generalStatusView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'general'));
+    byId('certificateView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'certificate'));
+    byId('adminPasswordView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'adminPassword'));
     byId('dashboardTab').classList.toggle('active', state.view === 'dashboard');
     byId('clientsTab').classList.toggle('active', state.view === 'clients');
     byId('softwareTab').classList.toggle('active', state.view === 'software');
     byId('hardwareTab').classList.toggle('active', state.view === 'hardware');
-    byId('installTab').classList.toggle('active', state.view === 'install');
-    byId('linuxInstallTab').classList.toggle('active', state.view === 'linuxInstall');
-    byId('linuxUpdatesTab').classList.toggle('active', state.view === 'linuxUpdates');
-    byId('packageTab').classList.toggle('active', state.view === 'package');
-    byId('updatesTab').classList.toggle('active', state.view === 'updates');
-    byId('generalTab').classList.toggle('active', state.view === 'general');
-    byId('certificateTab').classList.toggle('active', state.view === 'certificate');
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
     byId('linuxClientsTab').classList.toggle('active', state.view === 'linux');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
-    byId('adminPasswordTab').classList.toggle('active', state.view === 'admin');
+    // The 8 old Deploy/Settings buttons now all just toggle 'active' whenever
+    // their consolidated destination is open, regardless of which specific
+    // one was clicked to get there (e.g. installTab and linuxInstallTab are
+    // both 'active' together once on deploy/actions) - this is deliberately
+    // provisional; Task 3 removes all 8 of these buttons for good.
+    const onDeployActions = state.view === 'deploy' && state.subview === 'actions';
+    const onDeployUpdates = state.view === 'deploy' && state.subview === 'updates';
+    byId('installTab').classList.toggle('active', onDeployActions);
+    byId('linuxInstallTab').classList.toggle('active', onDeployActions);
+    byId('updatesTab').classList.toggle('active', onDeployUpdates);
+    byId('linuxUpdatesTab').classList.toggle('active', onDeployUpdates);
+    byId('packageTab').classList.toggle('active', state.view === 'deploy' && state.subview === 'package');
+    byId('generalTab').classList.toggle('active', state.view === 'settings' && state.subview === 'general');
+    byId('certificateTab').classList.toggle('active', state.view === 'settings' && state.subview === 'certificate');
+    byId('adminPasswordTab').classList.toggle('active', state.view === 'settings' && state.subview === 'adminPassword');
     const isInventoryView = inventoryViews.includes(state.view);
     const isLinuxInventoryView = linuxInventoryViews.includes(state.view);
     byId('searchInput').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
@@ -4031,22 +4068,16 @@
     setView('hardware');
   });
   byId('installTab').addEventListener('click', () => {
-    setView('install');
+    setView('deploy', 'actions');
   });
-  byId('linuxInstallTab').addEventListener('click', () => setView('linuxInstall'));
+  byId('linuxInstallTab').addEventListener('click', () => setView('deploy', 'actions'));
   window.addEventListener('hashchange', () => {
-    state.view = getInitialView();
+    Object.assign(state, getInitialViewState());
     render();
-    if (state.view === 'install') loadInstallHistory();
-    if (state.view === 'linuxInstall') { loadLinuxInstallHistory(); loadLinuxInstallPreferredSubnet(); }
-    if (state.view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
-    if (state.view === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
-    if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
-    if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
-    if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
+    if (state.view === 'deploy') loadDeploySubviewData(state.subview);
+    if (state.view === 'settings') loadSettingsSubviewData(state.subview);
     if (state.view === 'licenses') loadLicenses();
     if (state.view === 'linux' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
-    if (state.view === 'admin') loadAdminPasswordStatus();
   });
   byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
   byId('linuxInstallServerUrl').value = `${window.location.origin}/api/v1/linux/inventory`;
@@ -4069,7 +4100,7 @@
   byId('linuxUpdatesAcknowledgeHostKeyRisk').addEventListener('change', updateLinuxUpdatesTrustNewHostKeysUi);
   byId('linuxUpdatesScheduleMode').addEventListener('change', updateLinuxUpdatesScheduleFieldVisibility);
   byId('linuxUpdatesScheduleSaveButton').addEventListener('click', saveLinuxUpdateSchedule);
-  byId('linuxUpdatesTab').addEventListener('click', () => setView('linuxUpdates'));
+  byId('linuxUpdatesTab').addEventListener('click', () => setView('deploy', 'updates'));
   byId('installUseAdCredentials').addEventListener('change', updateInstallCredentialFieldsUi);
   byId('updatesUseAdCredentials').addEventListener('change', updateUpdatesCredentialFieldsUi);
   byId('installButton').addEventListener('click', startClientActionJob);
@@ -4180,8 +4211,8 @@
       deleteLinuxClient(deleteLinuxBtn.dataset.deleteLinuxClient);
     }
   });
-  byId('packageTab').addEventListener('click', () => setView('package'));
-  byId('updatesTab').addEventListener('click', () => setView('updates'));
+  byId('packageTab').addEventListener('click', () => setView('deploy', 'package'));
+  byId('updatesTab').addEventListener('click', () => setView('deploy', 'updates'));
   byId('updatesSaveCredentialsButton').addEventListener('click', saveClientUpdateCredentials);
   byId('updatesClearCredentialsButton').addEventListener('click', clearClientUpdateCredentials);
   byId('updatesPushButton').addEventListener('click', startClientUpdateJob);
@@ -4203,13 +4234,13 @@
   byId('pkgDownloadButton').addEventListener('click', () => {
     window.location.href = '/api/v1/client-package/download';
   });
-  byId('generalTab').addEventListener('click', () => setView('general'));
+  byId('generalTab').addEventListener('click', () => setView('settings', 'general'));
   byId('generalSaveButton').addEventListener('click', () => saveGeneralSettings(false));
   byId('generalAdUseServiceIdentity').addEventListener('change', updateAdIdentityFields);
   byId('generalAdSyncMode').addEventListener('change', updateAdSyncIntervalField);
   byId('updatesScheduleMode').addEventListener('change', updateScheduleFieldVisibility);
   byId('updatesScheduleSaveButton').addEventListener('click', saveClientUpdateSchedule);
-  byId('certificateTab').addEventListener('click', () => setView('certificate'));
+  byId('certificateTab').addEventListener('click', () => setView('settings', 'certificate'));
   byId('certUploadButton').addEventListener('click', uploadCertificate);
   byId('certDeleteButton').addEventListener('click', deleteCertificate);
   byId('licensesTab').addEventListener('click', () => setView('licenses'));
@@ -4234,7 +4265,7 @@
       addLicenseComputerFromInput();
     }
   });
-  byId('adminPasswordTab').addEventListener('click', () => setView('admin'));
+  byId('adminPasswordTab').addEventListener('click', () => setView('settings', 'adminPassword'));
   byId('adminPasswordSaveButton').addEventListener('click', changeAdminPassword);
   byId('ingestionTokenRegenerateButton').addEventListener('click', regenerateIngestionToken);
   byId('linuxCredsSaveButton').addEventListener('click', saveLinuxUpdateCredentials);
@@ -4245,17 +4276,12 @@
   byId('logoutButton').addEventListener('click', handleLogout);
   byId('logoutReloadButton').addEventListener('click', () => window.location.reload());
   updateThemeToggle();
-  if (state.view === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
-  if (state.view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
-  if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
-  if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
-  if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
+  if (state.view === 'deploy') loadDeploySubviewData(state.subview);
+  if (state.view === 'settings') loadSettingsSubviewData(state.subview);
   if (state.view === 'licenses') loadLicenses();
-  if (state.view === 'admin') loadAdminPasswordStatus();
   updateClientActionUi();
   loadInstallHistory();
   updateLinuxClientActionUi();
   updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField');
   updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField');
-  if (state.view === 'linuxInstall') { loadLinuxInstallHistory(); loadLinuxInstallPreferredSubnet(); }
 }());
