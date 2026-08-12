@@ -140,6 +140,35 @@
   --icon-chip-fg: #7fd4f5;
 }
 
+/* New component layer for the 2026-08-12 dashboard redesign ("Bold Card
+   System"), see docs/superpowers/specs/2026-08-12-dashboard-ui-redesign-design.md.
+   Not yet used anywhere in index.html/app.js - a later plan (Phase 3 of that
+   spec's rollout) applies these to the Dashboard/Fleet/Deploy/Settings pages
+   one at a time. Keep additive: do not remove or change any rule below this
+   comment until that later work explicitly calls for it. */
+.card-glow {
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-glow);
+}
+
+.card-hero {
+  border-radius: var(--card-radius);
+  background: var(--accent-gradient);
+  box-shadow: var(--card-glow-hero);
+}
+
+.icon-chip {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  background: var(--icon-chip-bg);
+  color: var(--icon-chip-fg);
+}
+
 * {
   box-sizing: border-box;
 }
