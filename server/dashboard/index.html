@@ -188,6 +188,12 @@
           </div>
         </section>
 
+        <div id="settingsSubtabs" class="subtab-strip hidden" role="tablist" aria-label="Settings sections">
+          <button id="settingsSubtabGeneral" class="subtab-item" type="button">General</button>
+          <button id="settingsSubtabCertificate" class="subtab-item" type="button">Certificate</button>
+          <button id="settingsSubtabAdminPassword" class="subtab-item" type="button">Admin password</button>
+        </div>
+
         <section id="generalView" class="install-panel hidden" aria-label="General settings">
           <div class="settings-block">
             <h2 class="settings-block-title">Inventory</h2>
@@ -541,6 +547,12 @@
           <div id="linuxServicesPager" class="pager"></div>
         </section>
 
+        <div id="deploySubtabs" class="subtab-strip hidden" role="tablist" aria-label="Deploy sections">
+          <button id="deploySubtabActions" class="subtab-item" type="button">Actions</button>
+          <button id="deploySubtabUpdates" class="subtab-item" type="button">Updates</button>
+          <button id="deploySubtabPackage" class="subtab-item" type="button">Package</button>
+        </div>
+
         <section id="packageView" class="install-panel hidden" aria-label="Client package">
           <div class="settings-block">
             <h2 class="settings-block-title">Windows package</h2>
@@ -606,6 +618,7 @@
         </section>
 
         <section id="updatesView" class="install-panel hidden" aria-label="Client updates">
+          <h2 class="settings-block-title">Windows Client updates</h2>
           <div class="settings-block">
             <h2 class="settings-block-title">WinRM credentials</h2>
             <p class="cert-hint">Leave both fields blank when pushing an update to use the saved account below, or the server service's own identity if nothing is saved (the same account WinRM client actions already require). Fill them in to override with a different account for this push only.</p>
@@ -678,6 +691,7 @@
         </section>
 
         <section id="installView" class="install-panel hidden" aria-label="Remote client actions">
+          <h2 class="settings-block-title">Windows Client actions</h2>
           <div class="install-grid">
             <div class="install-targets-field">
               <div class="install-targets-textarea-wrap">
@@ -732,6 +746,7 @@
         </section>
 
         <section id="linuxInstallView" class="install-panel hidden" aria-label="Linux client actions">
+          <h2 class="settings-block-title">Linux Client actions</h2>
           <div class="install-grid">
             <div class="install-targets-field">
               <div class="install-targets-textarea-wrap">
@@ -808,6 +823,7 @@
         </section>
 
         <section id="linuxUpdatesView" class="install-panel hidden" aria-label="Linux client updates">
+          <h2 class="settings-block-title">Linux Client updates</h2>
           <div class="linux-updates-top-row">
           <div class="settings-block">
             <h2 class="settings-block-title">Authentication</h2>

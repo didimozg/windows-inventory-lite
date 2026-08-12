@@ -393,6 +393,34 @@ body {
   border-radius: 999px;
 }
 
+.subtab-strip {
+  display: flex;
+  gap: var(--space-xs);
+  padding: var(--space-md) var(--space-2xl) 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.subtab-item {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  padding: var(--space-sm) var(--space-md);
+}
+
+.subtab-item:hover {
+  color: var(--text);
+}
+
+.subtab-item.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
 /* A dotted "spine" running down the section list, echoing the connector
    lines in the app's own logo (an org-chart of nodes) instead of a plain
    solid divider - the sidebar's own section list is, structurally, the

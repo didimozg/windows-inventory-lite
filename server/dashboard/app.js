@@ -186,6 +186,17 @@
     if (view === 'linux' || view === 'linuxServices' || view === 'hardware') loadLinuxClients();
   }
 
+  function renderSubtabStrips() {
+    byId('deploySubtabs').classList.toggle('hidden', state.view !== 'deploy');
+    byId('settingsSubtabs').classList.toggle('hidden', state.view !== 'settings');
+    byId('deploySubtabActions').classList.toggle('active', state.view === 'deploy' && state.subview === 'actions');
+    byId('deploySubtabUpdates').classList.toggle('active', state.view === 'deploy' && state.subview === 'updates');
+    byId('deploySubtabPackage').classList.toggle('active', state.view === 'deploy' && state.subview === 'package');
+    byId('settingsSubtabGeneral').classList.toggle('active', state.view === 'settings' && state.subview === 'general');
+    byId('settingsSubtabCertificate').classList.toggle('active', state.view === 'settings' && state.subview === 'certificate');
+    byId('settingsSubtabAdminPassword').classList.toggle('active', state.view === 'settings' && state.subview === 'adminPassword');
+  }
+
   function text(value) {
     return value === undefined || value === null || value === '' ? 'Unknown' : String(value);
   }
@@ -3820,6 +3831,7 @@
     byId('searchInput').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
     byId('generatedAt').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
     recalculateActivePagination();
+    renderSubtabStrips();
   }
 
   // Re-measures and, if it changed, applies a corrected live page size for
@@ -4213,6 +4225,12 @@
   });
   byId('packageTab').addEventListener('click', () => setView('deploy', 'package'));
   byId('updatesTab').addEventListener('click', () => setView('deploy', 'updates'));
+  byId('deploySubtabActions').addEventListener('click', () => setView('deploy', 'actions'));
+  byId('deploySubtabUpdates').addEventListener('click', () => setView('deploy', 'updates'));
+  byId('deploySubtabPackage').addEventListener('click', () => setView('deploy', 'package'));
+  byId('settingsSubtabGeneral').addEventListener('click', () => setView('settings', 'general'));
+  byId('settingsSubtabCertificate').addEventListener('click', () => setView('settings', 'certificate'));
+  byId('settingsSubtabAdminPassword').addEventListener('click', () => setView('settings', 'adminPassword'));
   byId('updatesSaveCredentialsButton').addEventListener('click', saveClientUpdateCredentials);
   byId('updatesClearCredentialsButton').addEventListener('click', clearClientUpdateCredentials);
   byId('updatesPushButton').addEventListener('click', startClientUpdateJob);
