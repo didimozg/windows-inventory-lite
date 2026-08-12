@@ -59,8 +59,8 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg: #111827;
-    --panel: #1f2937;
+    --bg: #0c2340;
+    --panel: #153a63;
     --text: #e2e8f0;
     --heading: #ffffff;
     --muted: #94a3b8;
@@ -86,13 +86,23 @@
     --success-bg: #16321a;
     --success-border: #2f6a37;
     --success-text: #8fe39c;
+    /* New component layer, see docs/superpowers/specs/2026-08-12-dashboard-ui-redesign-design.md.
+       --card-glow's rgba is --accent's decimal form (#1c93bc = 28,147,188);
+       --card-glow-hero uses the same accent at higher alpha for the one
+       "hero" gradient tile per page (see .card-hero, Task 3). */
+    --card-radius: 14px;
+    --card-glow: 0 0 0 1px #285484, 0 0 20px rgba(47, 179, 223, .18);
+    --card-glow-hero: 0 0 24px rgba(28, 147, 188, .35);
+    --accent-gradient: linear-gradient(135deg, #1c93bc, #2fb3df);
+    --icon-chip-bg: #1d4b78;
+    --icon-chip-fg: #7fd4f5;
   }
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #111827;
-  --panel: #1f2937;
+  --bg: #0c2340;
+  --panel: #153a63;
   --text: #e2e8f0;
   --heading: #ffffff;
   --muted: #94a3b8;
@@ -118,6 +128,16 @@
   --success-bg: #16321a;
   --success-border: #2f6a37;
   --success-text: #8fe39c;
+  /* New component layer, see docs/superpowers/specs/2026-08-12-dashboard-ui-redesign-design.md.
+     --card-glow's rgba is --accent's decimal form (#1c93bc = 28,147,188);
+     --card-glow-hero uses the same accent at higher alpha for the one
+     "hero" gradient tile per page (see .card-hero, Task 3). */
+  --card-radius: 14px;
+  --card-glow: 0 0 0 1px #285484, 0 0 20px rgba(47, 179, 223, .18);
+  --card-glow-hero: 0 0 24px rgba(28, 147, 188, .35);
+  --accent-gradient: linear-gradient(135deg, #1c93bc, #2fb3df);
+  --icon-chip-bg: #1d4b78;
+  --icon-chip-fg: #7fd4f5;
 }
 
 * {
