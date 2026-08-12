@@ -76,6 +76,11 @@
     <div class="content-area">
       <header id="topbar" class="topbar">
         <input id="searchInput" type="search" placeholder="Filter computers, OS, Office, software, hardware">
+        <div id="osFilter" class="os-filter hidden" role="group" aria-label="Filter by platform">
+          <button type="button" class="os-filter-option active" data-os-filter="all">All</button>
+          <button type="button" class="os-filter-option" data-os-filter="windows">Windows</button>
+          <button type="button" class="os-filter-option" data-os-filter="linux">Linux</button>
+        </div>
       </header>
 
       <main>

@@ -49,7 +49,11 @@
     // "expanded" state alive across any re-render (pager Next/Prev, a
     // live-resize page-size correction, or a background data poll), not
     // just the one that happened to be showing when the row was expanded.
-    expandedDetails: new Set()
+    expandedDetails: new Set(),
+    // Keyed per consuming view, same convention as state.sort/state.page/
+    // state.pageSize. 'all' | 'windows' | 'linux'. Only 'hardware' is used
+    // until the Clients page reuses this same filter (separate plan).
+    osFilter: { hardware: 'all' }
   };
 
   const MIN_PAGE_SIZE = 5;
@@ -3240,6 +3244,17 @@
     return state.clients.concat(state.linuxClients);
   }
 
+  // Backs the .os-filter segmented-pill component: 'all' is a no-op
+  // passthrough, otherwise keeps only clients matching that platform.
+  // Consumers filter *before* any cross-platform grouping (e.g.
+  // getCpuGroups) so a group with zero remaining members after the filter
+  // never appears, with no changes needed inside the grouping functions.
+  function filterClientsByOs(clients, filter) {
+    if (filter === 'all') return clients;
+    const wantWindows = filter === 'windows';
+    return clients.filter(c => (clientPlatformLabel(c) === 'Windows') === wantWindows);
+  }
+
   // Cross-platform CPU grouping. Windows reports the model as cpu.name,
   // Linux as cpu.model - the same underlying concept, so both feed one key.
   // The key is name+cores only: Windows' cpu.clockMhz has no Linux
@@ -3737,7 +3752,7 @@
         </tr>`;
       });
     byId('hwCpuBody').innerHTML = cpuRows.join('') || '<tr><td colspan="2" class="empty">No CPU data.</td></tr>';
-    renderPager('hwCpuPager', 'hwCpu', cpuPage, cpuTotalPages, () => renderHardwarePage(getAllClients()));
+    renderPager('hwCpuPager', 'hwCpu', cpuPage, cpuTotalPages, () => renderFilteredHardwarePage());
 
     const { key: diskSortKey, dir: diskSortDir } = state.sort.hwDisk;
     const diskFiltered = applySort(getDiskGroups(clients).filter(g => hwMatches([g.model, g.type, ...g.clients.map(c => clientDisplayName(c))].join(' '), query)), g => diskSortValue(g, diskSortKey), diskSortDir);
@@ -3760,7 +3775,7 @@
         </tr>`;
       });
     byId('hwDiskBody').innerHTML = diskRows.join('') || '<tr><td colspan="4" class="empty">No storage data.</td></tr>';
-    renderPager('hwDiskPager', 'hwDisk', diskPage, diskTotalPages, () => renderHardwarePage(getAllClients()));
+    renderPager('hwDiskPager', 'hwDisk', diskPage, diskTotalPages, () => renderFilteredHardwarePage());
 
     const { key: ramSortKey, dir: ramSortDir } = state.sort.hwRam;
     const ramFiltered = applySort(getRamGroups(clients).filter(g => hwMatches([g.totalGb, ...g.clients.map(c => clientDisplayName(c))].join(' '), query)), g => ramSortValue(g, ramSortKey), ramSortDir);
@@ -3779,7 +3794,15 @@
         </tr>`;
       });
     byId('hwRamBody').innerHTML = ramRows.join('') || '<tr><td colspan="2" class="empty">No RAM data.</td></tr>';
-    renderPager('hwRamPager', 'hwRam', ramPage, ramTotalPages, () => renderHardwarePage(getAllClients()));
+    renderPager('hwRamPager', 'hwRam', ramPage, ramTotalPages, () => renderFilteredHardwarePage());
+  }
+
+  // Applies the .os-filter's current Hardware selection before delegating
+  // to renderHardwarePage - the single place that combines the two, so
+  // every call site (render() and each of the 3 pagers' onChange) stays
+  // filter-aware without repeating the filter call at each site.
+  function renderFilteredHardwarePage() {
+    renderHardwarePage(filterClientsByOs(getAllClients(), state.osFilter.hardware));
   }
 
   function render() {
@@ -3787,7 +3810,7 @@
     renderSortHeaders();
     renderTable(state.clients);
     renderSoftwareTable(state.clients);
-    renderHardwarePage(getAllClients());
+    renderFilteredHardwarePage();
     renderLicenses();
     populateSoftwareDatalists();
     byId('dashboardView').classList.toggle('hidden', state.view !== 'dashboard');
@@ -3826,6 +3849,7 @@
     byId('searchInput').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
     byId('topbar').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
     byId('generatedAt').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
+    byId('osFilter').classList.toggle('hidden', state.view !== 'hardware');
     renderSubtabStrips();
     recalculateActivePagination();
   }
@@ -4212,6 +4236,19 @@
     const deleteLinuxBtn = e.target.closest('[data-delete-linux-client]');
     if (deleteLinuxBtn) {
       deleteLinuxClient(deleteLinuxBtn.dataset.deleteLinuxClient);
+      return;
+    }
+
+    const osFilterBtn = e.target.closest('[data-os-filter]');
+    if (osFilterBtn) {
+      state.osFilter.hardware = osFilterBtn.dataset.osFilter;
+      state.page.hwCpu = 1;
+      state.page.hwDisk = 1;
+      state.page.hwRam = 1;
+      document.querySelectorAll('#osFilter .os-filter-option').forEach(btn => {
+        btn.classList.toggle('active', btn === osFilterBtn);
+      });
+      renderFilteredHardwarePage();
     }
   });
   byId('deploySubtabActions').addEventListener('click', () => setView('deploy', 'actions'));
