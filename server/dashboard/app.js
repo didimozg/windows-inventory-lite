@@ -190,11 +190,17 @@
     byId('deploySubtabs').classList.toggle('hidden', state.view !== 'deploy');
     byId('settingsSubtabs').classList.toggle('hidden', state.view !== 'settings');
     byId('deploySubtabActions').classList.toggle('active', state.view === 'deploy' && state.subview === 'actions');
+    byId('deploySubtabActions').setAttribute('aria-selected', String(state.view === 'deploy' && state.subview === 'actions'));
     byId('deploySubtabUpdates').classList.toggle('active', state.view === 'deploy' && state.subview === 'updates');
+    byId('deploySubtabUpdates').setAttribute('aria-selected', String(state.view === 'deploy' && state.subview === 'updates'));
     byId('deploySubtabPackage').classList.toggle('active', state.view === 'deploy' && state.subview === 'package');
+    byId('deploySubtabPackage').setAttribute('aria-selected', String(state.view === 'deploy' && state.subview === 'package'));
     byId('settingsSubtabGeneral').classList.toggle('active', state.view === 'settings' && state.subview === 'general');
+    byId('settingsSubtabGeneral').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'general'));
     byId('settingsSubtabCertificate').classList.toggle('active', state.view === 'settings' && state.subview === 'certificate');
+    byId('settingsSubtabCertificate').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'certificate'));
     byId('settingsSubtabAdminPassword').classList.toggle('active', state.view === 'settings' && state.subview === 'adminPassword');
+    byId('settingsSubtabAdminPassword').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'adminPassword'));
   }
 
   function text(value) {
@@ -1585,7 +1591,7 @@
 
   function renderClientUpdates(data) {
     if (!data.packageAvailable) {
-      byId('updatesPackageStatus').textContent = 'No client package is available yet - build or deploy one on the Client package tab first.';
+      byId('updatesPackageStatus').textContent = 'No client package is available yet - build or deploy one on Deploy > Package first.';
       byId('updatesBody').innerHTML = '';
       updateUpdatesBadge(0);
       return;
@@ -1668,7 +1674,7 @@
 
   // Badge-only counterpart to handleClientUpdatesSummary (Windows), used by
   // the dedicated fetches in pollForUpdates() and the initial page load -
-  // updates just the sidebar count, without the full loadLinuxClientUpdates()/
+  // updates just the Manage dropdown count, without the full loadLinuxClientUpdates()/
   // renderLinuxClientUpdates() table rebuild.
   function handleLinuxClientUpdatesSummary(data) {
     updateLinuxUpdatesBadge(data.packageAvailable ? data.outdatedCount : 0);
@@ -1676,7 +1682,7 @@
 
   function renderLinuxClientUpdates(data) {
     if (!data.packageAvailable) {
-      byId('linuxUpdatesPackageStatus').textContent = 'No Linux client package is available yet - build one on the Client package tab first.';
+      byId('linuxUpdatesPackageStatus').textContent = 'No Linux client package is available yet - build one on Deploy > Package first.';
       byId('linuxUpdatesBody').innerHTML = '';
       updateLinuxUpdatesBadge(0);
       return;
@@ -2765,7 +2771,7 @@
   // successful generation, so this sets the message classes directly.
   function regenerateIngestionToken() {
     const warningText = state.generalLoadedRequireIngestionToken !== false
-      ? 'Regenerate the ingestion token? Every already-installed client will stop reporting until it is reconfigured with the new token - and any not-yet-deployed GPO package still has the OLD token baked in, so it must be rebuilt from the Client package tab, not just redeployed. This cannot be undone.'
+      ? 'Regenerate the ingestion token? Every already-installed client will stop reporting until it is reconfigured with the new token - and any not-yet-deployed GPO package still has the OLD token baked in, so it must be rebuilt from Deploy > Package, not just redeployed. This cannot be undone.'
       : "Regenerate the ingestion token? Already-installed clients are unaffected right now since 'Require ingestion token' is off - but any package rebuilt after this uses the new value, and turning enforcement back on later will require every client to have this value. Continue?";
     const confirmed = window.confirm(warningText);
     if (!confirmed) return;
@@ -3820,8 +3826,8 @@
     byId('searchInput').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
     byId('topbar').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
     byId('generatedAt').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
-    recalculateActivePagination();
     renderSubtabStrips();
+    recalculateActivePagination();
   }
 
   // Re-measures and, if it changed, applies a corrected live page size for
@@ -3918,7 +3924,7 @@
       loadLinuxClients();
     }
 
-    // Separate fetch, badge-only: the sidebar "Client updates" count should
+    // Separate fetch, badge-only: the Manage dropdown "Client updates" count should
     // stay live even when the Client updates tab itself isn't open. A full
     // loadClientUpdates()/renderClientUpdates() call is deliberately NOT used
     // here - it rebuilds #updatesBody's row checkboxes, which would silently
@@ -3936,7 +3942,7 @@
       });
 
     // Same badge-only concern as the Windows fetch above, for the Linux
-    // "Client updates" sidebar count - this was missing entirely, so the
+    // "Client updates" Manage dropdown count - this was missing entirely, so the
     // count only ever appeared after the user opened the Linux Client
     // updates tab directly (which populates it as a side effect of
     // loadLinuxClientUpdates()).
@@ -3998,7 +4004,7 @@
     });
 
   // Same badge-only fetch pollForUpdates() does on every tick, run once
-  // immediately on page load - otherwise the sidebar badge stays blank
+  // immediately on page load - otherwise the Manage dropdown badge stays blank
   // until the first 30s poll tick, a tab visibility change, or the user
   // opening Client updates directly (which populates it as a side effect).
   // Also baselines state.knownScheduledJobId (see handleClientUpdatesSummary).
@@ -4013,7 +4019,7 @@
     });
 
   // Same badge-only fetch pollForUpdates() does on every tick, run once
-  // immediately on page load - otherwise the Linux sidebar badge stays
+  // immediately on page load - otherwise the Linux Manage dropdown badge stays
   // blank until the first 30s poll tick or the user opens Linux Client
   // updates directly (which populates it as a side effect).
   fetch('/api/v1/linux-client-updates', { cache: 'no-store' })
