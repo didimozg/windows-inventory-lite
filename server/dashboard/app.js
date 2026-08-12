@@ -697,12 +697,24 @@
     return new Date().toISOString().slice(0, 10);
   }
 
+  // One CSV for the merged Clients table, replacing the former
+  // exportClients/exportLinuxClients pair. Columns are the union of the two
+  // old sets plus a Platform column (a mixed file without one is
+  // ambiguous); a column with no counterpart on a row's platform exports as
+  // an empty cell, this file's existing convention for "not applicable".
+  // The OS filter is applied here as well as on screen - exporting the full
+  // fleet while the table shows one platform would silently return
+  // different data than what was asked for.
   function exportClients() {
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.clients;
-    const items = applySort(state.clients.filter(c => clientMatches(c, query)), c => clientSortValue(c, sortKey), sortDir);
-    const rows = [['Computer', 'Domain', 'IP Addresses', 'Client Version', 'OS', 'OS Version', 'Build', 'Office', 'Office Version', 'Windows Activated', 'Office Activated', 'Software Count', 'Collected', 'Stale', 'CPU', 'RAM', 'Disks', 'USB Storage', 'AD Description']].concat(
+    const items = applySort(
+      filterClientsByOs(getAllClients(), state.osFilter.clients).filter(c => allClientMatches(c, query)),
+      c => allClientSortValue(c, sortKey), sortDir
+    );
+    const rows = [['Computer', 'Platform', 'Domain', 'IP Addresses', 'Client Version', 'OS', 'OS Version', 'Build', 'Office', 'Office Version', 'Windows Activated', 'Office Activated', 'Software/Services', 'Collected', 'Stale', 'CPU', 'RAM', 'Disks', 'USB Storage', 'AD Description']].concat(
       items.map(c => {
+        const isWindows = clientPlatformLabel(c) === 'Windows';
         const os = c.os || {};
         const office = c.office || {};
         const activation = c.activation || {};
@@ -712,40 +724,26 @@
         const ramText = c.ramTotalMb ? (c.ramTotalMb >= 1024 ? Math.round(c.ramTotalMb / 1024) + ' GB' : c.ramTotalMb + ' MB') : '';
         const disksText = (c.disks || []).map(d => (d.type || '') + ' ' + (d.sizeGb ? d.sizeGb + ' GB' : '') + ' ' + (d.model || '')).join(', ').trim();
         return [
-          c.computerName || '', c.domain || '', formatIpAddresses(c), c.clientVersion ? 'v' + c.clientVersion : '',
-          os.caption || '', os.version || '', os.buildNumber || '',
-          office.name || '', office.version || '',
-          winAct.activated ? 'Yes' : 'No', officeAct.activated ? 'Yes' : 'No',
-          (c.software || []).length, formatDateTime(c.collectedAt || c.sourceUpdatedAt),
-          isStale(c) ? 'Yes' : 'No', cpu.name || '', ramText, disksText,
+          (isWindows ? c.computerName : c.hostname) || '', clientPlatformLabel(c),
+          c.domain || '', formatIpAddresses(c),
+          c.clientVersion ? 'v' + c.clientVersion : '',
+          (isWindows ? os.caption : os.prettyName) || '',
+          isWindows ? (os.version || '') : '',
+          isWindows ? (os.buildNumber || '') : '',
+          isWindows ? (office.name || '') : '',
+          isWindows ? (office.version || '') : '',
+          isWindows ? (winAct.activated ? 'Yes' : 'No') : '',
+          isWindows ? (officeAct.activated ? 'Yes' : 'No') : '',
+          isWindows ? (c.software || []).length : (Array.isArray(c.services) ? c.services.length : 0),
+          formatDateTime(c.collectedAt || c.sourceUpdatedAt),
+          isStale(c) ? 'Yes' : 'No',
+          (isWindows ? cpu.name : cpu.model) || '', ramText, disksText,
           c.hasUsbStorage ? 'Yes' : 'No',
           state.adDescriptionSyncEnabled ? (c.adSyncStatus === 'not-found' ? 'Not found in AD' : c.adSyncStatus === 'error' ? 'AD unreachable' : (c.adDescription || '')) : (c.adDescription || '')
         ];
       })
     );
     downloadCsv('clients-' + csvDate() + '.csv', rows);
-  }
-
-  function exportLinuxClients() {
-    const query = byId('searchInput').value.trim();
-    const { key: sortKey, dir: sortDir } = state.sort.linuxClients;
-    const items = applySort(state.linuxClients.filter(c => linuxClientMatches(c, query)), c => linuxClientSortValue(c, sortKey), sortDir);
-    const rows = [['Computer', 'IP Addresses', 'Client Version', 'OS', 'Service Count', 'CPU', 'RAM', 'Disks', 'Collected', 'AD Description']].concat(
-      items.map(c => {
-        const os = c.os || {};
-        const cpu = c.cpu || {};
-        const ramText = c.ramTotalMb ? (c.ramTotalMb >= 1024 ? Math.round(c.ramTotalMb / 1024) + ' GB' : c.ramTotalMb + ' MB') : '';
-        const disksText = (c.disks || []).map(d => (d.type || '') + ' ' + (d.sizeGb ? d.sizeGb + ' GB' : '') + ' ' + (d.model || '')).join(', ').trim();
-        return [
-          c.hostname || '', formatIpAddresses(c), c.clientVersion || '',
-          os.prettyName || '', Array.isArray(c.services) ? c.services.length : 0,
-          cpu.model || '', ramText, disksText,
-          formatDateTime(c.collectedAt || c.sourceUpdatedAt),
-          state.adDescriptionSyncEnabled ? (c.adSyncStatus === 'not-found' ? 'Not found in AD' : c.adSyncStatus === 'error' ? 'AD unreachable' : (c.adDescription || '')) : (c.adDescription || '')
-        ];
-      })
-    );
-    downloadCsv('linux-clients-' + csvDate() + '.csv', rows);
   }
 
   function exportLinuxServices() {
