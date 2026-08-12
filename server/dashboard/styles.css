@@ -1240,14 +1240,25 @@ pre {
   white-space: nowrap;
 }
 
-/* Which platform a computer in an expanded Hardware group came from. Same
-   shape as .usb-badge (the established inline-badge pattern in this file),
-   in neutral theme colors rather than the USB warning palette - it is
-   metadata, not an alert. Selector is deliberately more specific than
-   `.computer-list small { display: block }` above, which would otherwise
-   win and push the tag onto its own line. */
-.computer-list small.platform-tag {
+/* Which platform a computer came from: an expanded Hardware group's
+   computer list, and the merged Clients table's Computer cell. Same shape
+   as .usb-badge (the established inline-badge pattern in this file), in
+   neutral theme colors rather than the USB warning palette - it is
+   metadata, not an alert.
+   Two selectors, because two different rules would otherwise force the tag
+   onto its own line: `.computer-list small { display: block }` (0,1,1) in
+   an expanded hardware row, and `td small { display: block }` (0,0,2) in a
+   table cell. The bare `.platform-tag` (0,1,0) beats `td small` on its own,
+   but loses to `.computer-list small`, so the ancestor-scoped selector has
+   to stay alongside it.
+   margin-top: 0 is explicit because `td small` also sets margin-top: 4px
+   and applies in BOTH places (a computer list lives inside a <td> too),
+   nudging the tag below the .usb-badge next to it - a <span>, which never
+   picked that rule up. */
+.computer-list small.platform-tag,
+.platform-tag {
   display: inline-block;
+  margin-top: 0;
   margin-left: 6px;
   padding: 1px 6px;
   border-radius: 4px;

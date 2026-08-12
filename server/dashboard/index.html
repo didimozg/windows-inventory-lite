@@ -51,9 +51,8 @@
       <div class="topnav-dropdown">
         <button id="fleetDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Fleet <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
         <div id="fleetDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
-          <button id="clientsTab" class="topnav-dropdown-item" type="button" role="menuitem">Windows Clients</button>
+          <button id="clientsTab" class="topnav-dropdown-item" type="button" role="menuitem">Clients</button>
           <button id="softwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Software</button>
-          <button id="linuxClientsTab" class="topnav-dropdown-item" type="button" role="menuitem">Linux Clients</button>
           <button id="linuxServicesTab" class="topnav-dropdown-item" type="button" role="menuitem">Services</button>
           <button id="hardwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Hardware</button>
           <button id="licensesTab" class="topnav-dropdown-item" type="button" role="menuitem">Licenses</button>
@@ -447,30 +446,6 @@
           </div>
         </section>
 
-        <section id="linuxClientsView" class="hidden" aria-label="Linux clients">
-          <div class="view-toolbar">
-            <button id="exportLinuxClientsBtn" class="export-button" type="button">Export CSV</button>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th data-sort-table="linuxClients" data-sort-key="hostname" class="sortable">Computer</th>
-                  <th data-sort-table="linuxClients" data-sort-key="clientVersion" class="sortable">Client</th>
-                  <th data-sort-table="linuxClients" data-sort-key="os" class="sortable">OS</th>
-                  <th>IP</th>
-                  <th data-sort-table="linuxClients" data-sort-key="softwareCount" class="sortable">Software</th>
-                  <th id="linuxDescriptionColumnHeader">AD Description</th>
-                  <th data-sort-table="linuxClients" data-sort-key="collectedAt" class="sortable">Collected</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody id="linuxClientsBody"></tbody>
-            </table>
-          </div>
-          <div id="linuxClientsPager" class="pager"></div>
-        </section>
-
         <section id="linuxServicesView" class="hidden" aria-label="Linux services inventory">
           <div class="view-toolbar">
             <button id="exportLinuxServicesBtn" class="export-button" type="button">Export CSV</button>
@@ -860,13 +835,12 @@
             <table>
               <thead>
                 <tr>
-                  <th data-sort-table="clients" data-sort-key="computerName" class="sortable">Computer</th>
+                  <th data-sort-table="clients" data-sort-key="name" class="sortable">Computer</th>
                   <th data-sort-table="clients" data-sort-key="clientVersion" class="sortable">Client</th>
                   <th data-sort-table="clients" data-sort-key="os" class="sortable">OS</th>
                   <th data-sort-table="clients" data-sort-key="office" class="sortable">Office</th>
-                  <th data-sort-table="clients" data-sort-key="windowsActivated" class="sortable">Windows</th>
-                  <th data-sort-table="clients" data-sort-key="officeActivated" class="sortable">Office activation</th>
-                  <th data-sort-table="clients" data-sort-key="softwareCount" class="sortable">Software</th>
+                  <th data-sort-table="clients" data-sort-key="activation" class="sortable">Activation</th>
+                  <th data-sort-table="clients" data-sort-key="items" class="sortable">Software/Services</th>
                   <th id="descriptionColumnHeader">AD Description</th>
                   <th data-sort-table="clients" data-sort-key="collectedAt" class="sortable">Collected</th>
                   <th>Actions</th>

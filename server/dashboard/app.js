@@ -1,14 +1,14 @@
 (function () {
   const inventoryViews = ['clients', 'software', 'hardware'];
-  const linuxInventoryViews = ['linux', 'linuxServices'];
+  const linuxInventoryViews = ['linuxServices'];
   // Views whose rendered content depends on state.linuxClients, so the 30s
   // poll keeps Linux data fresh while one of them is open. Deliberately a
   // separate list from linuxInventoryViews, which drives the search box and
-  // the "Generated:" line and must stay limited to the Linux inventory
-  // tables themselves - the Dashboard reads Linux data but is not an
-  // inventory view, and the merged Hardware view is already covered for
-  // search purposes by inventoryViews.
-  const linuxDataViews = ['linux', 'linuxServices', 'dashboard', 'hardware'];
+  // the "Generated:" line and must stay limited to the Linux-only inventory
+  // table - the Dashboard reads Linux data but is not an inventory view,
+  // and the merged Clients/Hardware views are already covered for search
+  // purposes by inventoryViews.
+  const linuxDataViews = ['clients', 'linuxServices', 'dashboard', 'hardware'];
   const state = {
     clients: [], linuxClients: [], ...getInitialViewState(), installJobId: null, installPollTimer: null, installJobs: [],
     updateJobId: null, updatePollTimer: null,
@@ -22,7 +22,10 @@
     staleHours: 48,
     licenses: [], editingLicenseId: null, licenseFormComputers: [],
     sort: {
-      clients: { key: 'computerName', dir: 1 },
+      // 'name', not 'computerName': the Clients table is cross-platform
+      // now, and its Computer column shows clientDisplayName() - Windows'
+      // computerName or Linux' hostname. See allClientSortValue.
+      clients: { key: 'name', dir: 1 },
       software: { key: 'name', dir: 1 },
       // hwCpu/hwDisk/hwRam drive the single cross-platform Hardware view -
       // these were always per-table, never per-platform, so the merged view
@@ -31,17 +34,16 @@
       hwDisk: { key: 'model', dir: 1 },
       hwRam: { key: 'totalMb', dir: -1 },
       licenses: { key: 'name', dir: 1 },
-      linuxClients: { key: 'hostname', dir: 1 },
       linuxServices: { key: 'name', dir: 1 }
     },
-    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxClients: 1, linuxServices: 1 },
+    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxServices: 1 },
     // clients/software start at a reasonable fallback and are corrected to
     // the real viewport-fitting value the first time their table becomes
     // visible (see computeLiveRowsPerPage/recalculateActivePagination).
     // hwCpu/hwDisk/hwRam are fixed (see HW_PAGE_SIZE) - the three Hardware
     // sub-tables render stacked in one view and are rarely large enough to
     // need viewport-adaptive sizing.
-    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20, linuxClients: 20, linuxServices: 20 },
+    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20, linuxServices: 20 },
     // Prefixed keys ('client:'/'software:'/'hw:' + id) so the three
     // separate data-*-details attribute namespaces can't collide in one
     // Set. Drives each render function's initial hidden/visible class for
@@ -51,9 +53,10 @@
     // just the one that happened to be showing when the row was expanded.
     expandedDetails: new Set(),
     // Keyed per consuming view, same convention as state.sort/state.page/
-    // state.pageSize. 'all' | 'windows' | 'linux'. Only 'hardware' is used
-    // until the Clients page reuses this same filter (separate plan).
-    osFilter: { hardware: 'all' }
+    // state.pageSize. 'all' | 'windows' | 'linux'. The keys are literally
+    // view names, so renderOsFilterActive can repaint the one shared pill
+    // from state.osFilter[state.view] when the user switches pages.
+    osFilter: { hardware: 'all', clients: 'all' }
   };
 
   const MIN_PAGE_SIZE = 5;
@@ -133,7 +136,10 @@
     if (hash === 'software') return { view: 'software', subview: null };
     if (hash === 'hardware' || hash === 'linux-hardware') return { view: 'hardware', subview: null };
     if (hash === 'licenses') return { view: 'licenses', subview: null };
-    if (hash === 'linux-clients' || hash === 'linux') return { view: 'linux', subview: null };
+    // #linux-clients / #linux are kept as aliases of the merged Clients
+    // page (same backward-compat pattern as #linux-hardware above and
+    // #certificate below) - old bookmarks land on Clients, unfiltered.
+    if (hash === 'linux-clients' || hash === 'linux') return { view: 'clients', subview: null };
     if (hash === 'linux-services') return { view: 'linuxServices', subview: null };
     if (hash === 'deploy' || hash === 'deploy-actions' || hash === 'client-actions' || hash === 'actions' || hash === 'install' || hash === 'linux-client-actions') return { view: 'deploy', subview: 'actions' };
     if (hash === 'deploy-updates' || hash === 'client-updates' || hash === 'updates' || hash === 'linux-client-updates') return { view: 'deploy', subview: 'updates' };
@@ -145,12 +151,12 @@
   }
 
   // View -> canonical hash. Deploy/Settings map through their subview;
-  // linux/linuxServices keep their existing multi-word hashes; everything
-  // else's hash equals its view name unchanged.
+  // linuxServices keeps its existing multi-word hash; everything else's
+  // hash equals its view name unchanged (the merged Clients page falls
+  // through to the default and produces 'clients').
   function computeHashForView(view, subview) {
     if (view === 'deploy') return subview === 'updates' ? 'deploy-updates' : subview === 'package' ? 'deploy-package' : 'deploy-actions';
     if (view === 'settings') return subview === 'certificate' ? 'settings-certificate' : subview === 'adminPassword' ? 'settings-admin-password' : 'settings-general';
-    if (view === 'linux') return 'linux-clients';
     if (view === 'linuxServices') return 'linux-services';
     return view;
   }
@@ -184,10 +190,10 @@
     if (view === 'deploy') loadDeploySubviewData(state.subview);
     if (view === 'settings') loadSettingsSubviewData(state.subview);
     if (view === 'licenses') loadLicenses();
-    // 'hardware' is in this list because the merged Hardware view reads Linux
-    // data too - opening the tab re-fetches it rather than waiting up to 30s
-    // for the next poll tick.
-    if (view === 'linux' || view === 'linuxServices' || view === 'hardware') loadLinuxClients();
+    // 'clients' and 'hardware' are in this list because both merged views
+    // read Linux data too - opening either tab re-fetches it rather than
+    // waiting up to 30s for the next poll tick.
+    if (view === 'clients' || view === 'linuxServices' || view === 'hardware') loadLinuxClients();
   }
 
   function renderSubtabStrips() {
@@ -302,7 +308,7 @@
       .then(data => {
         state.linuxClients = data.clients || [];
         state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
-        renderLinuxClientsTable(state.linuxClients);
+        renderFilteredClientsTable();
         renderLinuxServicesTable(state.linuxClients);
         // Both of these read Windows and Linux data together, so they have
         // to be redrawn whenever the Linux half lands - including on the
@@ -352,7 +358,7 @@
         // counting a deleted client until the next 30s poll, and only then if the
         // active view happened to be in linuxDataViews. This is the same set
         // loadLinuxClients re-renders after every fetch.
-        renderLinuxClientsTable(state.linuxClients);
+        renderFilteredClientsTable();
         renderLinuxServicesTable(state.linuxClients);
         renderFilteredHardwarePage();
         renderDashboardTiles();
@@ -361,99 +367,6 @@
       .catch(error => {
         window.alert(`Failed to delete ${hostname}: ${error.message}`);
       });
-  }
-
-  // Mirrors renderTable (Windows Clients) - pagination, a stable
-  // safeId(hostname)-based row id (NOT the old positional linux-${index},
-  // which would silently misattribute an expanded row's state to a
-  // different client after any sort or data change), row-expand with a
-  // CPU/RAM/Disks summary plus a nested services table (name/version only
-  // - Linux services carry no publisher or install date), a Delete
-  // button, and the same in-progress-edit-survives-a-rerender handling
-  // renderTable already has for the Windows Description editor.
-  function renderLinuxClientsTable(clients) {
-    const tbody = byId('linuxClientsBody');
-    if (!tbody) return;
-
-    const activeElement = document.activeElement;
-    const editingClientId = activeElement && activeElement.matches('.description-edit-input') && activeElement.dataset.platform === 'linux' ? activeElement.dataset.descriptionClient : null;
-    const editingValue = editingClientId ? activeElement.value : null;
-    const editingSelectionStart = editingClientId ? activeElement.selectionStart : null;
-
-    renderSortHeaders();
-    byId('linuxDescriptionColumnHeader').textContent = state.adDescriptionSyncEnabled ? 'AD Description' : 'Description';
-
-    const query = byId('searchInput').value.trim();
-    const { key: sortKey, dir: sortDir } = state.sort.linuxClients;
-    const filtered = applySort(clients.filter(client => linuxClientMatches(client, query)), c => linuxClientSortValue(c, sortKey), sortDir);
-    const { items: pageItems, page, totalPages } = paginate(filtered, state.page.linuxClients, state.pageSize.linuxClients);
-    state.page.linuxClients = page;
-
-    const rows = pageItems.map(client => {
-      const clientId = safeId(client.hostname || '');
-      const descriptionCell = state.adDescriptionSyncEnabled
-        ? formatLinuxAdDescription(client)
-        : formatLinuxDescriptionEditor(client, clientId);
-      const osName = (client.os && client.os.prettyName) || '';
-      const services = Array.isArray(client.services) ? client.services : [];
-      const serviceCount = services.length;
-      const detailsHidden = state.expandedDetails.has('linux-client:' + clientId) ? '' : 'hidden';
-
-      const serviceRows = services.map(item => `<tr>
-        <td>${escapeHtml(item.name)}</td>
-        <td>${escapeHtml(item.unit || '')}</td>
-        <td>${escapeHtml(item.version)}</td>
-        <td>${serviceActiveDot(item.active !== false)}</td>
-      </tr>`).join('');
-
-      const cpu = client.cpu || {};
-      const cpuText = cpu.model ? `${escapeHtml(cpu.model)}${cpu.cores ? `, ${Number(cpu.cores) || 0} cores` : ''}` : 'Unknown';
-      const ramGb = client.ramTotalMb
-        ? (client.ramTotalMb >= 1024 ? `${Math.round(client.ramTotalMb / 1024)} GB` : `${Number(client.ramTotalMb) || 0} MB`)
-        : 'Unknown';
-      const disksSummary = (client.disks || []).map(d => {
-        const size = d.sizeGb ? ` ${d.sizeGb} GB` : '';
-        return `${escapeHtml(d.type)}${escapeHtml(size)} <small>${escapeHtml(d.model)}</small>`;
-      }).join('<br>') || 'Unknown';
-
-      return `<tr>
-        <td><button class="link-button" type="button" data-linux-client="${clientId}">${escapeHtml(client.hostname)}</button></td>
-        <td>${escapeHtml(client.clientVersion)}</td>
-        <td>${escapeHtml(osName)}</td>
-        <td>${formatIpAddressesHtml(client)}</td>
-        <td>${serviceCount}</td>
-        <td>${descriptionCell}</td>
-        <td>${escapeHtml(formatDateTime(client.collectedAt || client.sourceUpdatedAt))}${client.servicesStatusCollectedAt ? `<small>Services checked: ${escapeHtml(formatDateTime(client.servicesStatusCollectedAt))}</small>` : ''}</td>
-        <td><button class="danger-button-ghost" type="button" data-delete-linux-client="${escapeHtml(client.hostname)}">Delete</button></td>
-      </tr>
-      <tr class="details-row ${detailsHidden}" data-linux-client-details="${clientId}">
-        <td colspan="8">
-          <div class="details">
-            <div class="hw-summary">
-              <div><strong>CPU</strong><span>${cpuText}</span></div>
-              <div><strong>RAM</strong><span>${ramGb}</span></div>
-              <div><strong>Storage</strong><span>${disksSummary}</span></div>
-            </div>
-            <h2>${escapeHtml(client.hostname)} services</h2>
-            <table class="nested-table">
-              <thead><tr><th>Name</th><th>Unit</th><th>Version</th><th>Active</th></tr></thead>
-              <tbody>${serviceRows || '<tr><td colspan="4" class="empty">No service records.</td></tr>'}</tbody>
-            </table>
-          </div>
-        </td>
-      </tr>`;
-    });
-
-    tbody.innerHTML = rows.join('') || '<tr><td colspan="8" class="empty">No matching Linux clients.</td></tr>';
-    if (editingClientId) {
-      const restoredInput = document.querySelector(`.description-edit-input[data-description-client="${editingClientId}"][data-platform="linux"]`);
-      if (restoredInput) {
-        restoredInput.value = editingValue;
-        restoredInput.focus();
-        restoredInput.setSelectionRange(editingSelectionStart, editingSelectionStart);
-      }
-    }
-    renderPager('linuxClientsPager', 'linuxClients', page, totalPages, () => renderLinuxClientsTable(state.linuxClients));
   }
 
   function formatDateTime(value) {
@@ -542,6 +455,15 @@
       disks
     ].join(' ').toLowerCase();
     return haystack.indexOf(query.toLowerCase()) !== -1;
+  }
+
+  // Matches a client against the merged Clients table's search box,
+  // delegating to the existing per-platform matcher since each already
+  // knows which fields that platform actually reports (Windows has
+  // domain/office/publisher fields Linux has no equivalent for; Linux
+  // searches service names where Windows searches software names).
+  function allClientMatches(client, query) {
+    return clientPlatformLabel(client) === 'Windows' ? clientMatches(client, query) : linuxClientMatches(client, query);
   }
 
   function safeId(value) {
@@ -643,6 +565,28 @@
       case 'clientVersion': return client.clientVersion || '';
       case 'os': return ((client.os && client.os.prettyName) || '').toLowerCase();
       case 'softwareCount': return Array.isArray(client.services) ? client.services.length : 0;
+      case 'collectedAt': return new Date(client.collectedAt || client.sourceUpdatedAt || 0).getTime();
+      default: return '';
+    }
+  }
+
+  // Sort value for the merged Clients table. Delegates to the existing
+  // per-platform sort-value functions (each already knows that platform's
+  // field names), so platform-specific logic isn't duplicated. The keys
+  // here are the data-sort-key values on #clientsView's headers and must
+  // stay in sync with them. 'office' and 'activation' have no Linux concept
+  // - returning null puts Linux rows at the end regardless of direction,
+  // which applySort already does for null (see its av == null / bv == null
+  // handling, no change needed there).
+  function allClientSortValue(client, key) {
+    const isWindows = clientPlatformLabel(client) === 'Windows';
+    switch (key) {
+      case 'name': return isWindows ? clientSortValue(client, 'computerName') : linuxClientSortValue(client, 'hostname');
+      case 'clientVersion': return client.clientVersion || '';
+      case 'os': return isWindows ? clientSortValue(client, 'os') : linuxClientSortValue(client, 'os');
+      case 'office': return isWindows ? clientSortValue(client, 'office') : null;
+      case 'activation': return isWindows ? clientSortValue(client, 'windowsActivated') : null;
+      case 'items': return isWindows ? clientSortValue(client, 'softwareCount') : linuxClientSortValue(client, 'softwareCount');
       case 'collectedAt': return new Date(client.collectedAt || client.sourceUpdatedAt || 0).getTime();
       default: return '';
     }
@@ -3515,98 +3459,178 @@
     return `<span class="ram-modules-grid">${items.join('')}</span>`;
   }
 
-  function renderTable(clients) {
+  // The single cross-platform Clients table, replacing the former
+  // renderTable (Windows) / renderLinuxClientsTable (Linux) pair. Callers
+  // pass the merged, OS-filtered list (see renderFilteredClientsTable) and
+  // each row branches on its own client's platform for the cells whose
+  // shape genuinely differs: which expand/delete data-* attribute the row
+  // carries, whether a domain is shown, the OS sub-line, Office,
+  // Activation, the installed-software vs running-services count, which
+  // Description formatter applies, and which nested table the expanded row
+  // shows. Every per-platform data attribute each old table emitted is
+  // emitted here unchanged, so the existing delegated click handlers for
+  // [data-client]/[data-linux-client]/[data-delete-client]/
+  // [data-delete-linux-client] keep working with no changes at all.
+  function renderClientsTable(clients) {
     const activeElement = document.activeElement;
     const editingClientId = activeElement && activeElement.matches('.description-edit-input') ? activeElement.dataset.descriptionClient : null;
+    // Both platforms' Description inputs can now be in the same table, and
+    // safeId() of a Windows computerName equal to a Linux hostname yields
+    // the same id - so the platform is part of the restore lookup below,
+    // not just the id.
+    const editingIsLinux = editingClientId ? activeElement.dataset.platform === 'linux' : false;
     const editingValue = editingClientId ? activeElement.value : null;
     const editingSelectionStart = editingClientId ? activeElement.selectionStart : null;
+
+    // Also called by render(), but this table is now re-rendered outside
+    // the render() pipeline too (loadLinuxClients' poll path, the pager,
+    // the OS filter) - same reason the retired renderLinuxClientsTable
+    // called it.
+    renderSortHeaders();
+    byId('descriptionColumnHeader').textContent = state.adDescriptionSyncEnabled ? 'AD Description' : 'Description';
+
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.clients;
-    const filtered = applySort(clients.filter(client => clientMatches(client, query)), c => clientSortValue(c, sortKey), sortDir);
+    const filtered = applySort(clients.filter(client => allClientMatches(client, query)), c => allClientSortValue(c, sortKey), sortDir);
     const { items: pageItems, page, totalPages } = paginate(filtered, state.page.clients, state.pageSize.clients);
     state.page.clients = page;
-    byId('descriptionColumnHeader').textContent = state.adDescriptionSyncEnabled ? 'AD Description' : 'Description';
+
     const rows = pageItems.map(client => {
+      const isWindows = clientPlatformLabel(client) === 'Windows';
+      const clientId = safeId((isWindows ? client.computerName : client.hostname) || '');
       const stale = isStale(client);
       const awaitingReport = !!client.lastInstalledAtUtc;
       const staleClass = stale ? ' stale' : '';
       const staleBadge = awaitingReport
         ? ` <span class="usb-badge" title="Pushed at ${escapeHtml(formatDateTime(client.lastInstalledAtUtc))}, waiting for this client to report in">AWAITING REPORT</span>`
         : (stale ? ' <span class="usb-badge">STALE</span>' : '');
+      // hasUsbStorage / isStale / lastInstalledAtUtc are all platform-
+      // agnostic (the Dashboard's USB and Stale tiles already read them off
+      // getAllClients()), so these two badges need no platform branch.
+      const usbBadge = client.hasUsbStorage ? ' <span class="usb-badge">USB</span>' : '';
+      // Windows only, and only when actually reported - piping an absent
+      // domain through escapeHtml would print the literal word "Unknown"
+      // under every Linux row (same reasoning as hardwareComputerItem).
+      const domainHtml = client.domain ? `<small>${escapeHtml(client.domain)}</small>` : '';
+      const ipAddressesHtml = formatIpAddressesHtml(client);
+      const expandAttr = isWindows ? `data-client="${clientId}"` : `data-linux-client="${clientId}"`;
+
       const os = client.os || {};
+      const osCell = isWindows
+        ? `${escapeHtml(os.caption)}<small class="mono">${escapeHtml(os.version)} build ${escapeHtml(os.buildNumber)}</small>`
+        : escapeHtml(os.prettyName);
+
       const office = client.office || {};
       const activation = client.activation || {};
       const windowsActivation = activation.windows || {};
       const officeActivation = activation.office || {};
-      const clientSoftware = getClientSoftware(client);
-      const softwareCount = clientSoftware.length;
-      const ipAddressesHtml = formatIpAddressesHtml(client);
-      const usbBadge = client.hasUsbStorage ? ' <span class="usb-badge">USB</span>' : '';
+      // Office licensing and Windows/Office activation have no Linux
+      // counterpart at all. An em dash marks "not applicable on this
+      // platform" - the same placeholder renderCertificateHistory already
+      // uses for a cell that cannot exist.
+      const officeCell = isWindows ? `${escapeHtml(office.name)}<small>${escapeHtml(office.version)}</small>` : '—';
+      const activationCell = isWindows
+        ? `${activationBadge(windowsActivation.activated, 'Windows')} ${activationBadge(officeActivation.activated, 'Office')}`
+        : '—';
 
-      const softwareRows = clientSoftware.map(item => `<tr>
-        <td>${escapeHtml(item.name)}</td>
-        <td>${escapeHtml(item.version)}</td>
-        <td>${escapeHtml(item.publisher)}</td>
-        <td>${escapeHtml(formatInstallDate(item.installDate))}</td>
-      </tr>`).join('');
+      const clientSoftware = isWindows ? getClientSoftware(client) : [];
+      const services = Array.isArray(client.services) ? client.services : [];
+      const itemCount = isWindows ? clientSoftware.length : services.length;
+
+      const descriptionCell = state.adDescriptionSyncEnabled
+        ? (isWindows ? formatAdDescription(client) : formatLinuxAdDescription(client))
+        : (isWindows ? formatDescriptionEditor(client, clientId) : formatLinuxDescriptionEditor(client, clientId));
 
       const cpu = client.cpu || {};
-      const cpuText = cpu.name
-        ? `${escapeHtml(cpu.name)}${cpu.cores ? `, ${Number(cpu.cores) || 0} cores` : ''}${cpu.clockMhz ? `, ${(cpu.clockMhz / 1000).toFixed(2)} GHz` : ''}`
+      const cpuName = isWindows ? cpu.name : cpu.model;
+      const cpuText = cpuName
+        ? `${escapeHtml(cpuName)}${cpu.cores ? `, ${Number(cpu.cores) || 0} cores` : ''}${isWindows && cpu.clockMhz ? `, ${(cpu.clockMhz / 1000).toFixed(2)} GHz` : ''}`
         : 'Unknown';
       const ramGb = client.ramTotalMb
         ? (client.ramTotalMb >= 1024 ? `${Math.round(client.ramTotalMb / 1024)} GB` : `${Number(client.ramTotalMb) || 0} MB`)
         : 'Unknown';
-      const ramModulesHtml = formatRamModulesHtml(client.ramModules);
+      // ramModules is a Windows-only field (no Linux counterpart in the
+      // Go client's report), so the per-module grid only ever renders for
+      // Windows rows.
+      const ramModulesHtml = isWindows ? formatRamModulesHtml(client.ramModules) : null;
       const disksSummary = (client.disks || []).map(d => {
         const size = d.sizeGb ? ` ${d.sizeGb} GB` : '';
         const badge = d.usb ? ' <span class="usb-badge">USB</span>' : '';
         return `${escapeHtml(d.type)}${escapeHtml(size)}${badge} <small>${escapeHtml(d.model)}</small>`;
       }).join('<br>') || 'Unknown';
 
-      const clientId = safeId(client.computerName || '');
-      const detailsHidden = state.expandedDetails.has('client:' + clientId) ? '' : 'hidden';
+      const nestedTable = isWindows
+        ? `<h2>${escapeHtml(client.computerName)} software</h2>
+            <table class="nested-table">
+              <thead><tr><th>Name</th><th>Version</th><th>Publisher</th><th>Install date</th></tr></thead>
+              <tbody>${clientSoftware.map(item => `<tr>
+                <td>${escapeHtml(item.name)}</td>
+                <td>${escapeHtml(item.version)}</td>
+                <td>${escapeHtml(item.publisher)}</td>
+                <td>${escapeHtml(formatInstallDate(item.installDate))}</td>
+              </tr>`).join('') || '<tr><td colspan="4" class="empty">No software records.</td></tr>'}</tbody>
+            </table>`
+        : `<h2>${escapeHtml(client.hostname)} services</h2>
+            <table class="nested-table">
+              <thead><tr><th>Name</th><th>Unit</th><th>Version</th><th>Active</th></tr></thead>
+              <tbody>${services.map(item => `<tr>
+                <td>${escapeHtml(item.name)}</td>
+                <td>${escapeHtml(item.unit || '')}</td>
+                <td>${escapeHtml(item.version)}</td>
+                <td>${serviceActiveDot(item.active !== false)}</td>
+              </tr>`).join('') || '<tr><td colspan="4" class="empty">No service records.</td></tr>'}</tbody>
+            </table>`;
+
+      const detailsHidden = state.expandedDetails.has((isWindows ? 'client:' : 'linux-client:') + clientId) ? '' : 'hidden';
+      const detailsAttr = isWindows ? `data-client-details="${clientId}"` : `data-linux-client-details="${clientId}"`;
+      const deleteAttr = isWindows
+        ? `data-delete-client="${escapeHtml(client.computerName)}"`
+        : `data-delete-linux-client="${escapeHtml(client.hostname)}"`;
 
       return `<tr class="${staleClass}">
-        <td><button class="link-button" type="button" data-client="${clientId}">${escapeHtml(client.computerName)}</button>${usbBadge}${staleBadge}<small>${escapeHtml(client.domain)}</small>${ipAddressesHtml ? `<small class="mono">${ipAddressesHtml}</small>` : ''}</td>
+        <td><button class="link-button" type="button" ${expandAttr}>${escapeHtml(clientDisplayName(client))}</button> <small class="platform-tag">${escapeHtml(clientPlatformLabel(client))}</small>${usbBadge}${staleBadge}${domainHtml}${ipAddressesHtml ? `<small class="mono">${ipAddressesHtml}</small>` : ''}</td>
         <td>${escapeHtml(client.clientVersion)}</td>
-        <td>${escapeHtml(os.caption)}<small class="mono">${escapeHtml(os.version)} build ${escapeHtml(os.buildNumber)}</small></td>
-        <td>${escapeHtml(office.name)}<small>${escapeHtml(office.version)}</small></td>
-        <td>${activationBadge(windowsActivation.activated, 'Windows')}</td>
-        <td>${activationBadge(officeActivation.activated, 'Office')}</td>
-        <td>${softwareCount}</td>
-        <td>${state.adDescriptionSyncEnabled ? formatAdDescription(client) : formatDescriptionEditor(client, clientId)}</td>
-        <td>${escapeHtml(formatDateTime(client.collectedAt || client.sourceUpdatedAt))}</td>
-        <td><button class="danger-button-ghost" type="button" data-delete-client="${escapeHtml(client.computerName)}">Delete</button></td>
+        <td>${osCell}</td>
+        <td>${officeCell}</td>
+        <td>${activationCell}</td>
+        <td>${itemCount}</td>
+        <td>${descriptionCell}</td>
+        <td>${escapeHtml(formatDateTime(client.collectedAt || client.sourceUpdatedAt))}${client.servicesStatusCollectedAt ? `<small>Services checked: ${escapeHtml(formatDateTime(client.servicesStatusCollectedAt))}</small>` : ''}</td>
+        <td><button class="danger-button-ghost" type="button" ${deleteAttr}>Delete</button></td>
       </tr>
-      <tr class="details-row ${detailsHidden}" data-client-details="${clientId}">
-        <td colspan="10">
+      <tr class="details-row ${detailsHidden}" ${detailsAttr}>
+        <td colspan="9">
           <div class="details">
             <div class="hw-summary">
               <div><strong>CPU</strong><span>${cpuText}</span></div>
               <div><strong>RAM</strong><span>${ramGb}${ramModulesHtml ? `<br>${ramModulesHtml}` : ''}</span></div>
               <div><strong>Storage</strong><span>${disksSummary}</span></div>
             </div>
-            <h2>${escapeHtml(client.computerName)} software</h2>
-            <table class="nested-table">
-              <thead><tr><th>Name</th><th>Version</th><th>Publisher</th><th>Install date</th></tr></thead>
-              <tbody>${softwareRows || '<tr><td colspan="4" class="empty">No software records.</td></tr>'}</tbody>
-            </table>
+            ${nestedTable}
           </div>
         </td>
       </tr>`;
     });
 
-    byId('inventoryBody').innerHTML = rows.join('') || '<tr><td colspan="10" class="empty">No matching inventory records.</td></tr>';
+    byId('inventoryBody').innerHTML = rows.join('') || '<tr><td colspan="9" class="empty">No matching inventory records.</td></tr>';
     if (editingClientId) {
-      const restoredInput = document.querySelector(`.description-edit-input[data-description-client="${editingClientId}"]`);
+      const platformSelector = editingIsLinux ? '[data-platform="linux"]' : ':not([data-platform])';
+      const restoredInput = document.querySelector(`.description-edit-input[data-description-client="${editingClientId}"]${platformSelector}`);
       if (restoredInput) {
         restoredInput.value = editingValue;
         restoredInput.focus();
         restoredInput.setSelectionRange(editingSelectionStart, editingSelectionStart);
       }
     }
-    renderPager('clientsPager', 'clients', page, totalPages, () => renderTable(state.clients));
+    renderPager('clientsPager', 'clients', page, totalPages, () => renderFilteredClientsTable());
+  }
+
+  // Applies the .os-filter's current Clients selection before delegating to
+  // renderClientsTable - the single place that combines the two, so every
+  // call site stays filter-aware without repeating the filter call. Exact
+  // mirror of renderFilteredHardwarePage.
+  function renderFilteredClientsTable() {
+    renderClientsTable(filterClientsByOs(getAllClients(), state.osFilter.clients));
   }
 
   document.addEventListener('keydown', event => {
@@ -3805,10 +3829,24 @@
     renderHardwarePage(filterClientsByOs(getAllClients(), state.osFilter.hardware));
   }
 
+  // Repaints the one shared .os-filter pill from the current view's own
+  // selection. Hardware and Clients each keep an independent value in
+  // state.osFilter, so without this, setting "Windows" on Hardware and then
+  // switching to Clients would leave the Windows chip lit while the Clients
+  // table is actually unfiltered. state.osFilter's keys are view names
+  // exactly so this lookup works; any other view falls back to 'all' (and
+  // the pill is hidden there anyway).
+  function renderOsFilterActive() {
+    const active = state.osFilter[state.view] || 'all';
+    document.querySelectorAll('#osFilter .os-filter-option').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.osFilter === active);
+    });
+  }
+
   function render() {
     renderDashboardTiles();
     renderSortHeaders();
-    renderTable(state.clients);
+    renderFilteredClientsTable();
     renderSoftwareTable(state.clients);
     renderFilteredHardwarePage();
     renderLicenses();
@@ -3818,7 +3856,6 @@
     byId('softwareView').classList.toggle('hidden', state.view !== 'software');
     byId('hardwareView').classList.toggle('hidden', state.view !== 'hardware');
     byId('licensesView').classList.toggle('hidden', state.view !== 'licenses');
-    byId('linuxClientsView').classList.toggle('hidden', state.view !== 'linux');
     byId('linuxServicesView').classList.toggle('hidden', state.view !== 'linuxServices');
     // Deploy: Actions shows both platforms' sections together (stacked, own
     // headings - see Task 2), Updates likewise, Package is already
@@ -3838,9 +3875,8 @@
     byId('softwareTab').classList.toggle('active', state.view === 'software');
     byId('hardwareTab').classList.toggle('active', state.view === 'hardware');
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
-    byId('linuxClientsTab').classList.toggle('active', state.view === 'linux');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
-    byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linux', 'linuxServices', 'hardware', 'licenses'].includes(state.view));
+    byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'licenses'].includes(state.view));
     byId('manageDropdownButton').classList.toggle('active', state.view === 'deploy' || state.view === 'settings');
     byId('deployTab').classList.toggle('active', state.view === 'deploy');
     byId('settingsTab').classList.toggle('active', state.view === 'settings');
@@ -3849,7 +3885,8 @@
     byId('searchInput').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
     byId('topbar').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
     byId('generatedAt').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
-    byId('osFilter').classList.toggle('hidden', state.view !== 'hardware');
+    byId('osFilter').classList.toggle('hidden', !(state.view === 'hardware' || state.view === 'clients'));
+    renderOsFilterActive();
     renderSubtabStrips();
     recalculateActivePagination();
   }
@@ -3863,7 +3900,7 @@
       const size = computeLiveRowsPerPage('inventoryBody');
       if (size && size !== state.pageSize.clients) {
         state.pageSize.clients = size;
-        renderTable(state.clients);
+        renderFilteredClientsTable();
       }
     } else if (state.view === 'software') {
       const size = computeLiveRowsPerPage('softwareBody');
@@ -4072,12 +4109,11 @@
     state.page.hwCpu = 1;
     state.page.hwDisk = 1;
     state.page.hwRam = 1;
-    state.page.linuxClients = 1;
     state.page.linuxServices = 1;
     render();
-    if (state.view === 'linux') {
-      renderLinuxClientsTable(state.linuxClients);
-    } else if (state.view === 'linuxServices') {
+    // The merged Clients table is redrawn by render() itself now; only the
+    // Linux Services table still lives outside that pipeline.
+    if (state.view === 'linuxServices') {
       renderLinuxServicesTable(state.linuxClients);
     }
   });
@@ -4105,7 +4141,7 @@
     if (state.view === 'deploy') loadDeploySubviewData(state.subview);
     if (state.view === 'settings') loadSettingsSubviewData(state.subview);
     if (state.view === 'licenses') loadLicenses();
-    if (state.view === 'linux' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
+    if (state.view === 'clients' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
   });
   byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
   byId('linuxInstallServerUrl').value = `${window.location.origin}/api/v1/linux/inventory`;
@@ -4140,11 +4176,12 @@
   byId('exportRamBtn').addEventListener('click', exportHardwareRam);
   // Delegated on document so it keeps working after any of these buttons'
   // rows get replaced outside the full render() pipeline - e.g. a
-  // standalone renderTable(state.clients) triggered by the Clients pager's
-  // Prev/Next or by recalculateActivePagination's live-resize re-render.
-  // Binding listeners on the buttons themselves would require re-binding
-  // after every innerHTML replacement; delegation needs binding exactly
-  // once, here, regardless of how the table DOM changes.
+  // standalone renderFilteredClientsTable() triggered by the Clients
+  // pager's Prev/Next, the OS filter, a Linux poll tick, or
+  // recalculateActivePagination's live-resize re-render. Binding listeners
+  // on the buttons themselves would require re-binding after every
+  // innerHTML replacement; delegation needs binding exactly once, here,
+  // regardless of how the table DOM changes.
   document.addEventListener('click', e => {
     const th = e.target.closest('th[data-sort-key]');
     if (th) {
@@ -4159,12 +4196,12 @@
         current.dir = 1;
       }
       if (state.page[table] !== undefined) state.page[table] = 1;
-      // render() doesn't touch the Linux Clients table (it's loaded/rendered
-      // through its own loadLinuxClients()/setView('linux') path, not the
-      // main Windows-side render pipeline) - re-render it directly instead.
-      if (table === 'linuxClients') {
-        renderLinuxClientsTable(state.linuxClients);
-      } else if (table === 'linuxServices') {
+      // render() doesn't touch the Linux Services table (it's loaded and
+      // rendered through its own loadLinuxClients()/setView('linuxServices')
+      // path, not the main render pipeline) - re-render it directly. Every
+      // other table, including the merged Clients table
+      // (data-sort-table="clients"), goes through render().
+      if (table === 'linuxServices') {
         renderLinuxServicesTable(state.linuxClients);
       } else {
         render();
@@ -4241,14 +4278,24 @@
 
     const osFilterBtn = e.target.closest('[data-os-filter]');
     if (osFilterBtn) {
-      state.osFilter.hardware = osFilterBtn.dataset.osFilter;
-      state.page.hwCpu = 1;
-      state.page.hwDisk = 1;
-      state.page.hwRam = 1;
-      document.querySelectorAll('#osFilter .os-filter-option').forEach(btn => {
-        btn.classList.toggle('active', btn === osFilterBtn);
-      });
-      renderFilteredHardwarePage();
+      // One pill, two consumers: the chip writes to whichever page is
+      // showing, resets that page's own pagination, and redraws only that
+      // page. The pill is hidden everywhere else, so no other view can
+      // reach this block.
+      const filter = osFilterBtn.dataset.osFilter;
+      if (state.view === 'clients') {
+        state.osFilter.clients = filter;
+        state.page.clients = 1;
+        renderOsFilterActive();
+        renderFilteredClientsTable();
+      } else if (state.view === 'hardware') {
+        state.osFilter.hardware = filter;
+        state.page.hwCpu = 1;
+        state.page.hwDisk = 1;
+        state.page.hwRam = 1;
+        renderOsFilterActive();
+        renderFilteredHardwarePage();
+      }
     }
   });
   byId('deploySubtabActions').addEventListener('click', () => setView('deploy', 'actions'));
@@ -4322,9 +4369,7 @@
   byId('certUploadButton').addEventListener('click', uploadCertificate);
   byId('certDeleteButton').addEventListener('click', deleteCertificate);
   byId('licensesTab').addEventListener('click', () => setView('licenses'));
-  byId('linuxClientsTab').addEventListener('click', () => setView('linux'));
   byId('linuxServicesTab').addEventListener('click', () => setView('linuxServices'));
-  byId('exportLinuxClientsBtn').addEventListener('click', exportLinuxClients);
   byId('exportLinuxServicesBtn').addEventListener('click', exportLinuxServices);
   byId('exportLicensesBtn').addEventListener('click', exportLicenses);
   byId('licenseAddButton').addEventListener('click', () => openLicenseForm(null));
