@@ -3818,6 +3818,7 @@
     const isInventoryView = inventoryViews.includes(state.view);
     const isLinuxInventoryView = linuxInventoryViews.includes(state.view);
     byId('searchInput').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
+    byId('topbar').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
     byId('generatedAt').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
     recalculateActivePagination();
     renderSubtabStrips();

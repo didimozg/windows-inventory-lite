@@ -266,7 +266,7 @@ body {
   border-bottom-color: var(--accent);
 }
 
-.generated-at-flash {
+#generatedAt.generated-at-flash {
   color: var(--accent);
 }
 
@@ -522,6 +522,11 @@ main {
 }
 
 .link-button {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
   padding: 0;
   font-weight: 700;
   text-align: left;
