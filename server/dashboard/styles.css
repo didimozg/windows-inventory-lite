@@ -720,6 +720,16 @@ main {
   color: var(--accent-text);
 }
 
+/* The hero tile's icon-chip sits directly on the gradient, not the neutral
+   --icon-chip-bg panel every other icon-chip is tuned for - a solid chip
+   color there would compete with the gradient instead of reading as a
+   badge on top of it. A translucent white overlay + --accent-text keeps
+   it visible in both themes without introducing a new token. */
+.summary .card-hero .icon-chip {
+  background: rgba(255, 255, 255, .18);
+  color: var(--accent-text);
+}
+
 /* .summary span's (0,1,1) otherwise beats .icon-chip's own (0,1,0)
    display/color declarations, and its "big number" typography
    (28px display font, 4px margin) leaks onto the 34x34 badges too.
