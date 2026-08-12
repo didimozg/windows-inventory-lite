@@ -81,16 +81,16 @@
       <main>
         <section id="dashboardView" class="install-panel" aria-label="Dashboard">
           <div id="dashboardTiles" class="summary dashboard-tiles">
-            <div><span id="dashClientCount">0</span><small>Clients</small></div>
-            <div><span id="dashWindowsActivated">0</span><small>Windows activated</small></div>
-            <div><span id="dashOfficeActivated">0</span><small>Office activated</small></div>
-            <div id="dashStaleTile"><span id="dashStaleCount">0</span><small id="dashStaleLabel">Stale &gt;48h</small></div>
+            <div class="card-glow"><span class="icon-chip" aria-hidden="true">#</span><span id="dashClientCount">0</span><small>Clients</small></div>
+            <div class="card-hero"><span id="dashWindowsActivated">0</span><small>Windows activated</small></div>
+            <div class="card-glow"><span class="icon-chip" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M5 10.5 L8.5 14 L15 6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span id="dashOfficeActivated">0</span><small>Office activated</small></div>
+            <div id="dashStaleTile" class="card-glow"><span class="icon-chip" aria-hidden="true">!</span><span id="dashStaleCount">0</span><small id="dashStaleLabel">Stale &gt;48h</small></div>
           </div>
 
           <div class="dashboard-card">
             <h2 class="settings-block-title">Software</h2>
             <div class="summary dash-single-stat">
-              <div><span id="dashLicenseCount">0</span><small>Licenses</small></div>
+              <div class="card-glow"><span id="dashLicenseCount">0</span><small>Licenses</small></div>
             </div>
             <div class="dash-chart-grid">
               <div class="dash-chart">
@@ -107,7 +107,7 @@
           <div class="dashboard-card">
             <h2 class="settings-block-title">Hardware</h2>
             <div class="summary dash-single-stat">
-              <div><span id="dashUsbCount">0</span><small>Computers with USB storage</small></div>
+              <div class="card-glow"><span id="dashUsbCount">0</span><small>Computers with USB storage</small></div>
             </div>
             <div class="dash-chart-grid">
               <div class="dash-chart">

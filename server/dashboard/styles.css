@@ -690,8 +690,6 @@ main {
 
 .summary div {
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 8px;
   padding: var(--space-lg);
 }
 
@@ -701,6 +699,15 @@ main {
   color: var(--accent);
   font-size: var(--font-size-display);
   font-weight: 700;
+}
+
+/* One hero tile per page (see docs/superpowers/specs/2026-08-12-dashboard-ui-redesign-design.md,
+   Visual System) - the .card-hero class itself (Phase 1) supplies the
+   gradient background and glow; this override makes its number readable
+   against that background instead of the neutral --accent color every
+   other .summary tile's number uses. */
+.summary .card-hero span {
+  color: var(--accent-text);
 }
 
 /* Declared after .summary div/span so it wins at the equal class+type
