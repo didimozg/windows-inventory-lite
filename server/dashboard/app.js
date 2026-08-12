@@ -725,7 +725,7 @@
         const disksText = (c.disks || []).map(d => (d.type || '') + ' ' + (d.sizeGb ? d.sizeGb + ' GB' : '') + ' ' + (d.model || '')).join(', ').trim();
         return [
           (isWindows ? c.computerName : c.hostname) || '', clientPlatformLabel(c),
-          c.domain || '', formatIpAddresses(c),
+          isWindows ? (c.domain || '') : '', formatIpAddresses(c),
           c.clientVersion ? 'v' + c.clientVersion : '',
           (isWindows ? os.caption : os.prettyName) || '',
           isWindows ? (os.version || '') : '',
@@ -738,7 +738,7 @@
           formatDateTime(c.collectedAt || c.sourceUpdatedAt),
           isStale(c) ? 'Yes' : 'No',
           (isWindows ? cpu.name : cpu.model) || '', ramText, disksText,
-          c.hasUsbStorage ? 'Yes' : 'No',
+          isWindows ? (c.hasUsbStorage ? 'Yes' : 'No') : '',
           state.adDescriptionSyncEnabled ? (c.adSyncStatus === 'not-found' ? 'Not found in AD' : c.adSyncStatus === 'error' ? 'AD unreachable' : (c.adDescription || '')) : (c.adDescription || '')
         ];
       })
