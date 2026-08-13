@@ -277,7 +277,7 @@ body {
 .subtab-strip {
   display: flex;
   gap: var(--space-xs);
-  padding: var(--space-md) var(--space-2xl) 0;
+  padding: var(--space-md) 0 0;
   border-bottom: 1px solid var(--line);
   margin-bottom: var(--space-lg);
 }
