@@ -64,39 +64,47 @@
     --text: #e2e8f0;
     --heading: #ffffff;
     --muted: #94a3b8;
-    --line: #374151;
+    /* Every token below this point is tuned to the same H~209-212deg blue
+       hue family as --bg/--panel/--accent, not left at the pre-redesign
+       neutral-gray values - a whole-redesign review found that Phase 1
+       only re-tuned --bg/--panel/--line themselves and one single-use
+       hardcode (the old --card-glow ring color, see below), leaving ~8
+       companion surface tokens still gray-toned and visibly duller than
+       the panels they render inside of. --line reuses the exact blue
+       (#285484) Phase 1 already hand-picked for that ring, so the ring no
+       longer needs its own hardcode either - it can go back to var(--line)
+       like the light-theme block already does. */
+    --line: #285484;
     --accent: #1c93bc;
     --accent-text: #04141a;
     --danger: #ff7a6e;
     --danger-bg: #3a1f1e;
     --danger-border: #7a3b35;
     --warn: #4a3f12;
-    --hover-bg: #232e39;
-    --active-bg: #1f3540;
-    --accent-soft: #1c3a44;
-    --table-header-bg: #1f2932;
-    --row-alt-bg: #171f27;
-    --code-bg: #141b22;
+    --hover-bg: #1f4f80;
+    --active-bg: #245c92;
+    /* Darker than the other new tokens on this pass deliberately - #94a3b8
+       text needs 4.5:1 here for the .platform-tag chip and .os-filter
+       pill (both use --accent-soft as fill), which put a floor under how
+       light this can go. At that floor its fill sits within ~1.1:1 of
+       --panel/--table-header-bg, so the chip/pill's 1px var(--line)
+       border is what actually reads as "this is a chip", not the fill -
+       keep that border if this token or those two components change. */
+    --accent-soft: #143257;
+    --table-header-bg: #102c50;
+    --row-alt-bg: #1a4272;
+    --code-bg: #081830;
     --usb-bg: #4a3f12;
     --usb-border: #8a742a;
     --usb-text: #f0d878;
     --usb-row-bg: #332a10;
-    --hw-summary-bg: #171f27;
+    --hw-summary-bg: #1a4272;
     --sortable-hover-bg: #24333d;
     --success-bg: #16321a;
     --success-border: #2f6a37;
     --success-text: #8fe39c;
-    /* New component layer, see docs/superpowers/specs/2026-08-12-dashboard-ui-redesign-design.md.
-       --card-glow's rgba is --accent-gradient's second stop in decimal
-       form (#2fb3df = 47,179,223); --card-glow-hero uses --accent's own
-       decimal form (#1c93bc = 28,147,188) at higher alpha for the one
-       "hero" gradient tile per page (see .card-hero, Task 3).
-       --card-glow's 1px ring is hardcoded to #285484 instead of
-       var(--line) because dark --line (#374151) is a neutral gray that
-       would look dull against the new Ocean Blue background; #285484
-       is a blue-tinted color chosen to match it instead. */
     --card-radius: 14px;
-    --card-glow: 0 0 0 1px #285484, 0 0 20px rgba(47, 179, 223, .18);
+    --card-glow: 0 0 0 1px var(--line), 0 0 20px rgba(47, 179, 223, .18);
     --card-glow-hero: 0 0 24px rgba(28, 147, 188, .35);
     --accent-gradient: linear-gradient(135deg, #1c93bc, #2fb3df);
     --icon-chip-bg: #1d4b78;
@@ -111,39 +119,33 @@
   --text: #e2e8f0;
   --heading: #ffffff;
   --muted: #94a3b8;
-  --line: #374151;
+  /* Kept byte-identical to the @media block above - see its comment for
+     why every token below this point is blue-hue-tuned, not left at the
+     pre-redesign neutral-gray values. */
+  --line: #285484;
   --accent: #1c93bc;
   --accent-text: #04141a;
   --danger: #ff7a6e;
   --danger-bg: #3a1f1e;
   --danger-border: #7a3b35;
   --warn: #4a3f12;
-  --hover-bg: #232e39;
-  --active-bg: #1f3540;
-  --accent-soft: #1c3a44;
-  --table-header-bg: #1f2932;
-  --row-alt-bg: #171f27;
-  --code-bg: #141b22;
+  --hover-bg: #1f4f80;
+  --active-bg: #245c92;
+  --accent-soft: #143257;
+  --table-header-bg: #102c50;
+  --row-alt-bg: #1a4272;
+  --code-bg: #081830;
   --usb-bg: #4a3f12;
   --usb-border: #8a742a;
   --usb-text: #f0d878;
   --usb-row-bg: #332a10;
-  --hw-summary-bg: #171f27;
+  --hw-summary-bg: #1a4272;
   --sortable-hover-bg: #24333d;
   --success-bg: #16321a;
   --success-border: #2f6a37;
   --success-text: #8fe39c;
-  /* New component layer, see docs/superpowers/specs/2026-08-12-dashboard-ui-redesign-design.md.
-     --card-glow's rgba is --accent-gradient's second stop in decimal
-     form (#2fb3df = 47,179,223); --card-glow-hero uses --accent's own
-     decimal form (#1c93bc = 28,147,188) at higher alpha for the one
-     "hero" gradient tile per page (see .card-hero, Task 3).
-     --card-glow's 1px ring is hardcoded to #285484 instead of
-     var(--line) because dark --line (#374151) is a neutral gray that
-     would look dull against the new Ocean Blue background; #285484
-     is a blue-tinted color chosen to match it instead. */
   --card-radius: 14px;
-  --card-glow: 0 0 0 1px #285484, 0 0 20px rgba(47, 179, 223, .18);
+  --card-glow: 0 0 0 1px var(--line), 0 0 20px rgba(47, 179, 223, .18);
   --card-glow-hero: 0 0 24px rgba(28, 147, 188, .35);
   --accent-gradient: linear-gradient(135deg, #1c93bc, #2fb3df);
   --icon-chip-bg: #1d4b78;
@@ -652,6 +654,7 @@ main {
 }
 
 .dashboard-card {
+  margin-top: var(--space-lg);
   padding: var(--space-lg);
   background: var(--panel);
 }
