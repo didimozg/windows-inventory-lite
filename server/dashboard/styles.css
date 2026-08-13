@@ -279,6 +279,7 @@ body {
   gap: var(--space-xs);
   padding: var(--space-md) var(--space-2xl) 0;
   border-bottom: 1px solid var(--line);
+  margin-bottom: var(--space-lg);
 }
 
 .subtab-item {
@@ -889,6 +890,27 @@ tr.stale td {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
+}
+
+/* Bold Card System treatment for a Deploy/Settings page-section, reusing
+   Phase 1's .card-glow. A compound selector, not just adding "card-glow" to
+   the class list and trusting .card-glow's own rule to win: both are
+   single-class selectors (equal 0,1,0 specificity), and .install-panel is
+   declared later in this file, so by source order alone .install-panel's
+   own border/border-radius/background would keep winning and silently
+   cancel the glow - the same specificity-bug family every phase of this
+   redesign has hit at least once, here as a source-order tie rather than
+   an ancestor-vs-component mismatch. .install-panel.card-glow (0,2,0)
+   outranks both single-class rules regardless of file order.
+   dashboardView and licenseForm also carry .install-panel but are
+   deliberately never given the card-glow class (see the redesign plan's
+   Global Constraints) - dashboardView already has its own Phase
+   3a-converted children and doesn't need a second, outer glow layered on
+   top; licenseForm is out of scope for this phase. */
+.install-panel.card-glow {
+  border: none;
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-glow);
 }
 
 .install-grid {
