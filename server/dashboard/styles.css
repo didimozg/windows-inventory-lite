@@ -911,6 +911,7 @@ tr.stale td {
   border: none;
   border-radius: var(--card-radius);
   box-shadow: var(--card-glow);
+  background: var(--panel);
 }
 
 .install-grid {
