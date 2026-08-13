@@ -1207,7 +1207,7 @@ input[type="number"] {
 }
 
 .install-history {
-  margin-top: 18px;
+  margin-top: 0;
 }
 
 .install-history h2 {

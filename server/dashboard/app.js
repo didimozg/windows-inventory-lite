@@ -915,16 +915,45 @@
     });
   }
 
-  function renderInstallHistory() {
-    const jobs = state.installJobs || [];
-    if (jobs.length === 0) {
+  // The single cross-platform "Saved client action logs" card at the
+  // bottom of Deploy > Actions, replacing the former renderInstallHistory
+  // (Windows) / renderLinuxInstallHistory (Linux) pair. Each platform's
+  // own job list (state.installJobs / state.linuxInstallJobs, populated
+  // independently by loadInstallHistory/loadLinuxInstallHistory) is tagged
+  // with its platform and merged into one table, newest job first
+  // regardless of which platform it came from. Per-job detail viewing is
+  // unchanged - a row's Job button still calls the same
+  // pollInstallJob/pollLinuxInstallJob as before, which still write into
+  // that platform's own installStatus/linuxInstallStatus box in its own
+  // card above, not into this one.
+  function renderMergedInstallHistory() {
+    const entries = (state.installJobs || []).map(job => ({ job, platform: 'Windows' }))
+      .concat((state.linuxInstallJobs || []).map(job => ({ job, platform: 'Linux' })))
+      .sort((a, b) => new Date(b.job.createdAt) - new Date(a.job.createdAt));
+
+    const windowsError = state.installJobsError;
+    const linuxError = state.linuxInstallJobsError;
+
+    if (entries.length === 0) {
       byId('installHistory').classList.add('empty');
-      byId('installHistory').textContent = 'No saved client action logs.';
+      byId('installHistory').textContent = (windowsError || linuxError)
+        ? `Saved client action logs are not available: ${windowsError || linuxError}`
+        : 'No saved client action logs.';
       return;
     }
 
-    const rows = jobs.map(job => `<tr>
-      <td><button class="link-button" type="button" data-install-job="${escapeHtml(job.id)}">${escapeHtml(job.id)}</button></td>
+    // A load failure on one platform doesn't hide the other platform's
+    // working data - it did before this merge (each table clobbered its
+    // own content with an error string on failure) but that behavior only
+    // made sense when each platform had its own card. Surfaced as a note
+    // above the table instead.
+    const errorNotice = (windowsError || linuxError)
+      ? `<p class="cert-hint">${windowsError ? `Windows action logs unavailable: ${escapeHtml(windowsError)}` : ''}${windowsError && linuxError ? ' ' : ''}${linuxError ? `Linux action logs unavailable: ${escapeHtml(linuxError)}` : ''}</p>`
+      : '';
+
+    const rows = entries.map(({ job, platform }) => `<tr>
+      <td><small class="platform-tag">${escapeHtml(platform)}</small></td>
+      <td><button class="link-button" type="button" data-action-job="${escapeHtml(job.id)}" data-action-platform="${platform === 'Windows' ? 'windows' : 'linux'}">${escapeHtml(job.id)}</button></td>
       <td>${escapeHtml(job.action || 'install')}</td>
       <td>${escapeHtml(job.status)}</td>
       <td>${escapeHtml(formatDateTime(job.createdAt))}</td>
@@ -936,17 +965,24 @@
 
     byId('installHistory').classList.remove('empty');
     byId('installHistory').innerHTML = `<h2>Saved client action logs</h2>
+      ${errorNotice}
       <div class="install-history-results">
         <table class="nested-table install-history-table">
-          <thead><tr><th>Job</th><th>Action</th><th>Status</th><th>Started</th><th>Completed</th><th>Targets</th><th>Failed</th><th>Retention</th></tr></thead>
+          <thead><tr><th>Platform</th><th>Job</th><th>Action</th><th>Status</th><th>Started</th><th>Completed</th><th>Targets</th><th>Failed</th><th>Retention</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>`;
 
-    document.querySelectorAll('[data-install-job]').forEach(button => {
+    document.querySelectorAll('[data-action-job]').forEach(button => {
       button.addEventListener('click', () => {
-        state.installJobId = button.dataset.installJob;
-        pollInstallJob(state.installJobId);
+        const jobId = button.dataset.actionJob;
+        if (button.dataset.actionPlatform === 'linux') {
+          state.linuxInstallJobId = jobId;
+          pollLinuxInstallJob(jobId);
+        } else {
+          state.installJobId = jobId;
+          pollInstallJob(jobId);
+        }
       });
     });
   }
@@ -959,11 +995,12 @@
       })
       .then(data => {
         state.installJobs = data.jobs || [];
-        renderInstallHistory();
+        state.installJobsError = null;
+        renderMergedInstallHistory();
       })
       .catch(error => {
-        byId('installHistory').classList.add('empty');
-        byId('installHistory').textContent = `Saved client action logs are not available: ${error.message}`;
+        state.installJobsError = error.message;
+        renderMergedInstallHistory();
       });
   }
 
@@ -1049,11 +1086,12 @@
       })
       .then(data => {
         state.linuxInstallJobs = data.jobs || [];
-        renderLinuxInstallHistory();
+        state.linuxInstallJobsError = null;
+        renderMergedInstallHistory();
       })
       .catch(error => {
-        byId('linuxInstallHistory').classList.add('empty');
-        byId('linuxInstallHistory').textContent = `Saved client action logs are not available: ${error.message}`;
+        state.linuxInstallJobsError = error.message;
+        renderMergedInstallHistory();
       });
   }
 
@@ -1092,41 +1130,6 @@
       .finally(() => {
         byId('linuxInstallPreferredSubnetSaveButton').disabled = false;
       });
-  }
-
-  function renderLinuxInstallHistory() {
-    const jobs = state.linuxInstallJobs || [];
-    if (jobs.length === 0) {
-      byId('linuxInstallHistory').classList.add('empty');
-      byId('linuxInstallHistory').textContent = 'No saved client action logs.';
-      return;
-    }
-
-    const rows = jobs.map(job => `<tr>
-      <td><button class="link-button" type="button" data-linux-install-job="${escapeHtml(job.id)}">${escapeHtml(job.id)}</button></td>
-      <td>${escapeHtml(job.action || 'install')}</td>
-      <td>${escapeHtml(job.status)}</td>
-      <td>${escapeHtml(formatDateTime(job.createdAt))}</td>
-      <td>${escapeHtml(formatDateTime(job.completedAt))}</td>
-      <td>${escapeHtml(job.targetCount)}</td>
-      <td>${escapeHtml(job.failedCount)}</td>
-    </tr>`).join('');
-
-    byId('linuxInstallHistory').classList.remove('empty');
-    byId('linuxInstallHistory').innerHTML = `<h2>Saved client action logs</h2>
-      <div class="install-history-results">
-        <table class="nested-table install-history-table">
-          <thead><tr><th>Job</th><th>Action</th><th>Status</th><th>Started</th><th>Completed</th><th>Targets</th><th>Failed</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>`;
-
-    document.querySelectorAll('[data-linux-install-job]').forEach(button => {
-      button.addEventListener('click', () => {
-        state.linuxInstallJobId = button.dataset.linuxInstallJob;
-        pollLinuxInstallJob(state.linuxInstallJobId);
-      });
-    });
   }
 
   function startLinuxClientActionJob() {
@@ -3860,6 +3863,7 @@
     // cross-platform on one section (no stacking needed).
     byId('installView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
     byId('linuxInstallView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
+    byId('installHistoryView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
     byId('updatesView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'updates'));
     byId('linuxUpdatesView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'updates'));
     byId('packageView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'package'));
