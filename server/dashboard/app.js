@@ -306,7 +306,7 @@
         return response.json();
       })
       .then(data => {
-        state.linuxClients = data.clients || [];
+        state.linuxClients = stampClientPlatform(data.clients || [], 'linux');
         state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
         renderFilteredClientsTable();
         renderLinuxServicesTable(state.linuxClients);
@@ -3166,13 +3166,30 @@
     return client.computerName || client.hostname || 'Unknown';
   }
 
-  // Which platform a client came from, derived from which name field it
-  // carries. Deliberately not a new explicit `platform` field on the client
-  // objects: computerName vs hostname already disambiguates the two sources
-  // cleanly, and adding a field would mean changing the C# and Go report
-  // shapes for a purely cosmetic dashboard label.
+  // Which platform a client came from. Reads client.platform, a field this
+  // dashboard stamps itself at load time (see stampClientPlatform below,
+  // called at every state.clients/state.linuxClients assignment) - never
+  // inferred from the client's own report body. Both Windows and Linux
+  // reports round-trip through an untyped dictionary server-side (see
+  // ReceiveInventory/ReceiveLinuxInventory in WindowsInventoryLiteServer.cs)
+  // with no schema enforcement, so a self-reported computerName is not a
+  // safe platform discriminator: this label decides which REST endpoint a
+  // row's Delete button and Description editor target
+  // (renderClientsTable), so inferring it from attacker-controllable data
+  // would let a spoofed Linux report's computerName field redirect an
+  // admin's Delete click at an unrelated Windows client's record.
   function clientPlatformLabel(client) {
-    return client.computerName ? 'Windows' : 'Linux';
+    return client.platform === 'linux' ? 'Linux' : 'Windows';
+  }
+
+  // Stamps every client in a freshly-fetched array with which endpoint it
+  // came from, overwriting any same-named key the report body itself might
+  // already carry (see clientPlatformLabel's comment for why that matters).
+  // Called at every state.clients/state.linuxClients assignment site so
+  // clientPlatformLabel never has to guess from client-reported fields.
+  function stampClientPlatform(clients, platform) {
+    clients.forEach(client => { client.platform = platform; });
+    return clients;
   }
 
   // Per-client dedupe key inside a hardware group. Platform-prefixed so a
@@ -3964,7 +3981,7 @@
         const fingerprint = computeClientsFingerprint(data.clients || []);
         if (fingerprint === lastClientsFingerprint) return;
         lastClientsFingerprint = fingerprint;
-        state.clients = data.clients || [];
+        state.clients = stampClientPlatform(data.clients || [], 'windows');
         state.staleHours = data.staleHours || 48;
         state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
         byId('generatedAt').textContent = `Generated: ${formatDateTime(data.generatedAt)}`;
@@ -4046,7 +4063,7 @@
       return response.json();
     })
     .then(data => {
-      state.clients = data.clients || [];
+      state.clients = stampClientPlatform(data.clients || [], 'windows');
       state.staleHours = data.staleHours || 48;
       state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
       lastClientsFingerprint = computeClientsFingerprint(state.clients);
