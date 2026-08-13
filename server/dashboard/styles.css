@@ -1743,6 +1743,19 @@ th.sort-desc::after {
   font-weight: 650;
 }
 
+/* Marks a platform-level heading ("Windows Client updates") as visually
+   senior to the .settings-block-title sub-headings stacked under it
+   ("WinRM credentials", "Schedule") - both used the same class and the
+   same weight before this rule existed (Phase 2's final review logged this
+   as a deferred Minor finding). Same font-size/weight as
+   .settings-block-title deliberately - the distinction is the accent
+   underline, not a size jump, to avoid competing with Dashboard's own
+   larger headings elsewhere on the page. */
+.platform-section-title {
+  padding-bottom: var(--space-sm);
+  border-bottom: 2px solid var(--accent);
+}
+
 .cert-history-heading {
   margin: 24px 0 10px;
   color: var(--heading);
