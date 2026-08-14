@@ -964,7 +964,7 @@
     </tr>`).join('');
 
     byId('installHistory').classList.remove('empty');
-    byId('installHistory').innerHTML = `<h2>Saved client action logs</h2>
+    byId('installHistory').innerHTML = `<h2 class="settings-block-title">Saved client action logs</h2>
       ${errorNotice}
       <div class="install-history-results">
         <table class="nested-table install-history-table">
@@ -1467,6 +1467,7 @@
     const action = byId('clientAction').value;
     const targets = byId('installTargets').value.trim();
     const serverUrl = byId('installServerUrl').value.trim();
+    const token = byId('installToken').value.trim();
     const useAdCredentials = byId('installUseAdCredentials').checked;
     const username = useAdCredentials ? '' : byId('installUsername').value.trim();
     const password = useAdCredentials ? '' : byId('installPassword').value;
@@ -1494,7 +1495,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets, serverUrl, username, password, force, addToTrustedHosts, useAdCredentials })
+      body: JSON.stringify({ targets, serverUrl, token, username, password, force, addToTrustedHosts, useAdCredentials })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
@@ -4332,6 +4333,43 @@
     const shouldOpen = forceClosed ? false : menu.classList.contains('hidden');
     menu.classList.toggle('hidden', !shouldOpen);
     button.setAttribute('aria-expanded', String(shouldOpen));
+    // Menu opened - move focus onto its first item, matching the standard
+    // WAI-ARIA menu-button pattern this markup already declares via
+    // role="menu"/menuitem/aria-haspopup/aria-expanded but never actually
+    // backed with keyboard behavior. Runs for a mouse open too (not just
+    // keyboard) - deliberate, so focus is always inside the menu that's
+    // visibly open, which is what handleDropdownKeydown below relies on.
+    if (shouldOpen) {
+      const firstItem = menu.querySelector('.topnav-dropdown-item');
+      if (firstItem) firstItem.focus();
+    }
+  }
+
+  // Escape closes whichever dropdown the keypress happened inside and
+  // returns focus to that menu's own trigger button; ArrowDown/ArrowUp
+  // move focus between its items, wrapping at each end. One handler for
+  // both Fleet and Manage - they're structurally identical (a trigger
+  // button plus a menu of item buttons), read from the closest
+  // .topnav-dropdown-menu rather than hardcoded to either one.
+  function handleDropdownKeydown(event) {
+    if (event.key !== 'Escape' && event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    const menu = event.target.closest('.topnav-dropdown-menu');
+    if (!menu) return;
+    const button = menu.previousElementSibling;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      menu.classList.add('hidden');
+      button.setAttribute('aria-expanded', 'false');
+      button.focus();
+      return;
+    }
+    const items = Array.from(menu.querySelectorAll('.topnav-dropdown-item'));
+    const currentIndex = items.indexOf(document.activeElement);
+    event.preventDefault();
+    const nextIndex = event.key === 'ArrowDown'
+      ? (currentIndex + 1) % items.length
+      : (currentIndex - 1 + items.length) % items.length;
+    items[nextIndex].focus();
   }
 
   byId('fleetDropdownButton').addEventListener('click', (event) => {
@@ -4344,6 +4382,8 @@
     toggleDropdown('manageDropdownButton', 'manageDropdownMenu');
     toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu', true);
   });
+  byId('fleetDropdownMenu').addEventListener('keydown', handleDropdownKeydown);
+  byId('manageDropdownMenu').addEventListener('keydown', handleDropdownKeydown);
   // Clicking any dropdown item closes its own menu (the item's own click
   // handler, registered above/in earlier tasks, has already fired and set
   // the view by the time this delegated listener runs).

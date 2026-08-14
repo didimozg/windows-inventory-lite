@@ -47,7 +47,15 @@
   --card-radius: 14px;
   --card-glow: 0 0 0 1px var(--line), 0 0 20px rgba(18, 111, 143, .12);
   --card-glow-hero: 0 0 24px rgba(18, 111, 143, .3);
-  --accent-gradient: linear-gradient(135deg, #126f8f, #1c93bc);
+  /* Second stop darkened from the original #1c93bc: white --accent-text
+     small text (.summary .card-hero small, .os-filter-option.active)
+     only cleared 3.53:1 against that lighter blue, short of the 4.5:1
+     small-text AA floor - #147a9e keeps a visible gradient while giving
+     white text ~4.9:1 at the lightest point. The hero tile's own number
+     is exempt (28px bold clears the 3:1 large-text floor either way).
+     Dark mode's gradient already passes AA (checked in an earlier
+     phase) and is untouched. */
+  --accent-gradient: linear-gradient(135deg, #126f8f, #147a9e);
   --icon-chip-bg: var(--accent-soft);
   --icon-chip-fg: var(--accent);
 }
@@ -790,11 +798,12 @@ main {
 
 /* Reuses the existing USB-badge amber rather than adding a new color -
    this is the one tile an admin needs to react to, the other summary
-   tiles are neutral facts. Left border, not a full-tile fill, so it
-   reads as a flag rather than an error state. Declared after .summary
-   span/div so its color/background actually win at equal specificity. */
+   tiles are neutral facts. The left bar plus background tint mark it;
+   the card's own glow ring stays the neutral var(--line) every tile
+   gets (not overridden here), so it still reads as one card among
+   others, not an error dialog. Declared after .summary span/div so its
+   color/background actually win at equal specificity. */
 .tile-alert {
-  border-color: var(--usb-border);
   border-left: 3px solid var(--usb-border);
   background: var(--usb-bg);
 }
@@ -1050,10 +1059,28 @@ input[type="number"] {
    fields were visible (e.g. hiding Server URL in Uninstall mode changed
    how the leftover height split between the two rows, bunching WinRM
    user/password at different heights between Install and Uninstall).
-   Bundling all four into one nested grid, placed as a single item
+   Bundling all fields into one nested grid, placed as a single item
    spanning the same grid-row: 1 / span 2, means the outer grid only ever
    compares ONE height (this whole block's) against Targets' - never a
-   per-row tug-of-war between five independent items. */
+   per-row tug-of-war between independent items.
+
+   Both .install-right-fields (Windows) and .linux-install-right-fields
+   (Linux) flow their children naturally in DOM order (2 columns, no
+   per-field position class) rather than assigning each field a fixed
+   grid-column/grid-row. Windows used to do the latter - a rigid 5-cell
+   grid sized for exactly Action/Server URL/WinRM user/WinRM password +
+   2 checkbox rows + submit - until adding one more field (Ingestion
+   token) had nowhere to go and landed in an unstyled implicit row below
+   the submit button. Linux hit the identical problem earlier for a
+   different reason (it has 9 fields, not 4, so several landed in the
+   SAME cell and rendered as overlapping text/inputs - a real bug live-
+   reported by a user, invisible to every prior DOM-state check in this
+   project's own testing since the elements were all correctly present
+   and toggled, just visually stacked). Natural flow fixes both: a field
+   just takes the next of 2 columns in DOM order, so it can't collide or
+   get orphaned regardless of field count, and a .hidden field is removed
+   from grid flow entirely, leaving no gap. */
+.linux-install-right-fields,
 .install-right-fields {
   grid-column: 3 / span 2;
   grid-row: 1 / span 2;
@@ -1063,76 +1090,8 @@ input[type="number"] {
   align-self: start;
 }
 
-.install-action-field {
-  grid-column: 1;
-  grid-row: 1;
-}
-
-.install-server-field {
-  grid-column: 2;
-  grid-row: 1;
-}
-
-.install-user-field {
-  grid-column: 1;
-  grid-row: 2;
-}
-
-.install-password-field {
-  grid-column: 2;
-  grid-row: 2;
-}
-
-/* Force reinstall/Add to TrustedHosts/Install client used to sit in the
-   outer grid's row 3, far below Action - moved into .install-right-fields
-   itself (rows 4-5) so the whole set of install controls reads as one
-   cluster next to Action, instead of split across two grid areas. */
-.install-use-ad-field {
-  grid-column: 1 / span 2;
-  grid-row: 3;
-}
-
-.install-force-field {
-  grid-column: 1;
-  grid-row: 4;
-}
-
-.install-trusted-field {
-  grid-column: 2;
-  grid-row: 4;
-}
-
-.install-submit-field {
-  grid-column: 1 / span 2;
-  grid-row: 5;
-  justify-self: end;
-}
-
-/* Linux Client actions has more fields (9) than .install-right-fields'
-   explicit 5-row grid was ever designed for (Windows: Action/ServerUrl/
-   User/Password + 2 checkbox rows + submit). Reusing that grid's
-   fixed-position classes (.install-action-field/.install-server-field/
-   .install-user-field/.install-password-field) on more fields than it has
-   distinct cells for made several land in the SAME cell, rendering as
-   overlapping text/inputs - a real bug live-reported by a user, invisible
-   to every prior DOM-state (classList/hidden) check in this project's own
-   testing, since the elements were all correctly present and toggled,
-   just visually stacked on top of each other.
-   This container flows its children naturally instead (no per-field
-   position class needed) - each field just takes the next of 2 columns
-   in DOM order, so it can't collide regardless of field count, and a
-   .hidden field (auth-mode toggling) is removed from grid flow entirely,
-   leaving no gap. */
-.linux-install-right-fields {
-  grid-column: 3 / span 2;
-  grid-row: 1 / span 2;
-  display: grid;
-  grid-template-columns: minmax(180px, 0.8fr) minmax(140px, 0.6fr);
-  gap: var(--space-md);
-  align-self: start;
-}
-
-.linux-install-right-fields .install-submit-field {
+.linux-install-right-fields .install-submit-field,
+.install-right-fields .install-submit-field {
   grid-column: 1 / span 2;
   grid-row: auto;
   justify-self: end;
@@ -1211,12 +1170,6 @@ input[type="number"] {
 
 .install-history {
   margin-top: 0;
-}
-
-.install-history h2 {
-  margin: 0 0 10px;
-  color: var(--heading);
-  font-size: var(--font-size-lg);
 }
 
 .install-history-results {

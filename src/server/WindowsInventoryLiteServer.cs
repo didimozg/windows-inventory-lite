@@ -2803,6 +2803,17 @@ namespace WindowsInventoryLite
             }
             string targetText = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "");
             string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
+            // Blank means "use the server's current ingestion token", not
+            // "install with no token" - same convention as the Linux
+            // install endpoint (see its own copy of this comment) and the
+            // Package tab's token fields. Lets an admin push a client
+            // pointed at a *different* server's token (e.g. a migration)
+            // without changing this server's own configured token first.
+            string token = Convert.ToString(payload.ContainsKey("token") ? payload["token"] : "");
+            if (String.IsNullOrEmpty(token))
+            {
+                token = options.Token;
+            }
             string username = Convert.ToString(payload.ContainsKey("username") ? payload["username"] : "");
             string password = Convert.ToString(payload.ContainsKey("password") ? payload["password"] : "");
             bool useSavedCredentials = payload.ContainsKey("useSavedCredentials") && Convert.ToBoolean(payload["useSavedCredentials"]);
@@ -2865,7 +2876,7 @@ namespace WindowsInventoryLite
             job.Targets = targets;
             job.Results = new ArrayList();
             job.ServerUrl = serverUrl;
-            job.Token = options.Token;
+            job.Token = token;
             job.Username = username;
             job.Password = password;
             job.Force = force;

@@ -52,8 +52,8 @@
         <button id="fleetDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Fleet <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
         <div id="fleetDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
           <button id="clientsTab" class="topnav-dropdown-item" type="button" role="menuitem">Clients</button>
-          <button id="softwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Software</button>
-          <button id="linuxServicesTab" class="topnav-dropdown-item" type="button" role="menuitem">Services</button>
+          <button id="softwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Software (Windows)</button>
+          <button id="linuxServicesTab" class="topnav-dropdown-item" type="button" role="menuitem">Services (Linux)</button>
           <button id="hardwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Hardware</button>
           <button id="licensesTab" class="topnav-dropdown-item" type="button" role="menuitem">Licenses</button>
         </div>
@@ -149,7 +149,7 @@
                 <input id="generalInstallLogRetentionDays" type="number" min="1" max="3650" value="30">
               </label>
             </div>
-            <p class="cert-hint">How long Client actions/Client updates push job logs (Installation &gt; Client actions) are kept before being cleaned up automatically.</p>
+            <p class="cert-hint">How long Client actions/Client updates push job logs (Deploy &gt; Actions) are kept before being cleaned up automatically.</p>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Network</h2>
@@ -625,34 +625,38 @@
               <div id="installAdMessage" class="pkg-message hidden"></div>
             </div>
             <div class="install-right-fields">
-              <label class="install-action-field">
+              <label>
                 Action
                 <select id="clientAction">
                   <option value="install">Install client</option>
                   <option value="uninstall">Uninstall client</option>
                 </select>
               </label>
-              <label class="install-server-field install-only">
+              <label class="install-only">
                 Server URL
                 <input id="installServerUrl" type="text" value="">
               </label>
-              <label class="install-user-field">
+              <label class="install-only">
+                Ingestion token
+                <input id="installToken" type="text" autocomplete="off" placeholder="leave empty to use the server's current token">
+              </label>
+              <label>
                 WinRM user
                 <input id="installUsername" type="text" autocomplete="username" placeholder="DOMAIN\User">
               </label>
-              <label class="install-password-field">
+              <label>
                 WinRM password
                 <input id="installPassword" type="password" autocomplete="current-password">
               </label>
-              <label class="check-label install-use-ad-field">
+              <label class="check-label">
                 <input id="installUseAdCredentials" type="checkbox">
                 Use global AD settings (Settings &gt; General &gt; Active Directory)
               </label>
-              <label class="check-label install-force-field install-only">
+              <label class="check-label install-only">
                 <input id="installForce" type="checkbox">
                 Force reinstall
               </label>
-              <label class="check-label install-trusted-field">
+              <label class="check-label">
                 <input id="installTrustedHosts" type="checkbox">
                 Add to TrustedHosts
               </label>
