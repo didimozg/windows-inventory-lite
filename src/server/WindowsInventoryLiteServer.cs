@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.40.0";
+        internal const string ProductVersion = "0.40.1";
 
         private static int Main(string[] args)
         {
@@ -8194,16 +8194,15 @@ namespace WindowsInventoryLite
             return null;
         }
 
-        // 0x4a21 (used for both the local file header and the matching
-        // central directory entry below) is a fixed DOS date/time stamp -
-        // no real per-file timestamp is tracked or needed for this
-        // download, so every entry gets the same placeholder value rather
-        // than computing one. 20 is the ZIP version-needed-to-extract.
+        // 20 is the ZIP version-needed-to-extract.
         private static byte[] BuildZip(List<string> names, List<byte[]> contents)
         {
             MemoryStream ms = new MemoryStream();
             List<int> offsets = new List<int>();
             List<uint> crcs = new List<uint>();
+            DateTime now = DateTime.Now;
+            int dosTime = DosTime(now);
+            int dosDate = DosDate(now);
 
             for (int i = 0; i < names.Count; i++)
             {
@@ -8214,7 +8213,7 @@ namespace WindowsInventoryLite
                 crcs.Add(crc);
                 WriteZipInt32(ms, 0x04034b50);
                 WriteZipInt16(ms, 20); WriteZipInt16(ms, 0); WriteZipInt16(ms, 0);
-                WriteZipInt16(ms, 0); WriteZipInt16(ms, 0x4a21);
+                WriteZipInt16(ms, dosTime); WriteZipInt16(ms, dosDate);
                 WriteZipInt32(ms, (int)crc);
                 WriteZipInt32(ms, data.Length); WriteZipInt32(ms, data.Length);
                 WriteZipInt16(ms, nameBytes.Length); WriteZipInt16(ms, 0);
@@ -8229,7 +8228,7 @@ namespace WindowsInventoryLite
                 byte[] data = contents[i];
                 WriteZipInt32(ms, 0x02014b50);
                 WriteZipInt16(ms, 20); WriteZipInt16(ms, 20); WriteZipInt16(ms, 0);
-                WriteZipInt16(ms, 0); WriteZipInt16(ms, 0); WriteZipInt16(ms, 0x4a21);
+                WriteZipInt16(ms, 0); WriteZipInt16(ms, dosTime); WriteZipInt16(ms, dosDate);
                 WriteZipInt32(ms, (int)crcs[i]);
                 WriteZipInt32(ms, data.Length); WriteZipInt32(ms, data.Length);
                 WriteZipInt16(ms, nameBytes.Length); WriteZipInt16(ms, 0); WriteZipInt16(ms, 0);
@@ -8257,6 +8256,21 @@ namespace WindowsInventoryLite
                     crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xEDB88320u : crc >> 1;
             }
             return crc ^ 0xFFFFFFFF;
+        }
+
+        // MS-DOS date/time format used by the ZIP local/central file headers -
+        // no timezone, 2-second resolution, and no representation for years
+        // before 1980 (clamped rather than throwing, since this only feeds a
+        // cosmetic "last modified" column in archive viewers).
+        private static int DosTime(DateTime dt)
+        {
+            return (dt.Hour << 11) | (dt.Minute << 5) | (dt.Second / 2);
+        }
+
+        private static int DosDate(DateTime dt)
+        {
+            int year = Math.Max(dt.Year, 1980) - 1980;
+            return (year << 9) | (dt.Month << 5) | dt.Day;
         }
 
         private static void WriteZipInt16(MemoryStream ms, int value)
@@ -8314,6 +8328,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ParseAdComputerImportOUs splits on newlines only, not commas", TestParseAdComputerImportOUsSplitsOnNewlinesOnly);
             allPassed &= SelfTestCheck(output, "ParseAdComputerImportOUs treats blank input as an empty OU list", TestParseAdComputerImportOUsEmptyMeansWholeDomain);
             allPassed &= SelfTestCheck(output, "BuildZip produces a structurally valid archive", TestBuildZipStructure);
+            allPassed &= SelfTestCheck(output, "BuildZip stamps entries with the real current date, not a hardcoded placeholder", TestBuildZipUsesRealDate);
             allPassed &= SelfTestCheck(output, "NormalizeThumbprint strips separators and uppercases", TestNormalizeThumbprint);
             allPassed &= SelfTestCheck(output, "ExtractLicenseId strips the route prefix and query string", TestExtractLicenseIdWithQuery);
             allPassed &= SelfTestCheck(output, "ExtractLicenseId decodes URL-encoded ids", TestExtractLicenseIdDecodesEscaping);
@@ -8595,6 +8610,27 @@ namespace WindowsInventoryLite
             if (!nameFound)
             {
                 return "entry file name '" + names[0] + "' not found in archive bytes";
+            }
+            return null;
+        }
+
+        private static string TestBuildZipUsesRealDate()
+        {
+            List<string> names = new List<string>();
+            List<byte[]> contents = new List<byte[]>();
+            names.Add("a.txt");
+            contents.Add(Encoding.UTF8.GetBytes("x"));
+
+            byte[] zip = BuildZip(names, contents);
+
+            // Local file header layout: signature(4) + version(2) + flags(2)
+            // + method(2) + mod time(2) + mod date(2) + ...
+            int dateOffset = 4 + 2 + 2 + 2 + 2;
+            int dosDate = zip[dateOffset] | (zip[dateOffset + 1] << 8);
+            int year = 1980 + (dosDate >> 9);
+            if (year != DateTime.Now.Year)
+            {
+                return "expected the ZIP entry's mod date to reflect the current year (" + DateTime.Now.Year + ") but got " + year + " - looks like a hardcoded placeholder date is still in use";
             }
             return null;
         }
