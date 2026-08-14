@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.40.0]
+
+### Changed
+
+- Redesigned the dashboard around a "Bold Card System": new light/dark design tokens, glowing card borders (`card-glow`), a hero-tile treatment (`card-hero`) for the dashboard's lead metric, and icon chips on stat tiles. The dark theme's base moved to an "Ocean Blue" background family, retuned for WCAG AA (4.5:1) text contrast; the light-mode accent gradient was also retuned to clear 4.5:1 for small text.
+- Replaced the vertical sidebar with a horizontal dropdown nav bar, and consolidated Deploy and Settings navigation into a single view+subview state model with a tab-strip UI. The Fleet dropdown now labels its per-platform pages "Software (Windows)" / "Services (Linux)" to disambiguate them.
+- Unified the separate Windows/Linux Clients tables, their CSV exports, the Hardware page, and the "Saved client action logs" table behind one OS filter component, replacing duplicate per-platform pages and tables.
+- The Clients dashboard tile is now the gradient hero tile (previously Windows activated).
+
+### Added
+
+- Dropdown menus (Fleet, Manage) support keyboard navigation: Escape closes and returns focus to the trigger, Arrow Up/Down move between items with wrap-around.
+- Windows Client actions gained an "Ingestion token" override field, matching the Linux form and its existing server-side resolution (blank means use the server's current token).
+
+### Fixed
+
+- Client platform (Windows vs Linux) is now stamped authoritatively at load time instead of inferred from a client-reported `computerName` field, closing a gap where a malformed or malicious client record could misrepresent its own platform and be routed/displayed incorrectly.
+
 ## [0.39.9]
 
 ### Changed
