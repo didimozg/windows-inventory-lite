@@ -19,140 +19,82 @@
 </head>
 <body>
   <div class="app-shell">
-    <aside class="sidebar" aria-label="Dashboard navigation">
-      <div class="sidebar-header">
-        <div class="brand" role="img" aria-label="Windows Inventory Lite">
-          <svg class="brand-mark" viewBox="0 0 120 90" aria-hidden="true">
-            <rect x="10" y="8" width="100" height="62" rx="4" fill="none" stroke="var(--accent)" stroke-width="5"/>
-            <path d="M55 70 L55 76 L50 82 L70 82 L65 76 L65 70" fill="none" stroke="var(--accent)" stroke-width="4" stroke-linejoin="round"/>
-            <line x1="40" y1="83" x2="80" y2="83" stroke="var(--accent)" stroke-width="4" stroke-linecap="round"/>
-            <line x1="36" y1="27" x2="44" y2="27" stroke="var(--accent)" stroke-width="3"/>
-            <line x1="50" y1="32" x2="57" y2="38" stroke="var(--accent)" stroke-width="3"/>
-            <line x1="78" y1="31" x2="71" y2="38" stroke="var(--accent)" stroke-width="3"/>
-            <line x1="82" y1="27" x2="88" y2="27" stroke="var(--accent)" stroke-width="3"/>
-            <line x1="56" y1="48" x2="35" y2="55" stroke="var(--accent)" stroke-width="3"/>
-            <line x1="61" y1="52" x2="55" y2="58" stroke="var(--accent)" stroke-width="3"/>
-            <line x1="68" y1="48" x2="78" y2="55" stroke="var(--accent)" stroke-width="3"/>
-            <rect x="24" y="22" width="12" height="10" rx="1.5" fill="var(--accent)"/>
-            <rect x="44" y="22" width="12" height="10" rx="1.5" fill="var(--accent)"/>
-            <circle cx="78" cy="27" r="4" fill="var(--accent)"/>
-            <rect x="88" y="22" width="12" height="10" rx="1.5" fill="var(--accent)"/>
-            <rect x="22" y="52" width="11" height="9" rx="1.5" fill="var(--accent)"/>
-            <rect x="50" y="55" width="11" height="9" rx="1.5" fill="var(--accent)"/>
-            <circle cx="82" cy="58" r="4" fill="var(--accent)"/>
-            <rect x="51" y="36" width="21" height="17" rx="3" fill="var(--accent)"/>
-            <path d="M56 44.5 L60 48.5 L68 39.5" fill="none" stroke="var(--accent-text)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-          <span class="brand-word">
-            <span class="brand-word-main">Windows Inventory</span>
-            <span class="brand-word-sub">Lite</span>
-          </span>
+    <nav class="topnav" aria-label="Dashboard navigation">
+      <div class="brand" role="img" aria-label="Windows Inventory Lite">
+        <svg class="brand-mark" viewBox="0 0 120 90" aria-hidden="true">
+          <rect x="10" y="8" width="100" height="62" rx="4" fill="none" stroke="var(--accent)" stroke-width="5"/>
+          <path d="M55 70 L55 76 L50 82 L70 82 L65 76 L65 70" fill="none" stroke="var(--accent)" stroke-width="4" stroke-linejoin="round"/>
+          <line x1="40" y1="83" x2="80" y2="83" stroke="var(--accent)" stroke-width="4" stroke-linecap="round"/>
+          <line x1="36" y1="27" x2="44" y2="27" stroke="var(--accent)" stroke-width="3"/>
+          <line x1="50" y1="32" x2="57" y2="38" stroke="var(--accent)" stroke-width="3"/>
+          <line x1="78" y1="31" x2="71" y2="38" stroke="var(--accent)" stroke-width="3"/>
+          <line x1="82" y1="27" x2="88" y2="27" stroke="var(--accent)" stroke-width="3"/>
+          <line x1="56" y1="48" x2="35" y2="55" stroke="var(--accent)" stroke-width="3"/>
+          <line x1="61" y1="52" x2="55" y2="58" stroke="var(--accent)" stroke-width="3"/>
+          <line x1="68" y1="48" x2="78" y2="55" stroke="var(--accent)" stroke-width="3"/>
+          <rect x="24" y="22" width="12" height="10" rx="1.5" fill="var(--accent)"/>
+          <rect x="44" y="22" width="12" height="10" rx="1.5" fill="var(--accent)"/>
+          <circle cx="78" cy="27" r="4" fill="var(--accent)"/>
+          <rect x="88" y="22" width="12" height="10" rx="1.5" fill="var(--accent)"/>
+          <rect x="22" y="52" width="11" height="9" rx="1.5" fill="var(--accent)"/>
+          <rect x="50" y="55" width="11" height="9" rx="1.5" fill="var(--accent)"/>
+          <circle cx="82" cy="58" r="4" fill="var(--accent)"/>
+          <rect x="51" y="36" width="21" height="17" rx="3" fill="var(--accent)"/>
+          <path d="M56 44.5 L60 48.5 L68 39.5" fill="none" stroke="var(--accent-text)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="brand-word">
+          <span class="brand-word-main">Windows Inventory</span>
+          <span class="brand-word-sub">Lite</span>
+        </span>
+      </div>
+      <button id="dashboardTab" class="topnav-item active" type="button">Dashboard</button>
+      <div class="topnav-dropdown">
+        <button id="fleetDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Fleet <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
+        <div id="fleetDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
+          <button id="clientsTab" class="topnav-dropdown-item" type="button" role="menuitem">Clients</button>
+          <button id="softwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Software (Windows)</button>
+          <button id="linuxServicesTab" class="topnav-dropdown-item" type="button" role="menuitem">Services (Linux)</button>
+          <button id="hardwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Hardware</button>
+          <button id="licensesTab" class="topnav-dropdown-item" type="button" role="menuitem">Licenses</button>
         </div>
       </div>
-      <nav class="nav-tree">
-        <button id="dashboardTab" class="nav-item nav-item-root active" type="button">
-          <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="2.5" width="6" height="6" rx="1"/><rect x="11.5" y="2.5" width="6" height="6" rx="1"/><rect x="2.5" y="11.5" width="6" height="6" rx="1"/><rect x="11.5" y="11.5" width="6" height="6" rx="1"/></svg>
-          Dashboard
-        </button>
-        <div class="nav-group">
-          <div class="nav-group-title">Windows Inventory</div>
-          <button id="clientsTab" class="nav-item" type="button">
-            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="10" rx="1.2"/><line x1="7" y1="17" x2="13" y2="17"/><line x1="10" y1="13.5" x2="10" y2="17"/></svg>
-            Clients
-          </button>
-          <button id="softwareTab" class="nav-item" type="button">
-            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5 L17.5 6.5 L17.5 13.5 L10 17.5 L2.5 13.5 L2.5 6.5 Z"/><line x1="10" y1="10" x2="17.3" y2="6.3"/><line x1="10" y1="10" x2="2.7" y2="6.3"/><line x1="10" y1="10" x2="10" y2="17.5"/></svg>
-            Software
-          </button>
+      <div class="topnav-dropdown">
+        <button id="manageDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Manage <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
+        <div id="manageDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
+          <button id="deployTab" class="topnav-dropdown-item" type="button" role="menuitem">Deploy <span id="updatesBadge" class="nav-badge hidden">0</span><span id="linuxUpdatesBadge" class="nav-badge hidden">0</span></button>
+          <button id="settingsTab" class="topnav-dropdown-item" type="button" role="menuitem">Settings</button>
         </div>
-        <div class="nav-group">
-          <div class="nav-group-title">Linux Inventory</div>
-          <button id="linuxClientsTab" class="nav-item" type="button">
-            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="10" rx="1.2"/><line x1="7" y1="17" x2="13" y2="17"/><line x1="10" y1="13.5" x2="10" y2="17"/></svg>
-            Clients
-          </button>
-          <button id="linuxServicesTab" class="nav-item" type="button">
-            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5 L17.5 6.5 L17.5 13.5 L10 17.5 L2.5 13.5 L2.5 6.5 Z"/><line x1="10" y1="10" x2="17.3" y2="6.3"/><line x1="10" y1="10" x2="2.7" y2="6.3"/><line x1="10" y1="10" x2="10" y2="17.5"/></svg>
-            Services
-          </button>
-        </div>
-        <button id="hardwareTab" class="nav-item nav-item-root" type="button">
-          <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="5" width="10" height="10" rx="1"/><line x1="8" y1="1.5" x2="8" y2="5"/><line x1="12" y1="1.5" x2="12" y2="5"/><line x1="8" y1="15" x2="8" y2="18.5"/><line x1="12" y1="15" x2="12" y2="18.5"/><line x1="1.5" y1="8" x2="5" y2="8"/><line x1="1.5" y1="12" x2="5" y2="12"/><line x1="15" y1="8" x2="18.5" y2="8"/><line x1="15" y1="12" x2="18.5" y2="12"/></svg>
-          Hardware
-        </button>
-        <button id="licensesTab" class="nav-item nav-item-root" type="button">
-          <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 2.5 h7 l3 3 v12 h-10 z"/><path d="M12 2.5 v3 h3"/><line x1="7" y1="11" x2="13" y2="11"/><line x1="7" y1="14" x2="11" y2="14"/></svg>
-          Licenses
-        </button>
-        <div class="nav-group">
-          <div class="nav-group-title">Installation</div>
-          <button id="installTab" class="nav-item" type="button">
-            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M11 2 L4 11.5 H9.5 L8.5 18 L16 8 H10.5 Z"/></svg>
-            Windows Client actions
-          </button>
-          <button id="updatesTab" class="nav-item" type="button">
-            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 a7 7 0 1 1 -6.3 4"/><path d="M3 3 v4 h4"/></svg>
-            Windows Client updates
-            <span id="updatesBadge" class="nav-badge hidden">0</span>
-          </button>
-          <button id="linuxInstallTab" class="nav-item" type="button">
-            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M11 2 L4 11.5 H9.5 L8.5 18 L16 8 H10.5 Z"/></svg>
-            Linux Client actions
-          </button>
-          <button id="linuxUpdatesTab" class="nav-item" type="button">
-            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 a7 7 0 1 1 -6.3 4"/><path d="M3 3 v4 h4"/></svg>
-            Linux Client updates
-            <span id="linuxUpdatesBadge" class="nav-badge hidden">0</span>
-          </button>
-          <button id="packageTab" class="nav-item" type="button">
-            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="4" width="15" height="3.5" rx="0.8"/><path d="M3.5 7.5 v8 h13 v-8"/><line x1="8" y1="10.5" x2="12" y2="10.5"/></svg>
-            Client package
-          </button>
-        </div>
-        <div class="nav-group">
-          <div class="nav-group-title">Settings</div>
-          <button id="generalTab" class="nav-item" type="button">
-            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3"/><path d="M10 2.5v2M10 15.5v2M17.5 10h-2M4.5 10h-2M15.4 4.6l-1.4 1.4M6 12.6l-1.4 1.4M15.4 15.4l-1.4-1.4M6 7.4L4.6 6"/></svg>
-            General
-          </button>
-          <button id="certificateTab" class="nav-item" type="button">
-            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2 L17 4.5 V10 c0 4.5-3 7-7 8-4-1-7-3.5-7-8V4.5 Z"/><path d="M6.8 10 L9 12.2 L13.2 7.8"/></svg>
-            Certificate
-          </button>
-          <button id="adminPasswordTab" class="nav-item" type="button">
-            <svg class="nav-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="4.5" y="9" width="11" height="8.5" rx="1.2"/><path d="M6.5 9V6a3.5 3.5 0 0 1 7 0v3"/></svg>
-            Admin password
-          </button>
-        </div>
-      </nav>
-      <div class="sidebar-footer">
-        <span id="serverVersionBadge">Server: unknown</span>
-        <span id="generatedAt">Waiting for inventory data.</span>
       </div>
-    </aside>
+      <div class="topnav-spacer"></div>
+      <span id="generatedAt" class="nav-status-text hidden">Waiting for inventory data.</span>
+      <span id="serverVersionBadge" class="nav-status-text">Server: unknown</span>
+      <button id="themeToggle" class="theme-toggle" type="button" title="Toggle color theme" aria-label="Toggle color theme">&#9790;</button>
+      <button id="logoutButton" class="logout-button" type="button" title="Log out">Log out</button>
+    </nav>
 
     <div class="content-area">
-      <header class="topbar">
+      <header id="topbar" class="topbar">
         <input id="searchInput" type="search" placeholder="Filter computers, OS, Office, software, hardware">
-        <div class="topbar-actions">
-          <button id="themeToggle" class="theme-toggle" type="button" title="Toggle color theme" aria-label="Toggle color theme">&#9790;</button>
-          <button id="logoutButton" class="logout-button" type="button" title="Log out">Log out</button>
+        <div id="osFilter" class="os-filter hidden" role="group" aria-label="Filter by platform">
+          <button type="button" class="os-filter-option active" data-os-filter="all">All</button>
+          <button type="button" class="os-filter-option" data-os-filter="windows">Windows</button>
+          <button type="button" class="os-filter-option" data-os-filter="linux">Linux</button>
         </div>
       </header>
 
       <main>
-        <section id="dashboardView" class="install-panel" aria-label="Dashboard">
+        <section id="dashboardView" aria-label="Dashboard">
           <div id="dashboardTiles" class="summary dashboard-tiles">
-            <div><span id="dashClientCount">0</span><small>Clients</small></div>
-            <div><span id="dashWindowsActivated">0</span><small>Windows activated</small></div>
-            <div><span id="dashOfficeActivated">0</span><small>Office activated</small></div>
-            <div id="dashStaleTile"><span id="dashStaleCount">0</span><small id="dashStaleLabel">Stale &gt;48h</small></div>
+            <div class="card-hero"><span class="icon-chip" aria-hidden="true">#</span><span id="dashClientCount">0</span><small>Clients</small></div>
+            <div class="card-glow"><span class="icon-chip" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M5 10.5 L8.5 14 L15 6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span id="dashWindowsActivated">0</span><small>Windows activated</small></div>
+            <div class="card-glow"><span class="icon-chip" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M5 10.5 L8.5 14 L15 6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span id="dashOfficeActivated">0</span><small>Office activated</small></div>
+            <div id="dashStaleTile" class="card-glow"><span class="icon-chip" aria-hidden="true">!</span><span id="dashStaleCount">0</span><small id="dashStaleLabel">Stale &gt;48h</small></div>
           </div>
 
-          <div class="dashboard-card">
+          <div class="dashboard-card card-glow">
             <h2 class="settings-block-title">Software</h2>
             <div class="summary dash-single-stat">
-              <div><span id="dashLicenseCount">0</span><small>Licenses</small></div>
+              <div class="card-glow"><span id="dashLicenseCount">0</span><small>Licenses</small></div>
             </div>
             <div class="dash-chart-grid">
               <div class="dash-chart">
@@ -166,10 +108,10 @@
             </div>
           </div>
 
-          <div class="dashboard-card">
+          <div class="dashboard-card card-glow">
             <h2 class="settings-block-title">Hardware</h2>
             <div class="summary dash-single-stat">
-              <div><span id="dashUsbCount">0</span><small>Computers with USB storage</small></div>
+              <div class="card-glow"><span id="dashUsbCount">0</span><small>Computers with USB storage</small></div>
             </div>
             <div class="dash-chart-grid">
               <div class="dash-chart">
@@ -188,7 +130,13 @@
           </div>
         </section>
 
-        <section id="generalView" class="install-panel hidden" aria-label="General settings">
+        <div id="settingsSubtabs" class="subtab-strip hidden" role="tablist" aria-label="Settings sections">
+          <button id="settingsSubtabGeneral" class="subtab-item" role="tab" type="button">General</button>
+          <button id="settingsSubtabCertificate" class="subtab-item" role="tab" type="button">Certificate</button>
+          <button id="settingsSubtabAdminPassword" class="subtab-item" role="tab" type="button">Admin password</button>
+        </div>
+
+        <section id="generalView" class="install-panel card-glow hidden" aria-label="General settings">
           <div class="settings-block">
             <h2 class="settings-block-title">Inventory</h2>
             <div class="pkg-grid general-grid">
@@ -201,7 +149,7 @@
                 <input id="generalInstallLogRetentionDays" type="number" min="1" max="3650" value="30">
               </label>
             </div>
-            <p class="cert-hint">How long Client actions/Client updates push job logs (Installation &gt; Client actions) are kept before being cleaned up automatically.</p>
+            <p class="cert-hint">How long Client actions/Client updates push job logs (Deploy &gt; Actions) are kept before being cleaned up automatically.</p>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Network</h2>
@@ -355,7 +303,7 @@
           <div id="generalMessage" class="pkg-message hidden"></div>
         </section>
 
-        <section id="generalStatusView" class="dashboard-card hidden" aria-label="Connection status">
+        <section id="generalStatusView" class="dashboard-card card-glow hidden" aria-label="Connection status">
           <h2 class="settings-block-title">Connection status</h2>
           <div class="status-grid">
             <div class="status-row">
@@ -373,7 +321,7 @@
           </div>
         </section>
 
-        <section id="certificateView" class="install-panel hidden" aria-label="Server certificate">
+        <section id="certificateView" class="install-panel card-glow hidden" aria-label="Server certificate">
           <p id="certStatus" class="pkg-status">Loading certificate status...</p>
           <div class="pkg-buttons">
             <button id="certDeleteButton" class="danger-button hidden" type="button">Delete installed certificate</button>
@@ -411,7 +359,7 @@
           </div>
         </section>
 
-        <section id="adminPasswordView" class="install-panel hidden" aria-label="Change admin password">
+        <section id="adminPasswordView" class="install-panel card-glow hidden" aria-label="Change admin password">
           <p id="adminPasswordStatusText" class="pkg-status">Loading status...</p>
           <div class="pkg-grid admin-password-grid">
             <label class="pkg-token-field">
@@ -498,30 +446,6 @@
           </div>
         </section>
 
-        <section id="linuxClientsView" class="hidden" aria-label="Linux clients">
-          <div class="view-toolbar">
-            <button id="exportLinuxClientsBtn" class="export-button" type="button">Export CSV</button>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th data-sort-table="linuxClients" data-sort-key="hostname" class="sortable">Computer</th>
-                  <th data-sort-table="linuxClients" data-sort-key="clientVersion" class="sortable">Client</th>
-                  <th data-sort-table="linuxClients" data-sort-key="os" class="sortable">OS</th>
-                  <th>IP</th>
-                  <th data-sort-table="linuxClients" data-sort-key="softwareCount" class="sortable">Software</th>
-                  <th id="linuxDescriptionColumnHeader">AD Description</th>
-                  <th data-sort-table="linuxClients" data-sort-key="collectedAt" class="sortable">Collected</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody id="linuxClientsBody"></tbody>
-            </table>
-          </div>
-          <div id="linuxClientsPager" class="pager"></div>
-        </section>
-
         <section id="linuxServicesView" class="hidden" aria-label="Linux services inventory">
           <div class="view-toolbar">
             <button id="exportLinuxServicesBtn" class="export-button" type="button">Export CSV</button>
@@ -541,7 +465,13 @@
           <div id="linuxServicesPager" class="pager"></div>
         </section>
 
-        <section id="packageView" class="install-panel hidden" aria-label="Client package">
+        <div id="deploySubtabs" class="subtab-strip hidden" role="tablist" aria-label="Deploy sections">
+          <button id="deploySubtabActions" class="subtab-item" role="tab" type="button">Actions</button>
+          <button id="deploySubtabUpdates" class="subtab-item" role="tab" type="button">Updates</button>
+          <button id="deploySubtabPackage" class="subtab-item" role="tab" type="button">Package</button>
+        </div>
+
+        <section id="packageView" class="install-panel card-glow hidden" aria-label="Client package">
           <div class="settings-block">
             <h2 class="settings-block-title">Windows package</h2>
             <p id="pkgStatus" class="pkg-status">Loading package status...</p>
@@ -605,9 +535,10 @@
           </div>
         </section>
 
-        <section id="updatesView" class="install-panel hidden" aria-label="Client updates">
+        <section id="updatesView" class="install-panel card-glow hidden" aria-label="Client updates">
+          <h2 class="settings-block-title platform-section-title">Windows Client updates</h2>
           <div class="settings-block">
-            <h2 class="settings-block-title">WinRM credentials</h2>
+            <h3 class="settings-block-title">WinRM credentials</h3>
             <p class="cert-hint">Leave both fields blank when pushing an update to use the saved account below, or the server service's own identity if nothing is saved (the same account WinRM client actions already require). Fill them in to override with a different account for this push only.</p>
             <p id="updatesSavedAccountHint" class="cert-hint hidden"></p>
             <label class="check-label updates-use-ad-field">
@@ -631,7 +562,7 @@
             <div id="updatesCredentialsMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block">
-            <h2 class="settings-block-title">Schedule</h2>
+            <h3 class="settings-block-title">Schedule</h3>
             <p class="cert-hint">Automatically pushes to whichever clients are outdated when the schedule fires - the same targets "Update selected" would reach if every outdated row were checked. Uses the saved WinRM account above, or the server's own service identity if nothing is saved.</p>
             <p id="updatesScheduleCredentialWarning" class="cert-hint hidden">No saved WinRM account above - scheduled pushes will use the server's own service identity.</p>
             <div class="pkg-grid client-update-schedule-panel">
@@ -677,7 +608,8 @@
           <div id="updatesStatus" class="install-status empty">No update job started.</div>
         </section>
 
-        <section id="installView" class="install-panel hidden" aria-label="Remote client actions">
+        <section id="installView" class="install-panel card-glow hidden" aria-label="Remote client actions">
+          <h2 class="settings-block-title platform-section-title">Windows Client actions</h2>
           <div class="install-grid">
             <div class="install-targets-field">
               <div class="install-targets-textarea-wrap">
@@ -693,34 +625,38 @@
               <div id="installAdMessage" class="pkg-message hidden"></div>
             </div>
             <div class="install-right-fields">
-              <label class="install-action-field">
+              <label>
                 Action
                 <select id="clientAction">
                   <option value="install">Install client</option>
                   <option value="uninstall">Uninstall client</option>
                 </select>
               </label>
-              <label class="install-server-field install-only">
+              <label class="install-only">
                 Server URL
                 <input id="installServerUrl" type="text" value="">
               </label>
-              <label class="install-user-field">
+              <label class="install-only">
+                Ingestion token
+                <input id="installToken" type="text" autocomplete="off" placeholder="leave empty to use the server's current token">
+              </label>
+              <label>
                 WinRM user
                 <input id="installUsername" type="text" autocomplete="username" placeholder="DOMAIN\User">
               </label>
-              <label class="install-password-field">
+              <label>
                 WinRM password
                 <input id="installPassword" type="password" autocomplete="current-password">
               </label>
-              <label class="check-label install-use-ad-field">
+              <label class="check-label">
                 <input id="installUseAdCredentials" type="checkbox">
                 Use global AD settings (Settings &gt; General &gt; Active Directory)
               </label>
-              <label class="check-label install-force-field install-only">
+              <label class="check-label install-only">
                 <input id="installForce" type="checkbox">
                 Force reinstall
               </label>
-              <label class="check-label install-trusted-field">
+              <label class="check-label">
                 <input id="installTrustedHosts" type="checkbox">
                 Add to TrustedHosts
               </label>
@@ -728,10 +664,10 @@
             </div>
           </div>
           <div id="installStatus" class="install-status empty">No install job started.</div>
-          <div id="installHistory" class="install-history empty">No saved client action logs.</div>
         </section>
 
-        <section id="linuxInstallView" class="install-panel hidden" aria-label="Linux client actions">
+        <section id="linuxInstallView" class="install-panel card-glow hidden" aria-label="Linux client actions">
+          <h2 class="settings-block-title platform-section-title">Linux Client actions</h2>
           <div class="install-grid">
             <div class="install-targets-field">
               <div class="install-targets-textarea-wrap">
@@ -804,13 +740,17 @@
             </div>
           </div>
           <div id="linuxInstallStatus" class="install-status empty">No install job started.</div>
-          <div id="linuxInstallHistory" class="install-history empty">No saved client action logs.</div>
         </section>
 
-        <section id="linuxUpdatesView" class="install-panel hidden" aria-label="Linux client updates">
+        <section id="installHistoryView" class="install-panel card-glow hidden" aria-label="Saved client action logs">
+          <div id="installHistory" class="install-history empty">No saved client action logs.</div>
+        </section>
+
+        <section id="linuxUpdatesView" class="install-panel card-glow hidden" aria-label="Linux client updates">
+          <h2 class="settings-block-title platform-section-title">Linux Client updates</h2>
           <div class="linux-updates-top-row">
           <div class="settings-block">
-            <h2 class="settings-block-title">Authentication</h2>
+            <h3 class="settings-block-title">Authentication</h3>
             <label class="linux-updates-credential-field">
               Authentication
               <select id="linuxUpdatesAuthMode">
@@ -837,7 +777,7 @@
             </label>
           </div>
           <div class="settings-block">
-            <h2 class="settings-block-title">Linux client targeting</h2>
+            <h3 class="settings-block-title">Linux client targeting</h3>
             <label class="linux-updates-credential-field">
               Preferred subnet (CIDR)
               <input id="linuxUpdatesPreferredSubnet" type="text" placeholder="192.168.1.0/24">
@@ -848,7 +788,7 @@
             <div id="linuxUpdatesPreferredSubnetMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block">
-            <h2 class="settings-block-title">Schedule</h2>
+            <h3 class="settings-block-title">Schedule</h3>
             <p class="cert-hint">Auto-pushes outdated clients using the credentials above (no AD reuse for scheduled pushes).</p>
             <div class="pkg-grid client-update-schedule-panel">
               <label class="pkg-token-field">
@@ -901,13 +841,12 @@
             <table>
               <thead>
                 <tr>
-                  <th data-sort-table="clients" data-sort-key="computerName" class="sortable">Computer</th>
+                  <th data-sort-table="clients" data-sort-key="name" class="sortable">Computer</th>
                   <th data-sort-table="clients" data-sort-key="clientVersion" class="sortable">Client</th>
                   <th data-sort-table="clients" data-sort-key="os" class="sortable">OS</th>
                   <th data-sort-table="clients" data-sort-key="office" class="sortable">Office</th>
-                  <th data-sort-table="clients" data-sort-key="windowsActivated" class="sortable">Windows</th>
-                  <th data-sort-table="clients" data-sort-key="officeActivated" class="sortable">Office activation</th>
-                  <th data-sort-table="clients" data-sort-key="softwareCount" class="sortable">Software</th>
+                  <th data-sort-table="clients" data-sort-key="activation" class="sortable">Activation</th>
+                  <th data-sort-table="clients" data-sort-key="items" class="sortable">Software/Services</th>
                   <th id="descriptionColumnHeader">AD Description</th>
                   <th data-sort-table="clients" data-sort-key="collectedAt" class="sortable">Collected</th>
                   <th>Actions</th>

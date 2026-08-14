@@ -39,74 +39,191 @@
   --success-bg: #f0f8ef;
   --success-border: #b8ddb0;
   --success-text: #2d5e26;
+  /* New component layer for the 2026-08-12 dashboard redesign ("Bold Card
+     System"), see docs/superpowers/specs/2026-08-12-dashboard-ui-redesign-design.md.
+     Additive only - nothing in index.html/app.js references these yet.
+     rgba() values below are the decimal form of --accent (#126f8f = 18,111,143),
+     used for a colored glow instead of a flat border. */
+  --card-radius: 14px;
+  --card-glow: 0 0 0 1px var(--line), 0 0 20px rgba(18, 111, 143, .12);
+  --card-glow-hero: 0 0 24px rgba(18, 111, 143, .3);
+  /* Second stop darkened from the original #1c93bc: white --accent-text
+     small text (.summary .card-hero small, .os-filter-option.active)
+     only cleared 3.53:1 against that lighter blue, short of the 4.5:1
+     small-text AA floor - #147a9e keeps a visible gradient while giving
+     white text ~4.9:1 at the lightest point. The hero tile's own number
+     is exempt (28px bold clears the 3:1 large-text floor either way).
+     Dark mode's gradient already passes AA (checked in an earlier
+     phase) and is untouched. */
+  --accent-gradient: linear-gradient(135deg, #126f8f, #147a9e);
+  --icon-chip-bg: var(--accent-soft);
+  --icon-chip-fg: var(--accent);
 }
 
 /* Dark theme: follows the OS preference by default, or an explicit choice
-   saved by the sidebar toggle (see index.html's inline head script and
+   saved by the theme toggle (see index.html's inline head script and
    app.js's toggleTheme, which set/read [data-theme] on <html> to avoid a
    flash of the wrong theme on load). */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg: #111827;
-    --panel: #1f2937;
+    --bg: #0c2340;
+    --panel: #153a63;
     --text: #e2e8f0;
     --heading: #ffffff;
     --muted: #94a3b8;
-    --line: #374151;
+    /* Every token below this point is tuned to the same H~209-212deg blue
+       hue family as --bg/--panel/--accent, not left at the pre-redesign
+       neutral-gray values - a whole-redesign review found that Phase 1
+       only re-tuned --bg/--panel/--line themselves and one single-use
+       hardcode (the old --card-glow ring color, see below), leaving ~8
+       companion surface tokens still gray-toned and visibly duller than
+       the panels they render inside of. --line reuses the exact blue
+       (#285484) Phase 1 already hand-picked for that ring, so the ring no
+       longer needs its own hardcode either - it can go back to var(--line)
+       like the light-theme block already does. */
+    --line: #285484;
     --accent: #1c93bc;
     --accent-text: #04141a;
     --danger: #ff7a6e;
     --danger-bg: #3a1f1e;
     --danger-border: #7a3b35;
     --warn: #4a3f12;
-    --hover-bg: #232e39;
-    --active-bg: #1f3540;
-    --accent-soft: #1c3a44;
-    --table-header-bg: #1f2932;
-    --row-alt-bg: #171f27;
-    --code-bg: #141b22;
+    --hover-bg: #1f4f80;
+    --active-bg: #245c92;
+    /* Darker than the other new tokens on this pass deliberately - #94a3b8
+       text needs 4.5:1 here for the .platform-tag chip and .os-filter
+       pill (both use --accent-soft as fill), which put a floor under how
+       light this can go. At that floor its fill sits within ~1.1:1 of
+       --panel/--table-header-bg, so the chip/pill's 1px var(--line)
+       border is what actually reads as "this is a chip", not the fill -
+       keep that border if this token or those two components change. */
+    --accent-soft: #143257;
+    --table-header-bg: #102c50;
+    --row-alt-bg: #1a4272;
+    --code-bg: #081830;
     --usb-bg: #4a3f12;
     --usb-border: #8a742a;
     --usb-text: #f0d878;
     --usb-row-bg: #332a10;
-    --hw-summary-bg: #171f27;
+    --hw-summary-bg: #1a4272;
     --sortable-hover-bg: #24333d;
     --success-bg: #16321a;
     --success-border: #2f6a37;
     --success-text: #8fe39c;
+    --card-radius: 14px;
+    --card-glow: 0 0 0 1px var(--line), 0 0 20px rgba(47, 179, 223, .18);
+    --card-glow-hero: 0 0 24px rgba(28, 147, 188, .35);
+    --accent-gradient: linear-gradient(135deg, #1c93bc, #2fb3df);
+    --icon-chip-bg: #1d4b78;
+    --icon-chip-fg: #7fd4f5;
   }
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #111827;
-  --panel: #1f2937;
+  --bg: #0c2340;
+  --panel: #153a63;
   --text: #e2e8f0;
   --heading: #ffffff;
   --muted: #94a3b8;
-  --line: #374151;
+  /* Kept byte-identical to the @media block above - see its comment for
+     why every token below this point is blue-hue-tuned, not left at the
+     pre-redesign neutral-gray values. */
+  --line: #285484;
   --accent: #1c93bc;
   --accent-text: #04141a;
   --danger: #ff7a6e;
   --danger-bg: #3a1f1e;
   --danger-border: #7a3b35;
   --warn: #4a3f12;
-  --hover-bg: #232e39;
-  --active-bg: #1f3540;
-  --accent-soft: #1c3a44;
-  --table-header-bg: #1f2932;
-  --row-alt-bg: #171f27;
-  --code-bg: #141b22;
+  --hover-bg: #1f4f80;
+  --active-bg: #245c92;
+  --accent-soft: #143257;
+  --table-header-bg: #102c50;
+  --row-alt-bg: #1a4272;
+  --code-bg: #081830;
   --usb-bg: #4a3f12;
   --usb-border: #8a742a;
   --usb-text: #f0d878;
   --usb-row-bg: #332a10;
-  --hw-summary-bg: #171f27;
+  --hw-summary-bg: #1a4272;
   --sortable-hover-bg: #24333d;
   --success-bg: #16321a;
   --success-border: #2f6a37;
   --success-text: #8fe39c;
+  --card-radius: 14px;
+  --card-glow: 0 0 0 1px var(--line), 0 0 20px rgba(47, 179, 223, .18);
+  --card-glow-hero: 0 0 24px rgba(28, 147, 188, .35);
+  --accent-gradient: linear-gradient(135deg, #1c93bc, #2fb3df);
+  --icon-chip-bg: #1d4b78;
+  --icon-chip-fg: #7fd4f5;
+}
+
+/* New component layer for the 2026-08-12 dashboard redesign ("Bold Card
+   System"), see docs/superpowers/specs/2026-08-12-dashboard-ui-redesign-design.md.
+   Not yet used anywhere in index.html/app.js - a later plan (Phase 3 of that
+   spec's rollout) applies these to the Dashboard/Fleet/Deploy/Settings pages
+   one at a time. Keep additive: do not remove or change any rule below this
+   comment until that later work explicitly calls for it. */
+.card-glow {
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-glow);
+  background: var(--panel);
+}
+
+.card-hero {
+  border-radius: var(--card-radius);
+  background: var(--accent-gradient);
+  box-shadow: var(--card-glow-hero);
+}
+
+.icon-chip {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  background: var(--icon-chip-bg);
+  color: var(--icon-chip-fg);
+}
+
+.icon-chip svg {
+  width: 18px;
+  height: 18px;
+}
+
+.os-filter {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  border: 1px solid var(--line);
+}
+
+.os-filter-option {
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  padding: 4px 14px;
+}
+
+.os-filter-option:hover {
+  color: var(--text);
+}
+
+.os-filter-option.active {
+  background: var(--accent-gradient);
+  color: var(--accent-text);
 }
 
 * {
@@ -156,35 +273,73 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-.app-shell {
-  display: flex;
-  min-height: 100vh;
-  align-items: stretch;
+.nav-badge {
+  margin-left: auto;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: var(--font-size-xs);
+  font-weight: 650;
+  line-height: 1;
+  padding: 2px var(--space-sm);
+  border-radius: 999px;
 }
 
-.sidebar {
-  width: 240px;
-  flex-shrink: 0;
+.subtab-strip {
+  display: flex;
+  gap: var(--space-xs);
+  padding: var(--space-md) 0 0;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: var(--space-lg);
+}
+
+.subtab-item {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  padding: var(--space-sm) var(--space-md);
+}
+
+.subtab-item:hover {
+  color: var(--text);
+}
+
+.subtab-item.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+#generatedAt.generated-at-flash {
+  color: var(--accent);
+}
+
+.content-area {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-xs);
-  padding: var(--space-xl) var(--space-md);
-  background: var(--panel);
-  border-right: 1px solid var(--line);
-  position: sticky;
-  top: 0;
-  align-self: flex-start;
-  height: 100vh;
-  overflow-y: auto;
 }
 
-.sidebar-header {
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.topnav {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-sm);
-  margin-bottom: 16px;
-  padding: 0 var(--space-md);
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-2xl);
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  z-index: 10;
 }
 
 .brand {
@@ -192,6 +347,7 @@ body {
   align-items: center;
   gap: var(--space-sm);
   min-width: 0;
+  margin-right: var(--space-xl);
 }
 
 .brand-mark {
@@ -235,6 +391,7 @@ body {
   cursor: pointer;
   font-size: var(--font-size-base);
   line-height: 1;
+  margin-left: var(--space-md);
 }
 
 .theme-toggle:hover {
@@ -242,51 +399,33 @@ body {
   color: var(--accent);
 }
 
-.nav-tree {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.nav-group {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-bottom: 6px;
-}
-
-.nav-group-title {
-  margin: 4px 0 2px;
-  padding: var(--space-sm) var(--space-md) var(--space-xs) var(--space-md);
-  color: var(--muted);
-  font-size: var(--font-size-base);
-  font-weight: 650;
-}
-
-.nav-item,
-.link-button {
+.topnav-item {
   border: 0;
   background: transparent;
   color: var(--text);
   cursor: pointer;
   font: inherit;
-}
-
-.nav-item {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: 8px;
   display: flex;
   align-items: center;
-  gap: var(--space-md);
-  padding: var(--space-sm) var(--space-md) var(--space-sm) var(--space-lg);
-  border-left: 3px solid transparent;
-  border-radius: 0 6px 6px 0;
-  text-align: left;
-  font-size: var(--font-size-base);
+  gap: var(--space-xs);
 }
 
-.nav-icon {
-  flex-shrink: 0;
-  width: 17px;
-  height: 17px;
+.topnav-item:hover {
+  background: var(--hover-bg);
+}
+
+.topnav-item.active {
+  background: var(--active-bg);
+  color: var(--accent);
+}
+
+.topnav-caret {
+  width: 9px;
+  height: 6px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.6;
@@ -294,94 +433,70 @@ body {
   stroke-linejoin: round;
 }
 
-.nav-item:hover {
+.topnav-dropdown {
+  position: relative;
+}
+
+.topnav-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .12);
+  padding: 6px;
+  min-width: 200px;
+  z-index: 20;
+}
+
+.topnav-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-base);
+  text-align: left;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: 7px;
+}
+
+.topnav-dropdown-item:hover {
   background: var(--hover-bg);
 }
 
-.nav-item.active {
-  border-left-color: var(--accent);
-  background: var(--active-bg);
+.topnav-dropdown-item.active {
+  background: var(--accent-soft);
   color: var(--accent);
   font-weight: 650;
 }
 
-.nav-item-root {
-  margin: 4px 0 10px;
-  padding-left: var(--space-md);
-  font-weight: 650;
+.topnav-spacer {
+  flex: 1;
 }
 
-.nav-badge {
-  margin-left: auto;
-  background: var(--accent);
-  color: var(--accent-text);
-  font-size: var(--font-size-xs);
-  font-weight: 650;
-  line-height: 1;
-  padding: 2px var(--space-sm);
-  border-radius: 999px;
-}
-
-/* A dotted "spine" running down the section list, echoing the connector
-   lines in the app's own logo (an org-chart of nodes) instead of a plain
-   solid divider - the sidebar's own section list is, structurally, the
-   same kind of tree the logo depicts. Only sets border/padding, not
-   margin, so it layers onto each element's own existing spacing instead
-   of fighting it for specificity. Vertical-only: doesn't make sense once
-   the sidebar switches to a horizontal bar below 900px, see media query. */
-.nav-tree > * + * {
-  padding-top: var(--space-sm);
-  border-top: 1px dotted var(--line);
-}
-
-.sidebar-footer {
-  margin-top: auto;
-  padding: var(--space-md);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
+.nav-status-text {
   color: var(--muted);
   font-size: var(--font-size-xs);
+  white-space: nowrap;
 }
 
-.sidebar-footer #generatedAt {
-  font-size: var(--font-size-xs);
+#generatedAt {
   transition: color 0.3s ease;
-}
-
-.generated-at-flash {
-  color: var(--accent);
-}
-
-.content-area {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
 }
 
 .topbar {
   display: flex;
-  gap: var(--space-xl);
   align-items: center;
-  justify-content: space-between;
+  gap: var(--space-md);
   padding: var(--space-lg) var(--space-2xl);
   background: var(--panel);
   border-bottom: 1px solid var(--line);
-}
-
-.topbar-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  flex-shrink: 0;
-  /* #searchInput (the .topbar's other child) is hidden on non-Inventory
-     views, leaving this as the sole flex child - justify-content:
-     space-between on the parent has no effect with only one item, so it
-     was collapsing to the left edge instead of staying pinned right.
-     margin-left: auto keeps it right-pinned regardless of the sibling's
-     visibility. */
-  margin-left: auto;
 }
 
 .logout-button {
@@ -455,6 +570,11 @@ main {
 }
 
 .link-button {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
   padding: 0;
   font-weight: 700;
   text-align: left;
@@ -542,10 +662,9 @@ main {
 }
 
 .dashboard-card {
+  margin-top: var(--space-lg);
   padding: var(--space-lg);
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 8px;
 }
 
 .dash-single-stat {
@@ -617,10 +736,10 @@ main {
 }
 
 .summary div {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 8px;
   padding: var(--space-lg);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
 }
 
 .summary span {
@@ -629,6 +748,40 @@ main {
   color: var(--accent);
   font-size: var(--font-size-display);
   font-weight: 700;
+}
+
+/* One hero tile per page (see docs/superpowers/specs/2026-08-12-dashboard-ui-redesign-design.md,
+   Visual System) - the .card-hero class itself (Phase 1) supplies the
+   gradient background and glow; this override makes its number readable
+   against that background instead of the neutral --accent color every
+   other .summary tile's number uses. */
+.summary .card-hero span {
+  color: var(--accent-text);
+}
+
+.summary .card-hero small {
+  color: var(--accent-text);
+}
+
+/* The hero tile's icon-chip sits directly on the gradient, not the neutral
+   --icon-chip-bg panel every other icon-chip is tuned for - a solid chip
+   color there would compete with the gradient instead of reading as a
+   badge on top of it. A translucent white overlay + --accent-text keeps
+   it visible in both themes without introducing a new token. */
+.summary .card-hero .icon-chip {
+  background: rgba(255, 255, 255, .18);
+  color: var(--accent-text);
+}
+
+/* .summary span's (0,1,1) otherwise beats .icon-chip's own (0,1,0)
+   display/color declarations, and its "big number" typography
+   (28px display font, 4px margin) leaks onto the 34x34 badges too.
+   .summary span.icon-chip = (0,2,1), which wins on class count alone. */
+.summary span.icon-chip {
+  display: flex;
+  color: var(--icon-chip-fg);
+  font-size: inherit;
+  margin-bottom: 0;
 }
 
 /* Declared after .summary div/span so it wins at the equal class+type
@@ -645,11 +798,12 @@ main {
 
 /* Reuses the existing USB-badge amber rather than adding a new color -
    this is the one tile an admin needs to react to, the other summary
-   tiles are neutral facts. Left border, not a full-tile fill, so it
-   reads as a flag rather than an error state. Declared after .summary
-   span/div so its color/background actually win at equal specificity. */
+   tiles are neutral facts. The left bar plus background tint mark it;
+   the card's own glow ring stays the neutral var(--line) every tile
+   gets (not overridden here), so it still reads as one card among
+   others, not an error dialog. Declared after .summary span/div so its
+   color/background actually win at equal specificity. */
 .tile-alert {
-  border-color: var(--usb-border);
   border-left: 3px solid var(--usb-border);
   background: var(--usb-bg);
 }
@@ -748,6 +902,28 @@ tr.stale td {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
+}
+
+/* Bold Card System treatment for a Deploy/Settings page-section, reusing
+   Phase 1's .card-glow. A compound selector, not just adding "card-glow" to
+   the class list and trusting .card-glow's own rule to win: both are
+   single-class selectors (equal 0,1,0 specificity), and .install-panel is
+   declared later in this file, so by source order alone .install-panel's
+   own border/border-radius/background would keep winning and silently
+   cancel the glow - the same specificity-bug family every phase of this
+   redesign has hit at least once, here as a source-order tie rather than
+   an ancestor-vs-component mismatch. .install-panel.card-glow (0,2,0)
+   outranks both single-class rules regardless of file order.
+   dashboardView and licenseForm also carry .install-panel but are
+   deliberately never given the card-glow class (see the redesign plan's
+   Global Constraints) - dashboardView already has its own Phase
+   3a-converted children and doesn't need a second, outer glow layered on
+   top; licenseForm is out of scope for this phase. */
+.install-panel.card-glow {
+  border: none;
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-glow);
+  background: var(--panel);
 }
 
 .install-grid {
@@ -883,10 +1059,28 @@ input[type="number"] {
    fields were visible (e.g. hiding Server URL in Uninstall mode changed
    how the leftover height split between the two rows, bunching WinRM
    user/password at different heights between Install and Uninstall).
-   Bundling all four into one nested grid, placed as a single item
+   Bundling all fields into one nested grid, placed as a single item
    spanning the same grid-row: 1 / span 2, means the outer grid only ever
    compares ONE height (this whole block's) against Targets' - never a
-   per-row tug-of-war between five independent items. */
+   per-row tug-of-war between independent items.
+
+   Both .install-right-fields (Windows) and .linux-install-right-fields
+   (Linux) flow their children naturally in DOM order (2 columns, no
+   per-field position class) rather than assigning each field a fixed
+   grid-column/grid-row. Windows used to do the latter - a rigid 5-cell
+   grid sized for exactly Action/Server URL/WinRM user/WinRM password +
+   2 checkbox rows + submit - until adding one more field (Ingestion
+   token) had nowhere to go and landed in an unstyled implicit row below
+   the submit button. Linux hit the identical problem earlier for a
+   different reason (it has 9 fields, not 4, so several landed in the
+   SAME cell and rendered as overlapping text/inputs - a real bug live-
+   reported by a user, invisible to every prior DOM-state check in this
+   project's own testing since the elements were all correctly present
+   and toggled, just visually stacked). Natural flow fixes both: a field
+   just takes the next of 2 columns in DOM order, so it can't collide or
+   get orphaned regardless of field count, and a .hidden field is removed
+   from grid flow entirely, leaving no gap. */
+.linux-install-right-fields,
 .install-right-fields {
   grid-column: 3 / span 2;
   grid-row: 1 / span 2;
@@ -896,76 +1090,8 @@ input[type="number"] {
   align-self: start;
 }
 
-.install-action-field {
-  grid-column: 1;
-  grid-row: 1;
-}
-
-.install-server-field {
-  grid-column: 2;
-  grid-row: 1;
-}
-
-.install-user-field {
-  grid-column: 1;
-  grid-row: 2;
-}
-
-.install-password-field {
-  grid-column: 2;
-  grid-row: 2;
-}
-
-/* Force reinstall/Add to TrustedHosts/Install client used to sit in the
-   outer grid's row 3, far below Action - moved into .install-right-fields
-   itself (rows 4-5) so the whole set of install controls reads as one
-   cluster next to Action, instead of split across two grid areas. */
-.install-use-ad-field {
-  grid-column: 1 / span 2;
-  grid-row: 3;
-}
-
-.install-force-field {
-  grid-column: 1;
-  grid-row: 4;
-}
-
-.install-trusted-field {
-  grid-column: 2;
-  grid-row: 4;
-}
-
-.install-submit-field {
-  grid-column: 1 / span 2;
-  grid-row: 5;
-  justify-self: end;
-}
-
-/* Linux Client actions has more fields (9) than .install-right-fields'
-   explicit 5-row grid was ever designed for (Windows: Action/ServerUrl/
-   User/Password + 2 checkbox rows + submit). Reusing that grid's
-   fixed-position classes (.install-action-field/.install-server-field/
-   .install-user-field/.install-password-field) on more fields than it has
-   distinct cells for made several land in the SAME cell, rendering as
-   overlapping text/inputs - a real bug live-reported by a user, invisible
-   to every prior DOM-state (classList/hidden) check in this project's own
-   testing, since the elements were all correctly present and toggled,
-   just visually stacked on top of each other.
-   This container flows its children naturally instead (no per-field
-   position class needed) - each field just takes the next of 2 columns
-   in DOM order, so it can't collide regardless of field count, and a
-   .hidden field (auth-mode toggling) is removed from grid flow entirely,
-   leaving no gap. */
-.linux-install-right-fields {
-  grid-column: 3 / span 2;
-  grid-row: 1 / span 2;
-  display: grid;
-  grid-template-columns: minmax(180px, 0.8fr) minmax(140px, 0.6fr);
-  gap: var(--space-md);
-  align-self: start;
-}
-
-.linux-install-right-fields .install-submit-field {
+.linux-install-right-fields .install-submit-field,
+.install-right-fields .install-submit-field {
   grid-column: 1 / span 2;
   grid-row: auto;
   justify-self: end;
@@ -1043,13 +1169,7 @@ input[type="number"] {
 }
 
 .install-history {
-  margin-top: 18px;
-}
-
-.install-history h2 {
-  margin: 0 0 10px;
-  color: var(--heading);
-  font-size: var(--font-size-lg);
+  margin-top: 0;
 }
 
 .install-history-results {
@@ -1099,14 +1219,25 @@ pre {
   white-space: nowrap;
 }
 
-/* Which platform a computer in an expanded Hardware group came from. Same
-   shape as .usb-badge (the established inline-badge pattern in this file),
-   in neutral theme colors rather than the USB warning palette - it is
-   metadata, not an alert. Selector is deliberately more specific than
-   `.computer-list small { display: block }` above, which would otherwise
-   win and push the tag onto its own line. */
-.computer-list small.platform-tag {
+/* Which platform a computer came from: an expanded Hardware group's
+   computer list, and the merged Clients table's Computer cell. Same shape
+   as .usb-badge (the established inline-badge pattern in this file), in
+   neutral theme colors rather than the USB warning palette - it is
+   metadata, not an alert.
+   Two selectors, because two different rules would otherwise force the tag
+   onto its own line: `.computer-list small { display: block }` (0,1,1) in
+   an expanded hardware row, and `td small { display: block }` (0,0,2) in a
+   table cell. The bare `.platform-tag` (0,1,0) beats `td small` on its own,
+   but loses to `.computer-list small`, so the ancestor-scoped selector has
+   to stay alongside it.
+   margin-top: 0 is explicit because `td small` also sets margin-top: 4px
+   and applies in BOTH places (a computer list lives inside a <td> too),
+   nudging the tag below the .usb-badge next to it - a <span>, which never
+   picked that rule up. */
+.computer-list small.platform-tag,
+.platform-tag {
   display: inline-block;
+  margin-top: 0;
   margin-left: 6px;
   padding: 1px 6px;
   border-radius: 4px;
@@ -1568,6 +1699,19 @@ th.sort-desc::after {
   font-weight: 650;
 }
 
+/* Marks a platform-level heading ("Windows Client updates") as visually
+   senior to the .settings-block-title sub-headings stacked under it
+   ("WinRM credentials", "Schedule") - both used the same class and the
+   same weight before this rule existed (Phase 2's final review logged this
+   as a deferred Minor finding). Same font-size/weight as
+   .settings-block-title deliberately - the distinction is the accent
+   underline, not a size jump, to avoid competing with Dashboard's own
+   larger headings elsewhere on the page. */
+.platform-section-title {
+  padding-bottom: var(--space-sm);
+  border-bottom: 2px solid var(--accent);
+}
+
 .cert-history-heading {
   margin: 24px 0 10px;
   color: var(--heading);
@@ -1648,67 +1792,6 @@ th.sort-desc::after {
 }
 
 @media (max-width: 900px) {
-  .app-shell {
-    flex-direction: column;
-  }
-
-  .sidebar {
-    width: 100%;
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-xs) var(--space-md);
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-    position: static;
-    height: auto;
-    overflow-y: visible;
-  }
-
-  .sidebar-header {
-    margin-bottom: 0;
-    padding: 0 var(--space-md) 0 0;
-    flex-basis: 100%;
-  }
-
-  .nav-tree {
-    flex-direction: row;
-    flex-wrap: wrap;
-  }
-
-  .nav-tree > * + * {
-    padding-top: 0;
-    border-top: 0;
-  }
-
-  .nav-group {
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: center;
-    margin-bottom: 0;
-  }
-
-  .nav-group-title {
-    padding: var(--space-xs) var(--space-sm) var(--space-xs) 0;
-  }
-
-  .nav-item {
-    padding: var(--space-sm) var(--space-md);
-    border-left: 0;
-    border-bottom: 3px solid transparent;
-    border-radius: 6px 6px 0 0;
-  }
-
-  .nav-item.active {
-    border-left-color: transparent;
-    border-bottom-color: var(--accent);
-  }
-
-  .nav-item-root {
-    margin: 0;
-    padding: var(--space-sm) var(--space-md);
-  }
-
   .topbar {
     align-items: stretch;
     flex-direction: column;
@@ -1718,6 +1801,11 @@ th.sort-desc::after {
   input[type="search"] {
     width: 100%;
     min-width: 0;
+  }
+
+  .os-filter {
+    align-self: flex-start;
+    margin-top: var(--space-sm);
   }
 
   main {

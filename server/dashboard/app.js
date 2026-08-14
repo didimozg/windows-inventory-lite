@@ -1,16 +1,16 @@
 (function () {
   const inventoryViews = ['clients', 'software', 'hardware'];
-  const linuxInventoryViews = ['linux', 'linuxServices'];
+  const linuxInventoryViews = ['linuxServices'];
   // Views whose rendered content depends on state.linuxClients, so the 30s
   // poll keeps Linux data fresh while one of them is open. Deliberately a
   // separate list from linuxInventoryViews, which drives the search box and
-  // the "Generated:" line and must stay limited to the Linux inventory
-  // tables themselves - the Dashboard reads Linux data but is not an
-  // inventory view, and the merged Hardware view is already covered for
-  // search purposes by inventoryViews.
-  const linuxDataViews = ['linux', 'linuxServices', 'dashboard', 'hardware'];
+  // the "Generated:" line and must stay limited to the Linux-only inventory
+  // table - the Dashboard reads Linux data but is not an inventory view,
+  // and the merged Clients/Hardware views are already covered for search
+  // purposes by inventoryViews.
+  const linuxDataViews = ['clients', 'linuxServices', 'dashboard', 'hardware'];
   const state = {
-    clients: [], linuxClients: [], view: getInitialView(), installJobId: null, installPollTimer: null, installJobs: [],
+    clients: [], linuxClients: [], ...getInitialViewState(), installJobId: null, installPollTimer: null, installJobs: [],
     updateJobId: null, updatePollTimer: null,
     // Baselined from the first client-updates poll response, then compared
     // on every later one - lets an open dashboard tab pick up a scheduled
@@ -22,7 +22,10 @@
     staleHours: 48,
     licenses: [], editingLicenseId: null, licenseFormComputers: [],
     sort: {
-      clients: { key: 'computerName', dir: 1 },
+      // 'name', not 'computerName': the Clients table is cross-platform
+      // now, and its Computer column shows clientDisplayName() - Windows'
+      // computerName or Linux' hostname. See allClientSortValue.
+      clients: { key: 'name', dir: 1 },
       software: { key: 'name', dir: 1 },
       // hwCpu/hwDisk/hwRam drive the single cross-platform Hardware view -
       // these were always per-table, never per-platform, so the merged view
@@ -31,17 +34,16 @@
       hwDisk: { key: 'model', dir: 1 },
       hwRam: { key: 'totalMb', dir: -1 },
       licenses: { key: 'name', dir: 1 },
-      linuxClients: { key: 'hostname', dir: 1 },
       linuxServices: { key: 'name', dir: 1 }
     },
-    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxClients: 1, linuxServices: 1 },
+    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxServices: 1 },
     // clients/software start at a reasonable fallback and are corrected to
     // the real viewport-fitting value the first time their table becomes
     // visible (see computeLiveRowsPerPage/recalculateActivePagination).
     // hwCpu/hwDisk/hwRam are fixed (see HW_PAGE_SIZE) - the three Hardware
     // sub-tables render stacked in one view and are rarely large enough to
     // need viewport-adaptive sizing.
-    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20, linuxClients: 20, linuxServices: 20 },
+    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20, linuxServices: 20 },
     // Prefixed keys ('client:'/'software:'/'hw:' + id) so the three
     // separate data-*-details attribute namespaces can't collide in one
     // Set. Drives each render function's initial hidden/visible class for
@@ -49,7 +51,12 @@
     // "expanded" state alive across any re-render (pager Next/Prev, a
     // live-resize page-size correction, or a background data poll), not
     // just the one that happened to be showing when the row was expanded.
-    expandedDetails: new Set()
+    expandedDetails: new Set(),
+    // Keyed per consuming view, same convention as state.sort/state.page/
+    // state.pageSize. 'all' | 'windows' | 'linux'. The keys are literally
+    // view names, so renderOsFilterActive can repaint the one shared pill
+    // from state.osFilter[state.view] when the user switches pages.
+    osFilter: { hardware: 'all', clients: 'all' }
   };
 
   const MIN_PAGE_SIZE = 5;
@@ -115,49 +122,95 @@
     });
   }
 
-  function getInitialView() {
+  // Returns { view, subview }. Deploy and Settings are consolidated
+  // destinations (see docs/superpowers/specs/2026-08-12-dashboard-ui-redesign-design.md,
+  // decisions 6-7) - every hash that used to point at one of the 5 old
+  // Installation pages or 3 old Settings pages now resolves to 'deploy' or
+  // 'settings' plus a subview. Old hashes are kept as aliases (matching this
+  // function's existing #linux-hardware precedent) so bookmarks/links still
+  // land correctly; deploy-*/settings-* are the new canonical hashes setView
+  // itself produces going forward.
+  function getInitialViewState() {
     const hash = window.location.hash.replace(/^#/, '').toLowerCase();
-    if (hash === 'clients') return 'clients';
-    if (hash === 'software') return 'software';
-    // #linux-hardware is kept as an alias so existing bookmarks/links to the
-    // retired Linux Hardware tab land on the merged view instead of silently
-    // falling through to the Dashboard.
-    if (hash === 'hardware' || hash === 'linux-hardware') return 'hardware';
-    if (hash === 'client-actions' || hash === 'actions' || hash === 'install') return 'install';
-    if (hash === 'client-package' || hash === 'package') return 'package';
-    if (hash === 'client-updates' || hash === 'updates') return 'updates';
-    if (hash === 'general') return 'general';
-    if (hash === 'certificate') return 'certificate';
-    if (hash === 'licenses') return 'licenses';
-    if (hash === 'linux-clients' || hash === 'linux') return 'linux';
-    if (hash === 'linux-services') return 'linuxServices';
-    if (hash === 'admin-password' || hash === 'admin') return 'admin';
-    if (hash === 'linux-client-actions') return 'linuxInstall';
-    if (hash === 'linux-client-updates') return 'linuxUpdates';
-    return 'dashboard';
+    if (hash === 'clients') return { view: 'clients', subview: null };
+    if (hash === 'software') return { view: 'software', subview: null };
+    if (hash === 'hardware' || hash === 'linux-hardware') return { view: 'hardware', subview: null };
+    if (hash === 'licenses') return { view: 'licenses', subview: null };
+    // #linux-clients / #linux are kept as aliases of the merged Clients
+    // page (same backward-compat pattern as #linux-hardware above and
+    // #certificate below) - old bookmarks land on Clients, unfiltered.
+    if (hash === 'linux-clients' || hash === 'linux') return { view: 'clients', subview: null };
+    if (hash === 'linux-services') return { view: 'linuxServices', subview: null };
+    if (hash === 'deploy' || hash === 'deploy-actions' || hash === 'client-actions' || hash === 'actions' || hash === 'install' || hash === 'linux-client-actions') return { view: 'deploy', subview: 'actions' };
+    if (hash === 'deploy-updates' || hash === 'client-updates' || hash === 'updates' || hash === 'linux-client-updates') return { view: 'deploy', subview: 'updates' };
+    if (hash === 'deploy-package' || hash === 'client-package' || hash === 'package') return { view: 'deploy', subview: 'package' };
+    if (hash === 'settings' || hash === 'settings-general' || hash === 'general') return { view: 'settings', subview: 'general' };
+    if (hash === 'settings-certificate' || hash === 'certificate') return { view: 'settings', subview: 'certificate' };
+    if (hash === 'settings-admin-password' || hash === 'admin-password' || hash === 'admin') return { view: 'settings', subview: 'adminPassword' };
+    return { view: 'dashboard', subview: null };
   }
 
-  function setView(view) {
+  // View -> canonical hash. Deploy/Settings map through their subview;
+  // linuxServices keeps its existing multi-word hash; everything else's
+  // hash equals its view name unchanged (the merged Clients page falls
+  // through to the default and produces 'clients').
+  function computeHashForView(view, subview) {
+    if (view === 'deploy') return subview === 'updates' ? 'deploy-updates' : subview === 'package' ? 'deploy-package' : 'deploy-actions';
+    if (view === 'settings') return subview === 'certificate' ? 'settings-certificate' : subview === 'adminPassword' ? 'settings-admin-password' : 'settings-general';
+    if (view === 'linuxServices') return 'linux-services';
+    return view;
+  }
+
+  function loadDeploySubviewData(subview) {
+    if (subview === 'actions') loadInstallHistory();
+    if (subview === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
+    if (subview === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
+    // Both platforms' Actions/Updates content is stacked on one subview now
+    // (see the design spec's Phase 2 scope note - no OS filter yet), so a
+    // single subview load must trigger both platforms' own loaders.
+    if (subview === 'actions') { loadLinuxInstallHistory(); loadLinuxInstallPreferredSubnet(); }
+    if (subview === 'updates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
+  }
+
+  function loadSettingsSubviewData(subview) {
+    if (subview === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
+    if (subview === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
+    if (subview === 'adminPassword') loadAdminPasswordStatus();
+  }
+
+  function setView(view, subview) {
     state.view = view;
-    const hash = view === 'install' ? 'client-actions' : view === 'linuxInstall' ? 'linux-client-actions' : view === 'linuxUpdates' ? 'linux-client-updates' : view === 'package' ? 'client-package' : view === 'updates' ? 'client-updates' : view === 'admin' ? 'admin-password' : view === 'linux' ? 'linux-clients' : view === 'linuxServices' ? 'linux-services' : view;
+    state.subview = subview || null;
+    const hash = computeHashForView(view, subview);
     if (window.location.hash.replace(/^#/, '') !== hash) {
       window.location.hash = hash;
       return;
     }
     render();
-    if (view === 'install') loadInstallHistory();
-    if (view === 'linuxInstall') { loadLinuxInstallHistory(); loadLinuxInstallPreferredSubnet(); }
-    if (view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
-    if (view === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
-    if (view === 'updates') loadClientUpdates();
-    if (view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
-    if (view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
+    if (view === 'deploy') loadDeploySubviewData(state.subview);
+    if (view === 'settings') loadSettingsSubviewData(state.subview);
     if (view === 'licenses') loadLicenses();
-    // 'hardware' is in this list because the merged Hardware view reads Linux
-    // data too - opening the tab re-fetches it rather than waiting up to 30s
-    // for the next poll tick.
-    if (view === 'linux' || view === 'linuxServices' || view === 'hardware') loadLinuxClients();
-    if (view === 'admin') loadAdminPasswordStatus();
+    // 'clients' and 'hardware' are in this list because both merged views
+    // read Linux data too - opening either tab re-fetches it rather than
+    // waiting up to 30s for the next poll tick.
+    if (view === 'clients' || view === 'linuxServices' || view === 'hardware') loadLinuxClients();
+  }
+
+  function renderSubtabStrips() {
+    byId('deploySubtabs').classList.toggle('hidden', state.view !== 'deploy');
+    byId('settingsSubtabs').classList.toggle('hidden', state.view !== 'settings');
+    byId('deploySubtabActions').classList.toggle('active', state.view === 'deploy' && state.subview === 'actions');
+    byId('deploySubtabActions').setAttribute('aria-selected', String(state.view === 'deploy' && state.subview === 'actions'));
+    byId('deploySubtabUpdates').classList.toggle('active', state.view === 'deploy' && state.subview === 'updates');
+    byId('deploySubtabUpdates').setAttribute('aria-selected', String(state.view === 'deploy' && state.subview === 'updates'));
+    byId('deploySubtabPackage').classList.toggle('active', state.view === 'deploy' && state.subview === 'package');
+    byId('deploySubtabPackage').setAttribute('aria-selected', String(state.view === 'deploy' && state.subview === 'package'));
+    byId('settingsSubtabGeneral').classList.toggle('active', state.view === 'settings' && state.subview === 'general');
+    byId('settingsSubtabGeneral').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'general'));
+    byId('settingsSubtabCertificate').classList.toggle('active', state.view === 'settings' && state.subview === 'certificate');
+    byId('settingsSubtabCertificate').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'certificate'));
+    byId('settingsSubtabAdminPassword').classList.toggle('active', state.view === 'settings' && state.subview === 'adminPassword');
+    byId('settingsSubtabAdminPassword').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'adminPassword'));
   }
 
   function text(value) {
@@ -253,14 +306,14 @@
         return response.json();
       })
       .then(data => {
-        state.linuxClients = data.clients || [];
+        state.linuxClients = stampClientPlatform(data.clients || [], 'linux');
         state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
-        renderLinuxClientsTable(state.linuxClients);
+        renderFilteredClientsTable();
         renderLinuxServicesTable(state.linuxClients);
         // Both of these read Windows and Linux data together, so they have
         // to be redrawn whenever the Linux half lands - including on the
         // unconditional page-load call, which can resolve after render().
-        renderHardwarePage(getAllClients());
+        renderFilteredHardwarePage();
         renderDashboardTiles();
       })
       .catch(() => {});
@@ -305,108 +358,15 @@
         // counting a deleted client until the next 30s poll, and only then if the
         // active view happened to be in linuxDataViews. This is the same set
         // loadLinuxClients re-renders after every fetch.
-        renderLinuxClientsTable(state.linuxClients);
+        renderFilteredClientsTable();
         renderLinuxServicesTable(state.linuxClients);
-        renderHardwarePage(getAllClients());
+        renderFilteredHardwarePage();
         renderDashboardTiles();
         byId('generatedAt').textContent = `Updated: ${formatDateTime(new Date().toISOString())}`;
       })
       .catch(error => {
         window.alert(`Failed to delete ${hostname}: ${error.message}`);
       });
-  }
-
-  // Mirrors renderTable (Windows Clients) - pagination, a stable
-  // safeId(hostname)-based row id (NOT the old positional linux-${index},
-  // which would silently misattribute an expanded row's state to a
-  // different client after any sort or data change), row-expand with a
-  // CPU/RAM/Disks summary plus a nested services table (name/version only
-  // - Linux services carry no publisher or install date), a Delete
-  // button, and the same in-progress-edit-survives-a-rerender handling
-  // renderTable already has for the Windows Description editor.
-  function renderLinuxClientsTable(clients) {
-    const tbody = byId('linuxClientsBody');
-    if (!tbody) return;
-
-    const activeElement = document.activeElement;
-    const editingClientId = activeElement && activeElement.matches('.description-edit-input') && activeElement.dataset.platform === 'linux' ? activeElement.dataset.descriptionClient : null;
-    const editingValue = editingClientId ? activeElement.value : null;
-    const editingSelectionStart = editingClientId ? activeElement.selectionStart : null;
-
-    renderSortHeaders();
-    byId('linuxDescriptionColumnHeader').textContent = state.adDescriptionSyncEnabled ? 'AD Description' : 'Description';
-
-    const query = byId('searchInput').value.trim();
-    const { key: sortKey, dir: sortDir } = state.sort.linuxClients;
-    const filtered = applySort(clients.filter(client => linuxClientMatches(client, query)), c => linuxClientSortValue(c, sortKey), sortDir);
-    const { items: pageItems, page, totalPages } = paginate(filtered, state.page.linuxClients, state.pageSize.linuxClients);
-    state.page.linuxClients = page;
-
-    const rows = pageItems.map(client => {
-      const clientId = safeId(client.hostname || '');
-      const descriptionCell = state.adDescriptionSyncEnabled
-        ? formatLinuxAdDescription(client)
-        : formatLinuxDescriptionEditor(client, clientId);
-      const osName = (client.os && client.os.prettyName) || '';
-      const services = Array.isArray(client.services) ? client.services : [];
-      const serviceCount = services.length;
-      const detailsHidden = state.expandedDetails.has('linux-client:' + clientId) ? '' : 'hidden';
-
-      const serviceRows = services.map(item => `<tr>
-        <td>${escapeHtml(item.name)}</td>
-        <td>${escapeHtml(item.unit || '')}</td>
-        <td>${escapeHtml(item.version)}</td>
-        <td>${serviceActiveDot(item.active !== false)}</td>
-      </tr>`).join('');
-
-      const cpu = client.cpu || {};
-      const cpuText = cpu.model ? `${escapeHtml(cpu.model)}${cpu.cores ? `, ${Number(cpu.cores) || 0} cores` : ''}` : 'Unknown';
-      const ramGb = client.ramTotalMb
-        ? (client.ramTotalMb >= 1024 ? `${Math.round(client.ramTotalMb / 1024)} GB` : `${Number(client.ramTotalMb) || 0} MB`)
-        : 'Unknown';
-      const disksSummary = (client.disks || []).map(d => {
-        const size = d.sizeGb ? ` ${d.sizeGb} GB` : '';
-        return `${escapeHtml(d.type)}${escapeHtml(size)} <small>${escapeHtml(d.model)}</small>`;
-      }).join('<br>') || 'Unknown';
-
-      return `<tr>
-        <td><button class="link-button" type="button" data-linux-client="${clientId}">${escapeHtml(client.hostname)}</button></td>
-        <td>${escapeHtml(client.clientVersion)}</td>
-        <td>${escapeHtml(osName)}</td>
-        <td>${formatIpAddressesHtml(client)}</td>
-        <td>${serviceCount}</td>
-        <td>${descriptionCell}</td>
-        <td>${escapeHtml(formatDateTime(client.collectedAt || client.sourceUpdatedAt))}${client.servicesStatusCollectedAt ? `<small>Services checked: ${escapeHtml(formatDateTime(client.servicesStatusCollectedAt))}</small>` : ''}</td>
-        <td><button class="danger-button-ghost" type="button" data-delete-linux-client="${escapeHtml(client.hostname)}">Delete</button></td>
-      </tr>
-      <tr class="details-row ${detailsHidden}" data-linux-client-details="${clientId}">
-        <td colspan="8">
-          <div class="details">
-            <div class="hw-summary">
-              <div><strong>CPU</strong><span>${cpuText}</span></div>
-              <div><strong>RAM</strong><span>${ramGb}</span></div>
-              <div><strong>Storage</strong><span>${disksSummary}</span></div>
-            </div>
-            <h2>${escapeHtml(client.hostname)} services</h2>
-            <table class="nested-table">
-              <thead><tr><th>Name</th><th>Unit</th><th>Version</th><th>Active</th></tr></thead>
-              <tbody>${serviceRows || '<tr><td colspan="4" class="empty">No service records.</td></tr>'}</tbody>
-            </table>
-          </div>
-        </td>
-      </tr>`;
-    });
-
-    tbody.innerHTML = rows.join('') || '<tr><td colspan="8" class="empty">No matching Linux clients.</td></tr>';
-    if (editingClientId) {
-      const restoredInput = document.querySelector(`.description-edit-input[data-description-client="${editingClientId}"][data-platform="linux"]`);
-      if (restoredInput) {
-        restoredInput.value = editingValue;
-        restoredInput.focus();
-        restoredInput.setSelectionRange(editingSelectionStart, editingSelectionStart);
-      }
-    }
-    renderPager('linuxClientsPager', 'linuxClients', page, totalPages, () => renderLinuxClientsTable(state.linuxClients));
   }
 
   function formatDateTime(value) {
@@ -495,6 +455,15 @@
       disks
     ].join(' ').toLowerCase();
     return haystack.indexOf(query.toLowerCase()) !== -1;
+  }
+
+  // Matches a client against the merged Clients table's search box,
+  // delegating to the existing per-platform matcher since each already
+  // knows which fields that platform actually reports (Windows has
+  // domain/office/publisher fields Linux has no equivalent for; Linux
+  // searches service names where Windows searches software names).
+  function allClientMatches(client, query) {
+    return clientPlatformLabel(client) === 'Windows' ? clientMatches(client, query) : linuxClientMatches(client, query);
   }
 
   function safeId(value) {
@@ -596,6 +565,28 @@
       case 'clientVersion': return client.clientVersion || '';
       case 'os': return ((client.os && client.os.prettyName) || '').toLowerCase();
       case 'softwareCount': return Array.isArray(client.services) ? client.services.length : 0;
+      case 'collectedAt': return new Date(client.collectedAt || client.sourceUpdatedAt || 0).getTime();
+      default: return '';
+    }
+  }
+
+  // Sort value for the merged Clients table. Delegates to the existing
+  // per-platform sort-value functions (each already knows that platform's
+  // field names), so platform-specific logic isn't duplicated. The keys
+  // here are the data-sort-key values on #clientsView's headers and must
+  // stay in sync with them. 'office' and 'activation' have no Linux concept
+  // - returning null puts Linux rows at the end regardless of direction,
+  // which applySort already does for null (see its av == null / bv == null
+  // handling, no change needed there).
+  function allClientSortValue(client, key) {
+    const isWindows = clientPlatformLabel(client) === 'Windows';
+    switch (key) {
+      case 'name': return isWindows ? clientSortValue(client, 'computerName') : linuxClientSortValue(client, 'hostname');
+      case 'clientVersion': return client.clientVersion || '';
+      case 'os': return isWindows ? clientSortValue(client, 'os') : linuxClientSortValue(client, 'os');
+      case 'office': return isWindows ? clientSortValue(client, 'office') : null;
+      case 'activation': return isWindows ? clientSortValue(client, 'windowsActivated') : null;
+      case 'items': return isWindows ? clientSortValue(client, 'softwareCount') : linuxClientSortValue(client, 'softwareCount');
       case 'collectedAt': return new Date(client.collectedAt || client.sourceUpdatedAt || 0).getTime();
       default: return '';
     }
@@ -706,12 +697,24 @@
     return new Date().toISOString().slice(0, 10);
   }
 
+  // One CSV for the merged Clients table, replacing the former
+  // exportClients/exportLinuxClients pair. Columns are the union of the two
+  // old sets plus a Platform column (a mixed file without one is
+  // ambiguous); a column with no counterpart on a row's platform exports as
+  // an empty cell, this file's existing convention for "not applicable".
+  // The OS filter is applied here as well as on screen - exporting the full
+  // fleet while the table shows one platform would silently return
+  // different data than what was asked for.
   function exportClients() {
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.clients;
-    const items = applySort(state.clients.filter(c => clientMatches(c, query)), c => clientSortValue(c, sortKey), sortDir);
-    const rows = [['Computer', 'Domain', 'IP Addresses', 'Client Version', 'OS', 'OS Version', 'Build', 'Office', 'Office Version', 'Windows Activated', 'Office Activated', 'Software Count', 'Collected', 'Stale', 'CPU', 'RAM', 'Disks', 'USB Storage', 'AD Description']].concat(
+    const items = applySort(
+      filterClientsByOs(getAllClients(), state.osFilter.clients).filter(c => allClientMatches(c, query)),
+      c => allClientSortValue(c, sortKey), sortDir
+    );
+    const rows = [['Computer', 'Platform', 'Domain', 'IP Addresses', 'Client Version', 'OS', 'OS Version', 'Build', 'Office', 'Office Version', 'Windows Activated', 'Office Activated', 'Software/Services', 'Collected', 'Stale', 'CPU', 'RAM', 'Disks', 'USB Storage', 'AD Description']].concat(
       items.map(c => {
+        const isWindows = clientPlatformLabel(c) === 'Windows';
         const os = c.os || {};
         const office = c.office || {};
         const activation = c.activation || {};
@@ -721,40 +724,26 @@
         const ramText = c.ramTotalMb ? (c.ramTotalMb >= 1024 ? Math.round(c.ramTotalMb / 1024) + ' GB' : c.ramTotalMb + ' MB') : '';
         const disksText = (c.disks || []).map(d => (d.type || '') + ' ' + (d.sizeGb ? d.sizeGb + ' GB' : '') + ' ' + (d.model || '')).join(', ').trim();
         return [
-          c.computerName || '', c.domain || '', formatIpAddresses(c), c.clientVersion ? 'v' + c.clientVersion : '',
-          os.caption || '', os.version || '', os.buildNumber || '',
-          office.name || '', office.version || '',
-          winAct.activated ? 'Yes' : 'No', officeAct.activated ? 'Yes' : 'No',
-          (c.software || []).length, formatDateTime(c.collectedAt || c.sourceUpdatedAt),
-          isStale(c) ? 'Yes' : 'No', cpu.name || '', ramText, disksText,
-          c.hasUsbStorage ? 'Yes' : 'No',
+          (isWindows ? c.computerName : c.hostname) || '', clientPlatformLabel(c),
+          isWindows ? (c.domain || '') : '', formatIpAddresses(c),
+          c.clientVersion ? 'v' + c.clientVersion : '',
+          (isWindows ? os.caption : os.prettyName) || '',
+          isWindows ? (os.version || '') : '',
+          isWindows ? (os.buildNumber || '') : '',
+          isWindows ? (office.name || '') : '',
+          isWindows ? (office.version || '') : '',
+          isWindows ? (winAct.activated ? 'Yes' : 'No') : '',
+          isWindows ? (officeAct.activated ? 'Yes' : 'No') : '',
+          isWindows ? (c.software || []).length : (Array.isArray(c.services) ? c.services.length : 0),
+          formatDateTime(c.collectedAt || c.sourceUpdatedAt),
+          isStale(c) ? 'Yes' : 'No',
+          (isWindows ? cpu.name : cpu.model) || '', ramText, disksText,
+          isWindows ? (c.hasUsbStorage ? 'Yes' : 'No') : '',
           state.adDescriptionSyncEnabled ? (c.adSyncStatus === 'not-found' ? 'Not found in AD' : c.adSyncStatus === 'error' ? 'AD unreachable' : (c.adDescription || '')) : (c.adDescription || '')
         ];
       })
     );
     downloadCsv('clients-' + csvDate() + '.csv', rows);
-  }
-
-  function exportLinuxClients() {
-    const query = byId('searchInput').value.trim();
-    const { key: sortKey, dir: sortDir } = state.sort.linuxClients;
-    const items = applySort(state.linuxClients.filter(c => linuxClientMatches(c, query)), c => linuxClientSortValue(c, sortKey), sortDir);
-    const rows = [['Computer', 'IP Addresses', 'Client Version', 'OS', 'Service Count', 'CPU', 'RAM', 'Disks', 'Collected', 'AD Description']].concat(
-      items.map(c => {
-        const os = c.os || {};
-        const cpu = c.cpu || {};
-        const ramText = c.ramTotalMb ? (c.ramTotalMb >= 1024 ? Math.round(c.ramTotalMb / 1024) + ' GB' : c.ramTotalMb + ' MB') : '';
-        const disksText = (c.disks || []).map(d => (d.type || '') + ' ' + (d.sizeGb ? d.sizeGb + ' GB' : '') + ' ' + (d.model || '')).join(', ').trim();
-        return [
-          c.hostname || '', formatIpAddresses(c), c.clientVersion || '',
-          os.prettyName || '', Array.isArray(c.services) ? c.services.length : 0,
-          cpu.model || '', ramText, disksText,
-          formatDateTime(c.collectedAt || c.sourceUpdatedAt),
-          state.adDescriptionSyncEnabled ? (c.adSyncStatus === 'not-found' ? 'Not found in AD' : c.adSyncStatus === 'error' ? 'AD unreachable' : (c.adDescription || '')) : (c.adDescription || '')
-        ];
-      })
-    );
-    downloadCsv('linux-clients-' + csvDate() + '.csv', rows);
   }
 
   function exportLinuxServices() {
@@ -786,7 +775,7 @@
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.hwCpu;
     const groups = applySort(
-      getCpuGroups(getAllClients()).filter(g => hwMatches([g.name].concat(g.clients.map(c => clientDisplayName(c))).join(' '), query)),
+      getCpuGroups(filterClientsByOs(getAllClients(), state.osFilter.hardware)).filter(g => hwMatches([g.name].concat(g.clients.map(c => clientDisplayName(c))).join(' '), query)),
       g => cpuSortValue(g, sortKey), sortDir
     );
     const rows = [['Model', 'Machines', 'Computers']].concat(
@@ -799,7 +788,7 @@
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.hwDisk;
     const groups = applySort(
-      getDiskGroups(getAllClients()).filter(g => hwMatches([g.model, g.type].concat(g.clients.map(c => clientDisplayName(c))).join(' '), query)),
+      getDiskGroups(filterClientsByOs(getAllClients(), state.osFilter.hardware)).filter(g => hwMatches([g.model, g.type].concat(g.clients.map(c => clientDisplayName(c))).join(' '), query)),
       g => diskSortValue(g, sortKey), sortDir
     );
     const rows = [['Model', 'Type', 'Size GB', 'USB', 'Machines', 'Computers']].concat(
@@ -812,7 +801,7 @@
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.hwRam;
     const groups = applySort(
-      getRamGroups(getAllClients()).filter(g => hwMatches([g.totalGb].concat(g.clients.map(c => clientDisplayName(c))).join(' '), query)),
+      getRamGroups(filterClientsByOs(getAllClients(), state.osFilter.hardware)).filter(g => hwMatches([g.totalGb].concat(g.clients.map(c => clientDisplayName(c))).join(' '), query)),
       g => ramSortValue(g, sortKey), sortDir
     );
     const rows = [['Total RAM', 'Machines', 'Computers']].concat(
@@ -926,16 +915,45 @@
     });
   }
 
-  function renderInstallHistory() {
-    const jobs = state.installJobs || [];
-    if (jobs.length === 0) {
+  // The single cross-platform "Saved client action logs" card at the
+  // bottom of Deploy > Actions, replacing the former renderInstallHistory
+  // (Windows) / renderLinuxInstallHistory (Linux) pair. Each platform's
+  // own job list (state.installJobs / state.linuxInstallJobs, populated
+  // independently by loadInstallHistory/loadLinuxInstallHistory) is tagged
+  // with its platform and merged into one table, newest job first
+  // regardless of which platform it came from. Per-job detail viewing is
+  // unchanged - a row's Job button still calls the same
+  // pollInstallJob/pollLinuxInstallJob as before, which still write into
+  // that platform's own installStatus/linuxInstallStatus box in its own
+  // card above, not into this one.
+  function renderMergedInstallHistory() {
+    const entries = (state.installJobs || []).map(job => ({ job, platform: 'Windows' }))
+      .concat((state.linuxInstallJobs || []).map(job => ({ job, platform: 'Linux' })))
+      .sort((a, b) => new Date(b.job.createdAt) - new Date(a.job.createdAt));
+
+    const windowsError = state.installJobsError;
+    const linuxError = state.linuxInstallJobsError;
+
+    if (entries.length === 0) {
       byId('installHistory').classList.add('empty');
-      byId('installHistory').textContent = 'No saved client action logs.';
+      byId('installHistory').textContent = (windowsError || linuxError)
+        ? `Saved client action logs are not available: ${windowsError || linuxError}`
+        : 'No saved client action logs.';
       return;
     }
 
-    const rows = jobs.map(job => `<tr>
-      <td><button class="link-button" type="button" data-install-job="${escapeHtml(job.id)}">${escapeHtml(job.id)}</button></td>
+    // A load failure on one platform doesn't hide the other platform's
+    // working data - it did before this merge (each table clobbered its
+    // own content with an error string on failure) but that behavior only
+    // made sense when each platform had its own card. Surfaced as a note
+    // above the table instead.
+    const errorNotice = (windowsError || linuxError)
+      ? `<p class="cert-hint">${windowsError ? `Windows action logs unavailable: ${escapeHtml(windowsError)}` : ''}${windowsError && linuxError ? ' ' : ''}${linuxError ? `Linux action logs unavailable: ${escapeHtml(linuxError)}` : ''}</p>`
+      : '';
+
+    const rows = entries.map(({ job, platform }) => `<tr>
+      <td><small class="platform-tag">${escapeHtml(platform)}</small></td>
+      <td><button class="link-button" type="button" data-action-job="${escapeHtml(job.id)}" data-action-platform="${platform === 'Windows' ? 'windows' : 'linux'}">${escapeHtml(job.id)}</button></td>
       <td>${escapeHtml(job.action || 'install')}</td>
       <td>${escapeHtml(job.status)}</td>
       <td>${escapeHtml(formatDateTime(job.createdAt))}</td>
@@ -946,18 +964,25 @@
     </tr>`).join('');
 
     byId('installHistory').classList.remove('empty');
-    byId('installHistory').innerHTML = `<h2>Saved client action logs</h2>
+    byId('installHistory').innerHTML = `<h2 class="settings-block-title">Saved client action logs</h2>
+      ${errorNotice}
       <div class="install-history-results">
         <table class="nested-table install-history-table">
-          <thead><tr><th>Job</th><th>Action</th><th>Status</th><th>Started</th><th>Completed</th><th>Targets</th><th>Failed</th><th>Retention</th></tr></thead>
+          <thead><tr><th>Platform</th><th>Job</th><th>Action</th><th>Status</th><th>Started</th><th>Completed</th><th>Targets</th><th>Failed</th><th>Retention</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>`;
 
-    document.querySelectorAll('[data-install-job]').forEach(button => {
+    document.querySelectorAll('[data-action-job]').forEach(button => {
       button.addEventListener('click', () => {
-        state.installJobId = button.dataset.installJob;
-        pollInstallJob(state.installJobId);
+        const jobId = button.dataset.actionJob;
+        if (button.dataset.actionPlatform === 'linux') {
+          state.linuxInstallJobId = jobId;
+          pollLinuxInstallJob(jobId);
+        } else {
+          state.installJobId = jobId;
+          pollInstallJob(jobId);
+        }
       });
     });
   }
@@ -970,11 +995,12 @@
       })
       .then(data => {
         state.installJobs = data.jobs || [];
-        renderInstallHistory();
+        state.installJobsError = null;
+        renderMergedInstallHistory();
       })
       .catch(error => {
-        byId('installHistory').classList.add('empty');
-        byId('installHistory').textContent = `Saved client action logs are not available: ${error.message}`;
+        state.installJobsError = error.message;
+        renderMergedInstallHistory();
       });
   }
 
@@ -1060,11 +1086,12 @@
       })
       .then(data => {
         state.linuxInstallJobs = data.jobs || [];
-        renderLinuxInstallHistory();
+        state.linuxInstallJobsError = null;
+        renderMergedInstallHistory();
       })
       .catch(error => {
-        byId('linuxInstallHistory').classList.add('empty');
-        byId('linuxInstallHistory').textContent = `Saved client action logs are not available: ${error.message}`;
+        state.linuxInstallJobsError = error.message;
+        renderMergedInstallHistory();
       });
   }
 
@@ -1103,41 +1130,6 @@
       .finally(() => {
         byId('linuxInstallPreferredSubnetSaveButton').disabled = false;
       });
-  }
-
-  function renderLinuxInstallHistory() {
-    const jobs = state.linuxInstallJobs || [];
-    if (jobs.length === 0) {
-      byId('linuxInstallHistory').classList.add('empty');
-      byId('linuxInstallHistory').textContent = 'No saved client action logs.';
-      return;
-    }
-
-    const rows = jobs.map(job => `<tr>
-      <td><button class="link-button" type="button" data-linux-install-job="${escapeHtml(job.id)}">${escapeHtml(job.id)}</button></td>
-      <td>${escapeHtml(job.action || 'install')}</td>
-      <td>${escapeHtml(job.status)}</td>
-      <td>${escapeHtml(formatDateTime(job.createdAt))}</td>
-      <td>${escapeHtml(formatDateTime(job.completedAt))}</td>
-      <td>${escapeHtml(job.targetCount)}</td>
-      <td>${escapeHtml(job.failedCount)}</td>
-    </tr>`).join('');
-
-    byId('linuxInstallHistory').classList.remove('empty');
-    byId('linuxInstallHistory').innerHTML = `<h2>Saved client action logs</h2>
-      <div class="install-history-results">
-        <table class="nested-table install-history-table">
-          <thead><tr><th>Job</th><th>Action</th><th>Status</th><th>Started</th><th>Completed</th><th>Targets</th><th>Failed</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </div>`;
-
-    document.querySelectorAll('[data-linux-install-job]').forEach(button => {
-      button.addEventListener('click', () => {
-        state.linuxInstallJobId = button.dataset.linuxInstallJob;
-        pollLinuxInstallJob(state.linuxInstallJobId);
-      });
-    });
   }
 
   function startLinuxClientActionJob() {
@@ -1475,6 +1467,7 @@
     const action = byId('clientAction').value;
     const targets = byId('installTargets').value.trim();
     const serverUrl = byId('installServerUrl').value.trim();
+    const token = byId('installToken').value.trim();
     const useAdCredentials = byId('installUseAdCredentials').checked;
     const username = useAdCredentials ? '' : byId('installUsername').value.trim();
     const password = useAdCredentials ? '' : byId('installPassword').value;
@@ -1502,7 +1495,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets, serverUrl, username, password, force, addToTrustedHosts, useAdCredentials })
+      body: JSON.stringify({ targets, serverUrl, token, username, password, force, addToTrustedHosts, useAdCredentials })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
@@ -1548,7 +1541,7 @@
 
   function renderClientUpdates(data) {
     if (!data.packageAvailable) {
-      byId('updatesPackageStatus').textContent = 'No client package is available yet - build or deploy one on the Client package tab first.';
+      byId('updatesPackageStatus').textContent = 'No client package is available yet - build or deploy one on Deploy > Package first.';
       byId('updatesBody').innerHTML = '';
       updateUpdatesBadge(0);
       return;
@@ -1631,7 +1624,7 @@
 
   // Badge-only counterpart to handleClientUpdatesSummary (Windows), used by
   // the dedicated fetches in pollForUpdates() and the initial page load -
-  // updates just the sidebar count, without the full loadLinuxClientUpdates()/
+  // updates just the Manage dropdown count, without the full loadLinuxClientUpdates()/
   // renderLinuxClientUpdates() table rebuild.
   function handleLinuxClientUpdatesSummary(data) {
     updateLinuxUpdatesBadge(data.packageAvailable ? data.outdatedCount : 0);
@@ -1639,7 +1632,7 @@
 
   function renderLinuxClientUpdates(data) {
     if (!data.packageAvailable) {
-      byId('linuxUpdatesPackageStatus').textContent = 'No Linux client package is available yet - build one on the Client package tab first.';
+      byId('linuxUpdatesPackageStatus').textContent = 'No Linux client package is available yet - build one on Deploy > Package first.';
       byId('linuxUpdatesBody').innerHTML = '';
       updateLinuxUpdatesBadge(0);
       return;
@@ -1798,7 +1791,7 @@
     }
     if (scheduledJobId && scheduledJobId !== state.knownScheduledJobId) {
       state.knownScheduledJobId = scheduledJobId;
-      if (state.view === 'updates' && !state.updatePollTimer) {
+      if (state.view === 'deploy' && state.subview === 'updates' && !state.updatePollTimer) {
         state.updateJobId = scheduledJobId;
         pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', pruneCompletedUpdateTargets);
         state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', pruneCompletedUpdateTargets), 3000);
@@ -2728,7 +2721,7 @@
   // successful generation, so this sets the message classes directly.
   function regenerateIngestionToken() {
     const warningText = state.generalLoadedRequireIngestionToken !== false
-      ? 'Regenerate the ingestion token? Every already-installed client will stop reporting until it is reconfigured with the new token - and any not-yet-deployed GPO package still has the OLD token baked in, so it must be rebuilt from the Client package tab, not just redeployed. This cannot be undone.'
+      ? 'Regenerate the ingestion token? Every already-installed client will stop reporting until it is reconfigured with the new token - and any not-yet-deployed GPO package still has the OLD token baked in, so it must be rebuilt from Deploy > Package, not just redeployed. This cannot be undone.'
       : "Regenerate the ingestion token? Already-installed clients are unaffected right now since 'Require ingestion token' is off - but any package rebuilt after this uses the new value, and turning enforcement back on later will require every client to have this value. Continue?";
     const confirmed = window.confirm(warningText);
     if (!confirmed) return;
@@ -3174,13 +3167,30 @@
     return client.computerName || client.hostname || 'Unknown';
   }
 
-  // Which platform a client came from, derived from which name field it
-  // carries. Deliberately not a new explicit `platform` field on the client
-  // objects: computerName vs hostname already disambiguates the two sources
-  // cleanly, and adding a field would mean changing the C# and Go report
-  // shapes for a purely cosmetic dashboard label.
+  // Which platform a client came from. Reads client.platform, a field this
+  // dashboard stamps itself at load time (see stampClientPlatform below,
+  // called at every state.clients/state.linuxClients assignment) - never
+  // inferred from the client's own report body. Both Windows and Linux
+  // reports round-trip through an untyped dictionary server-side (see
+  // ReceiveInventory/ReceiveLinuxInventory in WindowsInventoryLiteServer.cs)
+  // with no schema enforcement, so a self-reported computerName is not a
+  // safe platform discriminator: this label decides which REST endpoint a
+  // row's Delete button and Description editor target
+  // (renderClientsTable), so inferring it from attacker-controllable data
+  // would let a spoofed Linux report's computerName field redirect an
+  // admin's Delete click at an unrelated Windows client's record.
   function clientPlatformLabel(client) {
-    return client.computerName ? 'Windows' : 'Linux';
+    return client.platform === 'linux' ? 'Linux' : 'Windows';
+  }
+
+  // Stamps every client in a freshly-fetched array with which endpoint it
+  // came from, overwriting any same-named key the report body itself might
+  // already carry (see clientPlatformLabel's comment for why that matters).
+  // Called at every state.clients/state.linuxClients assignment site so
+  // clientPlatformLabel never has to guess from client-reported fields.
+  function stampClientPlatform(clients, platform) {
+    clients.forEach(client => { client.platform = platform; });
+    return clients;
   }
 
   // Per-client dedupe key inside a hardware group. Platform-prefixed so a
@@ -3195,6 +3205,17 @@
   // state.clients.
   function getAllClients() {
     return state.clients.concat(state.linuxClients);
+  }
+
+  // Backs the .os-filter segmented-pill component: 'all' is a no-op
+  // passthrough, otherwise keeps only clients matching that platform.
+  // Consumers filter *before* any cross-platform grouping (e.g.
+  // getCpuGroups) so a group with zero remaining members after the filter
+  // never appears, with no changes needed inside the grouping functions.
+  function filterClientsByOs(clients, filter) {
+    if (filter === 'all') return clients;
+    const wantWindows = filter === 'windows';
+    return clients.filter(c => (clientPlatformLabel(c) === 'Windows') === wantWindows);
   }
 
   // Cross-platform CPU grouping. Windows reports the model as cpu.name,
@@ -3457,98 +3478,178 @@
     return `<span class="ram-modules-grid">${items.join('')}</span>`;
   }
 
-  function renderTable(clients) {
+  // The single cross-platform Clients table, replacing the former
+  // renderTable (Windows) / renderLinuxClientsTable (Linux) pair. Callers
+  // pass the merged, OS-filtered list (see renderFilteredClientsTable) and
+  // each row branches on its own client's platform for the cells whose
+  // shape genuinely differs: which expand/delete data-* attribute the row
+  // carries, whether a domain is shown, the OS sub-line, Office,
+  // Activation, the installed-software vs running-services count, which
+  // Description formatter applies, and which nested table the expanded row
+  // shows. Every per-platform data attribute each old table emitted is
+  // emitted here unchanged, so the existing delegated click handlers for
+  // [data-client]/[data-linux-client]/[data-delete-client]/
+  // [data-delete-linux-client] keep working with no changes at all.
+  function renderClientsTable(clients) {
     const activeElement = document.activeElement;
     const editingClientId = activeElement && activeElement.matches('.description-edit-input') ? activeElement.dataset.descriptionClient : null;
+    // Both platforms' Description inputs can now be in the same table, and
+    // safeId() of a Windows computerName equal to a Linux hostname yields
+    // the same id - so the platform is part of the restore lookup below,
+    // not just the id.
+    const editingIsLinux = editingClientId ? activeElement.dataset.platform === 'linux' : false;
     const editingValue = editingClientId ? activeElement.value : null;
     const editingSelectionStart = editingClientId ? activeElement.selectionStart : null;
+
+    // Also called by render(), but this table is now re-rendered outside
+    // the render() pipeline too (loadLinuxClients' poll path, the pager,
+    // the OS filter) - same reason the retired renderLinuxClientsTable
+    // called it.
+    renderSortHeaders();
+    byId('descriptionColumnHeader').textContent = state.adDescriptionSyncEnabled ? 'AD Description' : 'Description';
+
     const query = byId('searchInput').value.trim();
     const { key: sortKey, dir: sortDir } = state.sort.clients;
-    const filtered = applySort(clients.filter(client => clientMatches(client, query)), c => clientSortValue(c, sortKey), sortDir);
+    const filtered = applySort(clients.filter(client => allClientMatches(client, query)), c => allClientSortValue(c, sortKey), sortDir);
     const { items: pageItems, page, totalPages } = paginate(filtered, state.page.clients, state.pageSize.clients);
     state.page.clients = page;
-    byId('descriptionColumnHeader').textContent = state.adDescriptionSyncEnabled ? 'AD Description' : 'Description';
+
     const rows = pageItems.map(client => {
+      const isWindows = clientPlatformLabel(client) === 'Windows';
+      const clientId = safeId((isWindows ? client.computerName : client.hostname) || '');
       const stale = isStale(client);
       const awaitingReport = !!client.lastInstalledAtUtc;
       const staleClass = stale ? ' stale' : '';
       const staleBadge = awaitingReport
         ? ` <span class="usb-badge" title="Pushed at ${escapeHtml(formatDateTime(client.lastInstalledAtUtc))}, waiting for this client to report in">AWAITING REPORT</span>`
         : (stale ? ' <span class="usb-badge">STALE</span>' : '');
+      // hasUsbStorage / isStale / lastInstalledAtUtc are all platform-
+      // agnostic (the Dashboard's USB and Stale tiles already read them off
+      // getAllClients()), so these two badges need no platform branch.
+      const usbBadge = client.hasUsbStorage ? ' <span class="usb-badge">USB</span>' : '';
+      // Windows only, and only when actually reported - piping an absent
+      // domain through escapeHtml would print the literal word "Unknown"
+      // under every Linux row (same reasoning as hardwareComputerItem).
+      const domainHtml = client.domain ? `<small>${escapeHtml(client.domain)}</small>` : '';
+      const ipAddressesHtml = formatIpAddressesHtml(client);
+      const expandAttr = isWindows ? `data-client="${clientId}"` : `data-linux-client="${clientId}"`;
+
       const os = client.os || {};
+      const osCell = isWindows
+        ? `${escapeHtml(os.caption)}<small class="mono">${escapeHtml(os.version)} build ${escapeHtml(os.buildNumber)}</small>`
+        : escapeHtml(os.prettyName);
+
       const office = client.office || {};
       const activation = client.activation || {};
       const windowsActivation = activation.windows || {};
       const officeActivation = activation.office || {};
-      const clientSoftware = getClientSoftware(client);
-      const softwareCount = clientSoftware.length;
-      const ipAddressesHtml = formatIpAddressesHtml(client);
-      const usbBadge = client.hasUsbStorage ? ' <span class="usb-badge">USB</span>' : '';
+      // Office licensing and Windows/Office activation have no Linux
+      // counterpart at all. An em dash marks "not applicable on this
+      // platform" - the same placeholder renderCertificateHistory already
+      // uses for a cell that cannot exist.
+      const officeCell = isWindows ? `${escapeHtml(office.name)}<small>${escapeHtml(office.version)}</small>` : '—';
+      const activationCell = isWindows
+        ? `${activationBadge(windowsActivation.activated, 'Windows')} ${activationBadge(officeActivation.activated, 'Office')}`
+        : '—';
 
-      const softwareRows = clientSoftware.map(item => `<tr>
-        <td>${escapeHtml(item.name)}</td>
-        <td>${escapeHtml(item.version)}</td>
-        <td>${escapeHtml(item.publisher)}</td>
-        <td>${escapeHtml(formatInstallDate(item.installDate))}</td>
-      </tr>`).join('');
+      const clientSoftware = isWindows ? getClientSoftware(client) : [];
+      const services = Array.isArray(client.services) ? client.services : [];
+      const itemCount = isWindows ? clientSoftware.length : services.length;
+
+      const descriptionCell = state.adDescriptionSyncEnabled
+        ? (isWindows ? formatAdDescription(client) : formatLinuxAdDescription(client))
+        : (isWindows ? formatDescriptionEditor(client, clientId) : formatLinuxDescriptionEditor(client, clientId));
 
       const cpu = client.cpu || {};
-      const cpuText = cpu.name
-        ? `${escapeHtml(cpu.name)}${cpu.cores ? `, ${Number(cpu.cores) || 0} cores` : ''}${cpu.clockMhz ? `, ${(cpu.clockMhz / 1000).toFixed(2)} GHz` : ''}`
+      const cpuName = isWindows ? cpu.name : cpu.model;
+      const cpuText = cpuName
+        ? `${escapeHtml(cpuName)}${cpu.cores ? `, ${Number(cpu.cores) || 0} cores` : ''}${isWindows && cpu.clockMhz ? `, ${(cpu.clockMhz / 1000).toFixed(2)} GHz` : ''}`
         : 'Unknown';
       const ramGb = client.ramTotalMb
         ? (client.ramTotalMb >= 1024 ? `${Math.round(client.ramTotalMb / 1024)} GB` : `${Number(client.ramTotalMb) || 0} MB`)
         : 'Unknown';
-      const ramModulesHtml = formatRamModulesHtml(client.ramModules);
+      // ramModules is a Windows-only field (no Linux counterpart in the
+      // Go client's report), so the per-module grid only ever renders for
+      // Windows rows.
+      const ramModulesHtml = isWindows ? formatRamModulesHtml(client.ramModules) : null;
       const disksSummary = (client.disks || []).map(d => {
         const size = d.sizeGb ? ` ${d.sizeGb} GB` : '';
         const badge = d.usb ? ' <span class="usb-badge">USB</span>' : '';
         return `${escapeHtml(d.type)}${escapeHtml(size)}${badge} <small>${escapeHtml(d.model)}</small>`;
       }).join('<br>') || 'Unknown';
 
-      const clientId = safeId(client.computerName || '');
-      const detailsHidden = state.expandedDetails.has('client:' + clientId) ? '' : 'hidden';
+      const nestedTable = isWindows
+        ? `<h2>${escapeHtml(client.computerName)} software</h2>
+            <table class="nested-table">
+              <thead><tr><th>Name</th><th>Version</th><th>Publisher</th><th>Install date</th></tr></thead>
+              <tbody>${clientSoftware.map(item => `<tr>
+                <td>${escapeHtml(item.name)}</td>
+                <td>${escapeHtml(item.version)}</td>
+                <td>${escapeHtml(item.publisher)}</td>
+                <td>${escapeHtml(formatInstallDate(item.installDate))}</td>
+              </tr>`).join('') || '<tr><td colspan="4" class="empty">No software records.</td></tr>'}</tbody>
+            </table>`
+        : `<h2>${escapeHtml(client.hostname)} services</h2>
+            <table class="nested-table">
+              <thead><tr><th>Name</th><th>Unit</th><th>Version</th><th>Active</th></tr></thead>
+              <tbody>${services.map(item => `<tr>
+                <td>${escapeHtml(item.name)}</td>
+                <td>${escapeHtml(item.unit || '')}</td>
+                <td>${escapeHtml(item.version)}</td>
+                <td>${serviceActiveDot(item.active !== false)}</td>
+              </tr>`).join('') || '<tr><td colspan="4" class="empty">No service records.</td></tr>'}</tbody>
+            </table>`;
+
+      const detailsHidden = state.expandedDetails.has((isWindows ? 'client:' : 'linux-client:') + clientId) ? '' : 'hidden';
+      const detailsAttr = isWindows ? `data-client-details="${clientId}"` : `data-linux-client-details="${clientId}"`;
+      const deleteAttr = isWindows
+        ? `data-delete-client="${escapeHtml(client.computerName)}"`
+        : `data-delete-linux-client="${escapeHtml(client.hostname)}"`;
 
       return `<tr class="${staleClass}">
-        <td><button class="link-button" type="button" data-client="${clientId}">${escapeHtml(client.computerName)}</button>${usbBadge}${staleBadge}<small>${escapeHtml(client.domain)}</small>${ipAddressesHtml ? `<small class="mono">${ipAddressesHtml}</small>` : ''}</td>
+        <td><button class="link-button" type="button" ${expandAttr}>${escapeHtml(clientDisplayName(client))}</button> <small class="platform-tag">${escapeHtml(clientPlatformLabel(client))}</small>${usbBadge}${staleBadge}${domainHtml}${ipAddressesHtml ? `<small class="mono">${ipAddressesHtml}</small>` : ''}</td>
         <td>${escapeHtml(client.clientVersion)}</td>
-        <td>${escapeHtml(os.caption)}<small class="mono">${escapeHtml(os.version)} build ${escapeHtml(os.buildNumber)}</small></td>
-        <td>${escapeHtml(office.name)}<small>${escapeHtml(office.version)}</small></td>
-        <td>${activationBadge(windowsActivation.activated, 'Windows')}</td>
-        <td>${activationBadge(officeActivation.activated, 'Office')}</td>
-        <td>${softwareCount}</td>
-        <td>${state.adDescriptionSyncEnabled ? formatAdDescription(client) : formatDescriptionEditor(client, clientId)}</td>
-        <td>${escapeHtml(formatDateTime(client.collectedAt || client.sourceUpdatedAt))}</td>
-        <td><button class="danger-button-ghost" type="button" data-delete-client="${escapeHtml(client.computerName)}">Delete</button></td>
+        <td>${osCell}</td>
+        <td>${officeCell}</td>
+        <td>${activationCell}</td>
+        <td>${itemCount}</td>
+        <td>${descriptionCell}</td>
+        <td>${escapeHtml(formatDateTime(client.collectedAt || client.sourceUpdatedAt))}${client.servicesStatusCollectedAt ? `<small>Services checked: ${escapeHtml(formatDateTime(client.servicesStatusCollectedAt))}</small>` : ''}</td>
+        <td><button class="danger-button-ghost" type="button" ${deleteAttr}>Delete</button></td>
       </tr>
-      <tr class="details-row ${detailsHidden}" data-client-details="${clientId}">
-        <td colspan="10">
+      <tr class="details-row ${detailsHidden}" ${detailsAttr}>
+        <td colspan="9">
           <div class="details">
             <div class="hw-summary">
               <div><strong>CPU</strong><span>${cpuText}</span></div>
               <div><strong>RAM</strong><span>${ramGb}${ramModulesHtml ? `<br>${ramModulesHtml}` : ''}</span></div>
               <div><strong>Storage</strong><span>${disksSummary}</span></div>
             </div>
-            <h2>${escapeHtml(client.computerName)} software</h2>
-            <table class="nested-table">
-              <thead><tr><th>Name</th><th>Version</th><th>Publisher</th><th>Install date</th></tr></thead>
-              <tbody>${softwareRows || '<tr><td colspan="4" class="empty">No software records.</td></tr>'}</tbody>
-            </table>
+            ${nestedTable}
           </div>
         </td>
       </tr>`;
     });
 
-    byId('inventoryBody').innerHTML = rows.join('') || '<tr><td colspan="10" class="empty">No matching inventory records.</td></tr>';
+    byId('inventoryBody').innerHTML = rows.join('') || '<tr><td colspan="9" class="empty">No matching inventory records.</td></tr>';
     if (editingClientId) {
-      const restoredInput = document.querySelector(`.description-edit-input[data-description-client="${editingClientId}"]`);
+      const platformSelector = editingIsLinux ? '[data-platform="linux"]' : ':not([data-platform])';
+      const restoredInput = document.querySelector(`.description-edit-input[data-description-client="${editingClientId}"]${platformSelector}`);
       if (restoredInput) {
         restoredInput.value = editingValue;
         restoredInput.focus();
         restoredInput.setSelectionRange(editingSelectionStart, editingSelectionStart);
       }
     }
-    renderPager('clientsPager', 'clients', page, totalPages, () => renderTable(state.clients));
+    renderPager('clientsPager', 'clients', page, totalPages, () => renderFilteredClientsTable());
+  }
+
+  // Applies the .os-filter's current Clients selection before delegating to
+  // renderClientsTable - the single place that combines the two, so every
+  // call site stays filter-aware without repeating the filter call. Exact
+  // mirror of renderFilteredHardwarePage.
+  function renderFilteredClientsTable() {
+    renderClientsTable(filterClientsByOs(getAllClients(), state.osFilter.clients));
   }
 
   document.addEventListener('keydown', event => {
@@ -3694,7 +3795,7 @@
         </tr>`;
       });
     byId('hwCpuBody').innerHTML = cpuRows.join('') || '<tr><td colspan="2" class="empty">No CPU data.</td></tr>';
-    renderPager('hwCpuPager', 'hwCpu', cpuPage, cpuTotalPages, () => renderHardwarePage(getAllClients()));
+    renderPager('hwCpuPager', 'hwCpu', cpuPage, cpuTotalPages, () => renderFilteredHardwarePage());
 
     const { key: diskSortKey, dir: diskSortDir } = state.sort.hwDisk;
     const diskFiltered = applySort(getDiskGroups(clients).filter(g => hwMatches([g.model, g.type, ...g.clients.map(c => clientDisplayName(c))].join(' '), query)), g => diskSortValue(g, diskSortKey), diskSortDir);
@@ -3717,7 +3818,7 @@
         </tr>`;
       });
     byId('hwDiskBody').innerHTML = diskRows.join('') || '<tr><td colspan="4" class="empty">No storage data.</td></tr>';
-    renderPager('hwDiskPager', 'hwDisk', diskPage, diskTotalPages, () => renderHardwarePage(getAllClients()));
+    renderPager('hwDiskPager', 'hwDisk', diskPage, diskTotalPages, () => renderFilteredHardwarePage());
 
     const { key: ramSortKey, dir: ramSortDir } = state.sort.hwRam;
     const ramFiltered = applySort(getRamGroups(clients).filter(g => hwMatches([g.totalGb, ...g.clients.map(c => clientDisplayName(c))].join(' '), query)), g => ramSortValue(g, ramSortKey), ramSortDir);
@@ -3736,52 +3837,77 @@
         </tr>`;
       });
     byId('hwRamBody').innerHTML = ramRows.join('') || '<tr><td colspan="2" class="empty">No RAM data.</td></tr>';
-    renderPager('hwRamPager', 'hwRam', ramPage, ramTotalPages, () => renderHardwarePage(getAllClients()));
+    renderPager('hwRamPager', 'hwRam', ramPage, ramTotalPages, () => renderFilteredHardwarePage());
+  }
+
+  // Applies the .os-filter's current Hardware selection before delegating
+  // to renderHardwarePage - the single place that combines the two, so
+  // every call site (render() and each of the 3 pagers' onChange) stays
+  // filter-aware without repeating the filter call at each site.
+  function renderFilteredHardwarePage() {
+    renderHardwarePage(filterClientsByOs(getAllClients(), state.osFilter.hardware));
+  }
+
+  // Repaints the one shared .os-filter pill from the current view's own
+  // selection. Hardware and Clients each keep an independent value in
+  // state.osFilter, so without this, setting "Windows" on Hardware and then
+  // switching to Clients would leave the Windows chip lit while the Clients
+  // table is actually unfiltered. state.osFilter's keys are view names
+  // exactly so this lookup works; any other view falls back to 'all' (and
+  // the pill is hidden there anyway).
+  function renderOsFilterActive() {
+    const active = state.osFilter[state.view] || 'all';
+    document.querySelectorAll('#osFilter .os-filter-option').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.osFilter === active);
+    });
   }
 
   function render() {
     renderDashboardTiles();
     renderSortHeaders();
-    renderTable(state.clients);
+    renderFilteredClientsTable();
     renderSoftwareTable(state.clients);
-    renderHardwarePage(getAllClients());
+    renderFilteredHardwarePage();
     renderLicenses();
     populateSoftwareDatalists();
     byId('dashboardView').classList.toggle('hidden', state.view !== 'dashboard');
     byId('clientsView').classList.toggle('hidden', state.view !== 'clients');
     byId('softwareView').classList.toggle('hidden', state.view !== 'software');
     byId('hardwareView').classList.toggle('hidden', state.view !== 'hardware');
-    byId('installView').classList.toggle('hidden', state.view !== 'install');
-    byId('linuxInstallView').classList.toggle('hidden', state.view !== 'linuxInstall');
-    byId('linuxUpdatesView').classList.toggle('hidden', state.view !== 'linuxUpdates');
-    byId('packageView').classList.toggle('hidden', state.view !== 'package');
-    byId('updatesView').classList.toggle('hidden', state.view !== 'updates');
-    byId('generalView').classList.toggle('hidden', state.view !== 'general');
-    byId('generalStatusView').classList.toggle('hidden', state.view !== 'general');
-    byId('certificateView').classList.toggle('hidden', state.view !== 'certificate');
     byId('licensesView').classList.toggle('hidden', state.view !== 'licenses');
-    byId('linuxClientsView').classList.toggle('hidden', state.view !== 'linux');
     byId('linuxServicesView').classList.toggle('hidden', state.view !== 'linuxServices');
-    byId('adminPasswordView').classList.toggle('hidden', state.view !== 'admin');
+    // Deploy: Actions shows both platforms' sections together (stacked, own
+    // headings - see Task 2), Updates likewise, Package is already
+    // cross-platform on one section (no stacking needed).
+    byId('installView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
+    byId('linuxInstallView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
+    byId('installHistoryView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
+    byId('updatesView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'updates'));
+    byId('linuxUpdatesView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'updates'));
+    byId('packageView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'package'));
+    // Settings: exactly one of the three shows at a time (no stacking).
+    byId('generalView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'general'));
+    byId('generalStatusView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'general'));
+    byId('certificateView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'certificate'));
+    byId('adminPasswordView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'adminPassword'));
     byId('dashboardTab').classList.toggle('active', state.view === 'dashboard');
     byId('clientsTab').classList.toggle('active', state.view === 'clients');
     byId('softwareTab').classList.toggle('active', state.view === 'software');
     byId('hardwareTab').classList.toggle('active', state.view === 'hardware');
-    byId('installTab').classList.toggle('active', state.view === 'install');
-    byId('linuxInstallTab').classList.toggle('active', state.view === 'linuxInstall');
-    byId('linuxUpdatesTab').classList.toggle('active', state.view === 'linuxUpdates');
-    byId('packageTab').classList.toggle('active', state.view === 'package');
-    byId('updatesTab').classList.toggle('active', state.view === 'updates');
-    byId('generalTab').classList.toggle('active', state.view === 'general');
-    byId('certificateTab').classList.toggle('active', state.view === 'certificate');
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
-    byId('linuxClientsTab').classList.toggle('active', state.view === 'linux');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
-    byId('adminPasswordTab').classList.toggle('active', state.view === 'admin');
+    byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'licenses'].includes(state.view));
+    byId('manageDropdownButton').classList.toggle('active', state.view === 'deploy' || state.view === 'settings');
+    byId('deployTab').classList.toggle('active', state.view === 'deploy');
+    byId('settingsTab').classList.toggle('active', state.view === 'settings');
     const isInventoryView = inventoryViews.includes(state.view);
     const isLinuxInventoryView = linuxInventoryViews.includes(state.view);
     byId('searchInput').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
+    byId('topbar').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
     byId('generatedAt').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
+    byId('osFilter').classList.toggle('hidden', !(state.view === 'hardware' || state.view === 'clients'));
+    renderOsFilterActive();
+    renderSubtabStrips();
     recalculateActivePagination();
   }
 
@@ -3794,7 +3920,7 @@
       const size = computeLiveRowsPerPage('inventoryBody');
       if (size && size !== state.pageSize.clients) {
         state.pageSize.clients = size;
-        renderTable(state.clients);
+        renderFilteredClientsTable();
       }
     } else if (state.view === 'software') {
       const size = computeLiveRowsPerPage('softwareBody');
@@ -3856,7 +3982,7 @@
         const fingerprint = computeClientsFingerprint(data.clients || []);
         if (fingerprint === lastClientsFingerprint) return;
         lastClientsFingerprint = fingerprint;
-        state.clients = data.clients || [];
+        state.clients = stampClientPlatform(data.clients || [], 'windows');
         state.staleHours = data.staleHours || 48;
         state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
         byId('generatedAt').textContent = `Generated: ${formatDateTime(data.generatedAt)}`;
@@ -3879,7 +4005,7 @@
       loadLinuxClients();
     }
 
-    // Separate fetch, badge-only: the sidebar "Client updates" count should
+    // Separate fetch, badge-only: the Manage dropdown "Client updates" count should
     // stay live even when the Client updates tab itself isn't open. A full
     // loadClientUpdates()/renderClientUpdates() call is deliberately NOT used
     // here - it rebuilds #updatesBody's row checkboxes, which would silently
@@ -3897,7 +4023,7 @@
       });
 
     // Same badge-only concern as the Windows fetch above, for the Linux
-    // "Client updates" sidebar count - this was missing entirely, so the
+    // "Client updates" Manage dropdown count - this was missing entirely, so the
     // count only ever appeared after the user opened the Linux Client
     // updates tab directly (which populates it as a side effect of
     // loadLinuxClientUpdates()).
@@ -3938,7 +4064,7 @@
       return response.json();
     })
     .then(data => {
-      state.clients = data.clients || [];
+      state.clients = stampClientPlatform(data.clients || [], 'windows');
       state.staleHours = data.staleHours || 48;
       state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
       lastClientsFingerprint = computeClientsFingerprint(state.clients);
@@ -3959,7 +4085,7 @@
     });
 
   // Same badge-only fetch pollForUpdates() does on every tick, run once
-  // immediately on page load - otherwise the sidebar badge stays blank
+  // immediately on page load - otherwise the Manage dropdown badge stays blank
   // until the first 30s poll tick, a tab visibility change, or the user
   // opening Client updates directly (which populates it as a side effect).
   // Also baselines state.knownScheduledJobId (see handleClientUpdatesSummary).
@@ -3974,7 +4100,7 @@
     });
 
   // Same badge-only fetch pollForUpdates() does on every tick, run once
-  // immediately on page load - otherwise the Linux sidebar badge stays
+  // immediately on page load - otherwise the Linux Manage dropdown badge stays
   // blank until the first 30s poll tick or the user opens Linux Client
   // updates directly (which populates it as a side effect).
   fetch('/api/v1/linux-client-updates', { cache: 'no-store' })
@@ -4003,12 +4129,11 @@
     state.page.hwCpu = 1;
     state.page.hwDisk = 1;
     state.page.hwRam = 1;
-    state.page.linuxClients = 1;
     state.page.linuxServices = 1;
     render();
-    if (state.view === 'linux') {
-      renderLinuxClientsTable(state.linuxClients);
-    } else if (state.view === 'linuxServices') {
+    // The merged Clients table is redrawn by render() itself now; only the
+    // Linux Services table still lives outside that pipeline.
+    if (state.view === 'linuxServices') {
       renderLinuxServicesTable(state.linuxClients);
     }
   });
@@ -4030,23 +4155,13 @@
   byId('hardwareTab').addEventListener('click', () => {
     setView('hardware');
   });
-  byId('installTab').addEventListener('click', () => {
-    setView('install');
-  });
-  byId('linuxInstallTab').addEventListener('click', () => setView('linuxInstall'));
   window.addEventListener('hashchange', () => {
-    state.view = getInitialView();
+    Object.assign(state, getInitialViewState());
     render();
-    if (state.view === 'install') loadInstallHistory();
-    if (state.view === 'linuxInstall') { loadLinuxInstallHistory(); loadLinuxInstallPreferredSubnet(); }
-    if (state.view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
-    if (state.view === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
-    if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
-    if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
-    if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
+    if (state.view === 'deploy') loadDeploySubviewData(state.subview);
+    if (state.view === 'settings') loadSettingsSubviewData(state.subview);
     if (state.view === 'licenses') loadLicenses();
-    if (state.view === 'linux' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
-    if (state.view === 'admin') loadAdminPasswordStatus();
+    if (state.view === 'clients' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
   });
   byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
   byId('linuxInstallServerUrl').value = `${window.location.origin}/api/v1/linux/inventory`;
@@ -4069,7 +4184,6 @@
   byId('linuxUpdatesAcknowledgeHostKeyRisk').addEventListener('change', updateLinuxUpdatesTrustNewHostKeysUi);
   byId('linuxUpdatesScheduleMode').addEventListener('change', updateLinuxUpdatesScheduleFieldVisibility);
   byId('linuxUpdatesScheduleSaveButton').addEventListener('click', saveLinuxUpdateSchedule);
-  byId('linuxUpdatesTab').addEventListener('click', () => setView('linuxUpdates'));
   byId('installUseAdCredentials').addEventListener('change', updateInstallCredentialFieldsUi);
   byId('updatesUseAdCredentials').addEventListener('change', updateUpdatesCredentialFieldsUi);
   byId('installButton').addEventListener('click', startClientActionJob);
@@ -4082,11 +4196,12 @@
   byId('exportRamBtn').addEventListener('click', exportHardwareRam);
   // Delegated on document so it keeps working after any of these buttons'
   // rows get replaced outside the full render() pipeline - e.g. a
-  // standalone renderTable(state.clients) triggered by the Clients pager's
-  // Prev/Next or by recalculateActivePagination's live-resize re-render.
-  // Binding listeners on the buttons themselves would require re-binding
-  // after every innerHTML replacement; delegation needs binding exactly
-  // once, here, regardless of how the table DOM changes.
+  // standalone renderFilteredClientsTable() triggered by the Clients
+  // pager's Prev/Next, the OS filter, a Linux poll tick, or
+  // recalculateActivePagination's live-resize re-render. Binding listeners
+  // on the buttons themselves would require re-binding after every
+  // innerHTML replacement; delegation needs binding exactly once, here,
+  // regardless of how the table DOM changes.
   document.addEventListener('click', e => {
     const th = e.target.closest('th[data-sort-key]');
     if (th) {
@@ -4101,12 +4216,12 @@
         current.dir = 1;
       }
       if (state.page[table] !== undefined) state.page[table] = 1;
-      // render() doesn't touch the Linux Clients table (it's loaded/rendered
-      // through its own loadLinuxClients()/setView('linux') path, not the
-      // main Windows-side render pipeline) - re-render it directly instead.
-      if (table === 'linuxClients') {
-        renderLinuxClientsTable(state.linuxClients);
-      } else if (table === 'linuxServices') {
+      // render() doesn't touch the Linux Services table (it's loaded and
+      // rendered through its own loadLinuxClients()/setView('linuxServices')
+      // path, not the main render pipeline) - re-render it directly. Every
+      // other table, including the merged Clients table
+      // (data-sort-table="clients"), goes through render().
+      if (table === 'linuxServices') {
         renderLinuxServicesTable(state.linuxClients);
       } else {
         render();
@@ -4178,10 +4293,112 @@
     const deleteLinuxBtn = e.target.closest('[data-delete-linux-client]');
     if (deleteLinuxBtn) {
       deleteLinuxClient(deleteLinuxBtn.dataset.deleteLinuxClient);
+      return;
+    }
+
+    const osFilterBtn = e.target.closest('[data-os-filter]');
+    if (osFilterBtn) {
+      // One pill, two consumers: the chip writes to whichever page is
+      // showing, resets that page's own pagination, and redraws only that
+      // page. The pill is hidden everywhere else, so no other view can
+      // reach this block.
+      const filter = osFilterBtn.dataset.osFilter;
+      if (state.view === 'clients') {
+        state.osFilter.clients = filter;
+        state.page.clients = 1;
+        renderOsFilterActive();
+        renderFilteredClientsTable();
+      } else if (state.view === 'hardware') {
+        state.osFilter.hardware = filter;
+        state.page.hwCpu = 1;
+        state.page.hwDisk = 1;
+        state.page.hwRam = 1;
+        renderOsFilterActive();
+        renderFilteredHardwarePage();
+      }
     }
   });
-  byId('packageTab').addEventListener('click', () => setView('package'));
-  byId('updatesTab').addEventListener('click', () => setView('updates'));
+  byId('deploySubtabActions').addEventListener('click', () => setView('deploy', 'actions'));
+  byId('deploySubtabUpdates').addEventListener('click', () => setView('deploy', 'updates'));
+  byId('deploySubtabPackage').addEventListener('click', () => setView('deploy', 'package'));
+  byId('settingsSubtabGeneral').addEventListener('click', () => setView('settings', 'general'));
+  byId('settingsSubtabCertificate').addEventListener('click', () => setView('settings', 'certificate'));
+  byId('settingsSubtabAdminPassword').addEventListener('click', () => setView('settings', 'adminPassword'));
+  byId('deployTab').addEventListener('click', () => setView('deploy', 'actions'));
+  byId('settingsTab').addEventListener('click', () => setView('settings', 'general'));
+
+  function toggleDropdown(buttonId, menuId, forceClosed) {
+    const button = byId(buttonId);
+    const menu = byId(menuId);
+    const shouldOpen = forceClosed ? false : menu.classList.contains('hidden');
+    menu.classList.toggle('hidden', !shouldOpen);
+    button.setAttribute('aria-expanded', String(shouldOpen));
+    // Menu opened - move focus onto its first item, matching the standard
+    // WAI-ARIA menu-button pattern this markup already declares via
+    // role="menu"/menuitem/aria-haspopup/aria-expanded but never actually
+    // backed with keyboard behavior. Runs for a mouse open too (not just
+    // keyboard) - deliberate, so focus is always inside the menu that's
+    // visibly open, which is what handleDropdownKeydown below relies on.
+    if (shouldOpen) {
+      const firstItem = menu.querySelector('.topnav-dropdown-item');
+      if (firstItem) firstItem.focus();
+    }
+  }
+
+  // Escape closes whichever dropdown the keypress happened inside and
+  // returns focus to that menu's own trigger button; ArrowDown/ArrowUp
+  // move focus between its items, wrapping at each end. One handler for
+  // both Fleet and Manage - they're structurally identical (a trigger
+  // button plus a menu of item buttons), read from the closest
+  // .topnav-dropdown-menu rather than hardcoded to either one.
+  function handleDropdownKeydown(event) {
+    if (event.key !== 'Escape' && event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    const menu = event.target.closest('.topnav-dropdown-menu');
+    if (!menu) return;
+    const button = menu.previousElementSibling;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      menu.classList.add('hidden');
+      button.setAttribute('aria-expanded', 'false');
+      button.focus();
+      return;
+    }
+    const items = Array.from(menu.querySelectorAll('.topnav-dropdown-item'));
+    const currentIndex = items.indexOf(document.activeElement);
+    event.preventDefault();
+    const nextIndex = event.key === 'ArrowDown'
+      ? (currentIndex + 1) % items.length
+      : (currentIndex - 1 + items.length) % items.length;
+    items[nextIndex].focus();
+  }
+
+  byId('fleetDropdownButton').addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu');
+    toggleDropdown('manageDropdownButton', 'manageDropdownMenu', true);
+  });
+  byId('manageDropdownButton').addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleDropdown('manageDropdownButton', 'manageDropdownMenu');
+    toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu', true);
+  });
+  byId('fleetDropdownMenu').addEventListener('keydown', handleDropdownKeydown);
+  byId('manageDropdownMenu').addEventListener('keydown', handleDropdownKeydown);
+  // Clicking any dropdown item closes its own menu (the item's own click
+  // handler, registered above/in earlier tasks, has already fired and set
+  // the view by the time this delegated listener runs).
+  document.querySelectorAll('.topnav-dropdown-menu').forEach((menu) => {
+    menu.addEventListener('click', (event) => {
+      if (event.target.closest('.topnav-dropdown-item')) {
+        menu.classList.add('hidden');
+        menu.previousElementSibling.setAttribute('aria-expanded', 'false');
+      }
+    });
+  });
+  document.addEventListener('click', () => {
+    toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu', true);
+    toggleDropdown('manageDropdownButton', 'manageDropdownMenu', true);
+  });
   byId('updatesSaveCredentialsButton').addEventListener('click', saveClientUpdateCredentials);
   byId('updatesClearCredentialsButton').addEventListener('click', clearClientUpdateCredentials);
   byId('updatesPushButton').addEventListener('click', startClientUpdateJob);
@@ -4203,19 +4420,15 @@
   byId('pkgDownloadButton').addEventListener('click', () => {
     window.location.href = '/api/v1/client-package/download';
   });
-  byId('generalTab').addEventListener('click', () => setView('general'));
   byId('generalSaveButton').addEventListener('click', () => saveGeneralSettings(false));
   byId('generalAdUseServiceIdentity').addEventListener('change', updateAdIdentityFields);
   byId('generalAdSyncMode').addEventListener('change', updateAdSyncIntervalField);
   byId('updatesScheduleMode').addEventListener('change', updateScheduleFieldVisibility);
   byId('updatesScheduleSaveButton').addEventListener('click', saveClientUpdateSchedule);
-  byId('certificateTab').addEventListener('click', () => setView('certificate'));
   byId('certUploadButton').addEventListener('click', uploadCertificate);
   byId('certDeleteButton').addEventListener('click', deleteCertificate);
   byId('licensesTab').addEventListener('click', () => setView('licenses'));
-  byId('linuxClientsTab').addEventListener('click', () => setView('linux'));
   byId('linuxServicesTab').addEventListener('click', () => setView('linuxServices'));
-  byId('exportLinuxClientsBtn').addEventListener('click', exportLinuxClients);
   byId('exportLinuxServicesBtn').addEventListener('click', exportLinuxServices);
   byId('exportLicensesBtn').addEventListener('click', exportLicenses);
   byId('licenseAddButton').addEventListener('click', () => openLicenseForm(null));
@@ -4234,7 +4447,6 @@
       addLicenseComputerFromInput();
     }
   });
-  byId('adminPasswordTab').addEventListener('click', () => setView('admin'));
   byId('adminPasswordSaveButton').addEventListener('click', changeAdminPassword);
   byId('ingestionTokenRegenerateButton').addEventListener('click', regenerateIngestionToken);
   byId('linuxCredsSaveButton').addEventListener('click', saveLinuxUpdateCredentials);
@@ -4245,17 +4457,12 @@
   byId('logoutButton').addEventListener('click', handleLogout);
   byId('logoutReloadButton').addEventListener('click', () => window.location.reload());
   updateThemeToggle();
-  if (state.view === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
-  if (state.view === 'linuxUpdates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
-  if (state.view === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
-  if (state.view === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
-  if (state.view === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
+  if (state.view === 'deploy') loadDeploySubviewData(state.subview);
+  if (state.view === 'settings') loadSettingsSubviewData(state.subview);
   if (state.view === 'licenses') loadLicenses();
-  if (state.view === 'admin') loadAdminPasswordStatus();
   updateClientActionUi();
   loadInstallHistory();
   updateLinuxClientActionUi();
   updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField');
   updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField');
-  if (state.view === 'linuxInstall') { loadLinuxInstallHistory(); loadLinuxInstallPreferredSubnet(); }
 }());

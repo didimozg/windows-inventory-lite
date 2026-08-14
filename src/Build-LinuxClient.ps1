@@ -57,7 +57,12 @@ try {
     # Windows username, of whichever machine built it. This binary is
     # committed to the repo (linux-client/prebuilt/), so that would leak
     # into the public history on every rebuild.
-    & go build -trimpath -ldflags "-X main.ClientVersion=$Version" -o $OutputPath .
+    # -s -w strip the symbol table and DWARF debug info respectively - this
+    # binary ships to production managed hosts, not a dev machine, so there
+    # is no debugger attaching to it there. Shrinks the statically-linked Go
+    # binary meaningfully with no functional effect (panics still print a
+    # message and exit code, just without a source-mapped stack trace).
+    & go build -trimpath -ldflags "-s -w -X main.ClientVersion=$Version" -o $OutputPath .
     if ($LASTEXITCODE -ne 0) {
         throw "go build failed with exit code $LASTEXITCODE."
     }
