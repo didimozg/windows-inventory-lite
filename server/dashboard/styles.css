@@ -83,6 +83,20 @@
        longer needs its own hardcode either - it can go back to var(--line)
        like the light-theme block already does. */
     --line: #285484;
+    /* .settings-block/.subtab-strip border-bottom dividers used --line
+       like every other border here, but on this palette --line (#285484)
+       only clears ~1.5:1 against --panel (#153a63) and ~2.0:1 against
+       --bg (#0c2340) - short of WCAG 1.4.11's 3:1 floor for UI-component
+       (non-text) contrast, not the 4.5:1 text threshold used elsewhere in
+       this file. --line itself is left alone: ~30 other rules lean on it
+       for a deliberately subtle card-border/glow-ring look that already
+       reads fine at that contrast, and brightening it broadly would make
+       every one of those rings loud instead. --divider-strong is a
+       dedicated, lighter tint at the same H~211deg hue, consumed only by
+       those two rules via var(--divider-strong, var(--line)) so light
+       mode (whose --line already clears 3:1) needs no change. #538dca
+       measures ~3.3:1 against --panel and ~4.5:1 against --bg. */
+    --divider-strong: #538dca;
     --accent: #1c93bc;
     --accent-text: #04141a;
     --danger: #ff7a6e;
@@ -131,6 +145,7 @@
      why every token below this point is blue-hue-tuned, not left at the
      pre-redesign neutral-gray values. */
   --line: #285484;
+  --divider-strong: #538dca;
   --accent: #1c93bc;
   --accent-text: #04141a;
   --danger: #ff7a6e;
@@ -288,7 +303,10 @@ body {
   display: flex;
   gap: var(--space-xs);
   padding: var(--space-md) 0 0;
-  border-bottom: 1px solid var(--line);
+  /* --divider-strong falls back to --line where it isn't defined (light
+     mode) - see the dark-mode --divider-strong comment for why this
+     divider needs a stronger value than --line's other consumers. */
+  border-bottom: 1px solid var(--divider-strong, var(--line));
   margin-bottom: var(--space-lg);
 }
 
@@ -1672,7 +1690,10 @@ th.sort-desc::after {
 .settings-block {
   padding-bottom: var(--space-lg);
   margin-bottom: 18px;
-  border-bottom: 1px solid var(--line);
+  /* --divider-strong falls back to --line where it isn't defined (light
+     mode) - see the dark-mode --divider-strong comment for why this
+     divider needs a stronger value than --line's other consumers. */
+  border-bottom: 1px solid var(--divider-strong, var(--line));
 }
 
 /* Authentication/Linux client targeting/Schedule (Linux) or WinRM
