@@ -885,6 +885,14 @@
     }).join('');
 
     const statusElement = byId(statusElementId);
+    // innerHTML replacement below recreates .install-results from scratch,
+    // which would silently reset its scroll position to the top on every
+    // poll tick (every 3s while a job runs) - capture it first and restore
+    // it after so a user reading further down a long target list doesn't
+    // keep getting yanked back to the top.
+    const previousResults = statusElement.querySelector('.install-results');
+    const previousScrollTop = previousResults ? previousResults.scrollTop : 0;
+
     statusElement.classList.remove('empty');
     statusElement.innerHTML = `<div class="job-header">
         <strong>Job ${escapeHtml(job.id)}</strong>
@@ -897,6 +905,9 @@
           <tbody>${rows || '<tr><td colspan="4" class="empty">Waiting for results.</td></tr>'}</tbody>
         </table>
       </div>`;
+
+    const newResults = statusElement.querySelector('.install-results');
+    if (newResults) newResults.scrollTop = previousScrollTop;
 
     statusElement.querySelectorAll('[data-trust-host]').forEach(button => {
       button.addEventListener('click', () => trustHostKeyAndRetry(button.dataset.trustHost, button.dataset.trustFingerprint, statusElementId));
