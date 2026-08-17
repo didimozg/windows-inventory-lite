@@ -4209,6 +4209,8 @@
   });
   byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
   byId('linuxInstallServerUrl').value = `${window.location.origin}/api/v1/linux/inventory`;
+  byId('pkgServerUrl').value = `${window.location.origin}/api/v1/inventory`;
+  byId('linuxPkgServerUrl').value = `${window.location.origin}/api/v1/linux/inventory`;
   byId('clientAction').addEventListener('change', updateClientActionUi);
   byId('linuxClientAction').addEventListener('change', updateLinuxClientActionUi);
   byId('linuxInstallAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField'));
