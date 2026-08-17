@@ -568,7 +568,7 @@ namespace WindowsInventoryLite
         private Dictionary<string, object> GetActivationState(bool windows)
         {
             string query = "SELECT Name, ApplicationID, LicenseStatus, PartialProductKey FROM SoftwareLicensingProduct WHERE PartialProductKey IS NOT NULL";
-            ArrayList products = QueryList(query);
+            ArrayList products = QueryList(query, "root\\cimv2");
             Dictionary<string, object> result = new Dictionary<string, object>();
 
             foreach (Dictionary<string, object> product in products)
@@ -585,6 +585,40 @@ namespace WindowsInventoryLite
                     result["activated"] = true;
                     result["product"] = name;
                     return result;
+                }
+            }
+
+            // Office 2010 predates Office's move into the unified Software
+            // Protection Platform SoftwareLicensingProduct above queries (Office
+            // 2013+/365 and the OS itself all use it) - it registers its own
+            // activation state in a separate, older WMI namespace instead. Only
+            // checked for the Office branch: Windows OS activation has always
+            // lived in SoftwareLicensingProduct, no equivalent gap there.
+            if (!windows)
+            {
+                ArrayList officeLegacyProducts;
+                try
+                {
+                    officeLegacyProducts = QueryList(
+                        "SELECT ProductKeyID, LicenseStatus FROM OfficeSoftwareProtectionProduct WHERE PartialProductKey IS NOT NULL",
+                        "root\\Microsoft\\OfficeSoftwareProtectionPlatform");
+                }
+                catch
+                {
+                    // Namespace doesn't exist on hosts with no legacy Office
+                    // Software Protection Platform installed (i.e. no Office 2010
+                    // or earlier ever present) - not an error, just no data.
+                    officeLegacyProducts = new ArrayList();
+                }
+
+                foreach (Dictionary<string, object> product in officeLegacyProducts)
+                {
+                    if (Convert.ToInt32(product["LicenseStatus"]) == 1)
+                    {
+                        result["activated"] = true;
+                        result["product"] = "Microsoft Office 2010";
+                        return result;
+                    }
                 }
             }
 
@@ -763,10 +797,17 @@ namespace WindowsInventoryLite
 
         private static ArrayList QueryList(string query)
         {
+            return QueryList(query, "root\\cimv2");
+        }
+
+        private static ArrayList QueryList(string query, string wmiNamespace)
+        {
             ArrayList result = new ArrayList();
             try
             {
-                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(query))
+                ManagementScope scope = new ManagementScope(new ManagementPath(wmiNamespace));
+                scope.Connect();
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(scope, new ObjectQuery(query)))
                 {
                     foreach (ManagementObject item in searcher.Get())
                     {
