@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.40.4]
+
+### Fixed
+
+- Deploy > Package's Linux Server URL field (added in 0.40.3) was being silently blanked back to empty every time the Package page loaded, because the page's own status loader unconditionally overwrote it with the server's saved value or `''` if nothing was saved yet - undoing the auto-fill for exactly the fresh-install case it exists for. Now only overwrites the field when a saved value actually exists, matching the equivalent Windows field's existing guard.
+- The dark-mode divider contrast fix from 0.40.3 (`.settings-block`/`.subtab-strip`) missed the actual divider on both Client updates pages: pairing "WinRM credentials"/"Schedule" (Windows) and "Authentication"/"Linux client targeting"/"Schedule" (Linux) side by side moves each page's only section divider onto their shared `.updates-top-row` wrapper, which was still using the low-contrast `--line` token. Now uses the same `--divider-strong` token as the two rules it was meant to match.
+
 ## [0.40.3]
 
 ### Added
@@ -14,7 +21,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
-- Windows client: activation detection never recognized Office 2010 - it only queried the WMI namespace Windows itself and Office 2013+/365 use (`SoftwareLicensingProduct`), not the separate, older namespace Office 2010 registers its activation state in (`root\Microsoft\OfficeSoftwareProtectionPlatform`). Now checks both. Client version bumped to `0.2.1` for this detection change.
+- Windows client: activation detection never recognized Office 2010 - it only queried the WMI namespace Windows itself and Office 2013+/365 use (`SoftwareLicensingProduct`), not the separate, older namespace Office 2010 registers its activation state in (`root\Microsoft\OfficeSoftwareProtectionPlatform`). Now checks both. Client version bumped to `0.2.1` for this detection change. **Not yet verified against a real Office 2010 host** - the legacy WMI class's exact column set is assumed to match `SoftwareLicensingProduct`'s (`PartialProductKey`, `LicenseStatus`); if that assumption is wrong the query fails silently (caught, treated as "not activated," same symptom as the bug this is meant to fix) rather than erroring visibly.
 - The live install-job log (Deploy > Actions/Updates, while a job is running) kept jumping back to the top every 3 seconds, making it unreadable with many targets - the underlying status box is fully re-rendered on every poll tick, which was silently resetting its scroll position. The current scroll position is now preserved across re-renders.
 - Windows Client updates now pairs "WinRM credentials" and "Schedule" side by side, matching the layout Linux Client updates already used for its equivalent fields.
 - Deploy > Package's Server URL fields (Windows and Linux) now auto-fill from the server's own current URL, matching Deploy > Actions - previously they showed only placeholder example text.

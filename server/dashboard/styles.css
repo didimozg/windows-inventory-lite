@@ -1709,7 +1709,12 @@ th.sort-desc::after {
   gap: var(--space-lg);
   margin-bottom: 18px;
   padding-bottom: var(--space-lg);
-  border-bottom: 1px solid var(--line);
+  /* This wrapper carries the ONLY section divider on both Updates pages -
+     .settings-block below sets border-bottom: none once nested here - so
+     it needs the same --divider-strong contrast fix as .settings-block/
+     .subtab-strip themselves (see the dark-mode --divider-strong comment),
+     not the plain --line every other border on the page uses. */
+  border-bottom: 1px solid var(--divider-strong, var(--line));
 }
 
 .updates-top-row .settings-block {

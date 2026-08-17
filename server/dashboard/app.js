@@ -2140,7 +2140,12 @@
           ? `Linux client binary present (v${escapeHtml(data.binaryVersion || 'unknown')}).`
           : 'No Linux client binary found - run Build-LinuxClient.ps1 and place the output in the Linux client package directory first.';
         byId('linuxPkgStatus').textContent = statusText;
-        byId('linuxPkgServerUrl').value = data.serverUrl || '';
+        // Only overwrite the auto-filled default (see the init-time
+        // window.location.origin assignment) when the server actually has
+        // a saved value - an unconditional assignment here would blank the
+        // field with '' on every page load until something is saved once,
+        // same guard as loadPackageStatus's Windows pkgServerUrl above.
+        if (data.serverUrl) byId('linuxPkgServerUrl').value = data.serverUrl;
         byId('linuxPkgIntervalHours').value = data.intervalHours || 6;
         byId('linuxPkgStatusIntervalMinutes').value = data.statusIntervalMinutes || 30;
         byId('linuxPkgInstallPath').value = data.installPath || '/opt/windows-inventory-lite';
