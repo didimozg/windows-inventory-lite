@@ -27,3 +27,8 @@ docs/pending-readme-updates.md
 # Detailed release-by-release history, kept for local reference only -
 # CHANGELOG.md is the public version history.
 docs/project-history.md
+
+# Working backlog with candid prioritization notes - internal planning only,
+# not meant for the public repo. GitHub Issues would be the public-facing
+# equivalent if this project ever wants one.
+docs/backlog.md
