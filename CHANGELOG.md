@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.40.2]
+
+### Fixed
+
+- The Clients table's Windows/Office activation dots (the two small circles in the Activation column) sat visibly out of alignment with each other whenever their on/off states differed - a "checked" dot and an "off" dot side by side could be ~4-5px apart vertically. Root cause: `.status-dot` is `display: inline-flex` with no explicit `vertical-align`, so its default `baseline` alignment was computed from each dot's own content (an SVG checkmark for "on" vs an empty `::after` dash for "off"), which differ. Fixed by setting `vertical-align: middle` so alignment no longer depends on content.
+
 ## [0.40.1]
 
 ### Fixed
