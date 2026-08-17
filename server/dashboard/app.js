@@ -3385,32 +3385,11 @@
       .filter(item => item.count > 0);
   }
 
-  // Top N software titles by the number of distinct computers that have any
-  // version of it installed - a client with three Chrome versions counts once.
-  function getTopSoftwareNames(clients, limit) {
-    const counts = new Map();
-    clients.forEach(client => {
-      const seenNames = new Set();
-      getClientSoftware(client).forEach(item => {
-        const name = (item.name || '').trim();
-        if (!name) return;
-        const key = name.toLowerCase();
-        if (seenNames.has(key)) return;
-        seenNames.add(key);
-        if (!counts.has(key)) counts.set(key, { label: name, count: 0 });
-        counts.get(key).count++;
-      });
-    });
-    return Array.from(counts.values())
-      .sort((a, b) => b.count - a.count)
-      .slice(0, limit);
-  }
-
   // One bar per distinct OS release across both platforms: Windows reports
   // it as os.caption, Linux as os.prettyName (collect.OSInfo). Same
   // [{label, count}] shape as getTopCpuModels/getRamBuckets so it can go
   // straight into renderBarChart. Grouped case-insensitively but displayed
-  // with the first-seen casing, matching getTopSoftwareNames' approach.
+  // with the first-seen casing.
   function getOsVersionBreakdown(clients, limit) {
     const counts = new Map();
     clients.forEach(client => {
@@ -3479,11 +3458,6 @@
     byId('dashStaleTile').classList.toggle('tile-alert', dashStaleCount > 0);
     byId('dashLicenseCount').textContent = state.licenses.length;
     byId('dashUsbCount').textContent = allClients.filter(client => client.hasUsbStorage).length;
-    // Top software stays Windows-only: the Linux client inventories running
-    // services, a different concept that would not mix meaningfully into a
-    // "top installed software" chart. The OS chart below is the cross-
-    // platform Software-card addition.
-    renderBarChart('dashSoftwareChart', getTopSoftwareNames(clients, 5));
     renderBarChart('dashOsChart', getOsVersionBreakdown(allClients, 5));
     renderBarChart('dashCpuChart', getTopCpuModels(allClients, 4));
     renderBarChart('dashRamChart', getRamBuckets(allClients));
