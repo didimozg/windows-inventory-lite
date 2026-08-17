@@ -1287,6 +1287,16 @@ tr.usb-row td {
   width: 20px;
   height: 20px;
   border-radius: 50%;
+  /* An inline-flex box's default vertical-align is "baseline", derived from
+     its content: the "on" state's checkmark <svg> establishes one baseline,
+     the "off" state's empty ::after box (no baseline-participating content)
+     falls back to a different one - so two dots side by side in the same
+     Clients-table cell (Windows/Office) sat ~4-5px apart whenever their
+     on/off states differed, self-aligned only when both matched. Fixing the
+     alignment mode itself (not the content) makes every dot instance -
+     Clients table pairs and the single Connection-status dots - align the
+     same way regardless of its own or a neighbor's state. */
+  vertical-align: middle;
 }
 
 .status-dot svg {
