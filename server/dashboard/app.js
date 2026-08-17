@@ -27,6 +27,11 @@
       // computerName or Linux' hostname. See allClientSortValue.
       clients: { key: 'name', dir: 1 },
       software: { key: 'name', dir: 1 },
+      // Sorts the software list inside a Windows client's expanded detail
+      // row (see nestedTable in renderClientsTable). Single shared key, not
+      // per-client - same convention as software/licenses above (one sort
+      // order for the whole logical table, not one per row/group).
+      clientSoftware: { key: 'name', dir: 1 },
       // hwCpu/hwDisk/hwRam drive the single cross-platform Hardware view -
       // these were always per-table, never per-platform, so the merged view
       // reuses them and the former linuxHw* keys are gone.
@@ -647,6 +652,19 @@
       case 'version': return (license.version || '').toLowerCase();
       case 'license': return (license.license || '').toLowerCase();
       case 'comment': return (license.comment || '').toLowerCase();
+      default: return '';
+    }
+  }
+
+  // installDate is raw YYYYMMDD (see formatInstallDate) - zero-padded and
+  // already chronologically sortable as a plain string, no Date parsing
+  // needed.
+  function clientSoftwareSortValue(item, key) {
+    switch (key) {
+      case 'name': return (item.name || '').toLowerCase();
+      case 'version': return item.version || '';
+      case 'publisher': return (item.publisher || '').toLowerCase();
+      case 'installDate': return item.installDate || '';
       default: return '';
     }
   }
@@ -3589,11 +3607,19 @@
         return `${escapeHtml(d.type)}${escapeHtml(size)}${badge} <small>${escapeHtml(d.model)}</small>`;
       }).join('<br>') || 'Unknown';
 
+      const { key: clientSoftwareSortKey, dir: clientSoftwareSortDir } = state.sort.clientSoftware;
+      const sortedClientSoftware = applySort(clientSoftware, item => clientSoftwareSortValue(item, clientSoftwareSortKey), clientSoftwareSortDir);
+
       const nestedTable = isWindows
         ? `<h2>${escapeHtml(client.computerName)} software</h2>
             <table class="nested-table">
-              <thead><tr><th>Name</th><th>Version</th><th>Publisher</th><th>Install date</th></tr></thead>
-              <tbody>${clientSoftware.map(item => `<tr>
+              <thead><tr>
+                <th data-sort-table="clientSoftware" data-sort-key="name" class="sortable">Name</th>
+                <th data-sort-table="clientSoftware" data-sort-key="version" class="sortable">Version</th>
+                <th data-sort-table="clientSoftware" data-sort-key="publisher" class="sortable">Publisher</th>
+                <th data-sort-table="clientSoftware" data-sort-key="installDate" class="sortable">Install date</th>
+              </tr></thead>
+              <tbody>${sortedClientSoftware.map(item => `<tr>
                 <td>${escapeHtml(item.name)}</td>
                 <td>${escapeHtml(item.version)}</td>
                 <td>${escapeHtml(item.publisher)}</td>
@@ -3643,6 +3669,13 @@
     });
 
     byId('inventoryBody').innerHTML = rows.join('') || '<tr><td colspan="9" class="empty">No matching inventory records.</td></tr>';
+    // The clientSoftware <th> elements above are rebuilt from scratch on
+    // every call (they live inside inventoryBody's innerHTML, unlike the
+    // Clients/Software/Hardware/Licenses <thead>s, which are static in
+    // index.html and persist across renders) - the earlier renderSortHeaders()
+    // call above ran before they existed, so re-run it now that they're in
+    // the DOM to give the active clientSoftware sort column its arrow.
+    renderSortHeaders();
     if (editingClientId) {
       const platformSelector = editingIsLinux ? '[data-platform="linux"]' : ':not([data-platform])';
       const restoredInput = document.querySelector(`.description-edit-input[data-description-client="${editingClientId}"]${platformSelector}`);
