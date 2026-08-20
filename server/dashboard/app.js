@@ -1029,7 +1029,11 @@
   // from one list (state.installJobs, populated by loadInstallHistory) -
   // each job's own `mode` field labels its row, newest job first.
   function renderMergedInstallHistory() {
-    const platformLabel = job => job.mode === 'force-linux' ? 'Linux' : (job.mode === 'force-windows' ? 'Windows' : 'Auto');
+    // A job file saved before this phase shipped has no "mode" key at
+    // all (GetStringValue returns "" for a missing key) - this directory
+    // only ever held Windows/WinRM job files pre-merge, so a blank mode
+    // unambiguously means a legacy Windows job, not "Auto".
+    const platformLabel = job => job.mode === 'force-linux' ? 'Linux' : (job.mode === 'auto' ? 'Auto' : 'Windows');
     const entries = (state.installJobs || []).map(job => ({ job, platform: platformLabel(job) }))
       .sort((a, b) => new Date(b.job.createdAt) - new Date(a.job.createdAt));
 
@@ -1125,16 +1129,6 @@
     byId(passwordFieldId).classList.toggle('hidden', mode !== 'credentials');
   }
 
-  function updateClientActionModeUi() {
-    const mode = byId('clientActionMode').value;
-    document.querySelectorAll('#installView .mode-windows-field').forEach(element => {
-      element.classList.toggle('hidden', mode === 'force-linux');
-    });
-    document.querySelectorAll('#installView .mode-linux-field').forEach(element => {
-      element.classList.toggle('hidden', mode === 'force-windows');
-    });
-  }
-
   function updateInstallTrustNewHostKeysUi() {
     const trustChecked = byId('installTrustNewHostKeys').checked;
     byId('installAcknowledgeHostKeyRiskField').classList.toggle('hidden', !trustChecked);
@@ -1222,16 +1216,44 @@
       });
   }
 
-  function updateClientActionUi() {
-    const action = byId('clientAction').value;
-    const isInstall = action === 'install';
-    document.querySelectorAll('#installView .install-only').forEach(element => {
-      element.classList.toggle('hidden', !isInstall);
+  // Single source of truth for Deploy > Actions' field visibility - it
+  // used to be two independent functions (one for the Install/Uninstall
+  // action, one for the Auto/Force Windows/Force Linux mode), but 5
+  // fields carry BOTH an .install-only class and a .mode-*-field class,
+  // so whichever function ran last silently clobbered the other's
+  // decision (found live during Phase 3's final review: the SSH
+  // host-key-risk acknowledgement checkbox was visible on a fresh page
+  // load, and toggling Action after picking Force Windows could resurrect
+  // Linux-only fields and even leave the submit button permanently
+  // disabled). One function, one pass, always both inputs.
+  function updateInstallFieldVisibility() {
+    const isInstall = byId('clientAction').value === 'install';
+    const mode = byId('clientActionMode').value;
+    document.querySelectorAll('#installView .install-only, #installView .mode-windows-field, #installView .mode-linux-field').forEach(element => {
+      const hideByAction = element.classList.contains('install-only') && !isInstall;
+      const hideByMode = (element.classList.contains('mode-windows-field') && mode === 'force-linux')
+        || (element.classList.contains('mode-linux-field') && mode === 'force-windows');
+      element.classList.toggle('hidden', hideByAction || hideByMode);
     });
     byId('installButton').textContent = isInstall ? 'Install client' : 'Uninstall client';
-    if (!isInstall) {
+    // Also reset when leaving Force Windows, not just when leaving
+    // Install: these two checkboxes have no meaning once the Linux
+    // fields they belong to are mode-hidden, and their .checked state
+    // otherwise survives a mode switch invisibly (the checkbox itself
+    // being hidden doesn't uncheck it), which is exactly what let a
+    // stale "trust new host keys" from a prior Force Linux selection
+    // disable the submit button after switching to Force Windows.
+    if (!isInstall || mode === 'force-windows') {
       byId('installTrustNewHostKeys').checked = false;
       byId('installAcknowledgeHostKeyRisk').checked = false;
+    }
+    // installSshCredentialsField/installSshPasswordField carry their own
+    // auth-mode-based visibility rule on top of .mode-linux-field (see
+    // updateLinuxAuthModeFieldsUi) - only re-derive it when the mode pass
+    // above didn't already hide them, or a Force Windows selection would
+    // get silently re-shown regardless of the (irrelevant) auth mode.
+    if (mode !== 'force-windows') {
+      updateLinuxAuthModeFieldsUi('installSshAuthMode', 'installSshCredentialsField', 'installSshPasswordField');
     }
     updateInstallTrustNewHostKeysUi();
   }
@@ -4246,8 +4268,8 @@
   byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
   byId('pkgServerUrl').value = `${window.location.origin}/api/v1/inventory`;
   byId('linuxPkgServerUrl').value = `${window.location.origin}/api/v1/linux/inventory`;
-  byId('clientAction').addEventListener('change', updateClientActionUi);
-  byId('clientActionMode').addEventListener('change', updateClientActionModeUi);
+  byId('clientAction').addEventListener('change', updateInstallFieldVisibility);
+  byId('clientActionMode').addEventListener('change', updateInstallFieldVisibility);
   byId('installSshAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('installSshAuthMode', 'installSshCredentialsField', 'installSshPasswordField'));
   byId('installPreferredSubnetSaveButton').addEventListener('click', saveInstallPreferredSubnet);
   byId('installTrustNewHostKeys').addEventListener('change', updateInstallTrustNewHostKeysUi);
@@ -4556,8 +4578,7 @@
   if (state.view === 'deploy') loadDeploySubviewData(state.subview);
   if (state.view === 'settings') loadSettingsSubviewData(state.subview);
   if (state.view === 'licenses') loadLicenses();
-  updateClientActionUi();
-  updateClientActionModeUi();
+  updateInstallFieldVisibility();
   loadInstallHistory();
   updateLinuxAuthModeFieldsUi('installSshAuthMode', 'installSshCredentialsField', 'installSshPasswordField');
   updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField');
