@@ -286,7 +286,7 @@
         <section id="linuxSettingsView" class="install-panel card-glow hidden" aria-label="Linux client settings">
           <div class="updates-top-row">
           <div class="settings-block">
-            <h2 class="settings-block-title">Linux client targeting</h2>
+            <h3 class="settings-block-title">Linux client targeting</h3>
             <p class="cert-hint">When a Linux host reports several network interfaces, Client updates/actions picks the first IPv4 address it sees by default - not necessarily the one reachable from this server (e.g. a dedicated storage/cluster network reported ahead of the real LAN address). Set a preferred subnet to make that address win instead, regardless of its position in the report. Leave blank to keep the plain first-address behavior.</p>
             <div class="pkg-grid client-update-grid">
               <label class="pkg-token-field">
@@ -297,7 +297,7 @@
           </div>
           <div class="settings-block">
             <h3 class="settings-block-title">Install defaults</h3>
-            <p class="cert-hint">Used by a Linux client install when the request itself doesn't override them (e.g. Deploy &gt; Actions' Auto-detect mode, which doesn't know a target is Linux until it tries).</p>
+            <p class="cert-hint">Used by a Linux client install request that doesn't specify its own interval, status interval, or install path. Deploy &gt; Actions' Linux form currently always sends its own values, so these apply only to requests that omit them (e.g. a future automated install flow).</p>
             <div class="pkg-grid linux-defaults-grid">
               <label class="pkg-token-field">
                 Interval (hours)
@@ -314,6 +314,10 @@
             </div>
           </div>
           </div>
+          <div class="pkg-buttons">
+            <button id="linuxSettingsSaveButton" class="primary-button" type="button">Save</button>
+          </div>
+          <div id="linuxSettingsMessage" class="pkg-message hidden"></div>
           <div class="settings-block">
             <h2 class="settings-block-title">Linux Client update credentials</h2>
             <p class="cert-hint">Used by Linux Client actions/updates pushes when "Stored Linux credentials" or "SSH key" auth mode is selected on those pages. Leave password blank to keep the currently saved value.</p>
@@ -347,10 +351,6 @@
             </div>
             <div id="linuxSshKeyMessage" class="pkg-message hidden"></div>
           </div>
-          <div class="pkg-buttons">
-            <button id="linuxSettingsSaveButton" class="primary-button" type="button">Save</button>
-          </div>
-          <div id="linuxSettingsMessage" class="pkg-message hidden"></div>
         </section>
 
         <section id="certificateView" class="install-panel card-glow hidden" aria-label="Server certificate">
@@ -371,7 +371,7 @@
               <button id="certUploadButton" class="primary-button" type="button">Upload</button>
             </div>
           </div>
-          <p class="cert-hint">Uploading only stages the certificate. Turn HTTPS on or off from Settings &gt; General. The first upload travels over whatever transport is currently active - if the server is still plain HTTP, do this from a trusted network or the server console.</p>
+          <p class="cert-hint">Uploading only stages the certificate. Turn HTTPS on or off from Settings &gt; Server. The first upload travels over whatever transport is currently active - if the server is still plain HTTP, do this from a trusted network or the server console.</p>
           <div id="certMessage" class="pkg-message hidden"></div>
           <h2 class="cert-history-heading">Certificate history</h2>
           <div class="table-wrap">
@@ -577,7 +577,7 @@
             <p id="updatesSavedAccountHint" class="cert-hint hidden"></p>
             <label class="check-label updates-use-ad-field">
               <input id="updatesUseAdCredentials" type="checkbox">
-              Use global AD settings (Settings &gt; General &gt; Active Directory)
+              Use global AD settings (Settings &gt; Windows &gt; Active Directory)
             </label>
             <div class="pkg-grid client-update-grid">
               <label class="pkg-token-field">
@@ -685,7 +685,7 @@
               </label>
               <label class="check-label">
                 <input id="installUseAdCredentials" type="checkbox">
-                Use global AD settings (Settings &gt; General &gt; Active Directory)
+                Use global AD settings (Settings &gt; Windows &gt; Active Directory)
               </label>
               <label class="check-label install-only">
                 <input id="installForce" type="checkbox">

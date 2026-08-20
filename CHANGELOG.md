@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.40.6]
+
+### Fixed
+
+- Every "Settings > General" reference left over from the Settings tab split (General -> Server/Windows/Linux) now points at the tab that actually holds the field: HTTPS/certificate text points to Server, Active Directory text points to Windows, Linux Client update credentials/SSH key/preferred-subnet text points to Linux. Covered the dashboard (`index.html`, `app.js`), the server's own error messages (`WindowsInventoryLiteServer.cs`), and the install wizard/installer comments (`Install-Wizard.ps1`, `Install-Server.ps1`).
+- Settings > Linux's "Install defaults" hint described an unbuilt "Auto-detect mode" (Deploy > Actions' Linux install form always sends its own values today) - reworded to describe the fields' actual current effect instead of a future feature.
+- Settings > Linux's "Linux client targeting" block used `<h2>` while its "Install defaults" row sibling used `<h3>` - now both use `<h3>`, matching the identical block on the Linux Client updates page.
+- Settings > Linux's Save button sat after the Linux Client update credentials/SSH key block, but only saves the preferred-subnet and Install-defaults fields above it (credentials/SSH key have their own separate Save controls) - moved the button (and its message area) to sit directly under the row it actually saves.
+- `.updates-top-row`'s CSS comment said it was used on "both Updates pages"; Settings > Linux has been a third consumer since the tab split. Updated the comment to describe all three.
+
 ## [0.40.5]
 
 ### Changed

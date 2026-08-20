@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.40.5";
+        internal const string ProductVersion = "0.40.6";
 
         private static int Main(string[] args)
         {
@@ -3097,7 +3097,7 @@ namespace WindowsInventoryLite
                 }
                 if (String.IsNullOrEmpty(username) || String.IsNullOrEmpty(password))
                 {
-                    SendText(stream, "{\"error\":\"AD service-identity mode is not usable for SSH pushes to Linux targets (there is no SSH equivalent of running as the service's own identity). Select 'Stored Linux credentials' or 'SSH key' instead, or configure an explicit AD account rather than service identity in Settings > General > Active Directory.\"}", "application/json; charset=utf-8", 400);
+                    SendText(stream, "{\"error\":\"AD service-identity mode is not usable for SSH pushes to Linux targets (there is no SSH equivalent of running as the service's own identity). Select 'Stored Linux credentials' or 'SSH key' instead, or configure an explicit AD account rather than service identity in Settings > Windows > Active Directory.\"}", "application/json; charset=utf-8", 400);
                     return;
                 }
             }
@@ -3107,7 +3107,7 @@ namespace WindowsInventoryLite
                 if (String.IsNullOrEmpty(password)) password = options.LinuxUpdatePassword;
                 if (String.IsNullOrEmpty(username) || String.IsNullOrEmpty(password))
                 {
-                    SendText(stream, "{\"error\":\"username/password are required for 'credentials' auth mode (enter them, or save them in Settings > General > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
+                    SendText(stream, "{\"error\":\"username/password are required for 'credentials' auth mode (enter them, or save them in Settings > Linux > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
                     return;
                 }
             }
@@ -3116,12 +3116,12 @@ namespace WindowsInventoryLite
                 if (String.IsNullOrEmpty(username)) username = options.LinuxUpdateUsername;
                 if (String.IsNullOrEmpty(username))
                 {
-                    SendText(stream, "{\"error\":\"username is required for 'key' auth mode (enter it, or save it in Settings > General > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
+                    SendText(stream, "{\"error\":\"username is required for 'key' auth mode (enter it, or save it in Settings > Linux > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
                     return;
                 }
                 if (!File.Exists(keyPath))
                 {
-                    SendText(stream, "{\"error\":\"No SSH key is configured - upload one in Settings > General > Linux Client update credentials.\"}", "application/json; charset=utf-8", 400);
+                    SendText(stream, "{\"error\":\"No SSH key is configured - upload one in Settings > Linux > Linux Client update credentials.\"}", "application/json; charset=utf-8", 400);
                     return;
                 }
             }
@@ -4198,7 +4198,7 @@ namespace WindowsInventoryLite
         // network reported that network's address BEFORE its real LAN
         // address, so a plain "first IPv4 wins" pick tried the unreachable
         // one and every scheduled update push to it failed. When
-        // preferredSubnetCidr is configured (Settings > General), an
+        // preferredSubnetCidr is configured (Settings > Linux), an
         // address inside it wins regardless of array position; otherwise -
         // or if nothing matches - falls back to the first IPv4 seen, same
         // as before this option existed. Falls back to the hostname only
@@ -4285,7 +4285,7 @@ namespace WindowsInventoryLite
             return ((uint)octets[0] << 24) | ((uint)octets[1] << 16) | ((uint)octets[2] << 8) | octets[3];
         }
 
-        // Save-time validation for the Settings > General "preferred Linux
+        // Save-time validation for the Settings > Linux "preferred Linux
         // subnet" field - blank clears the setting (always valid); a
         // non-blank value must be a well-formed IPv4 CIDR block so a typo
         // is rejected at save time with a clear error, rather than silently
@@ -5692,11 +5692,11 @@ namespace WindowsInventoryLite
         // Stores the uploaded certificate as the configured one and, if HTTPS is
         // already active AND the certificate has no known risks, hot-swaps the
         // serving certificate immediately. It does NOT turn HTTPS on by itself -
-        // that is a separate decision made from Settings > General, so an operator
+        // that is a separate decision made from Settings > Server, so an operator
         // can stage a certificate without risking the current connection. A risky
         // certificate is never hot-swapped in: the live listener keeps serving
         // whatever it was already serving until the operator explicitly
-        // acknowledges the risk from Settings > General, the same gate that
+        // acknowledges the risk from Settings > Server, the same gate that
         // applies to turning HTTPS on for the first time.
         private void StoreUploadedCertificate(X509Certificate2 certificate, List<string> risks)
         {
@@ -5956,7 +5956,7 @@ namespace WindowsInventoryLite
             // compared side by side.
             if (!options.AdSyncEnabled)
             {
-                SendText(stream, "{\"error\":\"Check \\\"Configure AD User\\\" in Settings > General > Active Directory first.\"}", "application/json; charset=utf-8", 400);
+                SendText(stream, "{\"error\":\"Check \\\"Configure AD User\\\" in Settings > Windows > Active Directory first.\"}", "application/json; charset=utf-8", 400);
                 return;
             }
 
@@ -6166,7 +6166,7 @@ namespace WindowsInventoryLite
 
             // HTTPS is applied before HTTP, not just validated before HTTP -
             // deliberately, and in this order for a reason: the dashboard's
-            // General Settings form always submits port/enableHttp/useHttps/
+            // Server Settings form always submits port/enableHttp/useHttps/
             // httpsPort together in one request, so "turn HTTPS on and turn
             // HTTP off" is a single call with both blocks active. ApplySlotState
             // never touches a slot's old listener when a new bind fails, so
@@ -7734,7 +7734,7 @@ namespace WindowsInventoryLite
         }
 
         // "Use global AD settings" on Client actions: substitutes the AD sync
-        // credentials already configured in Settings > General > Active
+        // credentials already configured in Settings > Windows > Active
         // Directory (the same ones AdLookupService uses) for this push -
         // either the server's own service identity (blank username/password,
         // the same as leaving both fields empty already means to
@@ -7754,7 +7754,7 @@ namespace WindowsInventoryLite
             }
             if (!adSyncEnabled)
             {
-                errorMessage = "Check \"Configure AD User\" in Settings > General > Active Directory first.";
+                errorMessage = "Check \"Configure AD User\" in Settings > Windows > Active Directory first.";
                 return false;
             }
             if (adUseServiceIdentity)
@@ -7765,7 +7765,7 @@ namespace WindowsInventoryLite
             }
             if (String.IsNullOrEmpty(adUsername) || String.IsNullOrEmpty(adPassword))
             {
-                errorMessage = "No AD username/password is saved in Settings > General > Active Directory.";
+                errorMessage = "No AD username/password is saved in Settings > Windows > Active Directory.";
                 return false;
             }
             username = adUsername;

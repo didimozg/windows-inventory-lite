@@ -1719,24 +1719,28 @@ th.sort-desc::after {
   border-bottom: 1px solid var(--divider-strong, var(--line));
 }
 
-/* Authentication/Linux client targeting/Schedule (Linux) or WinRM
-   credentials/Schedule (Windows) side by side instead of stacked - each is
-   a narrow, max-420px block, so they fit one row on any normal desktop
-   width without crowding. Wraps to stacked automatically on a narrow
-   viewport via flex-wrap, no separate breakpoint needed. The row-dividing
-   border moves to the wrapper; the children lose their own (which would
-   otherwise draw a divider under each column instead of under the row). */
+/* Authentication/Linux client targeting/Schedule (Linux Client updates),
+   WinRM credentials/Schedule (Windows Client updates), or Linux client
+   targeting/Install defaults (Settings > Linux) side by side instead of
+   stacked - each is a narrow, max-420px block, so they fit one row on any
+   normal desktop width without crowding. Wraps to stacked automatically on
+   a narrow viewport via flex-wrap, no separate breakpoint needed. The
+   row-dividing border moves to the wrapper; the children lose their own
+   (which would otherwise draw a divider under each column instead of under
+   the row). */
 .updates-top-row {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-lg);
   margin-bottom: 18px;
   padding-bottom: var(--space-lg);
-  /* This wrapper carries the ONLY section divider on both Updates pages -
-     .settings-block below sets border-bottom: none once nested here - so
-     it needs the same --divider-strong contrast fix as .settings-block/
-     .subtab-strip themselves (see the dark-mode --divider-strong comment),
-     not the plain --line every other border on the page uses. */
+  /* This wrapper carries the ONLY section divider across all three pages
+     that use it (Windows Client updates, Linux Client updates, and
+     Settings > Linux) - .settings-block below sets border-bottom: none
+     once nested here - so it needs the same --divider-strong contrast fix
+     as .settings-block/.subtab-strip themselves (see the dark-mode
+     --divider-strong comment), not the plain --line every other border on
+     the page uses. */
   border-bottom: 1px solid var(--divider-strong, var(--line));
 }
 

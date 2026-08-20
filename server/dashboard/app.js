@@ -1174,7 +1174,7 @@
   }
 
   // The Preferred subnet field on this page and on Client updates both edit
-  // the SAME saved server setting (see Settings > General > Linux client
+  // the SAME saved server setting (see Settings > Linux > Linux client
   // targeting) - this only pre-fills the current value; saving goes through
   // saveLinuxInstallPreferredSubnet below.
   function loadLinuxInstallPreferredSubnet() {
@@ -1317,7 +1317,7 @@
   }
 
   // "Use global AD settings" substitutes the typed WinRM user/password
-  // with the AD sync credentials already configured in Settings > General
+  // with the AD sync credentials already configured in Settings > Windows
   // (server identity, or the saved AD account) - the fields are disabled
   // while it's checked since whatever's typed in them would be ignored.
   function updateInstallCredentialFieldsUi() {
@@ -1328,7 +1328,7 @@
 
   // Mirrors updateInstallCredentialFieldsUi (Client actions) exactly: "Use
   // global AD settings" substitutes the typed/saved Client Update account
-  // with the AD sync credentials already configured in Settings > General.
+  // with the AD sync credentials already configured in Settings > Windows.
   function updateUpdatesCredentialFieldsUi() {
     const useAd = byId('updatesUseAdCredentials').checked;
     byId('updatesUsername').disabled = useAd;
@@ -1664,7 +1664,7 @@
   }
 
   // Saves the SAME server setting Client actions' own field and Settings >
-  // General > Linux client targeting edit - reloading afterward re-resolves
+  // Linux > Linux client targeting edit - reloading afterward re-resolves
   // every outdated client's push target (entry.target, the hidden checkbox
   // value in the table below) using the newly saved preference.
   function saveLinuxUpdatesPreferredSubnet() {
@@ -2328,7 +2328,7 @@
     }
     const risks = data.risks || [];
     const parts = [
-      data.useHttps ? 'HTTPS: enabled' : 'HTTPS: disabled (configured but not active - turn on in Settings > General)',
+      data.useHttps ? 'HTTPS: enabled' : 'HTTPS: disabled (configured but not active - turn on in Settings > Server)',
       'Subject: ' + escapeHtml(data.subject || 'Unknown'),
       'Expires: ' + escapeHtml(formatDateTime(data.notAfter)),
       data.isExpired ? '<span class="usb-badge">EXPIRED</span>' : '',
@@ -2411,8 +2411,8 @@
         const risks = data.risks || [];
         showCertMessage(
           risks.length
-            ? `Certificate uploaded with ${risks.length} risk(s): ${risks.join(' ')} Enable HTTPS from Settings > General when ready.`
-            : 'Certificate uploaded. Enable HTTPS from Settings > General when ready.',
+            ? `Certificate uploaded with ${risks.length} risk(s): ${risks.join(' ')} Enable HTTPS from Settings > Server when ready.`
+            : 'Certificate uploaded. Enable HTTPS from Settings > Server when ready.',
           risks.length > 0
         );
       })
