@@ -1908,4 +1908,14 @@ th.sort-desc::after {
     grid-column: auto;
     grid-row: auto;
   }
+
+  /* .install-right-fields .install-submit-field's own unconditional
+     grid-column: 1 / span 2 (needed for the 2-column desktop/tablet
+     layout) has the same (0,2,0) specificity as the reset above, which
+     only has (0,1,0) via the universal child combinator and can never
+     win regardless of source order. Match its specificity here instead -
+     appearing later in source order then correctly wins the tie. */
+  .install-right-fields .install-submit-field {
+    grid-column: 1;
+  }
 }
