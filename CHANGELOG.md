@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.41.1]
+
+Phase 2 of the Deploy > Actions/Updates unification effort (see `docs/superpowers/specs/2026-08-17-deploy-actions-updates-unification-design.md`) - internal-only, no reachable behavior change.
+
+### Added
+
+- Server-side building blocks for a future Auto-detect install mode (`TryConnect`, `DecideAutoDetectProtocols`, `BuildAttemptResult`) - not wired into any endpoint yet, nothing in the dashboard calls this code. Phase 3 will connect it to a unified Deploy > Actions form.
+
 ## [0.41.0]
 
 Phase 1 of a larger Deploy > Actions/Updates unification effort (see `docs/superpowers/specs/2026-08-17-deploy-actions-updates-unification-design.md`) - later phases will add auto-detected mixed Windows/Linux install targets and a unified Updates table; this phase lays the Settings groundwork they need.

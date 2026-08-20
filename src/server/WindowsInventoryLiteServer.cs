@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.41.0";
+        internal const string ProductVersion = "0.41.1";
 
         private static int Main(string[] args)
         {
@@ -4478,6 +4478,11 @@ namespace WindowsInventoryLite
         // other result-building convention in this file (e.g.
         // RunClientInstallTarget's own result dict) rather than
         // introducing a typed class this codebase doesn't otherwise use.
+        // Deliberately does not stamp startedAt/completedAt/exitCode here -
+        // Phase 3's real caller is expected to build an attempt by
+        // enriching the dict RunClientInstallTarget/RunLinuxClientInstallTarget
+        // already return (which already carry those fields) rather than
+        // constructing one from scratch and losing them.
         internal static Dictionary<string, object> BuildAttemptResult(string protocol, string status, string message, string output, string error)
         {
             Dictionary<string, object> attempt = new Dictionary<string, object>();
