@@ -6,6 +6,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.42.0]
+
+Phase 3 of the Deploy > Actions/Updates unification effort (see `docs/superpowers/specs/2026-08-17-deploy-actions-updates-unification-design.md`) - Deploy > Actions' separate Windows and Linux install/uninstall forms are now one mode-aware form, and Phase 2's Auto-detect building blocks are wired in for the first time.
+
+### Changed
+
+- Deploy > Actions is now a single form for both platforms, with a Detection mode selector: **Auto** (probes WinRM port 5985 and SSH port 22, tries WinRM first if both respond, falls back to SSH only if the WinRM attempt itself fails), **Force Windows** (WinRM only, no probing), **Force Linux** (SSH only, no probing). Credential fields show contextually per mode. A per-target result can now show more than one protocol attempt, displayed as a collapsible row when it does.
+- "Load all PC from AD" / "Load PC without client from AD" are no longer Windows-only - available in every mode, since a domain-joined Linux host can also be an AD computer object. This also fixed a real bug: the "missing" filter previously only ever checked Windows clients, so a Linux host that already had a reporting client could still show up as "missing."
+- The server-side `InstallJob`/`StartClientAction`/`RunClientActionJob` (Windows) and `LinuxInstallJob`/`StartLinuxClientAction`/`RunLinuxClientActionJob` (Linux) are unified into one job class, one dispatcher, and one endpoint pair.
+
+### Removed
+
+- **Breaking API change:** `POST /api/v1/linux-client-install` and `POST /api/v1/linux-client-uninstall` no longer exist. `POST /api/v1/client-install`/`POST /api/v1/client-uninstall` now serve both platforms and require a new `mode` field (`"auto"` / `"force-windows"` / `"force-linux"`). Any external automation calling the old Linux endpoints, or the Windows endpoints without a `mode` field, needs updating. `docs/api-reference.md` still describes the old shape pending a docs pass.
+
+### Fixed
+
+- Deploy > Actions' mobile (sub-480px) layout never actually collapsed its right-hand field column to a single line, despite the media query text reading correctly - a CSS specificity tie the intended reset rule could never win.
+- The merged "Saved client action logs" table's operator-identity column was blank for every Linux job (only ever read the WinRM username field).
+- A pre-existing UI defect surfaced by this merge: two independent field-visibility functions (one for Install/Uninstall, one for the new Detection mode) wrote to overlapping element sets, so whichever ran last silently clobbered the other's decision - visible as the SSH host-key-risk checkbox showing on a fresh page load, and one combination could leave the submit button permanently disabled. Consolidated into one function.
+- The "Trust and retry" host-key control could render on Deploy > Updates' Linux panel too (after the HTML merge collapsed two status boxes into one shared ID) - clicking it there would have resubmitted Deploy > Actions' own field values instead of the credentials the Updates push actually used. Re-scoped to the Actions panel only.
+
+### Known characteristic
+
+- Auto mode requires valid WinRM **and** SSH credentials to be resolvable before a job starts, even if every target in the batch turns out to be one platform only. A deployment with no Linux credentials saved (Settings > Linux) will get a validation error on Auto mode until Linux credentials or an SSH key are configured, or Force Windows is selected instead.
+
 ## [0.41.1]
 
 Phase 2 of the Deploy > Actions/Updates unification effort (see `docs/superpowers/specs/2026-08-17-deploy-actions-updates-unification-design.md`) - internal-only, no reachable behavior change.
