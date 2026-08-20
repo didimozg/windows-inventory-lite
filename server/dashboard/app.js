@@ -178,13 +178,9 @@
   }
 
   function loadDeploySubviewData(subview) {
-    if (subview === 'actions') loadInstallHistory();
+    if (subview === 'actions') { loadInstallHistory(); loadInstallPreferredSubnet(); }
     if (subview === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
     if (subview === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
-    // Both platforms' Actions/Updates content is stacked on one subview now
-    // (see the design spec's Phase 2 scope note - no OS filter yet), so a
-    // single subview load must trigger both platforms' own loaders.
-    if (subview === 'actions') { loadLinuxInstallHistory(); loadLinuxInstallPreferredSubnet(); }
     if (subview === 'updates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
   }
 
@@ -887,36 +883,61 @@
       });
   }
 
+  function renderAttemptRows(jobId, index, attempts) {
+    if (!attempts || attempts.length === 0) return '';
+    const key = 'attempt:' + jobId + ':' + index;
+    const isHidden = state.expandedDetails.has(key) ? '' : 'hidden';
+    const rows = attempts.map(attempt => `<tr>
+        <td>${escapeHtml(attempt.protocol)}</td>
+        <td>${escapeHtml(attempt.status)}</td>
+        <td>${escapeHtml(attempt.message)}</td>
+        <td><pre class="install-output">${escapeHtml((attempt.error || attempt.output || '').trim())}</pre></td>
+      </tr>`).join('');
+    return `<tr class="details-row ${isHidden}" data-attempt-details="${index}" data-attempt-job="${escapeHtml(jobId)}">
+        <td colspan="4">
+          <div class="details">
+            <table class="nested-table install-results-table">
+              <thead><tr><th>Protocol</th><th>Status</th><th>Message</th><th>Output</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        </td>
+      </tr>`;
+  }
+
   function renderInstallJob(job, statusElementId = 'installStatus') {
     const results = job.results || [];
-    const rows = results.map(result => {
-      // Trust-and-retry only makes sense on the Linux Client Actions panel:
-      // it submits the Actions tab's own install-form fields (server URL,
-      // token, path, auth mode), which don't exist/apply on the Updates
-      // panel's already-installed-clients flow. The Updates panel still
-      // shows the hostKeyBadge below so the operator sees why it failed.
+    const rows = results.map((result, index) => {
+      // Trust-and-retry reads the ssh attempt's host-key fields, which
+      // mirror onto the summary result when ssh is the last attempt tried
+      // (see RunUnifiedInstallTarget) - unchanged shape from before the
+      // Windows/Linux merge, just now reachable from any mode.
       let trustControl = '';
-      if (statusElementId === 'linuxInstallStatus') {
-        if (result.hostKeyStatus && result.hostKeyFingerprint) {
-          trustControl = `<button class="link-button trust-host-key-button" type="button"
-               data-trust-host="${escapeHtml(result.target)}"
-               data-trust-fingerprint="${escapeHtml(result.hostKeyFingerprint)}">Trust and retry</button>`;
-        } else if (result.hostKeyStatus) {
-          trustControl = `<span class="trust-host-key-manual">
-               <input type="text" class="trust-fingerprint-input" placeholder="SHA256:..." data-trust-host-input="${escapeHtml(result.target)}">
-               <button class="link-button trust-host-key-button" type="button" data-trust-host-manual="${escapeHtml(result.target)}">Trust and retry</button>
-             </span>`;
-        }
+      if (result.hostKeyStatus && result.hostKeyFingerprint) {
+        trustControl = `<button class="link-button trust-host-key-button" type="button"
+             data-trust-host="${escapeHtml(result.target)}"
+             data-trust-fingerprint="${escapeHtml(result.hostKeyFingerprint)}">Trust and retry</button>`;
+      } else if (result.hostKeyStatus) {
+        trustControl = `<span class="trust-host-key-manual">
+             <input type="text" class="trust-fingerprint-input" placeholder="SHA256:..." data-trust-host-input="${escapeHtml(result.target)}">
+             <button class="link-button trust-host-key-button" type="button" data-trust-host-manual="${escapeHtml(result.target)}">Trust and retry</button>
+           </span>`;
       }
       const hostKeyBadge = result.hostKeyStatus === 'changed'
         ? '<span class="usb-badge">HOST KEY CHANGED</span>'
         : (result.hostKeyStatus === 'unknown' ? '<span class="usb-badge">HOST KEY UNKNOWN</span>' : '');
+      const attempts = result.attempts || [];
+      const hasMultipleAttempts = attempts.length > 1;
+      const targetCell = hasMultipleAttempts
+        ? `<button class="link-button" type="button" data-attempt-toggle="${index}" data-attempt-job="${escapeHtml(job.id)}">${escapeHtml(result.target)}</button>`
+        : escapeHtml(result.target);
+      const protocolNote = result.protocol ? ` (${escapeHtml(result.protocol)})` : '';
       return `<tr>
-      <td>${escapeHtml(result.target)}</td>
-      <td>${escapeHtml(result.status)}${hostKeyBadge}</td>
+      <td>${targetCell}</td>
+      <td>${escapeHtml(result.status)}${protocolNote}${hostKeyBadge}</td>
       <td>${escapeHtml(result.message)}</td>
       <td><pre class="install-output">${escapeHtml((result.error || result.output || '').trim())}</pre>${trustControl}</td>
-    </tr>`;
+    </tr>${renderAttemptRows(job.id, index, hasMultipleAttempts ? attempts : null)}`;
     }).join('');
 
     const statusElement = byId(statusElementId);
@@ -993,45 +1014,32 @@
     });
   }
 
-  // The single cross-platform "Saved client action logs" card at the
-  // bottom of Deploy > Actions, replacing the former renderInstallHistory
-  // (Windows) / renderLinuxInstallHistory (Linux) pair. Each platform's
-  // own job list (state.installJobs / state.linuxInstallJobs, populated
-  // independently by loadInstallHistory/loadLinuxInstallHistory) is tagged
-  // with its platform and merged into one table, newest job first
-  // regardless of which platform it came from. Per-job detail viewing is
-  // unchanged - a row's Job button still calls the same
-  // pollInstallJob/pollLinuxInstallJob as before, which still write into
-  // that platform's own installStatus/linuxInstallStatus box in its own
-  // card above, not into this one.
+  // The single "Saved client action logs" card at the bottom of Deploy >
+  // Actions. Every job (Windows, Linux, or mixed "auto" targets) now comes
+  // from one list (state.installJobs, populated by loadInstallHistory) -
+  // each job's own `mode` field labels its row, newest job first.
   function renderMergedInstallHistory() {
-    const entries = (state.installJobs || []).map(job => ({ job, platform: 'Windows' }))
-      .concat((state.linuxInstallJobs || []).map(job => ({ job, platform: 'Linux' })))
+    const platformLabel = job => job.mode === 'force-linux' ? 'Linux' : (job.mode === 'force-windows' ? 'Windows' : 'Auto');
+    const entries = (state.installJobs || []).map(job => ({ job, platform: platformLabel(job) }))
       .sort((a, b) => new Date(b.job.createdAt) - new Date(a.job.createdAt));
 
-    const windowsError = state.installJobsError;
-    const linuxError = state.linuxInstallJobsError;
+    const loadError = state.installJobsError;
 
     if (entries.length === 0) {
       byId('installHistory').classList.add('empty');
-      byId('installHistory').textContent = (windowsError || linuxError)
-        ? `Saved client action logs are not available: ${windowsError || linuxError}`
+      byId('installHistory').textContent = loadError
+        ? `Saved client action logs are not available: ${loadError}`
         : 'No saved client action logs.';
       return;
     }
 
-    // A load failure on one platform doesn't hide the other platform's
-    // working data - it did before this merge (each table clobbered its
-    // own content with an error string on failure) but that behavior only
-    // made sense when each platform had its own card. Surfaced as a note
-    // above the table instead.
-    const errorNotice = (windowsError || linuxError)
-      ? `<p class="cert-hint">${windowsError ? `Windows action logs unavailable: ${escapeHtml(windowsError)}` : ''}${windowsError && linuxError ? ' ' : ''}${linuxError ? `Linux action logs unavailable: ${escapeHtml(linuxError)}` : ''}</p>`
+    const errorNotice = loadError
+      ? `<p class="cert-hint">Client action logs unavailable: ${escapeHtml(loadError)}</p>`
       : '';
 
     const rows = entries.map(({ job, platform }) => `<tr>
       <td><small class="platform-tag">${escapeHtml(platform)}</small></td>
-      <td><button class="link-button" type="button" data-action-job="${escapeHtml(job.id)}" data-action-platform="${platform === 'Windows' ? 'windows' : 'linux'}">${escapeHtml(job.id)}</button></td>
+      <td><button class="link-button" type="button" data-action-job="${escapeHtml(job.id)}">${escapeHtml(job.id)}</button></td>
       <td>${escapeHtml(job.action || 'install')}</td>
       <td>${escapeHtml(job.status)}</td>
       <td>${escapeHtml(formatDateTime(job.createdAt))}</td>
@@ -1046,21 +1054,15 @@
       ${errorNotice}
       <div class="install-history-results">
         <table class="nested-table install-history-table">
-          <thead><tr><th>Platform</th><th>Job</th><th>Action</th><th>Status</th><th>Started</th><th>Completed</th><th>Targets</th><th>Failed</th><th>Retention</th></tr></thead>
+          <thead><tr><th>Mode</th><th>Job</th><th>Action</th><th>Status</th><th>Started</th><th>Completed</th><th>Targets</th><th>Failed</th><th>Retention</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>`;
 
     document.querySelectorAll('[data-action-job]').forEach(button => {
       button.addEventListener('click', () => {
-        const jobId = button.dataset.actionJob;
-        if (button.dataset.actionPlatform === 'linux') {
-          state.linuxInstallJobId = jobId;
-          pollLinuxInstallJob(jobId);
-        } else {
-          state.installJobId = jobId;
-          pollInstallJob(jobId);
-        }
+        state.installJobId = button.dataset.actionJob;
+        pollInstallJob(state.installJobId);
       });
     });
   }
@@ -1102,25 +1104,6 @@
       });
   }
 
-  function pollLinuxInstallJob(jobId, statusElementId = 'linuxInstallStatus', onComplete = loadLinuxInstallHistory, timerKey = 'linuxInstallPollTimer') {
-    fetch(`/api/v1/linux-client-install/${encodeURIComponent(jobId)}`, { cache: 'no-store' })
-      .then(response => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json();
-      })
-      .then(job => {
-        renderInstallJob(job, statusElementId);
-        if (job.status === 'completed' && state[timerKey]) {
-          window.clearInterval(state[timerKey]);
-          state[timerKey] = null;
-          onComplete();
-        }
-      })
-      .catch(error => {
-        byId(statusElementId).textContent = `Install job status is not available: ${error.message}`;
-      });
-  }
-
   // Parameterized (not hardcoded to the Linux Client actions page's own
   // element ids) so the Linux Client updates page's own auth-mode selector
   // (Task 10) can reuse this instead of duplicating it - the established
@@ -1132,66 +1115,45 @@
     byId(passwordFieldId).classList.toggle('hidden', mode !== 'credentials');
   }
 
-  function updateLinuxClientActionUi() {
-    const action = byId('linuxClientAction').value;
-    const isInstall = action === 'install';
-    document.querySelectorAll('#linuxInstallView .install-only').forEach(element => {
-      element.classList.toggle('hidden', !isInstall);
+  function updateClientActionModeUi() {
+    const mode = byId('clientActionMode').value;
+    document.querySelectorAll('#installView .mode-windows-field').forEach(element => {
+      element.classList.toggle('hidden', mode === 'force-linux');
     });
-    byId('linuxInstallButton').textContent = isInstall ? 'Install client' : 'Uninstall client';
-    if (!isInstall) {
-      byId('linuxTrustNewHostKeys').checked = false;
-      byId('linuxAcknowledgeHostKeyRisk').checked = false;
-    }
-    updateLinuxTrustNewHostKeysUi();
+    document.querySelectorAll('#installView .mode-linux-field').forEach(element => {
+      element.classList.toggle('hidden', mode === 'force-windows');
+    });
   }
 
-  function updateLinuxTrustNewHostKeysUi() {
-    const trustChecked = byId('linuxTrustNewHostKeys').checked;
-    byId('linuxAcknowledgeHostKeyRiskField').classList.toggle('hidden', !trustChecked);
+  function updateInstallTrustNewHostKeysUi() {
+    const trustChecked = byId('installTrustNewHostKeys').checked;
+    byId('installAcknowledgeHostKeyRiskField').classList.toggle('hidden', !trustChecked);
     if (!trustChecked) {
-      byId('linuxAcknowledgeHostKeyRisk').checked = false;
+      byId('installAcknowledgeHostKeyRisk').checked = false;
     }
-    const acknowledgeChecked = byId('linuxAcknowledgeHostKeyRisk').checked;
-    byId('linuxInstallButton').disabled = trustChecked && !acknowledgeChecked;
-  }
-
-  function loadLinuxInstallHistory() {
-    fetch('/api/v1/linux-client-install', { cache: 'no-store' })
-      .then(response => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json();
-      })
-      .then(data => {
-        state.linuxInstallJobs = data.jobs || [];
-        state.linuxInstallJobsError = null;
-        renderMergedInstallHistory();
-      })
-      .catch(error => {
-        state.linuxInstallJobsError = error.message;
-        renderMergedInstallHistory();
-      });
+    const acknowledgeChecked = byId('installAcknowledgeHostKeyRisk').checked;
+    byId('installButton').disabled = trustChecked && !acknowledgeChecked;
   }
 
   // The Preferred subnet field on this page and on Client updates both edit
   // the SAME saved server setting (see Settings > Linux > Linux client
   // targeting) - this only pre-fills the current value; saving goes through
-  // saveLinuxInstallPreferredSubnet below.
-  function loadLinuxInstallPreferredSubnet() {
+  // saveInstallPreferredSubnet below.
+  function loadInstallPreferredSubnet() {
     fetch('/api/v1/server/settings', { cache: 'no-store' })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
       })
       .then(data => {
-        byId('linuxInstallPreferredSubnet').value = data.preferredLinuxSubnet || '';
+        byId('installPreferredSubnet').value = data.preferredLinuxSubnet || '';
       })
       .catch(() => {});
   }
 
-  function saveLinuxInstallPreferredSubnet() {
-    const preferredLinuxSubnet = byId('linuxInstallPreferredSubnet').value.trim();
-    byId('linuxInstallPreferredSubnetSaveButton').disabled = true;
+  function saveInstallPreferredSubnet() {
+    const preferredLinuxSubnet = byId('installPreferredSubnet').value.trim();
+    byId('installPreferredSubnetSaveButton').disabled = true;
     fetch('/api/v1/server/settings', {
       method: 'POST',
       cache: 'no-store',
@@ -1206,64 +1168,7 @@
         window.alert(`Failed to save preferred subnet: ${error.message}`);
       })
       .finally(() => {
-        byId('linuxInstallPreferredSubnetSaveButton').disabled = false;
-      });
-  }
-
-  function startLinuxClientActionJob() {
-    const action = byId('linuxClientAction').value;
-    const targets = byId('linuxInstallTargets').value.trim();
-    const serverUrl = byId('linuxInstallServerUrl').value.trim();
-    const token = byId('linuxInstallToken').value.trim();
-    const intervalHours = Number(byId('linuxInstallIntervalHours').value) || 6;
-    const statusIntervalMinutes = Number(byId('linuxInstallStatusIntervalMinutes').value) || 30;
-    const installPath = byId('linuxInstallPath').value.trim() || '/opt/windows-inventory-lite';
-    const authMode = byId('linuxInstallAuthMode').value;
-    const username = authMode === 'ad' ? '' : byId('linuxInstallUsername').value.trim();
-    const password = authMode === 'credentials' ? byId('linuxInstallPassword').value : '';
-    const trustNewHostKeys = action === 'install' && byId('linuxTrustNewHostKeys').checked;
-    const acknowledgeHostKeyRisk = action === 'install' && byId('linuxAcknowledgeHostKeyRisk').checked;
-
-    if (!targets) {
-      window.alert('Enter at least one target.');
-      return;
-    }
-    if (action === 'install' && !serverUrl) {
-      window.alert('Enter server URL.');
-      return;
-    }
-
-    if (action === 'uninstall') {
-      const confirmed = window.confirm('Uninstall the client service from the selected Linux targets?');
-      if (!confirmed) return;
-    }
-
-    byId('linuxInstallButton').disabled = true;
-    byId('linuxInstallStatus').classList.add('empty');
-    byId('linuxInstallStatus').textContent = `Starting ${action} job...`;
-
-    fetch(action === 'uninstall' ? '/api/v1/linux-client-uninstall' : '/api/v1/linux-client-install', {
-      method: 'POST',
-      cache: 'no-store',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, authMode, username, password, trustNewHostKeys, acknowledgeHostKeyRisk })
-    })
-      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
-      .then(({ ok, status, data }) => {
-        if (!ok) throw new Error(data.error || `HTTP ${status}`);
-        return data;
-      })
-      .then(data => {
-        state.linuxInstallJobId = data.jobId;
-        if (state.linuxInstallPollTimer) window.clearInterval(state.linuxInstallPollTimer);
-        pollLinuxInstallJob(state.linuxInstallJobId);
-        state.linuxInstallPollTimer = window.setInterval(() => pollLinuxInstallJob(state.linuxInstallJobId), 3000);
-      })
-      .catch(error => {
-        byId('linuxInstallStatus').textContent = `Failed to start ${action} job: ${error.message}`;
-      })
-      .finally(() => {
-        updateLinuxTrustNewHostKeysUi();
+        byId('installPreferredSubnetSaveButton').disabled = false;
       });
   }
 
@@ -1278,29 +1183,29 @@
       .then(({ ok, status, data }) => {
         if (!ok) throw new Error(data.error || `HTTP ${status}`);
 
-        const serverUrl = byId('linuxInstallServerUrl').value.trim();
-        const token = byId('linuxInstallToken').value.trim();
-        const intervalHours = Number(byId('linuxInstallIntervalHours').value) || 6;
-        const statusIntervalMinutes = Number(byId('linuxInstallStatusIntervalMinutes').value) || 30;
-        const installPath = byId('linuxInstallPath').value.trim() || '/opt/windows-inventory-lite';
-        const authMode = byId('linuxInstallAuthMode').value;
-        const username = authMode === 'ad' ? '' : byId('linuxInstallUsername').value.trim();
-        const password = authMode === 'credentials' ? byId('linuxInstallPassword').value : '';
+        const serverUrl = byId('installServerUrl').value.trim();
+        const token = byId('installToken').value.trim();
+        const intervalHours = Number(byId('installIntervalHours').value) || 6;
+        const statusIntervalMinutes = Number(byId('installStatusIntervalMinutes').value) || 30;
+        const installPath = byId('installLinuxPath').value.trim() || '/opt/windows-inventory-lite';
+        const sshAuthMode = byId('installSshAuthMode').value;
+        const sshUsername = sshAuthMode === 'ad' ? '' : byId('installSshUsername').value.trim();
+        const sshPassword = sshAuthMode === 'credentials' ? byId('installSshPassword').value : '';
 
-        return fetch('/api/v1/linux-client-install', {
+        return fetch('/api/v1/client-install', {
           method: 'POST',
           cache: 'no-store',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ targets: host, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, authMode, username, password, trustNewHostKeys: false, acknowledgeHostKeyRisk: false })
+          body: JSON.stringify({ targets: host, mode: 'force-linux', serverUrl, token, intervalHours, statusIntervalMinutes, installPath, sshAuthMode, sshUsername, sshPassword, trustNewHostKeys: false, acknowledgeHostKeyRisk: false })
         });
       })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
         if (!ok) throw new Error(data.error || `HTTP ${status}`);
-        state.linuxInstallJobId = data.jobId;
-        if (state.linuxInstallPollTimer) window.clearInterval(state.linuxInstallPollTimer);
-        pollLinuxInstallJob(state.linuxInstallJobId);
-        state.linuxInstallPollTimer = window.setInterval(() => pollLinuxInstallJob(state.linuxInstallJobId), 3000);
+        state.installJobId = data.jobId;
+        if (state.installPollTimer) window.clearInterval(state.installPollTimer);
+        pollInstallJob(state.installJobId);
+        state.installPollTimer = window.setInterval(() => pollInstallJob(state.installJobId), 3000);
       })
       .catch(error => {
         byId(statusElementId).textContent = `Trust and retry failed: ${error.message}`;
@@ -1314,6 +1219,11 @@
       element.classList.toggle('hidden', !isInstall);
     });
     byId('installButton').textContent = isInstall ? 'Install client' : 'Uninstall client';
+    if (!isInstall) {
+      byId('installTrustNewHostKeys').checked = false;
+      byId('installAcknowledgeHostKeyRisk').checked = false;
+    }
+    updateInstallTrustNewHostKeysUi();
   }
 
   // "Use global AD settings" substitutes the typed WinRM user/password
@@ -1512,7 +1422,7 @@
         const totalFound = computers.length;
 
         if (onlyMissing) {
-          const known = new Set((state.clients || []).map(c => (c.computerName || '').toLowerCase()));
+          const known = new Set(getAllClients().map(c => (clientDisplayName(c) || '').toLowerCase()));
           computers = computers.filter(name => !known.has(name.toLowerCase()));
         }
 
@@ -1543,6 +1453,7 @@
 
   function startClientActionJob() {
     const action = byId('clientAction').value;
+    const mode = byId('clientActionMode').value;
     const targets = byId('installTargets').value.trim();
     const serverUrl = byId('installServerUrl').value.trim();
     const token = byId('installToken').value.trim();
@@ -1551,6 +1462,15 @@
     const password = useAdCredentials ? '' : byId('installPassword').value;
     const force = byId('installForce').checked;
     const addToTrustedHosts = byId('installTrustedHosts').checked;
+    const sshAuthMode = byId('installSshAuthMode').value;
+    const sshUsername = sshAuthMode === 'ad' ? '' : byId('installSshUsername').value.trim();
+    const sshPassword = sshAuthMode === 'credentials' ? byId('installSshPassword').value : '';
+    const intervalHours = Number(byId('installIntervalHours').value) || 6;
+    const statusIntervalMinutes = Number(byId('installStatusIntervalMinutes').value) || 30;
+    const installPath = byId('installLinuxPath').value.trim() || '/opt/windows-inventory-lite';
+    const trustNewHostKeys = action === 'install' && byId('installTrustNewHostKeys').checked;
+    const acknowledgeHostKeyRisk = action === 'install' && byId('installAcknowledgeHostKeyRisk').checked;
+
     if (!targets) {
       window.alert('Enter at least one target.');
       return;
@@ -1573,7 +1493,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets, serverUrl, token, username, password, force, addToTrustedHosts, useAdCredentials })
+      body: JSON.stringify({ targets, mode, serverUrl, token, username, password, force, addToTrustedHosts, useAdCredentials, sshAuthMode, sshUsername, sshPassword, intervalHours, statusIntervalMinutes, installPath, trustNewHostKeys, acknowledgeHostKeyRisk })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
@@ -1591,6 +1511,7 @@
       })
       .finally(() => {
         byId('installButton').disabled = false;
+        updateInstallTrustNewHostKeysUi();
       });
   }
 
@@ -1747,7 +1668,7 @@
     byId('linuxUpdatesPushButton').disabled = !anyChecked || (trustChecked && !acknowledgeChecked);
   }
 
-  // Mirrors updateLinuxTrustNewHostKeysUi (Linux Client actions) - same
+  // Mirrors updateInstallTrustNewHostKeysUi (Deploy > Actions) - same
   // pairing (risk-ack field only shown/required once "trust new host keys"
   // is checked), reusing this panel's own combined button-state function
   // instead of a bare disabled=false so the trust/ack pairing is still
@@ -1765,20 +1686,20 @@
     const selected = Array.from(document.querySelectorAll('.linux-update-select:checked')).map(cb => cb.value);
     if (selected.length === 0) return;
 
-    const authMode = byId('linuxUpdatesAuthMode').value;
-    const username = authMode === 'ad' ? '' : byId('linuxUpdatesUsername').value.trim();
-    const password = authMode === 'credentials' ? byId('linuxUpdatesPassword').value : '';
+    const sshAuthMode = byId('linuxUpdatesAuthMode').value;
+    const sshUsername = sshAuthMode === 'ad' ? '' : byId('linuxUpdatesUsername').value.trim();
+    const sshPassword = sshAuthMode === 'credentials' ? byId('linuxUpdatesPassword').value : '';
     const trustNewHostKeys = byId('linuxUpdatesTrustNewHostKeys').checked;
     const acknowledgeHostKeyRisk = byId('linuxUpdatesAcknowledgeHostKeyRisk').checked;
     byId('linuxUpdatesPushButton').disabled = true;
     byId('linuxUpdatesStatus').classList.add('empty');
     byId('linuxUpdatesStatus').textContent = 'Starting update job...';
 
-    fetch('/api/v1/linux-client-install', {
+    fetch('/api/v1/client-install', {
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets: selected.join('\n'), authMode, username, password, trustNewHostKeys, acknowledgeHostKeyRisk })
+      body: JSON.stringify({ targets: selected.join('\n'), mode: 'force-linux', sshAuthMode, sshUsername, sshPassword, trustNewHostKeys, acknowledgeHostKeyRisk })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
@@ -1788,8 +1709,8 @@
       .then(data => {
         state.linuxUpdatesJobId = data.jobId;
         if (state.linuxUpdatesPollTimer) window.clearInterval(state.linuxUpdatesPollTimer);
-        pollLinuxInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', loadLinuxClientUpdates, 'linuxUpdatesPollTimer');
-        state.linuxUpdatesPollTimer = window.setInterval(() => pollLinuxInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', loadLinuxClientUpdates, 'linuxUpdatesPollTimer'), 3000);
+        pollInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', loadLinuxClientUpdates, 'linuxUpdatesPollTimer');
+        state.linuxUpdatesPollTimer = window.setInterval(() => pollInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', loadLinuxClientUpdates, 'linuxUpdatesPollTimer'), 3000);
       })
       .catch(error => {
         byId('linuxUpdatesStatus').textContent = `Failed to start update job: ${error.message}`;
@@ -2123,7 +2044,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets: targets.join('\n'), serverUrl, username, password, force: false, addToTrustedHosts: false, useSavedCredentials: true, useAdCredentials })
+      body: JSON.stringify({ targets: targets.join('\n'), mode: 'force-windows', serverUrl, username, password, force: false, addToTrustedHosts: false, useSavedCredentials: true, useAdCredentials })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
@@ -4028,7 +3949,6 @@
     // headings - see Task 2), Updates likewise, Package is already
     // cross-platform on one section (no stacking needed).
     byId('installView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
-    byId('linuxInstallView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
     byId('installHistoryView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
     byId('updatesView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'updates'));
     byId('linuxUpdatesView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'updates'));
@@ -4314,16 +4234,14 @@
     if (state.view === 'clients' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
   });
   byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
-  byId('linuxInstallServerUrl').value = `${window.location.origin}/api/v1/linux/inventory`;
   byId('pkgServerUrl').value = `${window.location.origin}/api/v1/inventory`;
   byId('linuxPkgServerUrl').value = `${window.location.origin}/api/v1/linux/inventory`;
   byId('clientAction').addEventListener('change', updateClientActionUi);
-  byId('linuxClientAction').addEventListener('change', updateLinuxClientActionUi);
-  byId('linuxInstallAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField'));
-  byId('linuxInstallButton').addEventListener('click', startLinuxClientActionJob);
-  byId('linuxInstallPreferredSubnetSaveButton').addEventListener('click', saveLinuxInstallPreferredSubnet);
-  byId('linuxTrustNewHostKeys').addEventListener('change', updateLinuxTrustNewHostKeysUi);
-  byId('linuxAcknowledgeHostKeyRisk').addEventListener('change', updateLinuxTrustNewHostKeysUi);
+  byId('clientActionMode').addEventListener('change', updateClientActionModeUi);
+  byId('installSshAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('installSshAuthMode', 'installSshCredentialsField', 'installSshPasswordField'));
+  byId('installPreferredSubnetSaveButton').addEventListener('click', saveInstallPreferredSubnet);
+  byId('installTrustNewHostKeys').addEventListener('change', updateInstallTrustNewHostKeysUi);
+  byId('installAcknowledgeHostKeyRisk').addEventListener('change', updateInstallTrustNewHostKeysUi);
   byId('linuxUpdatesAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField'));
   byId('linuxUpdatesSelectAll').addEventListener('change', () => {
     const checked = byId('linuxUpdatesSelectAll').checked;
@@ -4396,6 +4314,18 @@
     if (softwareBtn) {
       const key = 'software:' + softwareBtn.dataset.software;
       const row = document.querySelector(`[data-software-details="${softwareBtn.dataset.software}"]`);
+      if (row) {
+        const nowHidden = row.classList.toggle('hidden');
+        if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
+      }
+      return;
+    }
+
+    const attemptBtn = e.target.closest('[data-attempt-toggle]');
+    if (attemptBtn) {
+      const jobId = attemptBtn.dataset.attemptJob;
+      const key = 'attempt:' + jobId + ':' + attemptBtn.dataset.attemptToggle;
+      const row = document.querySelector(`[data-attempt-details="${attemptBtn.dataset.attemptToggle}"][data-attempt-job="${CSS.escape(jobId)}"]`);
       if (row) {
         const nowHidden = row.classList.toggle('hidden');
         if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
@@ -4617,8 +4547,8 @@
   if (state.view === 'settings') loadSettingsSubviewData(state.subview);
   if (state.view === 'licenses') loadLicenses();
   updateClientActionUi();
+  updateClientActionModeUi();
   loadInstallHistory();
-  updateLinuxClientActionUi();
-  updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField');
+  updateLinuxAuthModeFieldsUi('installSshAuthMode', 'installSshCredentialsField', 'installSshPasswordField');
   updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField');
 }());
