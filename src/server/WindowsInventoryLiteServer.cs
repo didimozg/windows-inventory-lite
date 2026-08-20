@@ -162,6 +162,14 @@ namespace WindowsInventoryLite
         // plain text, same as AdDomain. Dashboard-only, no Install-Server.ps1
         // CLI flag, same reasoning as ClientUpdateUsername below.
         public string AdComputerImportOUs;
+        // Dashboard-only (Settings > Linux > Install defaults), no
+        // Install-Server.ps1 CLI flag - same reasoning as
+        // AdComputerImportOUs above. Read by Auto-mode Deploy > Actions
+        // (a later phase) as the fallback when a target resolves to Linux
+        // and the install request itself supplies no override.
+        public int LinuxDefaultIntervalHours;
+        public int LinuxDefaultStatusIntervalMinutes;
+        public string LinuxDefaultInstallPath;
         // Off by default - a plain-text file capturing AD lookups,
         // inventory-report traffic, and unhandled server errors. See
         // DebugLogger.cs. Only meant for troubleshooting a specific
@@ -214,6 +222,9 @@ namespace WindowsInventoryLite
             options.LinuxUpdateScheduleOnceAtUtc = "";
             options.LinuxUpdateScheduleIntervalHours = 24;
             options.LinuxUpdateScheduleLastRunUtc = "";
+            options.LinuxDefaultIntervalHours = 6;
+            options.LinuxDefaultStatusIntervalMinutes = 30;
+            options.LinuxDefaultInstallPath = "/opt/windows-inventory-lite";
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -531,6 +542,32 @@ namespace WindowsInventoryLite
                 if (String.IsNullOrEmpty(options.PreferredLinuxSubnet))
                 {
                     options.PreferredLinuxSubnet = GetConfigString(config, "PreferredLinuxSubnet");
+                }
+                if (options.LinuxDefaultIntervalHours == 6)
+                {
+                    string linuxDefaultIntervalText = GetConfigString(config, "LinuxDefaultIntervalHours");
+                    int linuxDefaultIntervalFromConfig;
+                    if (!String.IsNullOrEmpty(linuxDefaultIntervalText) && Int32.TryParse(linuxDefaultIntervalText, out linuxDefaultIntervalFromConfig) && linuxDefaultIntervalFromConfig >= 1 && linuxDefaultIntervalFromConfig <= 24)
+                    {
+                        options.LinuxDefaultIntervalHours = linuxDefaultIntervalFromConfig;
+                    }
+                }
+                if (options.LinuxDefaultStatusIntervalMinutes == 30)
+                {
+                    string linuxDefaultStatusIntervalText = GetConfigString(config, "LinuxDefaultStatusIntervalMinutes");
+                    int linuxDefaultStatusIntervalFromConfig;
+                    if (!String.IsNullOrEmpty(linuxDefaultStatusIntervalText) && Int32.TryParse(linuxDefaultStatusIntervalText, out linuxDefaultStatusIntervalFromConfig) && linuxDefaultStatusIntervalFromConfig >= 1 && linuxDefaultStatusIntervalFromConfig <= 1440)
+                    {
+                        options.LinuxDefaultStatusIntervalMinutes = linuxDefaultStatusIntervalFromConfig;
+                    }
+                }
+                if (String.Equals(options.LinuxDefaultInstallPath, "/opt/windows-inventory-lite", StringComparison.Ordinal))
+                {
+                    string linuxDefaultInstallPathFromConfig = GetConfigString(config, "LinuxDefaultInstallPath");
+                    if (!String.IsNullOrEmpty(linuxDefaultInstallPathFromConfig))
+                    {
+                        options.LinuxDefaultInstallPath = linuxDefaultInstallPathFromConfig;
+                    }
                 }
                 if (String.IsNullOrEmpty(options.ClientUpdateUsername))
                 {
@@ -3106,24 +3143,24 @@ namespace WindowsInventoryLite
             {
                 token = options.Token;
             }
-            string installPath = Convert.ToString(payload.ContainsKey("installPath") ? payload["installPath"] : "/opt/windows-inventory-lite");
-            int intervalHours = 6;
+            string installPath = Convert.ToString(payload.ContainsKey("installPath") ? payload["installPath"] : options.LinuxDefaultInstallPath);
+            int intervalHours = options.LinuxDefaultIntervalHours;
             if (payload.ContainsKey("intervalHours"))
             {
                 Int32.TryParse(Convert.ToString(payload["intervalHours"]), out intervalHours);
             }
             if (intervalHours < 1 || intervalHours > 24)
             {
-                intervalHours = 6;
+                intervalHours = options.LinuxDefaultIntervalHours;
             }
-            int statusIntervalMinutes = 30;
+            int statusIntervalMinutes = options.LinuxDefaultStatusIntervalMinutes;
             if (payload.ContainsKey("statusIntervalMinutes"))
             {
                 Int32.TryParse(Convert.ToString(payload["statusIntervalMinutes"]), out statusIntervalMinutes);
             }
             if (statusIntervalMinutes < 1 || statusIntervalMinutes > 1440)
             {
-                statusIntervalMinutes = 30;
+                statusIntervalMinutes = options.LinuxDefaultStatusIntervalMinutes;
             }
 
             ArrayList targets = ExpandInstallTargets(targetText);
@@ -5968,6 +6005,9 @@ namespace WindowsInventoryLite
             result["adPasswordConfigured"] = !String.IsNullOrEmpty(options.AdPassword);
             result["adComputerImportOUs"] = options.AdComputerImportOUs;
             result["preferredLinuxSubnet"] = options.PreferredLinuxSubnet;
+            result["linuxDefaultIntervalHours"] = options.LinuxDefaultIntervalHours;
+            result["linuxDefaultStatusIntervalMinutes"] = options.LinuxDefaultStatusIntervalMinutes;
+            result["linuxDefaultInstallPath"] = options.LinuxDefaultInstallPath;
             result["installLogRetentionDays"] = options.InstallLogRetentionDays;
             result["debugLogEnabled"] = options.DebugLogEnabled;
             result["debugLogPath"] = DebugLogger.ResolvePath(options);
@@ -6257,6 +6297,42 @@ namespace WindowsInventoryLite
                 }
                 options.PreferredLinuxSubnet = preferredLinuxSubnet;
                 updates["PreferredLinuxSubnet"] = options.PreferredLinuxSubnet;
+            }
+
+            if (payload.ContainsKey("linuxDefaultIntervalHours"))
+            {
+                int linuxDefaultIntervalHours;
+                if (!Int32.TryParse(Convert.ToString(payload["linuxDefaultIntervalHours"]), out linuxDefaultIntervalHours) || linuxDefaultIntervalHours < 1 || linuxDefaultIntervalHours > 24)
+                {
+                    SendText(stream, "{\"error\":\"linuxDefaultIntervalHours must be between 1 and 24\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.LinuxDefaultIntervalHours = linuxDefaultIntervalHours;
+                updates["LinuxDefaultIntervalHours"] = linuxDefaultIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("linuxDefaultStatusIntervalMinutes"))
+            {
+                int linuxDefaultStatusIntervalMinutes;
+                if (!Int32.TryParse(Convert.ToString(payload["linuxDefaultStatusIntervalMinutes"]), out linuxDefaultStatusIntervalMinutes) || linuxDefaultStatusIntervalMinutes < 1 || linuxDefaultStatusIntervalMinutes > 1440)
+                {
+                    SendText(stream, "{\"error\":\"linuxDefaultStatusIntervalMinutes must be between 1 and 1440\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.LinuxDefaultStatusIntervalMinutes = linuxDefaultStatusIntervalMinutes;
+                updates["LinuxDefaultStatusIntervalMinutes"] = linuxDefaultStatusIntervalMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("linuxDefaultInstallPath"))
+            {
+                string linuxDefaultInstallPath = Convert.ToString(payload["linuxDefaultInstallPath"]).Trim();
+                if (String.IsNullOrEmpty(linuxDefaultInstallPath) || !linuxDefaultInstallPath.StartsWith("/"))
+                {
+                    SendText(stream, "{\"error\":\"linuxDefaultInstallPath must be a non-empty absolute Linux path (starting with /)\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.LinuxDefaultInstallPath = linuxDefaultInstallPath;
+                updates["LinuxDefaultInstallPath"] = linuxDefaultInstallPath;
             }
 
             if (payload.ContainsKey("debugLogEnabled"))
