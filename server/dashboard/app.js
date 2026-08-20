@@ -911,6 +911,27 @@
     const previousResults = statusElement.querySelector('.install-results');
     const previousScrollTop = previousResults ? previousResults.scrollTop : 0;
 
+    // Same innerHTML-replacement problem hits the manual host-key
+    // fingerprint inputs (one per target still needing a host key trusted -
+    // see trustControl above): a user mid-typing a SHA256 fingerprint when
+    // a poll tick fires would otherwise have it silently wiped, and lose
+    // focus/cursor position too. Capture every input's value keyed by its
+    // target (there can be more than one), plus which one had focus and
+    // where the cursor was, before the replacement destroys them all.
+    const previousFingerprintValues = new Map();
+    let focusedFingerprintTarget = null;
+    let focusedSelectionStart = null;
+    let focusedSelectionEnd = null;
+    statusElement.querySelectorAll('.trust-fingerprint-input').forEach(input => {
+      const target = input.dataset.trustHostInput;
+      previousFingerprintValues.set(target, input.value);
+      if (input === document.activeElement) {
+        focusedFingerprintTarget = target;
+        focusedSelectionStart = input.selectionStart;
+        focusedSelectionEnd = input.selectionEnd;
+      }
+    });
+
     statusElement.classList.remove('empty');
     statusElement.innerHTML = `<div class="job-header">
         <strong>Job ${escapeHtml(job.id)}</strong>
@@ -926,6 +947,17 @@
 
     const newResults = statusElement.querySelector('.install-results');
     if (newResults) newResults.scrollTop = previousScrollTop;
+
+    statusElement.querySelectorAll('.trust-fingerprint-input').forEach(input => {
+      const target = input.dataset.trustHostInput;
+      if (previousFingerprintValues.has(target)) {
+        input.value = previousFingerprintValues.get(target);
+      }
+      if (target === focusedFingerprintTarget) {
+        input.focus();
+        input.setSelectionRange(focusedSelectionStart, focusedSelectionEnd);
+      }
+    });
 
     statusElement.querySelectorAll('[data-trust-host]').forEach(button => {
       button.addEventListener('click', () => trustHostKeyAndRetry(button.dataset.trustHost, button.dataset.trustFingerprint, statusElementId));

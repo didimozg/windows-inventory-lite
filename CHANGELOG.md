@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.40.5]
+
+### Changed
+
+- Fleet's tables (Clients, Software, Services, Hardware, Licenses, install-job results) now use the same rounded-corner glow-shadow card treatment as the rest of the redesigned dashboard, replacing the old flat 1px border - the one remaining piece of pre-redesign chrome on Fleet's list pages. Table row/header styling itself is unchanged.
+
+### Fixed
+
+- Raised dark-mode divider contrast on `.topnav` (the top navigation bar) from ~1.5:1 to ~3.3:1, same fix as 0.40.3's `.settings-block`/`.subtab-strip` and 0.40.4's `.updates-top-row` - this divider was missed in both earlier passes.
+- The manual host-key fingerprint field (Linux Client Actions, shown when a host key needs trusting) lost its typed value and cursor position if a poll tick fired while a user was mid-typing - same root cause as 0.40.3's install-job-log scroll reset (the status box is fully re-rendered every 3s), now fixed the same way: captured before the re-render, restored after.
+
 ## [0.40.4]
 
 ### Fixed

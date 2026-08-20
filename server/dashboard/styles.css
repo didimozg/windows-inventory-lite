@@ -354,7 +354,10 @@ body {
   gap: var(--space-xs);
   padding: var(--space-sm) var(--space-2xl);
   background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  /* Same low-contrast-on-Ocean-Blue issue as .settings-block/.subtab-strip/
+     .updates-top-row had (see the dark-mode --divider-strong comment) -
+     this divider sits on --panel too, so the same fix applies. */
+  border-bottom: 1px solid var(--divider-strong, var(--line));
   position: sticky;
   top: 0;
   z-index: 10;
@@ -830,11 +833,17 @@ main {
   color: var(--usb-text);
 }
 
+/* Same radius/glow treatment as .card-glow (Bold Card System) - table row/
+   header styling itself is still out of scope (never mocked up), but the
+   flat 8px/1px-border chrome around every table was the one piece of
+   pre-redesign chrome left on Fleet's list pages, and .card-glow's
+   properties are a direct drop-in here (overflow-x:auto is the only thing
+   .card-glow doesn't already need, since it's not on a scrolling table). */
 .table-wrap {
   overflow-x: auto;
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-glow);
 }
 
 table {
