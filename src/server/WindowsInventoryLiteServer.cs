@@ -4406,6 +4406,89 @@ namespace WindowsInventoryLite
             return result;
         }
 
+        // Auto-detect mode's protocol probe - a short-timeout TCP connect
+        // attempt, used only to guess which install path is worth trying
+        // first (or at all). Never a substitute for the actual install
+        // attempt's own success/failure signal - a port answering doesn't
+        // guarantee the install itself will succeed, it's just a much
+        // cheaper and more reliable signal than trying an install and
+        // guessing from its failure text (which can't distinguish "wrong
+        // protocol" from "right protocol, wrong password" - see
+        // DecideAutoDetectProtocols below for the pure logic this feeds).
+        // Not self-tested: like every other network call in this file
+        // (the actual WinRM/SSH install attempts), a real connection
+        // attempt only means something against a real reachable or
+        // unreachable host.
+        internal static bool TryConnect(string host, int port, int timeoutMs)
+        {
+            try
+            {
+                using (TcpClient client = new TcpClient())
+                {
+                    IAsyncResult connectResult = client.BeginConnect(host, port, null, null);
+                    bool signaled = connectResult.AsyncWaitHandle.WaitOne(timeoutMs, false);
+                    if (!signaled)
+                    {
+                        return false;
+                    }
+                    client.EndConnect(connectResult);
+                    return client.Connected;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // Given Auto-detect's two TCP probe results (TryConnect against
+        // WinRM's ports 5985/5986 and SSH's port 22), decides which
+        // protocol(s) to attempt and in what order. Only one port open ->
+        // try only that protocol. Both open -> try WinRM first (this
+        // codebase's own working assumption: a box answering both is
+        // overwhelmingly likely a Windows host with OpenSSH also
+        // installed, not the reverse), with SSH as a fallback only if
+        // WinRM's actual install attempt fails. Neither open -> empty
+        // array, no attempt is worth making. Pure and self-tested,
+        // unlike TryConnect above.
+        internal static string[] DecideAutoDetectProtocols(bool winRmReachable, bool sshReachable)
+        {
+            if (winRmReachable && sshReachable)
+            {
+                return new string[] { "winrm", "ssh" };
+            }
+            if (winRmReachable)
+            {
+                return new string[] { "winrm" };
+            }
+            if (sshReachable)
+            {
+                return new string[] { "ssh" };
+            }
+            return new string[0];
+        }
+
+        // One entry in a per-target job result's future "attempts" array
+        // (see docs/superpowers/specs/2026-08-17-deploy-actions-updates-
+        // unification-design.md's Data model changes section) - one
+        // attempt is one try of one protocol against one target, whether
+        // or not Auto-detect chose it (a Force-mode result also uses this
+        // shape, just with exactly one entry, once Phase 3 wires this in).
+        // Kept as a loose Dictionary<string, object>, matching every
+        // other result-building convention in this file (e.g.
+        // RunClientInstallTarget's own result dict) rather than
+        // introducing a typed class this codebase doesn't otherwise use.
+        internal static Dictionary<string, object> BuildAttemptResult(string protocol, string status, string message, string output, string error)
+        {
+            Dictionary<string, object> attempt = new Dictionary<string, object>();
+            attempt["protocol"] = protocol;
+            attempt["status"] = status;
+            attempt["message"] = message;
+            attempt["output"] = output;
+            attempt["error"] = error;
+            return attempt;
+        }
+
         private static string QuoteArgument(string value)
         {
             return "\"" + value.Replace("\"", "\\\"") + "\"";
@@ -8401,6 +8484,11 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ExpandInstallTarget expands a full IPv4 range", TestExpandInstallTargetFullRange);
             allPassed &= SelfTestCheck(output, "ExpandInstallTarget passes through a single hostname", TestExpandInstallTargetHostname);
             allPassed &= SelfTestCheck(output, "ExpandInstallTargets de-duplicates and splits on separators", TestExpandInstallTargetsDedup);
+            allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries WinRM first when both ports are open", TestDecideAutoDetectProtocolsBothOpen);
+            allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries only WinRM when just that port is open", TestDecideAutoDetectProtocolsWinRmOnly);
+            allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries only SSH when just that port is open", TestDecideAutoDetectProtocolsSshOnly);
+            allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols returns no attempts when neither port is open", TestDecideAutoDetectProtocolsNeitherOpen);
+            allPassed &= SelfTestCheck(output, "BuildAttemptResult produces the expected dictionary shape", TestBuildAttemptResultShape);
             allPassed &= SelfTestCheck(output, "ParseAdComputerImportOUs splits on newlines only, not commas", TestParseAdComputerImportOUsSplitsOnNewlinesOnly);
             allPassed &= SelfTestCheck(output, "ParseAdComputerImportOUs treats blank input as an empty OU list", TestParseAdComputerImportOUsEmptyMeansWholeDomain);
             allPassed &= SelfTestCheck(output, "BuildZip produces a structurally valid archive", TestBuildZipStructure);
@@ -8609,6 +8697,57 @@ namespace WindowsInventoryLite
             ArrayList result = ExpandInstallTargets("host1, host1;host2\nhost1");
             string[] expected = new string[] { "host1", "host2" };
             return CompareStringLists(expected, result);
+        }
+
+        private static string TestDecideAutoDetectProtocolsBothOpen()
+        {
+            string[] result = DecideAutoDetectProtocols(true, true);
+            if (result.Length != 2 || result[0] != "winrm" || result[1] != "ssh")
+            {
+                return "expected [\"winrm\", \"ssh\"] (WinRM first) but got [" + String.Join(", ", result) + "]";
+            }
+            return null;
+        }
+
+        private static string TestDecideAutoDetectProtocolsWinRmOnly()
+        {
+            string[] result = DecideAutoDetectProtocols(true, false);
+            if (result.Length != 1 || result[0] != "winrm")
+            {
+                return "expected [\"winrm\"] but got [" + String.Join(", ", result) + "]";
+            }
+            return null;
+        }
+
+        private static string TestDecideAutoDetectProtocolsSshOnly()
+        {
+            string[] result = DecideAutoDetectProtocols(false, true);
+            if (result.Length != 1 || result[0] != "ssh")
+            {
+                return "expected [\"ssh\"] but got [" + String.Join(", ", result) + "]";
+            }
+            return null;
+        }
+
+        private static string TestDecideAutoDetectProtocolsNeitherOpen()
+        {
+            string[] result = DecideAutoDetectProtocols(false, false);
+            if (result.Length != 0)
+            {
+                return "expected an empty array (no attempt worth making) but got [" + String.Join(", ", result) + "]";
+            }
+            return null;
+        }
+
+        private static string TestBuildAttemptResultShape()
+        {
+            Dictionary<string, object> attempt = BuildAttemptResult("winrm", "failed", "Client install command failed.", "some output", "some error");
+            if (GetStringValue(attempt, "protocol") != "winrm") return "expected protocol 'winrm', got '" + GetStringValue(attempt, "protocol") + "'";
+            if (GetStringValue(attempt, "status") != "failed") return "expected status 'failed', got '" + GetStringValue(attempt, "status") + "'";
+            if (GetStringValue(attempt, "message") != "Client install command failed.") return "expected the given message, got '" + GetStringValue(attempt, "message") + "'";
+            if (GetStringValue(attempt, "output") != "some output") return "expected the given output, got '" + GetStringValue(attempt, "output") + "'";
+            if (GetStringValue(attempt, "error") != "some error") return "expected the given error, got '" + GetStringValue(attempt, "error") + "'";
+            return null;
         }
 
         private static string TestParseAdComputerImportOUsSplitsOnNewlinesOnly()
