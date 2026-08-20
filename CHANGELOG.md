@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.41.0]
+
+Phase 1 of a larger Deploy > Actions/Updates unification effort (see `docs/superpowers/specs/2026-08-17-deploy-actions-updates-unification-design.md`) - later phases will add auto-detected mixed Windows/Linux install targets and a unified Updates table; this phase lays the Settings groundwork they need.
+
+### Changed
+
+- Settings' "General" tab (9 sections crammed onto one page, one shared Save button covering all of them) is now three separate tabs - **Server** (Inventory, Network, HTTPS, Ingestion Token, Diagnostics), **Windows** (Active Directory), **Linux** (Linux client targeting, Linux Client update credentials, SSH key, plus the new Install defaults section below) - each with its own independent Save. Settings' tab strip is now Server / Windows / Linux / Certificate / Admin password (was General / Certificate / Admin password). Old `#settings`/`#general` links still land on the Server tab.
+
+### Added
+
+- New Settings > Linux > Install defaults section: Interval (hours), Status check interval (minutes), and Install path are now configurable server settings, replacing hardcoded values in the Linux install code path. Deploy > Actions' Linux install form still always sends its own values today, so these currently apply only to a request that omits them - a future automated install flow (part of a later phase) is what will actually exercise this.
+
+### Fixed
+
+- Every "Settings > General" reference left over from the tab split - across the dashboard, the server's own error messages, and the install wizard/installer - now names the tab that actually holds the field, instead of a retired tab name (some previously pointed at the wrong tab entirely, e.g. an Active Directory error directing an admin to "General" when the field moved to "Windows").
+
 ## [0.40.5]
 
 ### Changed
