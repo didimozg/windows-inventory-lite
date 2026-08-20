@@ -4474,6 +4474,26 @@ namespace WindowsInventoryLite
             return new string[0];
         }
 
+        // Given the unified job's Mode and (for Auto only) TryConnect's two
+        // probe results, decides which protocol(s) RunUnifiedInstallTarget
+        // should try and in what order. Force modes ignore the probe
+        // results entirely - force means force, no detection round-trip is
+        // spent reaching this decision. Auto mode delegates to
+        // DecideAutoDetectProtocols unchanged. Pure and self-tested, same
+        // convention as DecideAutoDetectProtocols itself.
+        internal static string[] ResolveAttemptOrder(string mode, bool winRmReachable, bool sshReachable)
+        {
+            if (mode == "force-windows")
+            {
+                return new string[] { "winrm" };
+            }
+            if (mode == "force-linux")
+            {
+                return new string[] { "ssh" };
+            }
+            return DecideAutoDetectProtocols(winRmReachable, sshReachable);
+        }
+
         // One entry in a per-target job result's future "attempts" array
         // (see docs/superpowers/specs/2026-08-17-deploy-actions-updates-
         // unification-design.md's Data model changes section) - one
@@ -8500,6 +8520,9 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries only SSH when just that port is open", TestDecideAutoDetectProtocolsSshOnly);
             allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols returns no attempts when neither port is open", TestDecideAutoDetectProtocolsNeitherOpen);
             allPassed &= SelfTestCheck(output, "BuildAttemptResult produces the expected dictionary shape", TestBuildAttemptResultShape);
+            allPassed &= SelfTestCheck(output, "ResolveAttemptOrder tries only WinRM for force-windows regardless of probe results", TestResolveAttemptOrderForceWindowsIgnoresProbes);
+            allPassed &= SelfTestCheck(output, "ResolveAttemptOrder tries only SSH for force-linux regardless of probe results", TestResolveAttemptOrderForceLinuxIgnoresProbes);
+            allPassed &= SelfTestCheck(output, "ResolveAttemptOrder delegates to DecideAutoDetectProtocols for auto mode", TestResolveAttemptOrderAutoDelegatesToDecideAutoDetectProtocols);
             allPassed &= SelfTestCheck(output, "ParseAdComputerImportOUs splits on newlines only, not commas", TestParseAdComputerImportOUsSplitsOnNewlinesOnly);
             allPassed &= SelfTestCheck(output, "ParseAdComputerImportOUs treats blank input as an empty OU list", TestParseAdComputerImportOUsEmptyMeansWholeDomain);
             allPassed &= SelfTestCheck(output, "BuildZip produces a structurally valid archive", TestBuildZipStructure);
@@ -8758,6 +8781,41 @@ namespace WindowsInventoryLite
             if (GetStringValue(attempt, "message") != "Client install command failed.") return "expected the given message, got '" + GetStringValue(attempt, "message") + "'";
             if (GetStringValue(attempt, "output") != "some output") return "expected the given output, got '" + GetStringValue(attempt, "output") + "'";
             if (GetStringValue(attempt, "error") != "some error") return "expected the given error, got '" + GetStringValue(attempt, "error") + "'";
+            return null;
+        }
+
+        private static string TestResolveAttemptOrderForceWindowsIgnoresProbes()
+        {
+            string[] result = ResolveAttemptOrder("force-windows", false, false);
+            if (result.Length != 1 || result[0] != "winrm")
+            {
+                return "expected [\"winrm\"] regardless of probe results but got [" + String.Join(", ", result) + "]";
+            }
+            return null;
+        }
+
+        private static string TestResolveAttemptOrderForceLinuxIgnoresProbes()
+        {
+            string[] result = ResolveAttemptOrder("force-linux", false, false);
+            if (result.Length != 1 || result[0] != "ssh")
+            {
+                return "expected [\"ssh\"] regardless of probe results but got [" + String.Join(", ", result) + "]";
+            }
+            return null;
+        }
+
+        private static string TestResolveAttemptOrderAutoDelegatesToDecideAutoDetectProtocols()
+        {
+            string[] bothOpen = ResolveAttemptOrder("auto", true, true);
+            if (bothOpen.Length != 2 || bothOpen[0] != "winrm" || bothOpen[1] != "ssh")
+            {
+                return "expected auto mode with both ports open to match DecideAutoDetectProtocols(true, true) but got [" + String.Join(", ", bothOpen) + "]";
+            }
+            string[] neitherOpen = ResolveAttemptOrder("auto", false, false);
+            if (neitherOpen.Length != 0)
+            {
+                return "expected auto mode with neither port open to return an empty array but got [" + String.Join(", ", neitherOpen) + "]";
+            }
             return null;
         }
 
