@@ -911,17 +911,27 @@
       // Trust-and-retry reads the ssh attempt's host-key fields, which
       // mirror onto the summary result when ssh is the last attempt tried
       // (see RunUnifiedInstallTarget) - unchanged shape from before the
-      // Windows/Linux merge, just now reachable from any mode.
+      // Windows/Linux merge, just now reachable from any mode. Gated to
+      // the merged Actions status box specifically: it submits Deploy >
+      // Actions' own form fields (installServerUrl/installSshAuthMode/
+      // installSshUsername/installSshPassword/etc via trustHostKeyAndRetry),
+      // which don't match whatever credentials Deploy > Updates' Linux
+      // push actually used - rendering it there would silently resubmit
+      // the wrong account. Same restriction the pre-merge code had
+      // (previously gated on statusElementId === 'linuxInstallStatus'),
+      // just re-pointed at the one surviving Actions status element id.
       let trustControl = '';
-      if (result.hostKeyStatus && result.hostKeyFingerprint) {
-        trustControl = `<button class="link-button trust-host-key-button" type="button"
+      if (statusElementId === 'installStatus') {
+        if (result.hostKeyStatus && result.hostKeyFingerprint) {
+          trustControl = `<button class="link-button trust-host-key-button" type="button"
              data-trust-host="${escapeHtml(result.target)}"
              data-trust-fingerprint="${escapeHtml(result.hostKeyFingerprint)}">Trust and retry</button>`;
-      } else if (result.hostKeyStatus) {
-        trustControl = `<span class="trust-host-key-manual">
+        } else if (result.hostKeyStatus) {
+          trustControl = `<span class="trust-host-key-manual">
              <input type="text" class="trust-fingerprint-input" placeholder="SHA256:..." data-trust-host-input="${escapeHtml(result.target)}">
              <button class="link-button trust-host-key-button" type="button" data-trust-host-manual="${escapeHtml(result.target)}">Trust and retry</button>
            </span>`;
+        }
       }
       const hostKeyBadge = result.hostKeyStatus === 'changed'
         ? '<span class="usb-badge">HOST KEY CHANGED</span>'
