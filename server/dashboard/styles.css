@@ -1107,7 +1107,6 @@ input[type="number"] {
    just takes the next of 2 columns in DOM order, so it can't collide or
    get orphaned regardless of field count, and a .hidden field is removed
    from grid flow entirely, leaving no gap. */
-.linux-install-right-fields,
 .install-right-fields {
   grid-column: 3 / span 2;
   grid-row: 1 / span 2;
@@ -1117,7 +1116,6 @@ input[type="number"] {
   align-self: start;
 }
 
-.linux-install-right-fields .install-submit-field,
 .install-right-fields .install-submit-field {
   grid-column: 1 / span 2;
   grid-row: auto;
