@@ -3115,7 +3115,15 @@ namespace WindowsInventoryLite
                     summary["completedAt"] = GetStringValue(job, "completedAt");
                     summary["mode"] = GetStringValue(job, "mode");
                     summary["serverUrl"] = GetStringValue(job, "serverUrl");
-                    summary["username"] = GetStringValue(job, "username");
+                    // A force-linux job has no WinRM username - fall back to
+                    // sshUsername so the merged "Saved client action logs"
+                    // table doesn't show a blank operator identity for
+                    // every Linux job (the old, now-deleted
+                    // SendLinuxClientInstallJobs exposed authMode/username
+                    // directly; this is the closest equivalent once both
+                    // credential sets live on one job).
+                    string winRmUsername = GetStringValue(job, "username");
+                    summary["username"] = String.IsNullOrEmpty(winRmUsername) ? GetStringValue(job, "sshUsername") : winRmUsername;
                     summary["retentionDays"] = GetIntValue(job, "retentionDays", options.InstallLogRetentionDays);
 
                     ArrayList targets = job.ContainsKey("targets") ? job["targets"] as ArrayList : null;
