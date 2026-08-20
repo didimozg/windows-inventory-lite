@@ -724,8 +724,6 @@ namespace WindowsInventoryLite
         private readonly ServerOptions options;
         private readonly object installJobsLock = new object();
         private readonly Dictionary<string, InstallJob> installJobs = new Dictionary<string, InstallJob>();
-        private readonly object linuxInstallJobsLock = new object();
-        private readonly Dictionary<string, LinuxInstallJob> linuxInstallJobs = new Dictionary<string, LinuxInstallJob>();
         // Lets an open dashboard tab notice a server-initiated (scheduled)
         // push exists at all - a scheduled push never goes through any HTTP
         // request the browser makes, so without this the browser has no way
@@ -781,10 +779,6 @@ namespace WindowsInventoryLite
             if (!Directory.Exists(GetInstallJobDirectory()))
             {
                 Directory.CreateDirectory(GetInstallJobDirectory());
-            }
-            if (!Directory.Exists(GetLinuxInstallJobDirectory()))
-            {
-                Directory.CreateDirectory(GetLinuxInstallJobDirectory());
             }
             CleanupInstallJobLogs();
             MigrateLegacyLinuxSshKey();
@@ -1142,6 +1136,7 @@ namespace WindowsInventoryLite
             job.CreatedAtUtc = DateTime.UtcNow;
             job.Targets = targets;
             job.Results = new ArrayList();
+            job.Mode = "force-windows";
             job.ServerUrl = serverUrl;
             job.Token = options.Token;
             job.Username = username;
@@ -1489,25 +1484,9 @@ namespace WindowsInventoryLite
                     {
                         DownloadClientPackage(stream);
                     }
-                    else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-install")
-                    {
-                        StartLinuxClientAction(stream, request, "install");
-                    }
-                    else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-uninstall")
-                    {
-                        StartLinuxClientAction(stream, request, "uninstall");
-                    }
                     else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-install/trust-host-key")
                     {
                         TrustLinuxHostKey(stream, request);
-                    }
-                    else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-install")
-                    {
-                        SendLinuxClientInstallJobs(stream);
-                    }
-                    else if (request.Method == "GET" && request.Path.StartsWith("/api/v1/linux-client-install/", StringComparison.OrdinalIgnoreCase))
-                    {
-                        SendLinuxClientInstallJob(stream, request);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-updates")
                     {
@@ -2659,32 +2638,33 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            LinuxInstallJob job = new LinuxInstallJob();
+            InstallJob job = new InstallJob();
             job.Id = Guid.NewGuid().ToString("N");
             job.Action = "install";
             job.Status = "queued";
             job.CreatedAtUtc = DateTime.UtcNow;
             job.Targets = targets;
             job.Results = new ArrayList();
-            job.AuthMode = authMode;
+            job.Mode = "force-linux";
             job.ServerUrl = serverUrl;
             job.Token = token;
             job.InstallPath = installPath;
             job.IntervalHours = intervalHours;
             job.StatusIntervalMinutes = statusIntervalMinutes;
-            job.Username = username;
-            job.Password = password;
-            job.KeyPath = keyPath;
+            job.SshAuthMode = authMode;
+            job.SshUsername = username;
+            job.SshPassword = password;
+            job.SshKeyPath = keyPath;
             job.RetentionDays = options.InstallLogRetentionDays;
 
-            lock (linuxInstallJobsLock)
+            lock (installJobsLock)
             {
-                linuxInstallJobs[job.Id] = job;
-                SaveLinuxInstallJob(job);
+                installJobs[job.Id] = job;
+                SaveInstallJob(job);
             }
             lastScheduledLinuxUpdateJobId = job.Id;
             DebugLogger.Log(options, "Schedule", "Scheduled Linux client update push started: job '" + job.Id + "', " + targets.Count + " target(s).");
-            ThreadPool.QueueUserWorkItem(RunLinuxClientActionJob, job);
+            ThreadPool.QueueUserWorkItem(RunClientActionJob, job);
         }
 
         private string BuildLinuxClientIndex()
@@ -2838,44 +2818,201 @@ namespace WindowsInventoryLite
                 SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
                 return;
             }
+
+            string mode = Convert.ToString(payload.ContainsKey("mode") ? payload["mode"] : "");
+            if (mode != "auto" && mode != "force-windows" && mode != "force-linux")
+            {
+                SendText(stream, "{\"error\":\"mode must be 'auto', 'force-windows', or 'force-linux'\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            bool needsWinRm = mode == "auto" || mode == "force-windows";
+            bool needsSsh = mode == "auto" || mode == "force-linux";
+
             string targetText = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "");
             string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
             // Blank means "use the server's current ingestion token", not
             // "install with no token" - same convention as the Linux
-            // install endpoint (see its own copy of this comment) and the
-            // Package tab's token fields. Lets an admin push a client
-            // pointed at a *different* server's token (e.g. a migration)
-            // without changing this server's own configured token first.
+            // install endpoint used to have its own copy of this comment,
+            // and the Package tab's token fields.
             string token = Convert.ToString(payload.ContainsKey("token") ? payload["token"] : "");
             if (String.IsNullOrEmpty(token))
             {
                 token = options.Token;
             }
-            string username = Convert.ToString(payload.ContainsKey("username") ? payload["username"] : "");
-            string password = Convert.ToString(payload.ContainsKey("password") ? payload["password"] : "");
-            bool useSavedCredentials = payload.ContainsKey("useSavedCredentials") && Convert.ToBoolean(payload["useSavedCredentials"]);
-            ResolveUpdateCredentials(ref username, ref password, useSavedCredentials, options.ClientUpdateUsername, options.ClientUpdatePassword);
-            bool useAdCredentials = payload.ContainsKey("useAdCredentials") && Convert.ToBoolean(payload["useAdCredentials"]);
-            string adCredentialError;
-            if (!TryResolveAdSyncCredentials(useAdCredentials, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref username, ref password, out adCredentialError))
+
+            string winRmUsername = "";
+            string winRmPassword = "";
+            bool force = false;
+            bool addToTrustedHosts = false;
+            if (needsWinRm)
             {
-                SendText(stream, "{\"error\":\"" + adCredentialError.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
-                return;
+                winRmUsername = Convert.ToString(payload.ContainsKey("username") ? payload["username"] : "");
+                winRmPassword = Convert.ToString(payload.ContainsKey("password") ? payload["password"] : "");
+                bool useSavedCredentials = payload.ContainsKey("useSavedCredentials") && Convert.ToBoolean(payload["useSavedCredentials"]);
+                ResolveUpdateCredentials(ref winRmUsername, ref winRmPassword, useSavedCredentials, options.ClientUpdateUsername, options.ClientUpdatePassword);
+                bool useAdCredentials = payload.ContainsKey("useAdCredentials") && Convert.ToBoolean(payload["useAdCredentials"]);
+                string adCredentialError;
+                if (!TryResolveAdSyncCredentials(useAdCredentials, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref winRmUsername, ref winRmPassword, out adCredentialError))
+                {
+                    SendText(stream, "{\"error\":\"" + adCredentialError.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                force = payload.ContainsKey("force") && Convert.ToBoolean(payload["force"]);
+                addToTrustedHosts = payload.ContainsKey("addToTrustedHosts") && Convert.ToBoolean(payload["addToTrustedHosts"]);
             }
-            bool force = payload.ContainsKey("force") && Convert.ToBoolean(payload["force"]);
-            bool addToTrustedHosts = payload.ContainsKey("addToTrustedHosts") && Convert.ToBoolean(payload["addToTrustedHosts"]);
+
+            string sshAuthMode = "credentials";
+            string sshUsername = "";
+            string sshPassword = "";
+            string sshKeyPath = "";
+            bool trustNewHostKeys = false;
+            int intervalHours = options.LinuxDefaultIntervalHours;
+            int statusIntervalMinutes = options.LinuxDefaultStatusIntervalMinutes;
+            string installPath = Convert.ToString(payload.ContainsKey("installPath") ? payload["installPath"] : options.LinuxDefaultInstallPath);
+            if (needsSsh)
+            {
+                sshAuthMode = Convert.ToString(payload.ContainsKey("sshAuthMode") ? payload["sshAuthMode"] : "credentials");
+                if (sshAuthMode != "ad" && sshAuthMode != "credentials" && sshAuthMode != "key")
+                {
+                    SendText(stream, "{\"error\":\"sshAuthMode must be 'ad', 'credentials', or 'key'\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                sshUsername = Convert.ToString(payload.ContainsKey("sshUsername") ? payload["sshUsername"] : "");
+                sshPassword = Convert.ToString(payload.ContainsKey("sshPassword") ? payload["sshPassword"] : "");
+                sshKeyPath = GetLinuxSshKeyFilePath();
+
+                if (sshAuthMode == "ad")
+                {
+                    bool useAd = true;
+                    string adCredentialError;
+                    if (!TryResolveAdSyncCredentials(useAd, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref sshUsername, ref sshPassword, out adCredentialError))
+                    {
+                        SendText(stream, "{\"error\":\"" + adCredentialError.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                    if (String.IsNullOrEmpty(sshUsername) || String.IsNullOrEmpty(sshPassword))
+                    {
+                        SendText(stream, "{\"error\":\"AD service-identity mode is not usable for SSH pushes to Linux targets (there is no SSH equivalent of running as the service's own identity). Select 'Stored Linux credentials' or 'SSH key' instead, or configure an explicit AD account rather than service identity in Settings > Windows > Active Directory.\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+                else if (sshAuthMode == "credentials")
+                {
+                    if (String.IsNullOrEmpty(sshUsername)) sshUsername = options.LinuxUpdateUsername;
+                    if (String.IsNullOrEmpty(sshPassword)) sshPassword = options.LinuxUpdatePassword;
+                    if (String.IsNullOrEmpty(sshUsername) || String.IsNullOrEmpty(sshPassword))
+                    {
+                        SendText(stream, "{\"error\":\"username/password are required for 'credentials' auth mode (enter them, or save them in Settings > Linux > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+                else
+                {
+                    if (String.IsNullOrEmpty(sshUsername)) sshUsername = options.LinuxUpdateUsername;
+                    if (String.IsNullOrEmpty(sshUsername))
+                    {
+                        SendText(stream, "{\"error\":\"username is required for 'key' auth mode (enter it, or save it in Settings > Linux > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                    if (!File.Exists(sshKeyPath))
+                    {
+                        SendText(stream, "{\"error\":\"No SSH key is configured - upload one in Settings > Linux > Linux Client update credentials.\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+
+                if (payload.ContainsKey("intervalHours"))
+                {
+                    Int32.TryParse(Convert.ToString(payload["intervalHours"]), out intervalHours);
+                }
+                if (intervalHours < 1 || intervalHours > 24)
+                {
+                    intervalHours = options.LinuxDefaultIntervalHours;
+                }
+                if (payload.ContainsKey("statusIntervalMinutes"))
+                {
+                    Int32.TryParse(Convert.ToString(payload["statusIntervalMinutes"]), out statusIntervalMinutes);
+                }
+                if (statusIntervalMinutes < 1 || statusIntervalMinutes > 1440)
+                {
+                    statusIntervalMinutes = options.LinuxDefaultStatusIntervalMinutes;
+                }
+            }
+
             int retentionDays = options.InstallLogRetentionDays;
             if (payload.ContainsKey("retentionDays"))
             {
                 Int32.TryParse(Convert.ToString(payload["retentionDays"]), out retentionDays);
             }
             retentionDays = NormalizeRetentionDays(retentionDays);
-            ArrayList targets = ExpandInstallTargets(targetText);
 
+            ArrayList targets = ExpandInstallTargets(targetText);
             if (targets.Count == 0)
             {
                 SendText(stream, "{\"error\":\"at least one target is required\"}", "application/json; charset=utf-8", 400);
                 return;
+            }
+
+            // Force Linux (and Auto, which may resolve a target to SSH)
+            // rejects any target with characters invalid in a
+            // hostname/IPv4 address up front, the all-or-nothing pre-check
+            // StartLinuxClientAction always applied. Force Windows skips
+            // this entirely - NetBIOS names can legally contain '_', which
+            // this check would wrongly reject.
+            if (mode != "force-windows")
+            {
+                foreach (string candidate in targets)
+                {
+                    if (!IsValidSshTarget(candidate))
+                    {
+                        SendText(stream, "{\"error\":\"one or more targets contain characters that are not valid in a hostname or IPv4 address (only letters, digits, '.' and '-' are allowed)\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+            }
+
+            // The Deploy > Updates "Update selected" push (both the Linux
+            // manual push and the Linux scheduled push) intentionally does
+            // not resend serverUrl/installPath/intervalHours/
+            // statusIntervalMinutes - it targets already-installed clients
+            // and expects the same values used for the original install.
+            // Fall back to linux-package-settings.json for whichever of
+            // these fields the caller did not explicitly supply, exactly
+            // as StartLinuxClientAction used to. Gated on needsSsh only -
+            // this file has no Windows equivalent, and a pure
+            // force-windows job has no use for it.
+            if (needsSsh && action == "install" && String.IsNullOrEmpty(serverUrl))
+            {
+                string packageSettingsPath = Path.Combine(options.LinuxClientPackagePath, "linux-package-settings.json");
+                if (File.Exists(packageSettingsPath))
+                {
+                    try
+                    {
+                        JavaScriptSerializer settingsSerializer = CreateJsonSerializer();
+                        Dictionary<string, object> savedSettings = settingsSerializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(packageSettingsPath, Encoding.UTF8));
+                        serverUrl = GetStringValue(savedSettings, "serverUrl");
+                        if (!payload.ContainsKey("installPath"))
+                        {
+                            string savedInstallPath = GetStringValue(savedSettings, "installPath");
+                            if (!String.IsNullOrEmpty(savedInstallPath))
+                            {
+                                installPath = savedInstallPath;
+                            }
+                        }
+                        if (!payload.ContainsKey("intervalHours"))
+                        {
+                            intervalHours = GetIntValue(savedSettings, "intervalHours", intervalHours);
+                        }
+                        if (!payload.ContainsKey("statusIntervalMinutes"))
+                        {
+                            statusIntervalMinutes = GetIntValue(savedSettings, "statusIntervalMinutes", statusIntervalMinutes);
+                        }
+                    }
+                    catch
+                    {
+                        serverUrl = null;
+                    }
+                }
             }
 
             if (action == "install" && String.IsNullOrEmpty(serverUrl))
@@ -2886,10 +3023,9 @@ namespace WindowsInventoryLite
 
             // serverUrl flows unmodified through Install-ClientWinRM.ps1 into
             // Deploy-ClientGpo.ps1's cmd.exe-based service-creation step on the
-            // TARGET machine (Invoke-ServiceCreate) - the same batch-metacharacter
-            // injection GenerateCmdLines already rejects for the GPO package path
-            // below is otherwise reachable here too, and this path can run as the
-            // service's own privileged identity when no credential is supplied.
+            // TARGET machine (Invoke-ServiceCreate) - validated for every mode,
+            // not just needsWinRm, since Auto mode may resolve any given target
+            // to WinRM even when the admin expected SSH.
             try
             {
                 ValidateBatchSafe(serverUrl, "serverUrl");
@@ -2899,10 +3035,30 @@ namespace WindowsInventoryLite
                 SendText(stream, "{\"error\":\"" + ex.Message.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
                 return;
             }
+            if (needsSsh)
+            {
+                string pushValidationError;
+                if (!TryValidateLinuxPushValues(serverUrl, token, installPath, out pushValidationError))
+                {
+                    SendText(stream, "{\"error\":\"" + pushValidationError.Replace("\\", "\\\\").Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
 
-            if (!addToTrustedHosts && !String.IsNullOrEmpty(username) && !String.IsNullOrEmpty(password) && ContainsIpAddressTarget(targets))
+            if (needsWinRm && !addToTrustedHosts && !String.IsNullOrEmpty(winRmUsername) && !String.IsNullOrEmpty(winRmPassword) && ContainsIpAddressTarget(targets))
             {
                 addToTrustedHosts = true;
+            }
+
+            if (needsSsh && action == "install")
+            {
+                trustNewHostKeys = payload.ContainsKey("trustNewHostKeys") && Convert.ToBoolean(payload["trustNewHostKeys"]);
+                bool acknowledgeHostKeyRisk = payload.ContainsKey("acknowledgeHostKeyRisk") && Convert.ToBoolean(payload["acknowledgeHostKeyRisk"]);
+                if (trustNewHostKeys && !acknowledgeHostKeyRisk)
+                {
+                    SendText(stream, "{\"error\":\"acknowledgeHostKeyRisk must be true when trustNewHostKeys is enabled\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
             }
 
             InstallJob job = new InstallJob();
@@ -2912,12 +3068,21 @@ namespace WindowsInventoryLite
             job.CreatedAtUtc = DateTime.UtcNow;
             job.Targets = targets;
             job.Results = new ArrayList();
+            job.Mode = mode;
             job.ServerUrl = serverUrl;
             job.Token = token;
-            job.Username = username;
-            job.Password = password;
+            job.Username = winRmUsername;
+            job.Password = winRmPassword;
             job.Force = force;
             job.AddToTrustedHosts = addToTrustedHosts;
+            job.SshAuthMode = sshAuthMode;
+            job.SshUsername = sshUsername;
+            job.SshPassword = sshPassword;
+            job.SshKeyPath = sshKeyPath;
+            job.IntervalHours = intervalHours;
+            job.StatusIntervalMinutes = statusIntervalMinutes;
+            job.InstallPath = installPath;
+            job.TrustNewHostKeys = trustNewHostKeys;
             job.RetentionDays = retentionDays;
 
             lock (installJobsLock)
@@ -2948,6 +3113,7 @@ namespace WindowsInventoryLite
                     summary["createdAt"] = GetStringValue(job, "createdAt");
                     summary["startedAt"] = GetStringValue(job, "startedAt");
                     summary["completedAt"] = GetStringValue(job, "completedAt");
+                    summary["mode"] = GetStringValue(job, "mode");
                     summary["serverUrl"] = GetStringValue(job, "serverUrl");
                     summary["username"] = GetStringValue(job, "username");
                     summary["retentionDays"] = GetIntValue(job, "retentionDays", options.InstallLogRetentionDays);
@@ -3018,8 +3184,11 @@ namespace WindowsInventoryLite
             }
 
             // Used only to patch a target's stored report after a
-            // successful install below (see PatchClientReportVersionAfterInstall) -
-            // computed once per job, not per-target.
+            // successful WinRM install below (see
+            // PatchClientReportVersionAfterInstall) - computed once per
+            // job, not per-target. Irrelevant to an SSH-installed target,
+            // which has no exe version in this sense; see the "protocol"
+            // check below.
             string net35Version = null;
             string net40Version = null;
             if (job.Action != "uninstall" && Directory.Exists(options.ClientPackagePath))
@@ -3032,16 +3201,20 @@ namespace WindowsInventoryLite
 
             foreach (string target in job.Targets)
             {
-                Dictionary<string, object> result = job.Action == "uninstall"
-                    ? RunClientUninstallTarget(target, job.Username, job.Password, job.AddToTrustedHosts)
-                    : RunClientInstallTarget(target, job.ServerUrl, job.Token, job.Username, job.Password, job.Force, job.AddToTrustedHosts);
+                Dictionary<string, object> result = RunUnifiedInstallTarget(
+                    target, job.Action, job.Mode,
+                    job.ServerUrl, job.Token,
+                    job.Username, job.Password, job.Force, job.AddToTrustedHosts,
+                    job.SshAuthMode, job.SshUsername, job.SshPassword, job.SshKeyPath, job.TrustNewHostKeys,
+                    job.IntervalHours, job.StatusIntervalMinutes, job.InstallPath,
+                    AutoDetectProbeTimeoutMs);
                 lock (installJobsLock)
                 {
                     job.Results.Add(result);
                     SaveInstallJob(job);
                 }
 
-                if (job.Action != "uninstall" && GetStringValue(result, "status") == "completed")
+                if (job.Action != "uninstall" && GetStringValue(result, "status") == "completed" && GetStringValue(result, "protocol") == "winrm")
                 {
                     PatchClientReportVersionAfterInstall(target, net35Version, net40Version);
                 }
@@ -3054,242 +3227,6 @@ namespace WindowsInventoryLite
                 SaveInstallJob(job);
             }
             CleanupInstallJobLogs();
-        }
-
-        private void StartLinuxClientAction(Stream stream, RequestContext request, string action)
-        {
-            JavaScriptSerializer serializer = CreateJsonSerializer();
-            Dictionary<string, object> payload;
-            try
-            {
-                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
-                if (payload == null)
-                {
-                    throw new ArgumentException("empty body");
-                }
-            }
-            catch
-            {
-                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-
-            string targetText = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "");
-            string authMode = Convert.ToString(payload.ContainsKey("authMode") ? payload["authMode"] : "credentials");
-            if (authMode != "ad" && authMode != "credentials" && authMode != "key")
-            {
-                SendText(stream, "{\"error\":\"authMode must be 'ad', 'credentials', or 'key'\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-
-            string username = Convert.ToString(payload.ContainsKey("username") ? payload["username"] : "");
-            string password = Convert.ToString(payload.ContainsKey("password") ? payload["password"] : "");
-            string keyPath = GetLinuxSshKeyFilePath();
-
-            if (authMode == "ad")
-            {
-                bool useAd = true;
-                string adCredentialError;
-                if (!TryResolveAdSyncCredentials(useAd, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref username, ref password, out adCredentialError))
-                {
-                    SendText(stream, "{\"error\":\"" + adCredentialError.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                if (String.IsNullOrEmpty(username) || String.IsNullOrEmpty(password))
-                {
-                    SendText(stream, "{\"error\":\"AD service-identity mode is not usable for SSH pushes to Linux targets (there is no SSH equivalent of running as the service's own identity). Select 'Stored Linux credentials' or 'SSH key' instead, or configure an explicit AD account rather than service identity in Settings > Windows > Active Directory.\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-            }
-            else if (authMode == "credentials")
-            {
-                if (String.IsNullOrEmpty(username)) username = options.LinuxUpdateUsername;
-                if (String.IsNullOrEmpty(password)) password = options.LinuxUpdatePassword;
-                if (String.IsNullOrEmpty(username) || String.IsNullOrEmpty(password))
-                {
-                    SendText(stream, "{\"error\":\"username/password are required for 'credentials' auth mode (enter them, or save them in Settings > Linux > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-            }
-            else
-            {
-                if (String.IsNullOrEmpty(username)) username = options.LinuxUpdateUsername;
-                if (String.IsNullOrEmpty(username))
-                {
-                    SendText(stream, "{\"error\":\"username is required for 'key' auth mode (enter it, or save it in Settings > Linux > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                if (!File.Exists(keyPath))
-                {
-                    SendText(stream, "{\"error\":\"No SSH key is configured - upload one in Settings > Linux > Linux Client update credentials.\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-            }
-
-            string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
-            string token = Convert.ToString(payload.ContainsKey("token") ? payload["token"] : "");
-            // Blank means "use the server's current ingestion token", not
-            // "install with no token" - a form left at its default (the
-            // field's own placeholder used to say "leave empty if not
-            // used", which is actively wrong on a server that actually
-            // enforces a token) must not silently ship a client that can
-            // never authenticate its own inventory reports. Mirrors the
-            // fix already applied to the Windows WinRM push
-            // (BuildPowerShellInstallArguments) for the identical failure
-            // mode, reported live: "clients stopped connecting after
-            // regenerating the token, reinstalling via the UI doesn't
-            // help" - true here too, for the same reason.
-            if (String.IsNullOrEmpty(token))
-            {
-                token = options.Token;
-            }
-            string installPath = Convert.ToString(payload.ContainsKey("installPath") ? payload["installPath"] : options.LinuxDefaultInstallPath);
-            int intervalHours = options.LinuxDefaultIntervalHours;
-            if (payload.ContainsKey("intervalHours"))
-            {
-                Int32.TryParse(Convert.ToString(payload["intervalHours"]), out intervalHours);
-            }
-            if (intervalHours < 1 || intervalHours > 24)
-            {
-                intervalHours = options.LinuxDefaultIntervalHours;
-            }
-            int statusIntervalMinutes = options.LinuxDefaultStatusIntervalMinutes;
-            if (payload.ContainsKey("statusIntervalMinutes"))
-            {
-                Int32.TryParse(Convert.ToString(payload["statusIntervalMinutes"]), out statusIntervalMinutes);
-            }
-            if (statusIntervalMinutes < 1 || statusIntervalMinutes > 1440)
-            {
-                statusIntervalMinutes = options.LinuxDefaultStatusIntervalMinutes;
-            }
-
-            ArrayList targets = ExpandInstallTargets(targetText);
-            if (targets.Count == 0)
-            {
-                SendText(stream, "{\"error\":\"at least one target is required\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-            // Reject before a job is created rather than letting each target fail
-            // individually later - a typo'd or hostile target list should be a
-            // clear 400, not a job full of per-target failures. ExpandInstallTargets
-            // itself is deliberately left alone: it is shared with the Windows WinRM
-            // push path, which is out of scope here.
-            foreach (string candidate in targets)
-            {
-                if (!IsValidSshTarget(candidate))
-                {
-                    SendText(stream, "{\"error\":\"one or more targets contain characters that are not valid in a hostname or IPv4 address (only letters, digits, '.' and '-' are allowed)\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-            }
-
-            if (action == "install" && String.IsNullOrEmpty(serverUrl))
-            {
-                // The dashboard's "Linux Client updates" push (Task 11's "Update
-                // selected" button) intentionally does not resend serverUrl/token/
-                // installPath/intervalHours - it targets already-installed clients
-                // and expects the same values used for the original install/package
-                // configuration. Fall back to linux-package-settings.json, the exact
-                // file StartScheduledLinuxClientUpdatePush already reads for the same
-                // reason. Only fields the caller did not explicitly supply are filled
-                // in, so the Task 9 manual push form (which always sends these fields)
-                // is never overridden by a stale saved value.
-                string packageSettingsPath = Path.Combine(options.LinuxClientPackagePath, "linux-package-settings.json");
-                if (File.Exists(packageSettingsPath))
-                {
-                    try
-                    {
-                        JavaScriptSerializer settingsSerializer = CreateJsonSerializer();
-                        Dictionary<string, object> savedSettings = settingsSerializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(packageSettingsPath, Encoding.UTF8));
-                        serverUrl = GetStringValue(savedSettings, "serverUrl");
-                        // token is deliberately NOT re-read from the saved
-                        // package settings here - it already defaulted to
-                        // the server's own live options.Token above, which
-                        // is always current; a token saved in this file
-                        // could be stale (e.g. from before a regenerate)
-                        // and would be a strictly worse value to fall back
-                        // to than the live one already resolved.
-                        if (!payload.ContainsKey("installPath"))
-                        {
-                            string savedInstallPath = GetStringValue(savedSettings, "installPath");
-                            if (!String.IsNullOrEmpty(savedInstallPath))
-                            {
-                                installPath = savedInstallPath;
-                            }
-                        }
-                        if (!payload.ContainsKey("intervalHours"))
-                        {
-                            intervalHours = GetIntValue(savedSettings, "intervalHours", intervalHours);
-                        }
-                        if (!payload.ContainsKey("statusIntervalMinutes"))
-                        {
-                            statusIntervalMinutes = GetIntValue(savedSettings, "statusIntervalMinutes", statusIntervalMinutes);
-                        }
-                    }
-                    catch
-                    {
-                        serverUrl = null;
-                    }
-                }
-            }
-
-            if (action == "install" && String.IsNullOrEmpty(serverUrl))
-            {
-                SendText(stream, "{\"error\":\"serverUrl is required\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-
-            // Validated HERE, not at the top of this method: the saved-settings
-            // fallback above can overwrite serverUrl and installPath with values
-            // read from linux-package-settings.json, so validating on entry would
-            // guard values that no longer exist by the time they reach the command
-            // line.
-            string pushValidationError;
-            if (!TryValidateLinuxPushValues(serverUrl, token, installPath, out pushValidationError))
-            {
-                SendText(stream, "{\"error\":\"" + pushValidationError.Replace("\\", "\\\\").Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-
-            bool trustNewHostKeys = false;
-            if (action == "install")
-            {
-                trustNewHostKeys = payload.ContainsKey("trustNewHostKeys") && Convert.ToBoolean(payload["trustNewHostKeys"]);
-                bool acknowledgeHostKeyRisk = payload.ContainsKey("acknowledgeHostKeyRisk") && Convert.ToBoolean(payload["acknowledgeHostKeyRisk"]);
-                if (trustNewHostKeys && !acknowledgeHostKeyRisk)
-                {
-                    SendText(stream, "{\"error\":\"acknowledgeHostKeyRisk must be true when trustNewHostKeys is enabled\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-            }
-
-            LinuxInstallJob job = new LinuxInstallJob();
-            job.Id = Guid.NewGuid().ToString("N");
-            job.Action = action;
-            job.Status = "queued";
-            job.CreatedAtUtc = DateTime.UtcNow;
-            job.Targets = targets;
-            job.Results = new ArrayList();
-            job.AuthMode = authMode;
-            job.Username = username;
-            job.Password = password;
-            job.KeyPath = keyPath;
-            job.ServerUrl = serverUrl;
-            job.Token = token;
-            job.IntervalHours = intervalHours;
-            job.StatusIntervalMinutes = statusIntervalMinutes;
-            job.InstallPath = installPath;
-            job.RetentionDays = options.InstallLogRetentionDays;
-            job.TrustNewHostKeys = trustNewHostKeys;
-
-            lock (linuxInstallJobsLock)
-            {
-                linuxInstallJobs[job.Id] = job;
-                SaveLinuxInstallJob(job);
-            }
-
-            ThreadPool.QueueUserWorkItem(RunLinuxClientActionJob, job);
-            SendJson(stream, "{\"jobId\":\"" + job.Id + "\",\"status\":\"queued\"}");
         }
 
         private void TrustLinuxHostKey(Stream stream, RequestContext request)
@@ -3355,37 +3292,6 @@ namespace WindowsInventoryLite
 
             Dictionary<string, object> record = UpsertLinuxKnownHost(host, port, keyType, fingerprint, "manual");
             SendJson(stream, serializer.Serialize(record));
-        }
-
-        private void RunLinuxClientActionJob(object state)
-        {
-            LinuxInstallJob job = (LinuxInstallJob)state;
-            job.Status = "running";
-            job.StartedAtUtc = DateTime.UtcNow;
-            lock (linuxInstallJobsLock)
-            {
-                SaveLinuxInstallJob(job);
-            }
-
-            foreach (string target in job.Targets)
-            {
-                Dictionary<string, object> result = job.Action == "uninstall"
-                    ? RunLinuxClientUninstallTarget(target, job.AuthMode, job.Username, job.Password, job.KeyPath, job.InstallPath)
-                    : RunLinuxClientInstallTarget(target, job.ServerUrl, job.Token, job.IntervalHours, job.StatusIntervalMinutes, job.InstallPath, job.AuthMode, job.Username, job.Password, job.KeyPath, job.TrustNewHostKeys);
-                lock (linuxInstallJobsLock)
-                {
-                    job.Results.Add(result);
-                    SaveLinuxInstallJob(job);
-                }
-            }
-
-            job.CompletedAtUtc = DateTime.UtcNow;
-            job.Status = "completed";
-            lock (linuxInstallJobsLock)
-            {
-                SaveLinuxInstallJob(job);
-            }
-            CleanupLinuxInstallJobLogs();
         }
 
         // Credentials/key path never appear on the child process's command
@@ -3774,83 +3680,6 @@ namespace WindowsInventoryLite
             keyType = match.Groups[1].Value;
             fingerprint = match.Groups[2].Value;
             return true;
-        }
-
-        private void SendLinuxClientInstallJobs(Stream stream)
-        {
-            CleanupLinuxInstallJobLogs();
-            ArrayList jobs = new ArrayList();
-            JavaScriptSerializer serializer = CreateJsonSerializer();
-
-            foreach (string file in Directory.GetFiles(GetLinuxInstallJobDirectory(), "*.json"))
-            {
-                try
-                {
-                    Dictionary<string, object> job = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
-                    Dictionary<string, object> summary = new Dictionary<string, object>();
-                    summary["id"] = GetStringValue(job, "id");
-                    summary["action"] = GetStringValue(job, "action");
-                    summary["status"] = GetStringValue(job, "status");
-                    summary["createdAt"] = GetStringValue(job, "createdAt");
-                    summary["startedAt"] = GetStringValue(job, "startedAt");
-                    summary["completedAt"] = GetStringValue(job, "completedAt");
-                    summary["authMode"] = GetStringValue(job, "authMode");
-                    summary["username"] = GetStringValue(job, "username");
-                    summary["retentionDays"] = GetIntValue(job, "retentionDays", options.InstallLogRetentionDays);
-
-                    ArrayList targets = job.ContainsKey("targets") ? job["targets"] as ArrayList : null;
-                    ArrayList results = job.ContainsKey("results") ? job["results"] as ArrayList : null;
-                    summary["targetCount"] = targets == null ? 0 : targets.Count;
-                    summary["resultCount"] = results == null ? 0 : results.Count;
-                    summary["failedCount"] = CountInstallResults(results, "failed");
-                    jobs.Add(summary);
-                }
-                catch
-                {
-                }
-            }
-
-            ArrayList sorted = SortJobsByCreatedAtDescending(jobs);
-            Dictionary<string, object> response = new Dictionary<string, object>();
-            response["defaultRetentionDays"] = options.InstallLogRetentionDays;
-            response["jobs"] = sorted;
-            SendJson(stream, serializer.Serialize(response));
-        }
-
-        private void SendLinuxClientInstallJob(Stream stream, RequestContext request)
-        {
-            const string prefix = "/api/v1/linux-client-install/";
-            string id = request.Path.Substring(prefix.Length);
-            int queryStart = id.IndexOf('?');
-            if (queryStart >= 0)
-            {
-                id = id.Substring(0, queryStart);
-            }
-
-            LinuxInstallJob job = null;
-            lock (linuxInstallJobsLock)
-            {
-                if (linuxInstallJobs.ContainsKey(id))
-                {
-                    job = linuxInstallJobs[id];
-                }
-            }
-
-            if (job == null)
-            {
-                string persisted = ReadLinuxInstallJobJson(id);
-                if (persisted == null)
-                {
-                    SendText(stream, "{\"error\":\"job not found\"}", "application/json; charset=utf-8", 404);
-                    return;
-                }
-
-                SendJson(stream, persisted);
-                return;
-            }
-
-            JavaScriptSerializer serializer = CreateJsonSerializer();
-            SendJson(stream, serializer.Serialize(job.ToDictionary()));
         }
 
         // A successful install push only becomes visible to
@@ -4805,11 +4634,11 @@ namespace WindowsInventoryLite
 
         // Shared by the two Client Package generator endpoints below
         // (ConfigureClientPackage, ConfigureLinuxClientPackage), which had
-        // no token fallback at all before this fix. StartClientAction and
-        // StartLinuxClientAction have their own equivalent inline fallback
-        // logic, added earlier and deliberately left as-is here (same
-        // behavior, different call sites, not worth the churn of
-        // consolidating four already-working call sites into one).
+        // no token fallback at all before this fix. StartClientAction has
+        // its own equivalent inline fallback logic, added earlier and
+        // deliberately left as-is here (same behavior, different call
+        // sites, not worth the churn of consolidating already-working call
+        // sites into one).
         private static string ResolveEffectiveToken(string requestedToken, string liveToken)
         {
             return String.IsNullOrEmpty(requestedToken) ? liveToken : requestedToken;
@@ -5114,12 +4943,21 @@ namespace WindowsInventoryLite
             public DateTime CompletedAtUtc;
             public ArrayList Targets;
             public ArrayList Results;
+            public string Mode;
             public string ServerUrl;
             public string Token;
             public string Username;
             public string Password;
             public bool Force;
             public bool AddToTrustedHosts;
+            public string SshAuthMode;
+            public string SshUsername;
+            public string SshPassword;
+            public string SshKeyPath;
+            public int IntervalHours;
+            public int StatusIntervalMinutes;
+            public string InstallPath;
+            public bool TrustNewHostKeys;
             public int RetentionDays;
 
             public Dictionary<string, object> ToDictionary()
@@ -5133,124 +4971,17 @@ namespace WindowsInventoryLite
                 result["completedAt"] = CompletedAtUtc == DateTime.MinValue ? null : CompletedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
                 result["targets"] = Targets;
                 result["results"] = Results;
+                result["mode"] = Mode;
                 result["serverUrl"] = ServerUrl;
                 result["username"] = Username;
                 result["force"] = Force;
                 result["addToTrustedHosts"] = AddToTrustedHosts;
-                result["retentionDays"] = RetentionDays;
-                return result;
-            }
-        }
-
-        private sealed class LinuxInstallJob
-        {
-            public string Id;
-            public string Action;
-            public string Status;
-            public DateTime CreatedAtUtc;
-            public DateTime StartedAtUtc;
-            public DateTime CompletedAtUtc;
-            public ArrayList Targets;
-            public ArrayList Results;
-            public string AuthMode;
-            public string Username;
-            public string Password;
-            public string KeyPath;
-            public string ServerUrl;
-            public string Token;
-            public int IntervalHours;
-            public int StatusIntervalMinutes;
-            public string InstallPath;
-            public int RetentionDays;
-            public bool TrustNewHostKeys;
-
-            public Dictionary<string, object> ToDictionary()
-            {
-                Dictionary<string, object> result = new Dictionary<string, object>();
-                result["id"] = Id;
-                result["action"] = String.IsNullOrEmpty(Action) ? "install" : Action;
-                result["status"] = Status;
-                result["createdAt"] = CreatedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                result["startedAt"] = StartedAtUtc == DateTime.MinValue ? null : StartedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                result["completedAt"] = CompletedAtUtc == DateTime.MinValue ? null : CompletedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                result["targets"] = Targets;
-                result["results"] = Results;
-                result["authMode"] = AuthMode;
-                result["username"] = Username;
-                result["serverUrl"] = ServerUrl;
+                result["sshAuthMode"] = SshAuthMode;
+                result["sshUsername"] = SshUsername;
                 result["installPath"] = InstallPath;
-                result["retentionDays"] = RetentionDays;
                 result["trustNewHostKeys"] = TrustNewHostKeys;
+                result["retentionDays"] = RetentionDays;
                 return result;
-            }
-        }
-
-        private string GetLinuxInstallJobDirectory()
-        {
-            return Path.Combine(options.LinuxDataPath, "_linux-client-install-jobs");
-        }
-
-        private string GetLinuxInstallJobPath(string id)
-        {
-            return Path.Combine(GetLinuxInstallJobDirectory(), SanitizeFileName(id) + ".json");
-        }
-
-        private void SaveLinuxInstallJob(LinuxInstallJob job)
-        {
-            if (!Directory.Exists(GetLinuxInstallJobDirectory()))
-            {
-                Directory.CreateDirectory(GetLinuxInstallJobDirectory());
-            }
-
-            JavaScriptSerializer serializer = CreateJsonSerializer();
-            File.WriteAllText(GetLinuxInstallJobPath(job.Id), serializer.Serialize(job.ToDictionary()), new UTF8Encoding(false));
-        }
-
-        private string ReadLinuxInstallJobJson(string id)
-        {
-            string safeId = SanitizeFileName(id);
-            if (String.IsNullOrEmpty(safeId) || safeId != id)
-            {
-                return null;
-            }
-
-            string path = GetLinuxInstallJobPath(safeId);
-            if (!File.Exists(path))
-            {
-                return null;
-            }
-
-            return File.ReadAllText(path, Encoding.UTF8);
-        }
-
-        private void CleanupLinuxInstallJobLogs()
-        {
-            string directory = GetLinuxInstallJobDirectory();
-            if (!Directory.Exists(directory))
-            {
-                return;
-            }
-
-            JavaScriptSerializer serializer = CreateJsonSerializer();
-            foreach (string file in Directory.GetFiles(directory, "*.json"))
-            {
-                try
-                {
-                    Dictionary<string, object> job = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
-                    DateTime createdAt = ParseUtcDate(GetStringValue(job, "createdAt"), File.GetCreationTimeUtc(file));
-                    int retentionDays = NormalizeRetentionDays(GetIntValue(job, "retentionDays", options.InstallLogRetentionDays));
-                    if (createdAt.AddDays(retentionDays) < DateTime.UtcNow)
-                    {
-                        File.Delete(file);
-                    }
-                }
-                catch
-                {
-                    if (File.GetLastWriteTimeUtc(file).AddDays(options.InstallLogRetentionDays) < DateTime.UtcNow)
-                    {
-                        File.Delete(file);
-                    }
-                }
             }
         }
 
@@ -8083,7 +7814,7 @@ namespace WindowsInventoryLite
         // The three values that get interpolated into the remote shell command
         // built for a Linux push. Grouped into one helper because they must be
         // validated at the point they are USED, not at the top of the request
-        // handler: StartLinuxClientAction overwrites serverUrl/installPath from
+        // handler: StartClientAction overwrites serverUrl/installPath from
         // linux-package-settings.json AFTER its original validation ran, and
         // StartScheduledLinuxClientUpdatePush reads all three straight from that
         // file and never validated them at all.
