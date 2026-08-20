@@ -149,7 +149,12 @@
     if (hash === 'deploy' || hash === 'deploy-actions' || hash === 'client-actions' || hash === 'actions' || hash === 'install' || hash === 'linux-client-actions') return { view: 'deploy', subview: 'actions' };
     if (hash === 'deploy-updates' || hash === 'client-updates' || hash === 'updates' || hash === 'linux-client-updates') return { view: 'deploy', subview: 'updates' };
     if (hash === 'deploy-package' || hash === 'client-package' || hash === 'package') return { view: 'deploy', subview: 'package' };
-    if (hash === 'settings' || hash === 'settings-general' || hash === 'general') return { view: 'settings', subview: 'general' };
+    // Old #settings/#settings-general/#general hashes land on Server (the
+    // new first tab) rather than disappearing - same backward-compat
+    // convention as every other retired hash in this function.
+    if (hash === 'settings' || hash === 'settings-general' || hash === 'general' || hash === 'settings-server') return { view: 'settings', subview: 'server' };
+    if (hash === 'settings-windows') return { view: 'settings', subview: 'windows' };
+    if (hash === 'settings-linux') return { view: 'settings', subview: 'linux' };
     if (hash === 'settings-certificate' || hash === 'certificate') return { view: 'settings', subview: 'certificate' };
     if (hash === 'settings-admin-password' || hash === 'admin-password' || hash === 'admin') return { view: 'settings', subview: 'adminPassword' };
     return { view: 'dashboard', subview: null };
@@ -161,7 +166,13 @@
   // through to the default and produces 'clients').
   function computeHashForView(view, subview) {
     if (view === 'deploy') return subview === 'updates' ? 'deploy-updates' : subview === 'package' ? 'deploy-package' : 'deploy-actions';
-    if (view === 'settings') return subview === 'certificate' ? 'settings-certificate' : subview === 'adminPassword' ? 'settings-admin-password' : 'settings-general';
+    if (view === 'settings') {
+      if (subview === 'certificate') return 'settings-certificate';
+      if (subview === 'adminPassword') return 'settings-admin-password';
+      if (subview === 'windows') return 'settings-windows';
+      if (subview === 'linux') return 'settings-linux';
+      return 'settings-server';
+    }
     if (view === 'linuxServices') return 'linux-services';
     return view;
   }
@@ -178,7 +189,9 @@
   }
 
   function loadSettingsSubviewData(subview) {
-    if (subview === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
+    if (subview === 'server') { loadServerSettings(); loadIngestionTokenStatus(); }
+    if (subview === 'windows') loadWindowsSettings();
+    if (subview === 'linux') { loadLinuxSettings(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (subview === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (subview === 'adminPassword') loadAdminPasswordStatus();
   }
@@ -210,8 +223,12 @@
     byId('deploySubtabUpdates').setAttribute('aria-selected', String(state.view === 'deploy' && state.subview === 'updates'));
     byId('deploySubtabPackage').classList.toggle('active', state.view === 'deploy' && state.subview === 'package');
     byId('deploySubtabPackage').setAttribute('aria-selected', String(state.view === 'deploy' && state.subview === 'package'));
-    byId('settingsSubtabGeneral').classList.toggle('active', state.view === 'settings' && state.subview === 'general');
-    byId('settingsSubtabGeneral').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'general'));
+    byId('settingsSubtabServer').classList.toggle('active', state.view === 'settings' && state.subview === 'server');
+    byId('settingsSubtabServer').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'server'));
+    byId('settingsSubtabWindows').classList.toggle('active', state.view === 'settings' && state.subview === 'windows');
+    byId('settingsSubtabWindows').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'windows'));
+    byId('settingsSubtabLinux').classList.toggle('active', state.view === 'settings' && state.subview === 'linux');
+    byId('settingsSubtabLinux').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'linux'));
     byId('settingsSubtabCertificate').classList.toggle('active', state.view === 'settings' && state.subview === 'certificate');
     byId('settingsSubtabCertificate').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'certificate'));
     byId('settingsSubtabAdminPassword').classList.toggle('active', state.view === 'settings' && state.subview === 'adminPassword');
@@ -2542,7 +2559,7 @@
       });
   }
 
-  function loadGeneralSettings() {
+  function loadServerSettings() {
     fetch('/api/v1/server/settings', { cache: 'no-store' })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -2570,6 +2587,22 @@
         } else {
           hint.classList.add('hidden');
         }
+        byId('generalDebugLogEnabled').checked = !!data.debugLogEnabled;
+        byId('generalDebugLogPath').textContent = data.debugLogPath || '-';
+        renderConnectionStatus(data);
+      })
+      .catch(error => {
+        showSavedMessage(byId('generalMessage'), `Settings unavailable: ${error.message}`, true);
+      });
+  }
+
+  function loadWindowsSettings() {
+    fetch('/api/v1/server/settings', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
         byId('generalAdSyncEnabled').checked = !!data.adSyncEnabled;
         byId('generalAdDescriptionSyncEnabled').checked = !!data.adDescriptionSyncEnabled;
         state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
@@ -2583,13 +2616,26 @@
         applyPasswordPlaceholder('generalAdPassword', !!data.adPasswordConfigured, 'leave blank to keep the current password');
         byId('generalAdComputerImportOUs').value = data.adComputerImportOUs || '';
         updateAdIdentityFields();
-        byId('generalPreferredLinuxSubnet').value = data.preferredLinuxSubnet || '';
-        byId('generalDebugLogEnabled').checked = !!data.debugLogEnabled;
-        byId('generalDebugLogPath').textContent = data.debugLogPath || '-';
-        renderConnectionStatus(data);
       })
       .catch(error => {
-        showGeneralMessage(`Settings unavailable: ${error.message}`, true);
+        showSavedMessage(byId('windowsSettingsMessage'), `Settings unavailable: ${error.message}`, true);
+      });
+  }
+
+  function loadLinuxSettings() {
+    fetch('/api/v1/server/settings', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('generalPreferredLinuxSubnet').value = data.preferredLinuxSubnet || '';
+        byId('linuxDefaultIntervalHours').value = data.linuxDefaultIntervalHours || 6;
+        byId('linuxDefaultStatusIntervalMinutes').value = data.linuxDefaultStatusIntervalMinutes || 30;
+        byId('linuxDefaultInstallPath').value = data.linuxDefaultInstallPath || '/opt/windows-inventory-lite';
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxSettingsMessage'), `Settings unavailable: ${error.message}`, true);
       });
   }
 
@@ -2626,11 +2672,7 @@
     setStatusDot('statusCertDot', 'statusCertDetail', certOn, certDetail);
   }
 
-  function showGeneralMessage(msg, isError) {
-    showSavedMessage(byId('generalMessage'), msg, isError);
-  }
-
-  function saveGeneralSettings(acknowledgeRisks, confirmedDisruption, acknowledgeIngestionTokenRisk) {
+  function saveServerSettings(acknowledgeRisks, confirmedDisruption, acknowledgeIngestionTokenRisk) {
     const staleHours = Number.parseInt(byId('generalStaleHours').value, 10) || 48;
     const installLogRetentionDays = Number.parseInt(byId('generalInstallLogRetentionDays').value, 10) || 30;
     const port = Number.parseInt(byId('generalPort').value, 10) || 8080;
@@ -2672,16 +2714,6 @@
       body: JSON.stringify({
         staleHours, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, requireIngestionToken,
         acknowledgeRisks: !!acknowledgeRisks, acknowledgeIngestionTokenRisk: !!acknowledgeIngestionTokenRisk,
-        adSyncEnabled: byId('generalAdSyncEnabled').checked,
-        adDescriptionSyncEnabled: byId('generalAdDescriptionSyncEnabled').checked,
-        adSyncMode: byId('generalAdSyncMode').value,
-        adSyncIntervalHours: Number.parseInt(byId('generalAdSyncIntervalHours').value, 10) || 24,
-        adDomain: byId('generalAdDomain').value.trim(),
-        adUseServiceIdentity: byId('generalAdUseServiceIdentity').checked,
-        adUsername: byId('generalAdUsername').value.trim(),
-        adPassword: byId('generalAdPassword').value,
-        adComputerImportOUs: byId('generalAdComputerImportOUs').value,
-        preferredLinuxSubnet: byId('generalPreferredLinuxSubnet').value.trim(),
         debugLogEnabled: byId('generalDebugLogEnabled').checked
       })
     })
@@ -2693,7 +2725,7 @@
               `${data.error}\n\n${data.risks.join('\n')}\n\nEnable HTTPS anyway?`
             );
             if (confirmed) {
-              saveGeneralSettings(true, true);
+              saveServerSettings(true, true);
               return;
             }
             byId('generalUseHttps').checked = false;
@@ -2704,18 +2736,79 @@
         state.staleHours = data.staleHours || 48;
         state.generalLoadedPort = data.port || 8080;
         state.generalLoadedEnableHttp = data.enableHttp !== false;
-        state.adDescriptionSyncEnabled = byId('generalAdDescriptionSyncEnabled').checked;
         renderDashboardTiles();
         renderConnectionStatus(data);
-        byId('generalAdPassword').value = '';
-        showGeneralMessage('Settings saved.', false);
+        showSavedMessage(byId('generalMessage'), 'Settings saved.', false);
         loadIngestionTokenStatus();
       })
       .catch(error => {
-        showGeneralMessage(`Save failed: ${error.message}`, true);
+        showSavedMessage(byId('generalMessage'), `Save failed: ${error.message}`, true);
       })
       .finally(() => {
         byId('generalSaveButton').disabled = false;
+      });
+  }
+
+  function saveWindowsSettings() {
+    byId('windowsSettingsSaveButton').disabled = true;
+    byId('windowsSettingsMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        adSyncEnabled: byId('generalAdSyncEnabled').checked,
+        adDescriptionSyncEnabled: byId('generalAdDescriptionSyncEnabled').checked,
+        adSyncMode: byId('generalAdSyncMode').value,
+        adSyncIntervalHours: Number.parseInt(byId('generalAdSyncIntervalHours').value, 10) || 24,
+        adDomain: byId('generalAdDomain').value.trim(),
+        adUseServiceIdentity: byId('generalAdUseServiceIdentity').checked,
+        adUsername: byId('generalAdUsername').value.trim(),
+        adPassword: byId('generalAdPassword').value,
+        adComputerImportOUs: byId('generalAdComputerImportOUs').value
+      })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        state.adDescriptionSyncEnabled = byId('generalAdDescriptionSyncEnabled').checked;
+        byId('generalAdPassword').value = '';
+        showSavedMessage(byId('windowsSettingsMessage'), 'Settings saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('windowsSettingsMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('windowsSettingsSaveButton').disabled = false;
+      });
+  }
+
+  function saveLinuxSettings() {
+    byId('linuxSettingsSaveButton').disabled = true;
+    byId('linuxSettingsMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        preferredLinuxSubnet: byId('generalPreferredLinuxSubnet').value.trim(),
+        linuxDefaultIntervalHours: Number.parseInt(byId('linuxDefaultIntervalHours').value, 10) || 6,
+        linuxDefaultStatusIntervalMinutes: Number.parseInt(byId('linuxDefaultStatusIntervalMinutes').value, 10) || 30,
+        linuxDefaultInstallPath: byId('linuxDefaultInstallPath').value.trim()
+      })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        showSavedMessage(byId('linuxSettingsMessage'), 'Settings saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxSettingsMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('linuxSettingsSaveButton').disabled = false;
       });
   }
 
@@ -3940,9 +4033,11 @@
     byId('updatesView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'updates'));
     byId('linuxUpdatesView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'updates'));
     byId('packageView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'package'));
-    // Settings: exactly one of the three shows at a time (no stacking).
-    byId('generalView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'general'));
-    byId('generalStatusView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'general'));
+    // Settings: exactly one of the five shows at a time (no stacking).
+    byId('serverSettingsView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'server'));
+    byId('generalStatusView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'server'));
+    byId('windowsSettingsView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'windows'));
+    byId('linuxSettingsView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'linux'));
     byId('certificateView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'certificate'));
     byId('adminPasswordView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'adminPassword'));
     byId('dashboardTab').classList.toggle('active', state.view === 'dashboard');
@@ -4378,11 +4473,13 @@
   byId('deploySubtabActions').addEventListener('click', () => setView('deploy', 'actions'));
   byId('deploySubtabUpdates').addEventListener('click', () => setView('deploy', 'updates'));
   byId('deploySubtabPackage').addEventListener('click', () => setView('deploy', 'package'));
-  byId('settingsSubtabGeneral').addEventListener('click', () => setView('settings', 'general'));
+  byId('settingsSubtabServer').addEventListener('click', () => setView('settings', 'server'));
+  byId('settingsSubtabWindows').addEventListener('click', () => setView('settings', 'windows'));
+  byId('settingsSubtabLinux').addEventListener('click', () => setView('settings', 'linux'));
   byId('settingsSubtabCertificate').addEventListener('click', () => setView('settings', 'certificate'));
   byId('settingsSubtabAdminPassword').addEventListener('click', () => setView('settings', 'adminPassword'));
   byId('deployTab').addEventListener('click', () => setView('deploy', 'actions'));
-  byId('settingsTab').addEventListener('click', () => setView('settings', 'general'));
+  byId('settingsTab').addEventListener('click', () => setView('settings', 'server'));
 
   function toggleDropdown(buttonId, menuId, forceClosed) {
     const button = byId(buttonId);
@@ -4477,7 +4574,9 @@
   byId('pkgDownloadButton').addEventListener('click', () => {
     window.location.href = '/api/v1/client-package/download';
   });
-  byId('generalSaveButton').addEventListener('click', () => saveGeneralSettings(false));
+  byId('generalSaveButton').addEventListener('click', () => saveServerSettings(false));
+  byId('windowsSettingsSaveButton').addEventListener('click', saveWindowsSettings);
+  byId('linuxSettingsSaveButton').addEventListener('click', saveLinuxSettings);
   byId('generalAdUseServiceIdentity').addEventListener('change', updateAdIdentityFields);
   byId('generalAdSyncMode').addEventListener('change', updateAdSyncIntervalField);
   byId('updatesScheduleMode').addEventListener('change', updateScheduleFieldVisibility);

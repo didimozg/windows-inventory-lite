@@ -127,12 +127,14 @@
         </section>
 
         <div id="settingsSubtabs" class="subtab-strip hidden" role="tablist" aria-label="Settings sections">
-          <button id="settingsSubtabGeneral" class="subtab-item" role="tab" type="button">General</button>
+          <button id="settingsSubtabServer" class="subtab-item" role="tab" type="button">Server</button>
+          <button id="settingsSubtabWindows" class="subtab-item" role="tab" type="button">Windows</button>
+          <button id="settingsSubtabLinux" class="subtab-item" role="tab" type="button">Linux</button>
           <button id="settingsSubtabCertificate" class="subtab-item" role="tab" type="button">Certificate</button>
           <button id="settingsSubtabAdminPassword" class="subtab-item" role="tab" type="button">Admin password</button>
         </div>
 
-        <section id="generalView" class="install-panel card-glow hidden" aria-label="General settings">
+        <section id="serverSettingsView" class="install-panel card-glow hidden" aria-label="Server settings">
           <div class="settings-block">
             <h2 class="settings-block-title">Inventory</h2>
             <div class="pkg-grid general-grid">
@@ -174,98 +176,6 @@
               </label>
             </div>
             <p id="generalCertHint" class="cert-hint hidden"></p>
-          </div>
-          <div class="settings-block">
-            <h2 class="settings-block-title">Active Directory</h2>
-            <div class="pkg-grid ad-sync-panel">
-              <label class="check-label">
-                <input id="generalAdDescriptionSyncEnabled" type="checkbox">
-                Sync Description from AD
-              </label>
-              <div class="ad-sync-mode-row">
-                <label class="pkg-token-field">
-                  Sync mode
-                  <select id="generalAdSyncMode">
-                    <option value="on-report">On inventory report</option>
-                    <option value="timer">Periodic timer</option>
-                  </select>
-                </label>
-                <label id="generalAdSyncIntervalField" class="pkg-token-field hidden">
-                  Sync interval (hours)
-                  <input id="generalAdSyncIntervalHours" type="number" min="1" max="8760" value="24">
-                </label>
-              </div>
-            </div>
-            <div class="pkg-grid ad-identity-panel">
-              <label class="check-label">
-                <input id="generalAdSyncEnabled" type="checkbox">
-                Configure AD User
-              </label>
-              <label class="pkg-token-field">
-                Domain
-                <input id="generalAdDomain" type="text" placeholder="leave blank to use the server's own domain">
-              </label>
-              <label class="check-label">
-                <input id="generalAdUseServiceIdentity" type="checkbox" checked>
-                Use service account identity
-              </label>
-              <label id="generalAdUsernameField" class="pkg-token-field hidden">
-                AD username
-                <input id="generalAdUsername" type="text" autocomplete="off">
-              </label>
-              <label id="generalAdPasswordField" class="pkg-token-field hidden">
-                AD password
-                <input id="generalAdPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current password">
-              </label>
-              <label class="pkg-token-field">
-                Organizational Units (DN, one per line)
-                <textarea id="generalAdComputerImportOUs" rows="3" placeholder="OU=Workstations,OU=Site1,DC=corp,DC=example,DC=com"></textarea>
-              </label>
-            </div>
-            <p class="cert-hint">"Configure AD User" makes the domain/credentials below available to Client actions, Client updates, and AD Computer Import. "Sync Description from AD" additionally writes each computer's Active Directory description into its inventory record, read-only in the Clients table while it's on. Turn it off to edit Description manually instead - re-enabling it later overwrites any manual edits on the next sync. Reading the description attribute is allowed to any authenticated domain user by default AD ACLs, so the service account identity usually needs no special AD delegation.</p>
-          </div>
-          <div class="settings-block">
-            <h2 class="settings-block-title">Linux client targeting</h2>
-            <p class="cert-hint">When a Linux host reports several network interfaces, Client updates/actions picks the first IPv4 address it sees by default - not necessarily the one reachable from this server (e.g. a dedicated storage/cluster network reported ahead of the real LAN address). Set a preferred subnet to make that address win instead, regardless of its position in the report. Leave blank to keep the plain first-address behavior.</p>
-            <div class="pkg-grid client-update-grid">
-              <label class="pkg-token-field">
-                Preferred subnet (CIDR)
-                <input id="generalPreferredLinuxSubnet" type="text" placeholder="192.168.1.0/24">
-              </label>
-            </div>
-          </div>
-          <div class="settings-block">
-            <h2 class="settings-block-title">Linux Client update credentials</h2>
-            <p class="cert-hint">Used by Linux Client actions/updates pushes when "Stored Linux credentials" or "SSH key" auth mode is selected on those pages. Leave password blank to keep the currently saved value.</p>
-            <div class="pkg-grid client-update-grid">
-              <label class="pkg-token-field">
-                Linux update username
-                <input id="linuxCredsUsername" type="text" autocomplete="username" placeholder="root">
-              </label>
-              <label class="pkg-token-field">
-                Linux update password
-                <input id="linuxCredsPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current one">
-              </label>
-              <div class="pkg-buttons">
-                <button id="linuxCredsSaveButton" class="primary-button" type="button">Save</button>
-                <button id="linuxCredsClearButton" class="danger-button-ghost" type="button">Delete saved credentials</button>
-              </div>
-            </div>
-            <p id="linuxSshToolsStatus" class="cert-hint">Checking plink.exe/pscp.exe status...</p>
-            <div id="linuxCredsMessage" class="pkg-message hidden"></div>
-            <h2 class="settings-block-title">SSH key</h2>
-            <p id="linuxSshKeyStatus" class="pkg-status">Loading SSH key status...</p>
-            <div class="pkg-grid pkg-grid-ssh-key">
-              <label class="pkg-url-field">
-                Private key file
-                <input id="linuxSshKeyFile" type="file">
-              </label>
-              <div class="pkg-buttons">
-                <button id="linuxSshKeyUploadButton" class="primary-button" type="button">Upload key</button>
-                <button id="linuxSshKeyDeleteButton" class="danger-button-ghost" type="button">Delete key</button>
-              </div>
-            </div>
-            <div id="linuxSshKeyMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Ingestion Token</h2>
@@ -315,6 +225,132 @@
               <span>Certificate<small id="statusCertDetail">-</small></span>
             </div>
           </div>
+        </section>
+
+        <section id="windowsSettingsView" class="install-panel card-glow hidden" aria-label="Windows client settings">
+          <div class="settings-block">
+            <h2 class="settings-block-title">Active Directory</h2>
+            <div class="pkg-grid ad-sync-panel">
+              <label class="check-label">
+                <input id="generalAdDescriptionSyncEnabled" type="checkbox">
+                Sync Description from AD
+              </label>
+              <div class="ad-sync-mode-row">
+                <label class="pkg-token-field">
+                  Sync mode
+                  <select id="generalAdSyncMode">
+                    <option value="on-report">On inventory report</option>
+                    <option value="timer">Periodic timer</option>
+                  </select>
+                </label>
+                <label id="generalAdSyncIntervalField" class="pkg-token-field hidden">
+                  Sync interval (hours)
+                  <input id="generalAdSyncIntervalHours" type="number" min="1" max="8760" value="24">
+                </label>
+              </div>
+            </div>
+            <div class="pkg-grid ad-identity-panel">
+              <label class="check-label">
+                <input id="generalAdSyncEnabled" type="checkbox">
+                Configure AD User
+              </label>
+              <label class="pkg-token-field">
+                Domain
+                <input id="generalAdDomain" type="text" placeholder="leave blank to use the server's own domain">
+              </label>
+              <label class="check-label">
+                <input id="generalAdUseServiceIdentity" type="checkbox" checked>
+                Use service account identity
+              </label>
+              <label id="generalAdUsernameField" class="pkg-token-field hidden">
+                AD username
+                <input id="generalAdUsername" type="text" autocomplete="off">
+              </label>
+              <label id="generalAdPasswordField" class="pkg-token-field hidden">
+                AD password
+                <input id="generalAdPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current password">
+              </label>
+              <label class="pkg-token-field">
+                Organizational Units (DN, one per line)
+                <textarea id="generalAdComputerImportOUs" rows="3" placeholder="OU=Workstations,OU=Site1,DC=corp,DC=example,DC=com"></textarea>
+              </label>
+            </div>
+            <p class="cert-hint">"Configure AD User" makes the domain/credentials below available to Client actions, Client updates, and AD Computer Import. "Sync Description from AD" additionally writes each computer's Active Directory description into its inventory record, read-only in the Clients table while it's on. Turn it off to edit Description manually instead - re-enabling it later overwrites any manual edits on the next sync. Reading the description attribute is allowed to any authenticated domain user by default AD ACLs, so the service account identity usually needs no special AD delegation.</p>
+          </div>
+          <div class="pkg-buttons">
+            <button id="windowsSettingsSaveButton" class="primary-button" type="button">Save</button>
+          </div>
+          <div id="windowsSettingsMessage" class="pkg-message hidden"></div>
+        </section>
+
+        <section id="linuxSettingsView" class="install-panel card-glow hidden" aria-label="Linux client settings">
+          <div class="updates-top-row">
+          <div class="settings-block">
+            <h2 class="settings-block-title">Linux client targeting</h2>
+            <p class="cert-hint">When a Linux host reports several network interfaces, Client updates/actions picks the first IPv4 address it sees by default - not necessarily the one reachable from this server (e.g. a dedicated storage/cluster network reported ahead of the real LAN address). Set a preferred subnet to make that address win instead, regardless of its position in the report. Leave blank to keep the plain first-address behavior.</p>
+            <div class="pkg-grid client-update-grid">
+              <label class="pkg-token-field">
+                Preferred subnet (CIDR)
+                <input id="generalPreferredLinuxSubnet" type="text" placeholder="192.168.1.0/24">
+              </label>
+            </div>
+          </div>
+          <div class="settings-block">
+            <h3 class="settings-block-title">Install defaults</h3>
+            <p class="cert-hint">Used by a Linux client install when the request itself doesn't override them (e.g. Deploy &gt; Actions' Auto-detect mode, which doesn't know a target is Linux until it tries).</p>
+            <div class="pkg-grid linux-defaults-grid">
+              <label class="pkg-token-field">
+                Interval (hours)
+                <input id="linuxDefaultIntervalHours" type="number" min="1" max="24" value="6">
+              </label>
+              <label class="pkg-token-field">
+                Status check interval (minutes)
+                <input id="linuxDefaultStatusIntervalMinutes" type="number" min="1" max="1440" value="30">
+              </label>
+              <label class="pkg-token-field">
+                Install path
+                <input id="linuxDefaultInstallPath" type="text" value="/opt/windows-inventory-lite">
+              </label>
+            </div>
+          </div>
+          </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Linux Client update credentials</h2>
+            <p class="cert-hint">Used by Linux Client actions/updates pushes when "Stored Linux credentials" or "SSH key" auth mode is selected on those pages. Leave password blank to keep the currently saved value.</p>
+            <div class="pkg-grid client-update-grid">
+              <label class="pkg-token-field">
+                Linux update username
+                <input id="linuxCredsUsername" type="text" autocomplete="username" placeholder="root">
+              </label>
+              <label class="pkg-token-field">
+                Linux update password
+                <input id="linuxCredsPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current one">
+              </label>
+              <div class="pkg-buttons">
+                <button id="linuxCredsSaveButton" class="primary-button" type="button">Save</button>
+                <button id="linuxCredsClearButton" class="danger-button-ghost" type="button">Delete saved credentials</button>
+              </div>
+            </div>
+            <p id="linuxSshToolsStatus" class="cert-hint">Checking plink.exe/pscp.exe status...</p>
+            <div id="linuxCredsMessage" class="pkg-message hidden"></div>
+            <h2 class="settings-block-title">SSH key</h2>
+            <p id="linuxSshKeyStatus" class="pkg-status">Loading SSH key status...</p>
+            <div class="pkg-grid pkg-grid-ssh-key">
+              <label class="pkg-url-field">
+                Private key file
+                <input id="linuxSshKeyFile" type="file">
+              </label>
+              <div class="pkg-buttons">
+                <button id="linuxSshKeyUploadButton" class="primary-button" type="button">Upload key</button>
+                <button id="linuxSshKeyDeleteButton" class="danger-button-ghost" type="button">Delete key</button>
+              </div>
+            </div>
+            <div id="linuxSshKeyMessage" class="pkg-message hidden"></div>
+          </div>
+          <div class="pkg-buttons">
+            <button id="linuxSettingsSaveButton" class="primary-button" type="button">Save</button>
+          </div>
+          <div id="linuxSettingsMessage" class="pkg-message hidden"></div>
         </section>
 
         <section id="certificateView" class="install-panel card-glow hidden" aria-label="Server certificate">

@@ -1696,6 +1696,20 @@ th.sort-desc::after {
   max-width: 420px;
 }
 
+/* Settings > Linux's "Install defaults" sits inside .updates-top-row next
+   to "Linux client targeting" (Task 2), where each column is as narrow as
+   280px - .general-grid's minmax(180px,1fr)/minmax(280px,2fr) tracks alone
+   demand ~460px+ and overflow that column (the sibling "Linux Client
+   update credentials" block hit the same problem with .client-update-grid,
+   which is why it was pulled out of this row entirely instead). Same
+   narrow single-column treatment as .ad-identity-panel/
+   .client-update-schedule-panel above fixes it here without a fixed
+   grid-column/grid-row placement. */
+.linux-defaults-grid {
+  grid-template-columns: 1fr;
+  max-width: 420px;
+}
+
 .settings-block {
   padding-bottom: var(--space-lg);
   margin-bottom: 18px;
