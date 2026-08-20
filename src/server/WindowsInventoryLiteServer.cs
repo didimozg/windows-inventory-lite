@@ -4442,8 +4442,14 @@ namespace WindowsInventoryLite
         }
 
         // Given Auto-detect's two TCP probe results (TryConnect against
-        // WinRM's ports 5985/5986 and SSH's port 22), decides which
-        // protocol(s) to attempt and in what order. Only one port open ->
+        // WinRM's port 5985 - HTTP only, see below - and SSH's port 22),
+        // decides which protocol(s) to attempt and in what order. Probe
+        // 5985 only, never 5986 (WinRM over HTTPS): Install-ClientWinRM.ps1
+        // calls New-PSSession -ComputerName with no -UseSSL/-Port override,
+        // so it can only ever connect over HTTP WinRM - a target with only
+        // 5986 open would probe as "reachable" and then fail when the
+        // installer tries 5985 instead, instead of cleanly falling through
+        // to SSH. Only one port open ->
         // try only that protocol. Both open -> try WinRM first (this
         // codebase's own working assumption: a box answering both is
         // overwhelmingly likely a Windows host with OpenSSH also
