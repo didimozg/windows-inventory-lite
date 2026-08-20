@@ -4406,6 +4406,15 @@ namespace WindowsInventoryLite
             return result;
         }
 
+        // Each Auto-mode probe (WinRM 5985, then SSH 22) gets this long to
+        // connect before being treated as closed. Sequential target
+        // execution (see Out of scope in the design spec) means both
+        // probes' worst case adds directly to one target's total latency -
+        // kept short since a LAN target that's actually reachable answers
+        // a TCP handshake in single-digit milliseconds; a target that
+        // never responds should not stall the whole job for long.
+        private const int AutoDetectProbeTimeoutMs = 2000;
+
         // Auto-detect mode's protocol probe - a short-timeout TCP connect
         // attempt, used only to guess which install path is worth trying
         // first (or at all). Never a substitute for the actual install
@@ -4518,6 +4527,110 @@ namespace WindowsInventoryLite
             attempt["output"] = output;
             attempt["error"] = error;
             return attempt;
+        }
+
+        // Runs one target through Mode's chosen protocol(s), producing the
+        // per-target result RunClientActionJob appends to job.Results.
+        // Force modes skip probing entirely and call straight into the one
+        // relevant existing per-target function. Auto mode probes both
+        // ports, asks ResolveAttemptOrder for a try-order, and walks it -
+        // stopping at the first protocol whose attempt reports "completed",
+        // recording every attempt tried either way. Not self-tested: like
+        // RunClientInstallTarget/RunLinuxClientInstallTarget, it makes real
+        // network calls (see the comment on TryConnect for why those stay
+        // integration-only in this codebase).
+        private Dictionary<string, object> RunUnifiedInstallTarget(
+            string target, string action, string mode,
+            string serverUrl, string token,
+            string winRmUsername, string winRmPassword, bool force, bool addToTrustedHosts,
+            string sshAuthMode, string sshUsername, string sshPassword, string sshKeyPath, bool trustNewHostKeys,
+            int intervalHours, int statusIntervalMinutes, string installPath,
+            int probeTimeoutMs)
+        {
+            bool winRmReachable = false;
+            bool sshReachable = false;
+            if (mode == "auto")
+            {
+                winRmReachable = TryConnect(target, 5985, probeTimeoutMs);
+                sshReachable = TryConnect(target, 22, probeTimeoutMs);
+            }
+            string[] attemptOrder = ResolveAttemptOrder(mode, winRmReachable, sshReachable);
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["target"] = target;
+            ArrayList attempts = new ArrayList();
+            result["attempts"] = attempts;
+
+            if (attemptOrder.Length == 0)
+            {
+                result["status"] = "failed";
+                result["message"] = "Target did not respond on WinRM (port 5985) or SSH (port 22).";
+                return result;
+            }
+
+            Dictionary<string, object> lastAttemptResult = null;
+            string lastProtocol = null;
+            foreach (string protocol in attemptOrder)
+            {
+                Dictionary<string, object> attemptResult;
+                if (protocol == "winrm")
+                {
+                    attemptResult = action == "uninstall"
+                        ? RunClientUninstallTarget(target, winRmUsername, winRmPassword, addToTrustedHosts)
+                        : RunClientInstallTarget(target, serverUrl, token, winRmUsername, winRmPassword, force, addToTrustedHosts);
+                }
+                else
+                {
+                    attemptResult = action == "uninstall"
+                        ? RunLinuxClientUninstallTarget(target, sshAuthMode, sshUsername, sshPassword, sshKeyPath, installPath)
+                        : RunLinuxClientInstallTarget(target, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, sshAuthMode, sshUsername, sshPassword, sshKeyPath, trustNewHostKeys);
+                }
+
+                Dictionary<string, object> attempt = BuildAttemptResult(protocol, GetStringValue(attemptResult, "status"), GetStringValue(attemptResult, "message"), GetStringValue(attemptResult, "output"), GetStringValue(attemptResult, "error"));
+                // Enrich with the fields BuildAttemptResult's own comment
+                // says its real caller must preserve rather than lose -
+                // startedAt/completedAt/exitCode always; hostKey* only for
+                // an ssh attempt, where RunLinuxClientInstallTarget sets
+                // them conditionally.
+                if (attemptResult.ContainsKey("startedAt")) attempt["startedAt"] = attemptResult["startedAt"];
+                if (attemptResult.ContainsKey("completedAt")) attempt["completedAt"] = attemptResult["completedAt"];
+                if (attemptResult.ContainsKey("exitCode")) attempt["exitCode"] = attemptResult["exitCode"];
+                if (protocol == "ssh")
+                {
+                    if (attemptResult.ContainsKey("hostKeyTrust")) attempt["hostKeyTrust"] = attemptResult["hostKeyTrust"];
+                    if (attemptResult.ContainsKey("hostKeyStatus")) attempt["hostKeyStatus"] = attemptResult["hostKeyStatus"];
+                    if (attemptResult.ContainsKey("hostKeyFingerprint")) attempt["hostKeyFingerprint"] = attemptResult["hostKeyFingerprint"];
+                }
+                attempts.Add(attempt);
+
+                lastAttemptResult = attemptResult;
+                lastProtocol = protocol;
+
+                if (GetStringValue(attemptResult, "status") == "completed")
+                {
+                    break;
+                }
+            }
+
+            // The summary mirrors the last attempt tried (the winning one,
+            // or the final failure if every protocol in the try-order
+            // failed) - CountInstallResults and the job-list "Failed"
+            // column only ever read this top-level status, never attempts[].
+            result["protocol"] = lastProtocol;
+            result["status"] = GetStringValue(lastAttemptResult, "status");
+            result["message"] = attempts.Count > 1 && GetStringValue(result, "status") != "completed"
+                ? "Both WinRM and SSH attempts failed."
+                : GetStringValue(lastAttemptResult, "message");
+            if (lastAttemptResult.ContainsKey("startedAt")) result["startedAt"] = lastAttemptResult["startedAt"];
+            if (lastAttemptResult.ContainsKey("completedAt")) result["completedAt"] = lastAttemptResult["completedAt"];
+            if (lastAttemptResult.ContainsKey("exitCode")) result["exitCode"] = lastAttemptResult["exitCode"];
+            if (lastProtocol == "ssh")
+            {
+                if (lastAttemptResult.ContainsKey("hostKeyTrust")) result["hostKeyTrust"] = lastAttemptResult["hostKeyTrust"];
+                if (lastAttemptResult.ContainsKey("hostKeyStatus")) result["hostKeyStatus"] = lastAttemptResult["hostKeyStatus"];
+                if (lastAttemptResult.ContainsKey("hostKeyFingerprint")) result["hostKeyFingerprint"] = lastAttemptResult["hostKeyFingerprint"];
+            }
+            return result;
         }
 
         private static string QuoteArgument(string value)
