@@ -2848,14 +2848,58 @@ namespace WindowsInventoryLite
             {
                 winRmUsername = Convert.ToString(payload.ContainsKey("username") ? payload["username"] : "");
                 winRmPassword = Convert.ToString(payload.ContainsKey("password") ? payload["password"] : "");
-                bool useSavedCredentials = payload.ContainsKey("useSavedCredentials") && Convert.ToBoolean(payload["useSavedCredentials"]);
-                ResolveUpdateCredentials(ref winRmUsername, ref winRmPassword, useSavedCredentials, options.ClientUpdateUsername, options.ClientUpdatePassword);
-                bool useAdCredentials = payload.ContainsKey("useAdCredentials") && Convert.ToBoolean(payload["useAdCredentials"]);
-                string adCredentialError;
-                if (!TryResolveAdSyncCredentials(useAdCredentials, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref winRmUsername, ref winRmPassword, out adCredentialError))
+                if (payload.ContainsKey("winRmAuthMode"))
                 {
-                    SendText(stream, "{\"error\":\"" + adCredentialError.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
-                    return;
+                    // New Deploy > Actions shape (2026-08-21): an explicit
+                    // credential-source dropdown, replacing the old "Use
+                    // global AD settings" checkbox. Global tries the
+                    // saved Client update account first, AD as a
+                    // fallback if nothing is saved - same priority chain
+                    // as SSH's own Global mode below. Manual keeps this
+                    // endpoint's existing behavior for typed fields
+                    // (used as given; blank means install as the
+                    // server's own service identity, not an error).
+                    string winRmAuthMode = Convert.ToString(payload["winRmAuthMode"]);
+                    if (winRmAuthMode != "global" && winRmAuthMode != "manual")
+                    {
+                        SendText(stream, "{\"error\":\"winRmAuthMode must be 'global' or 'manual'\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                    if (winRmAuthMode == "global")
+                    {
+                        winRmUsername = "";
+                        winRmPassword = "";
+                        ResolveUpdateCredentials(ref winRmUsername, ref winRmPassword, true, options.ClientUpdateUsername, options.ClientUpdatePassword);
+                        if (String.IsNullOrEmpty(winRmUsername) || String.IsNullOrEmpty(winRmPassword))
+                        {
+                            string adCredentialError;
+                            TryResolveAdSyncCredentials(true, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref winRmUsername, ref winRmPassword, out adCredentialError);
+                            // Ignore a false return here (AD disabled, or
+                            // no saved AD account) - TryResolveAdSyncCredentials
+                            // leaves username/password untouched on
+                            // failure, so this just means "nothing to
+                            // fall back to", which RunClientInstallTarget
+                            // already treats as "install as the
+                            // service's own identity", not an error.
+                        }
+                    }
+                    // "manual": winRmUsername/winRmPassword already hold
+                    // whatever was typed (or blank), used as-is.
+                }
+                else
+                {
+                    // Old shape, still sent by Deploy > Updates' "Update
+                    // selected" push (startClientUpdateJob) - unaffected
+                    // by the new dropdown, this branch is unchanged.
+                    bool useSavedCredentials = payload.ContainsKey("useSavedCredentials") && Convert.ToBoolean(payload["useSavedCredentials"]);
+                    ResolveUpdateCredentials(ref winRmUsername, ref winRmPassword, useSavedCredentials, options.ClientUpdateUsername, options.ClientUpdatePassword);
+                    bool useAdCredentials = payload.ContainsKey("useAdCredentials") && Convert.ToBoolean(payload["useAdCredentials"]);
+                    string adCredentialError;
+                    if (!TryResolveAdSyncCredentials(useAdCredentials, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref winRmUsername, ref winRmPassword, out adCredentialError))
+                    {
+                        SendText(stream, "{\"error\":\"" + adCredentialError.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
                 }
                 force = payload.ContainsKey("force") && Convert.ToBoolean(payload["force"]);
                 addToTrustedHosts = payload.ContainsKey("addToTrustedHosts") && Convert.ToBoolean(payload["addToTrustedHosts"]);
@@ -2872,17 +2916,71 @@ namespace WindowsInventoryLite
             if (needsSsh)
             {
                 sshAuthMode = Convert.ToString(payload.ContainsKey("sshAuthMode") ? payload["sshAuthMode"] : "credentials");
-                if (sshAuthMode != "ad" && sshAuthMode != "credentials" && sshAuthMode != "key")
-                {
-                    SendText(stream, "{\"error\":\"sshAuthMode must be 'ad', 'credentials', or 'key'\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
                 sshUsername = Convert.ToString(payload.ContainsKey("sshUsername") ? payload["sshUsername"] : "");
                 sshPassword = Convert.ToString(payload.ContainsKey("sshPassword") ? payload["sshPassword"] : "");
                 sshKeyPath = GetLinuxSshKeyFilePath();
 
-                if (sshAuthMode == "ad")
+                if (sshAuthMode == "global")
                 {
+                    // New Deploy > Actions shape (2026-08-21): no typed
+                    // fields shown - always tries the saved Linux
+                    // account first, AD as a fallback if nothing is
+                    // saved, same priority chain as WinRM's own Global
+                    // mode above. Unlike WinRM, SSH has no "service
+                    // identity" fallback (there is no anonymous SSH), so
+                    // this is a hard error rather than a silent
+                    // empty-credential fallback when nothing resolves.
+                    sshUsername = options.LinuxUpdateUsername;
+                    sshPassword = options.LinuxUpdatePassword;
+                    if (String.IsNullOrEmpty(sshUsername) || String.IsNullOrEmpty(sshPassword))
+                    {
+                        string adCredentialError;
+                        TryResolveAdSyncCredentials(true, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref sshUsername, ref sshPassword, out adCredentialError);
+                        // Ignore a false return - AD service-identity mode
+                        // resolves to blank username/password (no SSH
+                        // equivalent exists), which the check below
+                        // catches the same as "nothing configured at all".
+                    }
+                    if (String.IsNullOrEmpty(sshUsername) || String.IsNullOrEmpty(sshPassword))
+                    {
+                        SendText(stream, "{\"error\":\"No Linux credentials available for Global mode - save them in Settings > Linux > Linux Client update credentials, configure a non-service-identity AD account, or select Manual credentials/SSH key instead.\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+                else if (sshAuthMode == "manual" || sshAuthMode == "credentials")
+                {
+                    // "manual" (new Deploy > Actions dropdown) and
+                    // "credentials" (legacy value, still sent by
+                    // Deploy > Updates' Linux "Update selected" push -
+                    // startLinuxUpdatesPush) are the same behavior: typed
+                    // fields, falling back to the saved account when
+                    // left blank - unchanged leniency from before.
+                    if (String.IsNullOrEmpty(sshUsername)) sshUsername = options.LinuxUpdateUsername;
+                    if (String.IsNullOrEmpty(sshPassword)) sshPassword = options.LinuxUpdatePassword;
+                    if (String.IsNullOrEmpty(sshUsername) || String.IsNullOrEmpty(sshPassword))
+                    {
+                        SendText(stream, "{\"error\":\"username/password are required (enter them, or save them in Settings > Linux > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+                else if (sshAuthMode == "key")
+                {
+                    if (String.IsNullOrEmpty(sshUsername)) sshUsername = options.LinuxUpdateUsername;
+                    if (String.IsNullOrEmpty(sshUsername))
+                    {
+                        SendText(stream, "{\"error\":\"username is required for 'key' auth mode (enter it, or save it in Settings > Linux > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                    if (!File.Exists(sshKeyPath))
+                    {
+                        SendText(stream, "{\"error\":\"No SSH key is configured - upload one in Settings > Linux > Linux Client update credentials.\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+                else if (sshAuthMode == "ad")
+                {
+                    // Legacy value, still sent by Deploy > Updates' Linux
+                    // "Update selected" push - unchanged from before.
                     bool useAd = true;
                     string adCredentialError;
                     if (!TryResolveAdSyncCredentials(useAd, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref sshUsername, ref sshPassword, out adCredentialError))
@@ -2896,29 +2994,10 @@ namespace WindowsInventoryLite
                         return;
                     }
                 }
-                else if (sshAuthMode == "credentials")
-                {
-                    if (String.IsNullOrEmpty(sshUsername)) sshUsername = options.LinuxUpdateUsername;
-                    if (String.IsNullOrEmpty(sshPassword)) sshPassword = options.LinuxUpdatePassword;
-                    if (String.IsNullOrEmpty(sshUsername) || String.IsNullOrEmpty(sshPassword))
-                    {
-                        SendText(stream, "{\"error\":\"username/password are required for 'credentials' auth mode (enter them, or save them in Settings > Linux > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
-                        return;
-                    }
-                }
                 else
                 {
-                    if (String.IsNullOrEmpty(sshUsername)) sshUsername = options.LinuxUpdateUsername;
-                    if (String.IsNullOrEmpty(sshUsername))
-                    {
-                        SendText(stream, "{\"error\":\"username is required for 'key' auth mode (enter it, or save it in Settings > Linux > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
-                        return;
-                    }
-                    if (!File.Exists(sshKeyPath))
-                    {
-                        SendText(stream, "{\"error\":\"No SSH key is configured - upload one in Settings > Linux > Linux Client update credentials.\"}", "application/json; charset=utf-8", 400);
-                        return;
-                    }
+                    SendText(stream, "{\"error\":\"sshAuthMode must be 'global', 'manual', 'key', 'ad', or 'credentials'\"}", "application/json; charset=utf-8", 400);
+                    return;
                 }
 
                 if (payload.ContainsKey("intervalHours"))
@@ -4447,7 +4526,7 @@ namespace WindowsInventoryLite
                 {
                     attemptResult = action == "uninstall"
                         ? RunLinuxClientUninstallTarget(target, sshAuthMode, sshUsername, sshPassword, sshKeyPath, installPath)
-                        : RunLinuxClientInstallTarget(target, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, sshAuthMode, sshUsername, sshPassword, sshKeyPath, trustNewHostKeys);
+                        : RunLinuxClientInstallTarget(target, ToLinuxServerUrl(serverUrl), token, intervalHours, statusIntervalMinutes, installPath, sshAuthMode, sshUsername, sshPassword, sshKeyPath, trustNewHostKeys);
                 }
 
                 Dictionary<string, object> attempt = BuildAttemptResult(protocol, GetStringValue(attemptResult, "status"), GetStringValue(attemptResult, "message"), GetStringValue(attemptResult, "output"), GetStringValue(attemptResult, "error"));
