@@ -1,6 +1,6 @@
 # API Reference
 
-This is a practical lookup document for the server's HTTP API, not an OpenAPI/Swagger spec. It covers the real, current route surface: 53 routes (44 exact-match paths, 9 with a parameterized path segment). It does not cover the static dashboard asset routes (`/`, `/app.js`, `/styles.css`, `/favicon.svg`), which serve dashboard files rather than API data.
+This is a practical lookup document for the server's HTTP API, not an OpenAPI/Swagger spec. It covers the real, current route surface: 49 routes (41 exact-match paths, 8 with a parameterized path segment) - down from 53 as of v0.42.0, which removed the four separate Linux install/uninstall job routes (`/api/v1/linux-client-install`, `/linux-client-uninstall`, and their GET list/detail equivalents) in favor of the unified `/api/v1/client-install`/`/client-uninstall` pair. It does not cover the static dashboard asset routes (`/`, `/app.js`, `/styles.css`, `/favicon.svg`), which serve dashboard files rather than API data.
 
 ## Conventions
 
@@ -40,14 +40,20 @@ This project does not use a structured `{"error": {"code": ..., "message": ...}}
 | PUT | `/api/v1/linux/clients/{hostname}/description` | Basic Auth | Set a manual description override for one Linux client. |
 | DELETE | `/api/v1/linux/clients/{hostname}` | Basic Auth | Delete one Linux client's stored report. |
 
-### Windows client install/update
+### Client install/update (Windows + Linux)
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| POST | `/api/v1/client-install` | Basic Auth | Queue a WinRM push-install job against one or more Windows targets. |
-| POST | `/api/v1/client-uninstall` | Basic Auth | Queue a WinRM push-uninstall job. |
-| GET | `/api/v1/client-install` | Basic Auth | List recent install/uninstall job summaries. |
-| GET | `/api/v1/client-install/{jobId}` | Basic Auth | Return full detail for one install/uninstall job. |
+| POST | `/api/v1/client-install` | Basic Auth | Queue a mode-aware (Auto/Force Windows/Force Linux) push-install job, WinRM and/or SSH, against one or more targets of either platform. |
+| POST | `/api/v1/client-uninstall` | Basic Auth | Queue a mode-aware push-uninstall job. |
+| GET | `/api/v1/client-install` | Basic Auth | List recent install/uninstall job summaries, both platforms. |
+| GET | `/api/v1/client-install/{jobId}` | Basic Auth | Return full detail for one install/uninstall job, including per-target protocol attempts. |
+| POST | `/api/v1/linux-client-install/trust-host-key` | Basic Auth | Manually trust (pin) a Linux target's SSH host key. |
+
+### Windows client updates
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
 | GET | `/api/v1/client-updates` | Basic Auth | List Windows clients running an outdated client version. |
 | GET | `/api/v1/client-updates/credentials` | Basic Auth | Report whether WinRM update credentials are saved. |
 | POST | `/api/v1/client-updates/credentials` | Basic Auth | Save WinRM update credentials. |
@@ -62,15 +68,10 @@ This project does not use a structured `{"error": {"code": ..., "message": ...}}
 | POST | `/api/v1/client-package/configure` | Basic Auth | Regenerate `Install-ClientGpo.cmd` with a server URL, token, and interval. |
 | GET | `/api/v1/client-package/download` | Basic Auth | Download a zip of the GPO deployment package. |
 
-### Linux client install/update
+### Linux client updates
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| POST | `/api/v1/linux-client-install` | Basic Auth | Queue an SSH push-install job against one or more Linux targets. |
-| POST | `/api/v1/linux-client-uninstall` | Basic Auth | Queue an SSH push-uninstall job. |
-| POST | `/api/v1/linux-client-install/trust-host-key` | Basic Auth | Manually trust (pin) a Linux target's SSH host key. |
-| GET | `/api/v1/linux-client-install` | Basic Auth | List recent Linux install/uninstall job summaries. |
-| GET | `/api/v1/linux-client-install/{jobId}` | Basic Auth | Return full detail for one Linux install/uninstall job. |
 | GET | `/api/v1/linux-client-updates` | Basic Auth | List Linux clients running an outdated client version. |
 | GET | `/api/v1/linux-client-updates/credentials` | Basic Auth | Report whether SSH update credentials or a key are saved. |
 | POST | `/api/v1/linux-client-updates/credentials` | Basic Auth | Save the SSH username/password used for update pushes. |
@@ -194,41 +195,78 @@ Same shape as `GET /api/v1/clients` for Linux clients, with one difference: the 
 
 Linux equivalents of the two Windows endpoints above, operating on `LinuxDataPath` instead of `DataPath`. Same request/response shapes, same `/description` suffix requirement on PUT, same AD-sync guard, same 1024-character limit, same error shapes.
 
-## Windows client install/update
+## Client install/update (Windows + Linux)
+
+As of the Deploy > Actions unification (v0.42.0), one endpoint pair serves both platforms; the earlier separate `/api/v1/linux-client-install`/`/linux-client-uninstall`/`/linux-client-install` (GET list/detail) routes no longer exist. Anything that called them, or called the Windows routes without a `mode` field, needs updating - see the CHANGELOG's `[0.42.0]` entry.
 
 ### POST /api/v1/client-install and POST /api/v1/client-uninstall
 
-Both routes share one handler, distinguished only by which action it runs. Request body fields: `targets` (free-text, newline/comma/space-separated computer names, supports IP ranges), `serverUrl` (required for install, not for uninstall), `username`/`password` (optional; falls back to saved WinRM update credentials or an AD service identity, see `useSavedCredentials`/`useAdCredentials`), `force`, `addToTrustedHosts`, `retentionDays`.
+Both routes share one handler, serving both platforms, distinguished only by which action it runs. A request must declare a **mode**, required: `"auto"` (TCP-probes WinRM port 5985 and SSH port 22 per target, tries WinRM first if both respond, falls back to SSH only if the WinRM attempt itself fails), `"force-windows"` (WinRM only, no probing), or `"force-linux"` (SSH only, no probing). Missing or invalid `mode` is `400 {"error": "mode must be 'auto', 'force-windows', or 'force-linux'"}`.
 
-The response comes back immediately with a job ID; the actual WinRM install/uninstall work happens asynchronously on a background thread pool, tracked by that job:
+Request body fields:
+
+- `targets` (free-text, newline/comma/space-separated hostnames/computer names or IPs, supports IP ranges) - required.
+- `mode` - required, as above.
+- `serverUrl` (required for install unless a saved Linux package configuration supplies a fallback - see below; not required for uninstall), `token` (blank falls back to the server's live ingestion token).
+- WinRM fields, read whenever `mode` is `"auto"` or `"force-windows"`: `username`/`password` (optional; falls back to saved WinRM update credentials or an AD service identity, see `useSavedCredentials`/`useAdCredentials`), `force` (reinstall over an existing install), `addToTrustedHosts`.
+- SSH fields, read whenever `mode` is `"auto"` or `"force-linux"`: `sshAuthMode` (`"ad"`, `"credentials"`, or `"key"`, default `"credentials"`), `sshUsername`/`sshPassword` (for `credentials`/`key` modes; `key` mode uses the server's stored SSH private key and needs only `sshUsername`), `installPath`/`intervalHours`/`statusIntervalMinutes` (default from Settings > Linux > Install defaults if omitted), and, for install only, `trustNewHostKeys` plus `acknowledgeHostKeyRisk` (both must be set together to let a first-contact SSH host key be auto-trusted instead of failing).
+- `retentionDays` (optional, overrides the server's default job-log retention for this one job).
+
+**Known characteristic:** Auto mode requires both credential sets (WinRM and SSH) to be resolvable before the job is queued, even if every target in the batch turns out to be one platform only. A deployment with no Linux credentials/SSH key saved (Settings > Linux) gets a validation error on Auto mode until that's configured, or Force Windows is used instead.
+
+If `username`/`password` end up blank in a mode that reaches WinRM, that install runs without a WinRM `-Credential`, i.e. as whatever identity the server's own Windows service runs as - not rejected as an error.
+
+The response comes back immediately with a job ID; the actual install/uninstall work happens asynchronously on a background thread pool, tracked by that job:
 
 ```json
 {"jobId": "a1b2c3...", "status": "queued"}
 ```
 
-If `username`/`password` end up blank, the install runs without a WinRM `-Credential`, i.e. as whatever identity the server's own Windows service runs as - not rejected as an error. `serverUrl` and other string inputs are validated against a small unsafe-character set before being interpolated into the generated PowerShell/cmd invocation, and a validation failure comes back as `400 {"error": "at least one target is required"}` or a similar message describing which field failed.
+`serverUrl` and other string inputs are validated against unsafe-character sets before being interpolated into the generated PowerShell (WinRM) or shell (SSH) invocation, and a validation failure comes back as `400 {"error": "..."}` describing which field failed. Target hostname-format validation (letters/digits/`.`/`-` only) applies for every mode except `force-windows` - Windows NetBIOS names can legally contain `_`, which that check would otherwise wrongly reject.
 
 ```bash
 curl -X POST https://server:8443/api/v1/client-install \
   -u admin:password \
   -H "Content-Type: application/json" \
-  -d '{"targets":"192.168.1.10-20", "serverUrl":"https://server:8443", "useSavedCredentials":true}'
+  -d '{"targets":"192.168.1.10-20", "mode":"force-windows", "serverUrl":"https://server:8443", "useSavedCredentials":true}'
 ```
 
 ```bash
 curl -X POST https://server:8443/api/v1/client-uninstall \
   -u admin:password \
   -H "Content-Type: application/json" \
-  -d '{"targets":"WORKSTATION01", "useSavedCredentials":true}'
+  -d '{"targets":"web01.example.com", "mode":"force-linux", "sshAuthMode":"key", "sshUsername":"deploy"}'
+```
+
+```bash
+curl -X POST https://server:8443/api/v1/client-install \
+  -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{"targets":"PC-01\nweb01.example.com", "mode":"auto", "serverUrl":"https://server:8443", "useSavedCredentials":true, "sshAuthMode":"key", "sshUsername":"deploy"}'
 ```
 
 ### GET /api/v1/client-install
 
-Lists install/uninstall job summaries: `{"defaultRetentionDays": ..., "jobs": [...]}`. Each summary has `id`, `action`, `status`, `createdAt`, `startedAt`, `completedAt`, `serverUrl`, `username`, `retentionDays`, `targetCount`, `resultCount`, `failedCount` - counts only, not the full per-target result list. As a side effect, every call also prunes job files older than their retention window from disk.
+Lists install/uninstall job summaries across both platforms: `{"defaultRetentionDays": ..., "jobs": [...]}`. Each summary has `id`, `action`, `status`, `createdAt`, `startedAt`, `completedAt`, `mode`, `serverUrl`, `username` (falls back to the SSH username when the job had no WinRM username), `retentionDays`, `targetCount`, `resultCount`, `failedCount` - counts only, not the full per-target result list. As a side effect, every call also prunes job files older than their retention window from disk. A job saved before v0.42.0 has no `mode` field (reads as an empty string, shown as a legacy Windows job by the dashboard).
 
 ### GET /api/v1/client-install/{jobId}
 
-Returns one job's full detail, including the per-target `results` array (with `target`, `status`, `output`, `error` per target). Neither this endpoint nor the list endpoint above ever returns a `password` field. `404 {"error": "job not found"}` if the ID matches neither an in-memory job nor a persisted job file.
+Returns one job's full detail, including the per-target `results` array. Each result carries the existing summary fields (`target`, `status`, `message`, `protocol` - which protocol the summary reflects, `output`/`error`) plus a new `attempts` array: one entry per protocol actually tried (`protocol`, `status`, `message`, `output`/`error`, timestamps, and for an `ssh` attempt only, `hostKeyTrust`/`hostKeyStatus`/`hostKeyFingerprint`). A force-mode job's `attempts` always has exactly one entry; an Auto-mode job that tried both protocols has two. Neither this endpoint nor the list endpoint above ever returns a `password`/`sshPassword`/`token`/SSH-key-path field. `404 {"error": "job not found"}` if the ID matches neither an in-memory job nor a persisted job file.
+
+### POST /api/v1/linux-client-install/trust-host-key
+
+Manually pins a Linux target's SSH host key (TOFU/known-hosts style), a prerequisite for non-key-auth installs against a host the server has never connected to before. Unaffected by the install/uninstall unification above - this route predates it and was deliberately left at its original path. Request body: `host` (required), `fingerprint` (required, must look like `SHA256:...`), `keyType` (default `ssh-ed25519`), `port` (default 22).
+
+Stores the upserted record (`Host`, `Port`, `KeyType`, `Fingerprint`, `TrustedAtUtc`, `TrustMethod: "manual"`) and returns it directly as the response body. A subsequent install for that host pins the connection to this fingerprint; if the real key ever no longer matches, the result is classified `hostKeyStatus: "changed"` and is never auto-accepted, regardless of `trustNewHostKeys`.
+
+```bash
+curl -X POST https://server:8443/api/v1/linux-client-install/trust-host-key \
+  -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{"host":"web01.example.com", "fingerprint":"SHA256:AbCdEf...", "keyType":"ssh-ed25519"}'
+```
+
+## Windows client updates
 
 ### GET /api/v1/client-updates
 
@@ -263,44 +301,9 @@ curl -X POST https://server:8443/api/v1/client-package/configure \
 
 Streams a ZIP built on the fly from whatever exists on disk: the client executables, `Deploy-ClientGpo.ps1`, and `Install-ClientGpo.cmd`. Requires `POST /api/v1/client-package/configure` to have run first - `400 {"error": "..."}` with guidance text if `Install-ClientGpo.cmd` or a client executable is missing. Response headers: `Content-Type: application/zip`, `Content-Disposition: attachment; filename="windows-inventory-lite-client.zip"`.
 
-## Linux client install/update
+## Linux client updates
 
-### POST /api/v1/linux-client-install and POST /api/v1/linux-client-uninstall
-
-Shared handler, SSH-based equivalent of the Windows install/uninstall pair. Request body: `targets`, `authMode` (`"ad"`, `"credentials"`, or `"key"`, default `"credentials"`), `username`/`password` (for `credentials`/`key` modes; `key` mode uses the server's stored SSH private key file and needs only `username`), `serverUrl` (falls back to the saved package `serverUrl` for install if omitted), `token` (falls back to the live server token), `installPath` (default `/opt/windows-inventory-lite`), `intervalHours`, `statusIntervalMinutes`, and, for install only, `trustNewHostKeys` plus `acknowledgeHostKeyRisk` (both must be set together to let a first-contact SSH host key be auto-trusted instead of failing).
-
-Same async job pattern as the Windows endpoints: immediate `{"jobId": "...", "status": "queued"}`, work runs in the background. A first install attempt against a never-seen host fails with a per-target result carrying `hostKeyStatus: "unknown"` and a `hostKeyFingerprint` - the dashboard is expected to feed that into `trust-host-key` (below) before retrying, unless `trustNewHostKeys`/`acknowledgeHostKeyRisk` were set on the original request.
-
-```bash
-curl -X POST https://server:8443/api/v1/linux-client-install \
-  -u admin:password \
-  -H "Content-Type: application/json" \
-  -d '{"targets":"web01.example.com", "authMode":"credentials", "username":"deploy", "password":"...", "serverUrl":"https://server:8443"}'
-```
-
-```bash
-curl -X POST https://server:8443/api/v1/linux-client-uninstall \
-  -u admin:password \
-  -H "Content-Type: application/json" \
-  -d '{"targets":"web01.example.com", "authMode":"key", "username":"deploy"}'
-```
-
-### POST /api/v1/linux-client-install/trust-host-key
-
-Manually pins a Linux target's SSH host key (TOFU/known-hosts style), a prerequisite for non-key-auth installs against a host the server has never connected to before. Request body: `host` (required), `fingerprint` (required, must look like `SHA256:...`), `keyType` (default `ssh-ed25519`), `port` (default 22).
-
-Stores the upserted record (`Host`, `Port`, `KeyType`, `Fingerprint`, `TrustedAtUtc`, `TrustMethod: "manual"`) and returns it directly as the response body. A subsequent install for that host pins the connection to this fingerprint; if the real key ever no longer matches, the result is classified `hostKeyStatus: "changed"` and is never auto-accepted, regardless of `trustNewHostKeys`.
-
-```bash
-curl -X POST https://server:8443/api/v1/linux-client-install/trust-host-key \
-  -u admin:password \
-  -H "Content-Type: application/json" \
-  -d '{"host":"web01.example.com", "fingerprint":"SHA256:AbCdEf...", "keyType":"ssh-ed25519"}'
-```
-
-### GET /api/v1/linux-client-install and GET /api/v1/linux-client-install/{jobId}
-
-Same shape and behavior as the Windows job list/detail endpoints. List summary fields: `id`, `action`, `status`, `createdAt`, `startedAt`, `completedAt`, `authMode`, `username`, `retentionDays`, `targetCount`, `resultCount`, `failedCount`. Detail adds `targets`, `results`, `serverUrl`, `installPath`, `trustNewHostKeys`. `password` and the SSH key path are never included in either response. `404 {"error": "job not found"}` on an unknown ID.
+Install/uninstall job endpoints for Linux moved into the unified [Client install/update (Windows + Linux)](#post-apiv1client-install-and-post-apiv1client-uninstall) section above (v0.42.0). This section covers only the scheduled/manual update-push machinery, which the unification did not touch.
 
 ### GET /api/v1/linux-client-updates
 
