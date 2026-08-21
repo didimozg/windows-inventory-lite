@@ -4376,6 +4376,33 @@ namespace WindowsInventoryLite
         // RunClientInstallTarget/RunLinuxClientInstallTarget, it makes real
         // network calls (see the comment on TryConnect for why those stay
         // integration-only in this codebase).
+        // The dashboard no longer lets an admin type a full ingestion URL
+        // for Deploy > Actions (Server URL field removed, 2026-08-21) - it
+        // always sends the Windows-shaped one (.../api/v1/inventory),
+        // computed from window.location.origin. Whenever a target
+        // actually dispatches over SSH, the Linux client's own ingestion
+        // route lives at a different path (.../api/v1/linux/inventory) -
+        // this swaps the suffix if present. Leaves anything else
+        // unchanged: an already Linux-shaped URL (e.g. from
+        // linux-package-settings.json's saved-settings fallback inside
+        // StartClientAction, which is a full URL already read from a
+        // Linux-specific config file, not this Windows-default value) or
+        // a fully custom one some future caller supplies. Pure and
+        // self-tested.
+        internal static string ToLinuxServerUrl(string serverUrl)
+        {
+            if (String.IsNullOrEmpty(serverUrl))
+            {
+                return serverUrl;
+            }
+            const string windowsSuffix = "/api/v1/inventory";
+            if (serverUrl.EndsWith(windowsSuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                return serverUrl.Substring(0, serverUrl.Length - windowsSuffix.Length) + "/api/v1/linux/inventory";
+            }
+            return serverUrl;
+        }
+
         private Dictionary<string, object> RunUnifiedInstallTarget(
             string target, string action, string mode,
             string serverUrl, string token,
@@ -8375,6 +8402,9 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ResolveAttemptOrder tries only WinRM for force-windows regardless of probe results", TestResolveAttemptOrderForceWindowsIgnoresProbes);
             allPassed &= SelfTestCheck(output, "ResolveAttemptOrder tries only SSH for force-linux regardless of probe results", TestResolveAttemptOrderForceLinuxIgnoresProbes);
             allPassed &= SelfTestCheck(output, "ResolveAttemptOrder delegates to DecideAutoDetectProtocols for auto mode", TestResolveAttemptOrderAutoDelegatesToDecideAutoDetectProtocols);
+            allPassed &= SelfTestCheck(output, "ToLinuxServerUrl swaps the Windows ingestion suffix for the Linux one", TestToLinuxServerUrlSwapsWindowsSuffix);
+            allPassed &= SelfTestCheck(output, "ToLinuxServerUrl leaves an already Linux-shaped URL unchanged", TestToLinuxServerUrlLeavesAlreadyLinuxShapedUrlUnchanged);
+            allPassed &= SelfTestCheck(output, "ToLinuxServerUrl leaves blank and unrecognized-shape values unchanged", TestToLinuxServerUrlLeavesBlankAndCustomValuesUnchanged);
             allPassed &= SelfTestCheck(output, "ParseAdComputerImportOUs splits on newlines only, not commas", TestParseAdComputerImportOUsSplitsOnNewlinesOnly);
             allPassed &= SelfTestCheck(output, "ParseAdComputerImportOUs treats blank input as an empty OU list", TestParseAdComputerImportOUsEmptyMeansWholeDomain);
             allPassed &= SelfTestCheck(output, "BuildZip produces a structurally valid archive", TestBuildZipStructure);
@@ -8667,6 +8697,40 @@ namespace WindowsInventoryLite
             if (neitherOpen.Length != 0)
             {
                 return "expected auto mode with neither port open to return an empty array but got [" + String.Join(", ", neitherOpen) + "]";
+            }
+            return null;
+        }
+
+        private static string TestToLinuxServerUrlSwapsWindowsSuffix()
+        {
+            string result = ToLinuxServerUrl("https://server:8443/api/v1/inventory");
+            if (result != "https://server:8443/api/v1/linux/inventory")
+            {
+                return "expected the /api/v1/inventory suffix swapped for /api/v1/linux/inventory but got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestToLinuxServerUrlLeavesAlreadyLinuxShapedUrlUnchanged()
+        {
+            string result = ToLinuxServerUrl("https://server:8443/api/v1/linux/inventory");
+            if (result != "https://server:8443/api/v1/linux/inventory")
+            {
+                return "expected an already Linux-shaped URL to pass through unchanged but got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestToLinuxServerUrlLeavesBlankAndCustomValuesUnchanged()
+        {
+            if (ToLinuxServerUrl("") != "")
+            {
+                return "expected a blank serverUrl to stay blank";
+            }
+            string custom = "https://migration-target.example.com/some/other/path";
+            if (ToLinuxServerUrl(custom) != custom)
+            {
+                return "expected a URL with no recognized Windows suffix to pass through unchanged, got '" + ToLinuxServerUrl(custom) + "'";
             }
             return null;
         }
