@@ -1601,11 +1601,16 @@ th.sort-desc::after {
 }
 
 /* Every other .pkg-buttons sits at the END of its form (Save/Upload/
-   Download), so it never needs bottom spacing of its own. The Certificate
-   view's Delete button is the one place a .pkg-buttons block sits BEFORE a
-   field grid instead - without a gap it read as crowding the Certificate
-   file field right below it. */
-#certificateView > .pkg-buttons {
+   Download), so it never needs bottom spacing of its own. Two places have a
+   .pkg-buttons block sitting BEFORE the next block instead of at the end of
+   its own: the Certificate view's Delete button (before the certificate
+   file field), and Settings > Linux's page-level Save button for "Linux
+   client targeting"/"Install defaults" (before the separate "Linux Client
+   update credentials" block below it, reported live as the Save button
+   crowding that heading) - without a gap, both read as belonging to the
+   wrong section. */
+#certificateView > .pkg-buttons,
+#linuxSettingsView > .pkg-buttons {
   margin-bottom: 16px;
 }
 
@@ -1717,15 +1722,22 @@ th.sort-desc::after {
   border-bottom: 1px solid var(--divider-strong, var(--line));
 }
 
-/* Authentication/Linux client targeting/Schedule (Linux Client updates),
-   WinRM credentials/Schedule (Windows Client updates), or Linux client
-   targeting/Install defaults (Settings > Linux) side by side instead of
-   stacked - each is a narrow, max-420px block, so they fit one row on any
-   normal desktop width without crowding. Wraps to stacked automatically on
-   a narrow viewport via flex-wrap, no separate breakpoint needed. The
-   row-dividing border moves to the wrapper; the children lose their own
-   (which would otherwise draw a divider under each column instead of under
-   the row). */
+/* Authentication/Linux client targeting/Schedule (Linux Client updates), or
+   Linux client targeting/Install defaults (Settings > Linux) side by side
+   instead of stacked - each is a narrow, max-420px block, so they fit one
+   row on any normal desktop width without crowding. Wraps to stacked
+   automatically on a narrow viewport via flex-wrap, no separate breakpoint
+   needed. The row-dividing border moves to the wrapper; the children lose
+   their own (which would otherwise draw a divider under each column
+   instead of under the row).
+   Windows Client updates' WinRM credentials block used to pair with
+   Schedule here too, but it uses .client-update-grid (a wide 2-field +
+   button-row layout, not a narrow single-column one) - reported live as
+   overlapping/overflowing its half-width column, same failure the
+   analogous "Linux Client update credentials" block (Settings > Linux)
+   already hit and was fixed for by moving it out of a row entirely. WinRM
+   credentials got the same fix - it's now a standalone full-width block
+   above this row, not a row member. */
 .updates-top-row {
   display: flex;
   flex-wrap: wrap;

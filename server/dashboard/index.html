@@ -570,7 +570,6 @@
 
         <section id="updatesView" class="install-panel card-glow hidden" aria-label="Client updates">
           <h2 class="settings-block-title platform-section-title">Windows Client updates</h2>
-          <div class="updates-top-row">
           <div class="settings-block">
             <h3 class="settings-block-title">WinRM credentials</h3>
             <p class="cert-hint">Leave both fields blank when pushing an update to use the saved account below, or the server service's own identity if nothing is saved (the same account WinRM client actions already require). Fill them in to override with a different account for this push only.</p>
@@ -595,6 +594,7 @@
             </div>
             <div id="updatesCredentialsMessage" class="pkg-message hidden"></div>
           </div>
+          <div class="updates-top-row">
           <div class="settings-block">
             <h3 class="settings-block-title">Schedule</h3>
             <p class="cert-hint">Automatically pushes to whichever clients are outdated when the schedule fires - the same targets "Update selected" would reach if every outdated row were checked. Uses the saved WinRM account above, or the server's own service identity if nothing is saved.</p>
