@@ -672,26 +672,25 @@
                   <option value="force-linux">Force Linux (SSH only)</option>
                 </select>
               </label>
-              <label class="install-only">Server URL
-                <input id="installServerUrl" type="text" value="">
+              <label class="mode-windows-field">WinRM credential source
+                <select id="installWinRmAuthMode">
+                  <option value="global">Global (saved account, AD fallback)</option>
+                  <option value="manual">Manual credentials</option>
+                </select>
               </label>
-              <label class="install-only">Ingestion token
-                <input id="installToken" type="text" autocomplete="off" placeholder="leave empty to use the server's current token">
-              </label>
-              <label class="mode-windows-field">WinRM user
+              <label id="installWinRmUsernameField" class="mode-windows-field hidden">WinRM user
                 <input id="installUsername" type="text" autocomplete="username" placeholder="DOMAIN\User">
               </label>
-              <label class="mode-windows-field">WinRM password
+              <label id="installWinRmPasswordField" class="mode-windows-field hidden">WinRM password
                 <input id="installPassword" type="password" autocomplete="current-password">
               </label>
-              <label class="check-label mode-windows-field"><input id="installUseAdCredentials" type="checkbox"> Use global AD settings (Settings &gt; Windows &gt; Active Directory)</label>
               <label class="check-label install-only mode-windows-field"><input id="installForce" type="checkbox"> Force reinstall</label>
               <label class="check-label mode-windows-field"><input id="installTrustedHosts" type="checkbox"> Add to TrustedHosts</label>
-              <label class="mode-linux-field">SSH authentication
+              <label class="mode-linux-field">SSH credential source
                 <select id="installSshAuthMode">
-                  <option value="credentials">Stored Linux credentials</option>
+                  <option value="global">Global (saved account, AD fallback)</option>
+                  <option value="manual">Manual credentials</option>
                   <option value="key">SSH key</option>
-                  <option value="ad">Use global AD settings</option>
                 </select>
               </label>
               <label class="install-only mode-linux-field">Interval (hours)
