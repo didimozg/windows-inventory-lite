@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.43.1]
+
+Closed 6 findings from Phase 3's final and dedicated security reviews before starting Phase 4.
+
+### Fixed
+
+- A running install/uninstall job's `GET /api/v1/client-install/{jobId}` could occasionally throw or return corrupted JSON, since the response was serialized after releasing the lock that guards the same job's `Results` list against concurrent writes from the still-running job. Now serialized entirely under the lock.
+- The orphaned `_linux-client-install-jobs` directory (superseded by unified job storage in `[0.42.0]`, but never cleaned up) is now removed once at server startup, instead of persisting indefinitely past its own configured retention.
+
+### Security
+
+- **Auto mode no longer accepts "Trust new host keys automatically."** Combined with Auto's per-target protocol detection, this could bulk-auto-trust an SSH host key for a target the operator never deliberately identified as a Linux host - it just happened to answer on port 22 - widening the exposure of the saved/AD Linux credential versus explicitly selecting Force Linux first. The combination is now rejected with a clear error pointing at Force Linux instead.
+- `ResolveAttemptOrder` now fails closed (no attempt) on an unrecognized `mode` value instead of silently defaulting to Auto-style dual-protocol probing.
+- Deploy > Actions' submit no longer sends a typed WinRM/SSH credential left over from an earlier mode or credential-source selection when the current mode makes it irrelevant - the server already discarded it, but there was no reason to put it on the wire.
+
 ## [0.43.0]
 
 Deploy > Actions credential UX refinement, requested after live use of the merged form shipped in `[0.42.0]`.
