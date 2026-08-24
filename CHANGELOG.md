@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.43.0]
+
+Deploy > Actions credential UX refinement, requested after live use of the merged form shipped in `[0.42.0]`.
+
+### Changed
+
+- Deploy > Actions' WinRM and SSH credential-source fields now use matching Global/Manual dropdowns, replacing the old Windows-only "Use global AD settings" checkbox and the differently-shaped Linux 3-way select. **Global** tries the saved account (Settings > Windows/Linux > Client update credentials) first, then AD (service identity or a saved AD account) as a fallback; WinRM's Global degrades to the server's own identity if nothing resolves (not an error), SSH's Global has no such fallback (no anonymous SSH) and returns a clear error instead. **Manual** shows typed username/password fields as before.
+- The Server URL and Ingestion Token fields are gone from Deploy > Actions - both are now filled automatically and silently (the browser's own origin for the URL, the server's live token) rather than shown as editable inputs that in practice never needed to change.
+- Server-side, `/api/v1/client-install`/`/api/v1/client-uninstall` accept new `winRmAuthMode` (`"global"`/`"manual"`) and extended `sshAuthMode` (`"global"`/`"manual"`, alongside the existing `"key"`) values. The older `useSavedCredentials`/`useAdCredentials` and `sshAuthMode: "ad"|"credentials"` shapes still work unchanged - Deploy > Updates' own two "Update selected" push buttons still use them and were not touched by this change.
+
+### Fixed
+
+- A target that resolves to SSH (Force Linux, or Auto mode falling back to SSH) now gets the correct Linux-shaped ingestion URL (`.../api/v1/linux/inventory`) automatically - previously, since the Server URL field always defaulted to the Windows shape and an admin had no reason to notice or edit it for a mixed-mode push, an SSH install could silently point the new client at the wrong endpoint unless the admin happened to type the Linux URL by hand.
+- `docs/api-reference.md`'s client-install/uninstall documentation, left describing only the old payload shape after `[0.42.0]`, now documents the new fields and the SSH URL rewrite above.
+
 ## [0.42.0]
 
 Phase 3 of the Deploy > Actions/Updates unification effort (see `docs/superpowers/specs/2026-08-17-deploy-actions-updates-unification-design.md`) - Deploy > Actions' separate Windows and Linux install/uninstall forms are now one mode-aware form, and Phase 2's Auto-detect building blocks are wired in for the first time.
