@@ -1235,6 +1235,13 @@
       element.classList.toggle('hidden', hideByAction || hideByMode);
     });
     byId('installButton').textContent = isInstall ? 'Install client' : 'Uninstall client';
+    // Also reset when leaving Force Windows, not just when leaving
+    // Install: these two checkboxes have no meaning once the Linux
+    // fields they belong to are mode-hidden, and their .checked state
+    // otherwise survives a mode switch invisibly (the checkbox itself
+    // being hidden doesn't uncheck it), which is exactly what let a
+    // stale "trust new host keys" from a prior Force Linux selection
+    // disable the submit button after switching to Force Windows.
     if (!isInstall || mode === 'force-windows') {
       byId('installTrustNewHostKeys').checked = false;
       byId('installAcknowledgeHostKeyRisk').checked = false;
