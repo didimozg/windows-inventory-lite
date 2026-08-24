@@ -2889,9 +2889,12 @@ namespace WindowsInventoryLite
                 }
                 else
                 {
-                    // Old shape, still sent by Deploy > Updates' "Update
-                    // selected" push (startClientUpdateJob) - unaffected
-                    // by the new dropdown, this branch is unchanged.
+                    // Old shape. As of the Deploy > Updates unification,
+                    // no first-party caller sends this any more - the
+                    // dashboard's "Update selected" (startMergedUpdatesPush)
+                    // sends winRmAuthMode like Deploy > Actions does.
+                    // Kept for backward compatibility with anything that
+                    // scripted the old payload shape directly.
                     bool useSavedCredentials = payload.ContainsKey("useSavedCredentials") && Convert.ToBoolean(payload["useSavedCredentials"]);
                     ResolveUpdateCredentials(ref winRmUsername, ref winRmPassword, useSavedCredentials, options.ClientUpdateUsername, options.ClientUpdatePassword);
                     bool useAdCredentials = payload.ContainsKey("useAdCredentials") && Convert.ToBoolean(payload["useAdCredentials"]);
@@ -2950,12 +2953,15 @@ namespace WindowsInventoryLite
                 }
                 else if (sshAuthMode == "manual" || sshAuthMode == "credentials")
                 {
-                    // "manual" (new Deploy > Actions dropdown) and
-                    // "credentials" (legacy value, still sent by
-                    // Deploy > Updates' Linux "Update selected" push -
-                    // startLinuxUpdatesPush) are the same behavior: typed
-                    // fields, falling back to the saved account when
-                    // left blank - unchanged leniency from before.
+                    // "manual" (current dropdown value, sent by both
+                    // Deploy > Actions and, since the Deploy > Updates
+                    // unification, startMergedUpdatesPush too) and
+                    // "credentials" (legacy value - no first-party caller
+                    // sends it any more, kept for anything that scripted
+                    // the old payload shape directly) are the same
+                    // behavior: typed fields, falling back to the saved
+                    // account when left blank - unchanged leniency from
+                    // before.
                     if (String.IsNullOrEmpty(sshUsername)) sshUsername = options.LinuxUpdateUsername;
                     if (String.IsNullOrEmpty(sshPassword)) sshPassword = options.LinuxUpdatePassword;
                     if (String.IsNullOrEmpty(sshUsername) || String.IsNullOrEmpty(sshPassword))
