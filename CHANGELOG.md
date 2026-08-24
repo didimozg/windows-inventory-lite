@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.44.0]
+
+Phase 4 of the Deploy > Actions/Updates unification effort (see `docs/superpowers/specs/2026-08-17-deploy-actions-updates-unification-design.md`) - the spec's rollout plan is now fully shipped end to end. Deploy > Updates' separate Windows and Linux tabs are now one cross-platform table.
+
+### Changed
+
+- Deploy > Updates is now a single table for both platforms (Computer, Domain - `—` for Linux, Current version, Available version, Last collected), with the same All/Windows/Linux OS filter pill and pagination already used by Clients/Hardware, plus sorting on every column except Available version (a Windows row can show two version numbers at once, so it has no single comparable value).
+- WinRM/SSH credential-source selection on Deploy > Updates now uses the same Global/Manual(/SSH key) dropdowns Deploy > Actions already uses, replacing the old checkbox (WinRM) and differently-shaped 3-way select (SSH). The WinRM "Save" button is now only reachable in Manual mode - previously it stayed visible next to hidden, blank fields in Global mode, and clicking it would silently overwrite the saved account with a blank username. "Delete saved credentials" stays available in either mode, since it never sends the field values.
+- A single "Update selected" button now covers both platforms. Checking a mix of Windows and Linux rows and clicking it automatically fires two independent pushes against the existing `/api/v1/client-install` endpoint - no new server route, no client/platform detection, since each row's platform is already known from which list it came from.
+- The two Schedule panels (Windows/Linux) were deliberately kept separate, side by side - their backend timers, config, and credential-fallback behavior are genuinely independent, not merely a UI split.
+- Server-side, the two comments in `StartClientAction` claiming the legacy `useSavedCredentials`/`useAdCredentials`/`sshAuthMode: "ad"|"credentials"` shapes were "still sent by Deploy > Updates' push" no longer describe reality - Updates' own push now sends `winRmAuthMode`/`sshAuthMode` like Deploy > Actions does. Both shapes still work unchanged, now purely for backward compatibility with anything that scripted the old payload directly. `docs/api-reference.md` updated to match.
+
+### Fixed
+
+- A batch push completing every outdated row on the currently-visible page, while a later page still had outdated entries, previously showed a false "every reporting client is up to date" - the incremental-prune logic only ever checked the current page's DOM. It now removes completed targets from the underlying data and re-renders through the normal table pipeline, so pagination, sorting, the OS filter, and the outdated count all stay correct.
+
 ## [0.43.1]
 
 Closed 6 findings from Phase 3's final and dedicated security reviews before starting Phase 4.
