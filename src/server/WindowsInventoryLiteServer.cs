@@ -4457,7 +4457,13 @@ namespace WindowsInventoryLite
         // StartClientAction, which is a full URL already read from a
         // Linux-specific config file, not this Windows-default value) or
         // a fully custom one some future caller supplies. Pure and
-        // self-tested.
+        // self-tested. Runs AFTER StartClientAction's two shell-safety
+        // validators (ValidateBatchSafe/TryValidateLinuxPushValues,
+        // which see the pre-transform value) - safe today only because
+        // this swaps one fixed, already-safe literal suffix for another.
+        // If this ever grows a transform that isn't a fixed literal
+        // swap, re-validate the result before it reaches a
+        // shell/PowerShell invocation.
         internal static string ToLinuxServerUrl(string serverUrl)
         {
             if (String.IsNullOrEmpty(serverUrl))
