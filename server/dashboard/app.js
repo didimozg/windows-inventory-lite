@@ -1126,15 +1126,13 @@
       });
   }
 
-  // Parameterized (not hardcoded to the Linux Client actions page's own
-  // element ids) so the Linux Client updates page's own auth-mode selector
-  // (Task 10) can reuse this instead of duplicating it - the established
-  // pattern this project uses for this exact 3-way-select shape (see
-  // updateScheduleFieldVisibility).
-  function updateLinuxAuthModeFieldsUi(selectElementId, credentialsUserFieldId, passwordFieldId) {
-    const mode = byId(selectElementId).value;
-    byId(credentialsUserFieldId).classList.toggle('hidden', mode === 'ad');
-    byId(passwordFieldId).classList.toggle('hidden', mode !== 'credentials');
+  // SSH credential source for Deploy > Updates - global hides both fields
+  // (saved account, AD fallback), manual shows both, key shows only the
+  // username. Same value set/behavior as Deploy > Actions' installSshAuthMode.
+  function updateLinuxUpdatesAuthModeFieldsUi() {
+    const mode = byId('linuxUpdatesAuthMode').value;
+    byId('linuxUpdatesCredentialsField').classList.toggle('hidden', mode === 'global');
+    byId('linuxUpdatesPasswordField').classList.toggle('hidden', mode !== 'manual');
   }
 
   function updateInstallTrustNewHostKeysUi() {
@@ -1284,12 +1282,13 @@
     updateInstallTrustNewHostKeysUi();
   }
 
-  // "Use global AD settings" substitutes the typed/saved Client Update account
-  // with the AD sync credentials already configured in Settings > Windows.
-  function updateUpdatesCredentialFieldsUi() {
-    const useAd = byId('updatesUseAdCredentials').checked;
-    byId('updatesUsername').disabled = useAd;
-    byId('updatesPassword').disabled = useAd;
+  // Global uses the saved Client Update account (or AD as a fallback);
+  // Manual shows the username/password fields for a one-off override -
+  // same show/hide convention Deploy > Actions' installWinRmAuthMode uses.
+  function updateUpdatesCredentialFieldVisibility() {
+    const manual = byId('updatesWinRmAuthMode').value === 'manual';
+    byId('updatesWinRmUsernameField').classList.toggle('hidden', !manual);
+    byId('updatesWinRmPasswordField').classList.toggle('hidden', !manual);
   }
 
   function loadLinuxUpdateCredentials() {
@@ -1735,63 +1734,13 @@
     updateLinuxUpdatesBadge(data.packageAvailable ? data.outdatedCount : 0);
   }
 
-  function updateLinuxUpdatesPushButtonState() {
-    const anyChecked = document.querySelectorAll('.linux-update-select:checked').length > 0;
-    const trustChecked = byId('linuxUpdatesTrustNewHostKeys').checked;
-    const acknowledgeChecked = byId('linuxUpdatesAcknowledgeHostKeyRisk').checked;
-    byId('linuxUpdatesPushButton').disabled = !anyChecked || (trustChecked && !acknowledgeChecked);
-  }
-
-  // Mirrors updateInstallTrustNewHostKeysUi (Deploy > Actions) - same
-  // pairing (risk-ack field only shown/required once "trust new host keys"
-  // is checked), reusing this panel's own combined button-state function
-  // instead of a bare disabled=false so the trust/ack pairing is still
-  // enforced client-side after the checkbox toggles.
   function updateLinuxUpdatesTrustNewHostKeysUi() {
     const trustChecked = byId('linuxUpdatesTrustNewHostKeys').checked;
     byId('linuxUpdatesAcknowledgeHostKeyRiskField').classList.toggle('hidden', !trustChecked);
     if (!trustChecked) {
       byId('linuxUpdatesAcknowledgeHostKeyRisk').checked = false;
     }
-    updateLinuxUpdatesPushButtonState();
-  }
-
-  function startLinuxUpdatesPush() {
-    const selected = Array.from(document.querySelectorAll('.linux-update-select:checked')).map(cb => cb.value);
-    if (selected.length === 0) return;
-
-    const sshAuthMode = byId('linuxUpdatesAuthMode').value;
-    const sshUsername = sshAuthMode === 'ad' ? '' : byId('linuxUpdatesUsername').value.trim();
-    const sshPassword = sshAuthMode === 'credentials' ? byId('linuxUpdatesPassword').value : '';
-    const trustNewHostKeys = byId('linuxUpdatesTrustNewHostKeys').checked;
-    const acknowledgeHostKeyRisk = byId('linuxUpdatesAcknowledgeHostKeyRisk').checked;
-    byId('linuxUpdatesPushButton').disabled = true;
-    byId('linuxUpdatesStatus').classList.add('empty');
-    byId('linuxUpdatesStatus').textContent = 'Starting update job...';
-
-    fetch('/api/v1/client-install', {
-      method: 'POST',
-      cache: 'no-store',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets: selected.join('\n'), mode: 'force-linux', sshAuthMode, sshUsername, sshPassword, trustNewHostKeys, acknowledgeHostKeyRisk })
-    })
-      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
-      .then(({ ok, status, data }) => {
-        if (!ok) throw new Error(data.error || `HTTP ${status}`);
-        return data;
-      })
-      .then(data => {
-        state.linuxUpdatesJobId = data.jobId;
-        if (state.linuxUpdatesPollTimer) window.clearInterval(state.linuxUpdatesPollTimer);
-        pollInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', loadLinuxClientUpdates, 'linuxUpdatesPollTimer');
-        state.linuxUpdatesPollTimer = window.setInterval(() => pollInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', loadLinuxClientUpdates, 'linuxUpdatesPollTimer'), 3000);
-      })
-      .catch(error => {
-        byId('linuxUpdatesStatus').textContent = `Failed to start update job: ${error.message}`;
-      })
-      .finally(() => {
-        updateLinuxUpdatesPushButtonState();
-      });
+    updateUpdatesSelectionState();
   }
 
   function updateLinuxUpdatesScheduleFieldVisibility() {
@@ -2061,17 +2010,20 @@
   // (#updatesBody) previously stayed unchanged until every target was
   // done, even though job.results already grows one entry per target as
   // each one finishes (RunClientActionJob appends and saves after each
-  // target, run sequentially). This removes a target's row as soon as
-  // ITS OWN result shows up as a success, without waiting for the batch.
-  // A failed target is deliberately left in the table - it's still
-  // outdated and may need a retry.
-  function pruneCompletedUpdateTargets(job) {
+  // target, run sequentially). This removes a target's row as soon as ITS
+  // OWN result shows up as a success, without waiting for the batch. A
+  // failed target is deliberately left in the table - it's still outdated
+  // and may need a retry. platform scopes the removal to the sub-job that
+  // just progressed (Windows and Linux poll independently, see
+  // startMergedUpdatesPush), so a Windows job completing a target never
+  // touches a same-named Linux row and vice versa.
+  function pruneCompletedUpdateTargets(job, platform) {
     const results = job.results || [];
     const completedTargets = new Set(results.filter(result => result.status === 'completed').map(result => result.target));
     if (completedTargets.size === 0) return;
 
-    document.querySelectorAll('.updates-row-checkbox').forEach(checkbox => {
-      if (completedTargets.has(checkbox.dataset.computerName)) {
+    document.querySelectorAll(`.updates-row-checkbox[data-platform="${platform}"]`).forEach(checkbox => {
+      if (completedTargets.has(checkbox.dataset.target)) {
         checkbox.closest('tr').remove();
       }
     });
@@ -2082,59 +2034,86 @@
     }
   }
 
+  // Single gate for the merged "Update selected" button: at least one row
+  // checked (either platform), AND - only relevant when a Linux row is
+  // checked - "trust new host keys" isn't left checked without its
+  // acknowledgement checkbox (mirrors Deploy > Actions' own pairing rule).
   function updateUpdatesSelectionState() {
-    const checkboxes = Array.from(document.querySelectorAll('.updates-row-checkbox'));
-    const anyChecked = checkboxes.some(checkbox => checkbox.checked);
-    byId('updatesPushButton').disabled = !anyChecked;
+    const anyChecked = document.querySelectorAll('.updates-row-checkbox:checked').length > 0;
+    const trustChecked = byId('linuxUpdatesTrustNewHostKeys').checked;
+    const acknowledgeChecked = byId('linuxUpdatesAcknowledgeHostKeyRisk').checked;
+    byId('updatesPushButton').disabled = !anyChecked || (trustChecked && !acknowledgeChecked);
   }
 
-  function startClientUpdateJob() {
-    const targets = Array.from(document.querySelectorAll('.updates-row-checkbox:checked'))
-      .map(checkbox => checkbox.dataset.computerName);
-    if (targets.length === 0) return;
-
-    // Both fields are normally empty here: loadClientUpdateCredentials only
-    // ever shows the saved username as a read-only hint, never into these
-    // inputs (a pre-filled username paired with an always-blank password
-    // would send a mismatched credential pair to WinRM). useSavedCredentials:
-    // true below tells the server "if both fields are blank, use the saved
-    // account instead of the service identity" - typing a fresh
-    // username+password here still overrides that for this one push,
-    // matching Client actions' per-action behavior.
-    const useAdCredentials = byId('updatesUseAdCredentials').checked;
-    const username = useAdCredentials ? '' : byId('updatesUsername').value.trim();
-    const password = useAdCredentials ? '' : byId('updatesPassword').value;
-    // Same computed value Deploy > Actions now uses inline (Task 3, 2026-08-24)
-    // - the Server URL field this used to read from was removed.
-    const serverUrl = `${window.location.origin}/api/v1/inventory`;
+  // Splits the checked rows by their already-known platform (stamped at
+  // render time - never inferred from row content, see
+  // clientPlatformLabel's doc comment) and fires up to two independent
+  // requests against the same unified /api/v1/client-install endpoint
+  // Deploy > Actions uses, each with that platform's own credential
+  // source and its own status/poll target - so a mixed selection needs no
+  // extra UI, just two ordinary pushes running side by side.
+  function startMergedUpdatesPush() {
+    const checked = Array.from(document.querySelectorAll('.updates-row-checkbox:checked'));
+    const windowsTargets = checked.filter(cb => cb.dataset.platform === 'windows').map(cb => cb.dataset.target);
+    const linuxTargets = checked.filter(cb => cb.dataset.platform === 'linux').map(cb => cb.dataset.target);
+    if (windowsTargets.length === 0 && linuxTargets.length === 0) return;
 
     byId('updatesPushButton').disabled = true;
-    byId('updatesStatus').classList.add('empty');
-    byId('updatesStatus').textContent = 'Starting update job...';
+    const serverUrl = `${window.location.origin}/api/v1/inventory`;
 
-    fetch('/api/v1/client-install', {
-      method: 'POST',
-      cache: 'no-store',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets: targets.join('\n'), mode: 'force-windows', serverUrl, username, password, force: false, addToTrustedHosts: false, useSavedCredentials: true, useAdCredentials })
-    })
-      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
-      .then(({ ok, status, data }) => {
-        if (!ok) throw new Error(data.error || `HTTP ${status}`);
-        return data;
+    if (windowsTargets.length > 0) {
+      const winRmAuthMode = byId('updatesWinRmAuthMode').value;
+      const username = winRmAuthMode === 'manual' ? byId('updatesUsername').value.trim() : '';
+      const password = winRmAuthMode === 'manual' ? byId('updatesPassword').value : '';
+      byId('updatesStatus').classList.add('empty');
+      byId('updatesStatus').textContent = 'Starting update job...';
+      fetch('/api/v1/client-install', {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targets: windowsTargets.join('\n'), mode: 'force-windows', serverUrl, winRmAuthMode, username, password, force: false, addToTrustedHosts: false })
       })
-      .then(data => {
-        state.updateJobId = data.jobId;
-        if (state.updatePollTimer) window.clearInterval(state.updatePollTimer);
-        pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', pruneCompletedUpdateTargets);
-        state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', pruneCompletedUpdateTargets), 3000);
+        .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
+        .then(({ ok, status, data }) => {
+          if (!ok) throw new Error(data.error || `HTTP ${status}`);
+          state.updateJobId = data.jobId;
+          if (state.updatePollTimer) window.clearInterval(state.updatePollTimer);
+          pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows'));
+          state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows')), 3000);
+        })
+        .catch(error => {
+          byId('updatesStatus').textContent = `Failed to start update job: ${error.message}`;
+        })
+        .finally(updateUpdatesSelectionState);
+    }
+
+    if (linuxTargets.length > 0) {
+      const sshAuthMode = byId('linuxUpdatesAuthMode').value;
+      const sshUsername = sshAuthMode === 'global' ? '' : byId('linuxUpdatesUsername').value.trim();
+      const sshPassword = sshAuthMode === 'manual' ? byId('linuxUpdatesPassword').value : '';
+      const trustNewHostKeys = byId('linuxUpdatesTrustNewHostKeys').checked;
+      const acknowledgeHostKeyRisk = byId('linuxUpdatesAcknowledgeHostKeyRisk').checked;
+      byId('linuxUpdatesStatus').classList.add('empty');
+      byId('linuxUpdatesStatus').textContent = 'Starting update job...';
+      fetch('/api/v1/client-install', {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targets: linuxTargets.join('\n'), mode: 'force-linux', sshAuthMode, sshUsername, sshPassword, trustNewHostKeys, acknowledgeHostKeyRisk })
       })
-      .catch(error => {
-        byId('updatesStatus').textContent = `Failed to start update job: ${error.message}`;
-      })
-      .finally(() => {
-        byId('updatesPushButton').disabled = false;
-      });
+        .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
+        .then(({ ok, status, data }) => {
+          if (!ok) throw new Error(data.error || `HTTP ${status}`);
+          state.linuxUpdatesJobId = data.jobId;
+          if (state.linuxUpdatesPollTimer) window.clearInterval(state.linuxUpdatesPollTimer);
+          pollInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', () => loadLinuxClientUpdates(), 'linuxUpdatesPollTimer', job => pruneCompletedUpdateTargets(job, 'linux'));
+          state.linuxUpdatesPollTimer = window.setInterval(() => pollInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', () => loadLinuxClientUpdates(), 'linuxUpdatesPollTimer', job => pruneCompletedUpdateTargets(job, 'linux')), 3000);
+        })
+        .catch(error => {
+          byId('linuxUpdatesStatus').textContent = `Failed to start update job: ${error.message}`;
+        })
+        .finally(updateUpdatesSelectionState);
+    }
   }
 
   function loadPackageStatus() {
@@ -4313,7 +4292,7 @@
   byId('installPreferredSubnetSaveButton').addEventListener('click', saveInstallPreferredSubnet);
   byId('installTrustNewHostKeys').addEventListener('change', updateInstallTrustNewHostKeysUi);
   byId('installAcknowledgeHostKeyRisk').addEventListener('change', updateInstallTrustNewHostKeysUi);
-  byId('linuxUpdatesAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField'));
+  byId('linuxUpdatesAuthMode').addEventListener('change', updateLinuxUpdatesAuthModeFieldsUi);
   // linuxUpdatesSelectAll/linuxUpdatesPushButton/updatesUseAdCredentials
   // listeners removed here: Task 1's merged Deploy > Updates markup has no
   // such elements any more (one shared updatesSelectAll/updatesPushButton
@@ -4328,6 +4307,7 @@
   byId('linuxUpdatesScheduleMode').addEventListener('change', updateLinuxUpdatesScheduleFieldVisibility);
   byId('linuxUpdatesScheduleSaveButton').addEventListener('click', saveLinuxUpdateSchedule);
   byId('installWinRmAuthMode').addEventListener('change', updateInstallFieldVisibility);
+  byId('updatesWinRmAuthMode').addEventListener('change', updateUpdatesCredentialFieldVisibility);
   byId('installButton').addEventListener('click', startClientActionJob);
   byId('installLoadAdAllButton').addEventListener('click', () => loadTargetsFromAd(false));
   byId('installLoadAdMissingButton').addEventListener('click', () => loadTargetsFromAd(true));
@@ -4571,7 +4551,7 @@
   });
   byId('updatesSaveCredentialsButton').addEventListener('click', saveClientUpdateCredentials);
   byId('updatesClearCredentialsButton').addEventListener('click', clearClientUpdateCredentials);
-  byId('updatesPushButton').addEventListener('click', startClientUpdateJob);
+  byId('updatesPushButton').addEventListener('click', startMergedUpdatesPush);
   byId('updatesSelectAll').addEventListener('change', () => {
     const checked = byId('updatesSelectAll').checked;
     document.querySelectorAll('.updates-row-checkbox').forEach(checkbox => { checkbox.checked = checked; });
@@ -4634,5 +4614,7 @@
   if (state.view === 'licenses') loadLicenses();
   updateInstallFieldVisibility();
   loadInstallHistory();
-  updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField');
+  updateLinuxUpdatesAuthModeFieldsUi();
+  updateUpdatesCredentialFieldVisibility();
+  updateUpdatesSelectionState();
 }());
