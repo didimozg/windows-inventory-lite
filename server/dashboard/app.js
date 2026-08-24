@@ -1289,6 +1289,16 @@
     const manual = byId('updatesWinRmAuthMode').value === 'manual';
     byId('updatesWinRmUsernameField').classList.toggle('hidden', !manual);
     byId('updatesWinRmPasswordField').classList.toggle('hidden', !manual);
+    // Save persists whatever's currently in the (now-hidden) fields above -
+    // without this, Global mode left Save visible next to two blank
+    // fields, and clicking it would silently overwrite the saved account
+    // with a blank username (the server treats a present-but-empty
+    // username as real) while the blank password fell through and kept
+    // the old one - exactly the mismatched-pair corruption
+    // loadClientUpdateCredentials's own hint text warns about. Delete
+    // stays visible regardless of mode - it sends {clear:true}, never the
+    // field values, so it's safe to use without switching to Manual.
+    byId('updatesSaveCredentialsButton').classList.toggle('hidden', !manual);
   }
 
   function loadLinuxUpdateCredentials() {
@@ -1645,6 +1655,7 @@
     if (entries.length === 0) {
       byId('updatesBody').innerHTML = '<tr><td colspan="6" class="empty">Every reporting client is up to date.</td></tr>';
       byId('updatesPager').innerHTML = '';
+      updateUpdatesSelectionState();
       return;
     }
 
@@ -2006,32 +2017,35 @@
   }
 
   // pollInstallJob's onComplete only fires once the whole job finishes -
-  // for a batch push to many machines, the outdated-clients table
-  // (#updatesBody) previously stayed unchanged until every target was
-  // done, even though job.results already grows one entry per target as
-  // each one finishes (RunClientActionJob appends and saves after each
-  // target, run sequentially). This removes a target's row as soon as ITS
-  // OWN result shows up as a success, without waiting for the batch. A
-  // failed target is deliberately left in the table - it's still outdated
-  // and may need a retry. platform scopes the removal to the sub-job that
-  // just progressed (Windows and Linux poll independently, see
-  // startMergedUpdatesPush), so a Windows job completing a target never
-  // touches a same-named Linux row and vice versa.
+  // for a batch push to many machines, the merged table previously stayed
+  // unchanged until every target was done, even though job.results already
+  // grows one entry per target as each one finishes (RunClientActionJob
+  // appends and saves after each target, run sequentially). This removes a
+  // completed target from the underlying data (not just the current
+  // page's DOM - a page-scoped removal could show a false "every client is
+  // up to date" while a later page still had outdated rows) and re-renders
+  // through the normal pipeline, so pagination/OS-filter/sort/selection-
+  // state/outdated counts all stay correct. A failed target is
+  // deliberately left in - it's still outdated and may need a retry.
+  // platform scopes the removal to the sub-job that just progressed
+  // (Windows and Linux poll independently, see startMergedUpdatesPush), so
+  // a Windows job completing a target never touches a same-named Linux row
+  // and vice versa.
   function pruneCompletedUpdateTargets(job, platform) {
     const results = job.results || [];
     const completedTargets = new Set(results.filter(result => result.status === 'completed').map(result => result.target));
     if (completedTargets.size === 0) return;
 
-    document.querySelectorAll(`.updates-row-checkbox[data-platform="${platform}"]`).forEach(checkbox => {
-      if (completedTargets.has(checkbox.dataset.target)) {
-        checkbox.closest('tr').remove();
-      }
+    const data = platform === 'windows' ? state.clientUpdates : state.linuxClientUpdates;
+    if (!data || !data.updates) return;
+    const remaining = data.updates.filter(entry => {
+      const target = platform === 'windows' ? entry.computerName : (entry.target || entry.hostname);
+      return !completedTargets.has(target);
     });
-    updateUpdatesSelectionState();
-
-    if (!document.querySelector('.updates-row-checkbox')) {
-      byId('updatesBody').innerHTML = '<tr><td colspan="6" class="empty">Every reporting client is up to date.</td></tr>';
-    }
+    if (remaining.length === data.updates.length) return;
+    data.updates = remaining;
+    data.outdatedCount = remaining.length;
+    renderMergedUpdatesTable();
   }
 
   // Single gate for the merged "Update selected" button: at least one row
