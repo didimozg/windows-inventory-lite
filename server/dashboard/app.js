@@ -39,16 +39,20 @@
       hwDisk: { key: 'model', dir: 1 },
       hwRam: { key: 'totalMb', dir: -1 },
       licenses: { key: 'name', dir: 1 },
-      linuxServices: { key: 'name', dir: 1 }
+      linuxServices: { key: 'name', dir: 1 },
+      // Sorts the merged Deploy > Updates table (Windows + Linux outdated
+      // clients combined) - same per-view-key convention as every other
+      // table above.
+      updates: { key: 'computerName', dir: 1 }
     },
-    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxServices: 1 },
+    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxServices: 1, updates: 1 },
     // clients/software start at a reasonable fallback and are corrected to
     // the real viewport-fitting value the first time their table becomes
     // visible (see computeLiveRowsPerPage/recalculateActivePagination).
     // hwCpu/hwDisk/hwRam are fixed (see HW_PAGE_SIZE) - the three Hardware
     // sub-tables render stacked in one view and are rarely large enough to
     // need viewport-adaptive sizing.
-    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20, linuxServices: 20 },
+    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20, linuxServices: 20, updates: 20 },
     // Prefixed keys ('client:'/'software:'/'hw:' + id) so the three
     // separate data-*-details attribute namespaces can't collide in one
     // Set. Drives each render function's initial hidden/visible class for
@@ -61,7 +65,11 @@
     // state.pageSize. 'all' | 'windows' | 'linux'. The keys are literally
     // view names, so renderOsFilterActive can repaint the one shared pill
     // from state.osFilter[state.view] when the user switches pages.
-    osFilter: { hardware: 'all', clients: 'all' }
+    // 'deploy', not 'updates': state.view is 'deploy' for every Deploy
+    // subview (Actions/Updates/Package), and renderOsFilterActive() reads
+    // state.osFilter[state.view] - this key must match that, not the
+    // subview name.
+    osFilter: { hardware: 'all', clients: 'all', deploy: 'all' }
   };
 
   const MIN_PAGE_SIZE = 5;
@@ -1569,7 +1577,8 @@
       })
       .then(data => {
         state.clientUpdates = data;
-        renderClientUpdates(data);
+        renderMergedUpdatesTable();
+        updateUpdatesBadge(data.packageAvailable ? data.outdatedCount : 0);
       })
       .catch(error => {
         byId('updatesPackageStatus').textContent = `Client update status unavailable: ${error.message}`;
@@ -1584,34 +1593,84 @@
     return version ? `v${escapeHtml(version)}` : 'unknown';
   }
 
-  function renderClientUpdates(data) {
-    if (!data.packageAvailable) {
-      byId('updatesPackageStatus').textContent = 'No client package is available yet - build or deploy one on Deploy > Package first.';
-      byId('updatesBody').innerHTML = '';
-      updateUpdatesBadge(0);
+  // Merges state.clientUpdates (Windows) and state.linuxClientUpdates
+  // (Linux) into one row set, each entry stamped with .platform the same
+  // way stampClientPlatform does for state.clients/state.linuxClients -
+  // the merged "Update selected" push (Task 3) reads this stamp to decide
+  // which protocol/credentials a checked row needs, never inferring it
+  // from row content (see clientPlatformLabel's own doc comment on why).
+  function stampUpdatePlatform(entries, platform) {
+    entries.forEach(entry => { entry.platform = platform; });
+    return entries;
+  }
+
+  function updateSortValue(entry, key) {
+    switch (key) {
+      case 'computerName': return (entry.computerName || entry.hostname || '').toLowerCase();
+      case 'domain': return (entry.domain || '').toLowerCase();
+      case 'clientVersion': return (entry.clientVersion || '').toLowerCase();
+      case 'collectedAt': return entry.collectedAt || entry.sourceUpdatedAt || '';
+      default: return '';
+    }
+  }
+
+  function renderMergedUpdatesTable() {
+    renderSortHeaders();
+
+    const windowsData = state.clientUpdates;
+    const linuxData = state.linuxClientUpdates;
+    const windowsAvailable = windowsData && windowsData.packageAvailable;
+    const linuxAvailable = linuxData && linuxData.packageAvailable;
+
+    if (!windowsData || !linuxData) {
+      byId('updatesPackageStatus').textContent = 'Loading client update status...';
       return;
     }
 
-    const updates = data.updates || [];
-    byId('updatesPackageStatus').textContent = `Current client package: ${formatAvailableVersion(data)}. ${data.outdatedCount} outdated.`;
+    const statusParts = [];
+    statusParts.push(windowsAvailable
+      ? `Windows package: ${formatAvailableVersion(windowsData)} (${windowsData.outdatedCount} outdated)`
+      : 'No Windows client package uploaded yet - build or deploy one on Deploy > Package.');
+    statusParts.push(linuxAvailable
+      ? `Linux package: v${escapeHtml(linuxData.currentVersion)} (${linuxData.outdatedCount} outdated)`
+      : 'No Linux client package uploaded yet - build one on Deploy > Package.');
+    byId('updatesPackageStatus').textContent = statusParts.join('. ') + '.';
 
-    if (updates.length === 0) {
+    let entries = []
+      .concat(windowsAvailable ? stampUpdatePlatform(windowsData.updates || [], 'windows') : [])
+      .concat(linuxAvailable ? stampUpdatePlatform(linuxData.updates || [], 'linux') : []);
+
+    const filter = state.osFilter.deploy || 'all';
+    if (filter !== 'all') entries = entries.filter(e => e.platform === filter);
+
+    if (entries.length === 0) {
       byId('updatesBody').innerHTML = '<tr><td colspan="6" class="empty">Every reporting client is up to date.</td></tr>';
-      updateUpdatesBadge(0);
+      byId('updatesPager').innerHTML = '';
       return;
     }
 
-    const rows = updates.map(update => `<tr>
-        <td>${escapeHtml(update.computerName)}</td>
-        <td>${escapeHtml(update.domain)}</td>
-        <td>${escapeHtml(update.clientVersion || 'Unknown')}</td>
-        <td>${formatAvailableVersion(data)}</td>
-        <td>${escapeHtml(formatDateTime(update.collectedAt))}</td>
-        <td><input type="checkbox" class="updates-row-checkbox" data-computer-name="${escapeHtml(update.computerName)}"></td>
-      </tr>`);
+    const { key: sortKey, dir: sortDir } = state.sort.updates;
+    const sorted = applySort(entries, e => updateSortValue(e, sortKey), sortDir);
+    const { items: pageItems, page, totalPages } = paginate(sorted, state.page.updates, state.pageSize.updates);
+    state.page.updates = page;
 
-    byId('updatesBody').innerHTML = rows.join('');
-    updateUpdatesBadge(data.outdatedCount);
+    byId('updatesBody').innerHTML = pageItems.map(entry => {
+      const isWindows = entry.platform === 'windows';
+      const target = isWindows ? entry.computerName : (entry.target || entry.hostname);
+      const availableVersion = isWindows ? formatAvailableVersion(windowsData) : `v${escapeHtml(linuxData.currentVersion)}`;
+      const collectedAt = isWindows ? entry.collectedAt : entry.sourceUpdatedAt;
+      return `<tr>
+        <td>${escapeHtml(entry.computerName || entry.hostname)}</td>
+        <td>${isWindows ? escapeHtml(entry.domain) : '—'}</td>
+        <td>${escapeHtml(entry.clientVersion || 'Unknown')}</td>
+        <td>${availableVersion}</td>
+        <td>${escapeHtml(formatDateTime(collectedAt))}</td>
+        <td><input type="checkbox" class="updates-row-checkbox" data-platform="${entry.platform}" data-target="${escapeHtml(target)}"></td>
+      </tr>`;
+    }).join('');
+
+    renderPager('updatesPager', 'updates', page, totalPages, renderMergedUpdatesTable);
+    updateUpdatesSelectionState();
   }
 
   function loadLinuxClientUpdates() {
@@ -1623,10 +1682,11 @@
       .then(data => {
         state.linuxClientUpdates = data;
         byId('linuxUpdatesPreferredSubnet').value = data.preferredLinuxSubnet || '';
-        renderLinuxClientUpdates(data);
+        renderMergedUpdatesTable();
+        updateLinuxUpdatesBadge(data.packageAvailable ? data.outdatedCount : 0);
       })
       .catch(error => {
-        byId('linuxUpdatesPackageStatus').textContent = `Client update status unavailable: ${error.message}`;
+        byId('updatesPackageStatus').textContent = `Client update status unavailable: ${error.message}`;
       });
   }
 
@@ -1670,41 +1730,9 @@
   // Badge-only counterpart to handleClientUpdatesSummary (Windows), used by
   // the dedicated fetches in pollForUpdates() and the initial page load -
   // updates just the Manage dropdown count, without the full loadLinuxClientUpdates()/
-  // renderLinuxClientUpdates() table rebuild.
+  // renderMergedUpdatesTable() table rebuild.
   function handleLinuxClientUpdatesSummary(data) {
     updateLinuxUpdatesBadge(data.packageAvailable ? data.outdatedCount : 0);
-  }
-
-  function renderLinuxClientUpdates(data) {
-    if (!data.packageAvailable) {
-      byId('linuxUpdatesPackageStatus').textContent = 'No Linux client package is available yet - build one on Deploy > Package first.';
-      byId('linuxUpdatesBody').innerHTML = '';
-      updateLinuxUpdatesBadge(0);
-      return;
-    }
-
-    const updates = data.updates || [];
-    updateLinuxUpdatesBadge(updates.length);
-    byId('linuxUpdatesPackageStatus').textContent = `Current package version: v${escapeHtml(data.currentVersion)}. ${updates.length} client(s) outdated.`;
-
-    if (updates.length === 0) {
-      byId('linuxUpdatesBody').innerHTML = '<tr><td colspan="5" class="empty">All Linux clients are up to date.</td></tr>';
-      byId('linuxUpdatesPushButton').disabled = true;
-      return;
-    }
-
-    byId('linuxUpdatesBody').innerHTML = updates.map(entry => `<tr>
-      <td>${escapeHtml(entry.hostname)}</td>
-      <td>${escapeHtml(entry.clientVersion || 'unknown')}</td>
-      <td>v${escapeHtml(data.currentVersion)}</td>
-      <td>${escapeHtml(formatDateTime(entry.sourceUpdatedAt))}</td>
-      <td><input type="checkbox" class="linux-update-select" value="${escapeHtml(entry.target || entry.hostname)}"></td>
-    </tr>`).join('');
-
-    document.querySelectorAll('.linux-update-select').forEach(checkbox => {
-      checkbox.addEventListener('change', updateLinuxUpdatesPushButtonState);
-    });
-    updateLinuxUpdatesPushButtonState();
   }
 
   function updateLinuxUpdatesPushButtonState() {
@@ -3990,12 +4018,11 @@
     byId('licensesView').classList.toggle('hidden', state.view !== 'licenses');
     byId('linuxServicesView').classList.toggle('hidden', state.view !== 'linuxServices');
     // Deploy: Actions shows both platforms' sections together (stacked, own
-    // headings - see Task 2), Updates likewise, Package is already
-    // cross-platform on one section (no stacking needed).
+    // headings), Updates and Package are each already cross-platform on one
+    // merged section (no stacking needed).
     byId('installView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
     byId('installHistoryView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
     byId('updatesView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'updates'));
-    byId('linuxUpdatesView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'updates'));
     byId('packageView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'package'));
     // Settings: exactly one of the five shows at a time (no stacking).
     byId('serverSettingsView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'server'));
@@ -4016,10 +4043,11 @@
     byId('settingsTab').classList.toggle('active', state.view === 'settings');
     const isInventoryView = inventoryViews.includes(state.view);
     const isLinuxInventoryView = linuxInventoryViews.includes(state.view);
+    const isUpdatesView = state.view === 'deploy' && state.subview === 'updates';
     byId('searchInput').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
-    byId('topbar').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
+    byId('topbar').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView && !isUpdatesView);
     byId('generatedAt').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
-    byId('osFilter').classList.toggle('hidden', !(state.view === 'hardware' || state.view === 'clients'));
+    byId('osFilter').classList.toggle('hidden', !(state.view === 'hardware' || state.view === 'clients' || (state.view === 'deploy' && state.subview === 'updates')));
     renderOsFilterActive();
     renderSubtabStrips();
     recalculateActivePagination();
@@ -4121,7 +4149,7 @@
 
     // Separate fetch, badge-only: the Manage dropdown "Client updates" count should
     // stay live even when the Client updates tab itself isn't open. A full
-    // loadClientUpdates()/renderClientUpdates() call is deliberately NOT used
+    // loadClientUpdates()/renderMergedUpdatesTable() call is deliberately NOT used
     // here - it rebuilds #updatesBody's row checkboxes, which would silently
     // clear an in-progress selection if the user has this tab open and rows
     // checked when a poll tick lands. handleClientUpdatesSummary also picks
@@ -4286,19 +4314,20 @@
   byId('installTrustNewHostKeys').addEventListener('change', updateInstallTrustNewHostKeysUi);
   byId('installAcknowledgeHostKeyRisk').addEventListener('change', updateInstallTrustNewHostKeysUi);
   byId('linuxUpdatesAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField'));
-  byId('linuxUpdatesSelectAll').addEventListener('change', () => {
-    const checked = byId('linuxUpdatesSelectAll').checked;
-    document.querySelectorAll('.linux-update-select').forEach(cb => { cb.checked = checked; });
-    updateLinuxUpdatesPushButtonState();
-  });
-  byId('linuxUpdatesPushButton').addEventListener('click', startLinuxUpdatesPush);
+  // linuxUpdatesSelectAll/linuxUpdatesPushButton/updatesUseAdCredentials
+  // listeners removed here: Task 1's merged Deploy > Updates markup has no
+  // such elements any more (one shared updatesSelectAll/updatesPushButton
+  // now covers both platforms, and Windows credentials moved to the
+  // updatesWinRmAuthMode dropdown below) - the old byId() calls threw and
+  // aborted this whole setup block before it reached the wiring below.
+  // Re-wiring push-dispatch/credential-UI to the new elements is Task 3's
+  // job, not this one's.
   byId('linuxUpdatesPreferredSubnetSaveButton').addEventListener('click', saveLinuxUpdatesPreferredSubnet);
   byId('linuxUpdatesTrustNewHostKeys').addEventListener('change', updateLinuxUpdatesTrustNewHostKeysUi);
   byId('linuxUpdatesAcknowledgeHostKeyRisk').addEventListener('change', updateLinuxUpdatesTrustNewHostKeysUi);
   byId('linuxUpdatesScheduleMode').addEventListener('change', updateLinuxUpdatesScheduleFieldVisibility);
   byId('linuxUpdatesScheduleSaveButton').addEventListener('click', saveLinuxUpdateSchedule);
   byId('installWinRmAuthMode').addEventListener('change', updateInstallFieldVisibility);
-  byId('updatesUseAdCredentials').addEventListener('change', updateUpdatesCredentialFieldsUi);
   byId('installButton').addEventListener('click', startClientActionJob);
   byId('installLoadAdAllButton').addEventListener('click', () => loadTargetsFromAd(false));
   byId('installLoadAdMissingButton').addEventListener('click', () => loadTargetsFromAd(true));
@@ -4336,6 +4365,8 @@
       // (data-sort-table="clients"), goes through render().
       if (table === 'linuxServices') {
         renderLinuxServicesTable(state.linuxClients);
+      } else if (table === 'updates') {
+        renderMergedUpdatesTable();
       } else {
         render();
       }
@@ -4447,6 +4478,11 @@
         state.page.hwRam = 1;
         renderOsFilterActive();
         renderFilteredHardwarePage();
+      } else if (state.view === 'deploy' && state.subview === 'updates') {
+        state.osFilter.deploy = filter;
+        state.page.updates = 1;
+        renderOsFilterActive();
+        renderMergedUpdatesTable();
       }
     }
   });
