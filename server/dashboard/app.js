@@ -913,8 +913,8 @@
       // (see RunUnifiedInstallTarget) - unchanged shape from before the
       // Windows/Linux merge, just now reachable from any mode. Gated to
       // the merged Actions status box specifically: it submits Deploy >
-      // Actions' own form fields (installServerUrl/installSshAuthMode/
-      // installSshUsername/installSshPassword/etc via trustHostKeyAndRetry),
+      // Actions' own form fields (installSshAuthMode/installSshUsername/
+      // installSshPassword/etc via trustHostKeyAndRetry),
       // which don't match whatever credentials Deploy > Updates' Linux
       // push actually used - rendering it there would silently resubmit
       // the wrong account. Same restriction the pre-merge code had
@@ -1187,20 +1187,19 @@
       .then(({ ok, status, data }) => {
         if (!ok) throw new Error(data.error || `HTTP ${status}`);
 
-        const serverUrl = byId('installServerUrl').value.trim();
-        const token = byId('installToken').value.trim();
+        const serverUrl = `${window.location.origin}/api/v1/inventory`;
         const intervalHours = Number(byId('installIntervalHours').value) || 6;
         const statusIntervalMinutes = Number(byId('installStatusIntervalMinutes').value) || 30;
         const installPath = byId('installLinuxPath').value.trim() || '/opt/windows-inventory-lite';
         const sshAuthMode = byId('installSshAuthMode').value;
-        const sshUsername = sshAuthMode === 'ad' ? '' : byId('installSshUsername').value.trim();
-        const sshPassword = sshAuthMode === 'credentials' ? byId('installSshPassword').value : '';
+        const sshUsername = sshAuthMode === 'global' ? '' : byId('installSshUsername').value.trim();
+        const sshPassword = sshAuthMode === 'manual' ? byId('installSshPassword').value : '';
 
         return fetch('/api/v1/client-install', {
           method: 'POST',
           cache: 'no-store',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ targets: host, mode: 'force-linux', serverUrl, token, intervalHours, statusIntervalMinutes, installPath, sshAuthMode, sshUsername, sshPassword, trustNewHostKeys: false, acknowledgeHostKeyRisk: false })
+          body: JSON.stringify({ targets: host, mode: 'force-linux', serverUrl, intervalHours, statusIntervalMinutes, installPath, sshAuthMode, sshUsername, sshPassword, trustNewHostKeys: false, acknowledgeHostKeyRisk: false })
         });
       })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
@@ -1236,40 +1235,33 @@
       element.classList.toggle('hidden', hideByAction || hideByMode);
     });
     byId('installButton').textContent = isInstall ? 'Install client' : 'Uninstall client';
-    // Also reset when leaving Force Windows, not just when leaving
-    // Install: these two checkboxes have no meaning once the Linux
-    // fields they belong to are mode-hidden, and their .checked state
-    // otherwise survives a mode switch invisibly (the checkbox itself
-    // being hidden doesn't uncheck it), which is exactly what let a
-    // stale "trust new host keys" from a prior Force Linux selection
-    // disable the submit button after switching to Force Windows.
     if (!isInstall || mode === 'force-windows') {
       byId('installTrustNewHostKeys').checked = false;
       byId('installAcknowledgeHostKeyRisk').checked = false;
     }
-    // installSshCredentialsField/installSshPasswordField carry their own
-    // auth-mode-based visibility rule on top of .mode-linux-field (see
-    // updateLinuxAuthModeFieldsUi) - only re-derive it when the mode pass
-    // above didn't already hide them, or a Force Windows selection would
-    // get silently re-shown regardless of the (irrelevant) auth mode.
+    // installWinRmUsernameField/installWinRmPasswordField carry their own
+    // credential-source-based visibility rule on top of .mode-windows-field -
+    // only re-derive it when the mode pass above didn't already hide them,
+    // or a Force Linux selection would get silently re-shown regardless of
+    // the (irrelevant) credential source.
+    if (mode !== 'force-linux') {
+      const winRmManual = byId('installWinRmAuthMode').value === 'manual';
+      byId('installWinRmUsernameField').classList.toggle('hidden', !winRmManual);
+      byId('installWinRmPasswordField').classList.toggle('hidden', !winRmManual);
+    }
+    // Same idea for installSshCredentialsField/installSshPasswordField,
+    // now driven by the three-way Global/Manual/SSH key dropdown instead
+    // of the old ad/credentials/key one - Global shows neither field,
+    // Manual shows both, SSH key shows only the username.
     if (mode !== 'force-windows') {
-      updateLinuxAuthModeFieldsUi('installSshAuthMode', 'installSshCredentialsField', 'installSshPasswordField');
+      const sshMode = byId('installSshAuthMode').value;
+      byId('installSshCredentialsField').classList.toggle('hidden', sshMode === 'global');
+      byId('installSshPasswordField').classList.toggle('hidden', sshMode !== 'manual');
     }
     updateInstallTrustNewHostKeysUi();
   }
 
-  // "Use global AD settings" substitutes the typed WinRM user/password
-  // with the AD sync credentials already configured in Settings > Windows
-  // (server identity, or the saved AD account) - the fields are disabled
-  // while it's checked since whatever's typed in them would be ignored.
-  function updateInstallCredentialFieldsUi() {
-    const useAd = byId('installUseAdCredentials').checked;
-    byId('installUsername').disabled = useAd;
-    byId('installPassword').disabled = useAd;
-  }
-
-  // Mirrors updateInstallCredentialFieldsUi (Client actions) exactly: "Use
-  // global AD settings" substitutes the typed/saved Client Update account
+  // "Use global AD settings" substitutes the typed/saved Client Update account
   // with the AD sync credentials already configured in Settings > Windows.
   function updateUpdatesCredentialFieldsUi() {
     const useAd = byId('updatesUseAdCredentials').checked;
@@ -1487,16 +1479,20 @@
     const action = byId('clientAction').value;
     const mode = byId('clientActionMode').value;
     const targets = byId('installTargets').value.trim();
-    const serverUrl = byId('installServerUrl').value.trim();
-    const token = byId('installToken').value.trim();
-    const useAdCredentials = byId('installUseAdCredentials').checked;
-    const username = useAdCredentials ? '' : byId('installUsername').value.trim();
-    const password = useAdCredentials ? '' : byId('installPassword').value;
+    // Server URL and Ingestion token are no longer editable fields (removed
+    // 2026-08-21) - always the server's own live values. serverUrl is
+    // computed the same way the old auto-fill init code always did; token
+    // is simply omitted from the payload, and the server already treats a
+    // missing/blank token as "use the current live one".
+    const serverUrl = `${window.location.origin}/api/v1/inventory`;
+    const winRmAuthMode = byId('installWinRmAuthMode').value;
+    const username = winRmAuthMode === 'manual' ? byId('installUsername').value.trim() : '';
+    const password = winRmAuthMode === 'manual' ? byId('installPassword').value : '';
     const force = byId('installForce').checked;
     const addToTrustedHosts = byId('installTrustedHosts').checked;
     const sshAuthMode = byId('installSshAuthMode').value;
-    const sshUsername = sshAuthMode === 'ad' ? '' : byId('installSshUsername').value.trim();
-    const sshPassword = sshAuthMode === 'credentials' ? byId('installSshPassword').value : '';
+    const sshUsername = sshAuthMode === 'global' ? '' : byId('installSshUsername').value.trim();
+    const sshPassword = sshAuthMode === 'manual' ? byId('installSshPassword').value : '';
     const intervalHours = Number(byId('installIntervalHours').value) || 6;
     const statusIntervalMinutes = Number(byId('installStatusIntervalMinutes').value) || 30;
     const installPath = byId('installLinuxPath').value.trim() || '/opt/windows-inventory-lite';
@@ -1505,10 +1501,6 @@
 
     if (!targets) {
       window.alert('Enter at least one target.');
-      return;
-    }
-    if (action === 'install' && !serverUrl) {
-      window.alert('Enter server URL.');
       return;
     }
 
@@ -1525,7 +1517,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets, mode, serverUrl, token, username, password, force, addToTrustedHosts, useAdCredentials, sshAuthMode, sshUsername, sshPassword, intervalHours, statusIntervalMinutes, installPath, trustNewHostKeys, acknowledgeHostKeyRisk })
+      body: JSON.stringify({ targets, mode, serverUrl, winRmAuthMode, username, password, force, addToTrustedHosts, sshAuthMode, sshUsername, sshPassword, intervalHours, statusIntervalMinutes, installPath, trustNewHostKeys, acknowledgeHostKeyRisk })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
@@ -2062,11 +2054,9 @@
     const useAdCredentials = byId('updatesUseAdCredentials').checked;
     const username = useAdCredentials ? '' : byId('updatesUsername').value.trim();
     const password = useAdCredentials ? '' : byId('updatesPassword').value;
-    // #installServerUrl is populated once, unconditionally, on page load
-    // (see the byId('installServerUrl').value = ... line near the bottom
-    // of this file) - it always holds a real value by the time any tab is
-    // used, so reusing it here needs no extra loading/fallback logic.
-    const serverUrl = byId('installServerUrl').value.trim();
+    // Same computed value Deploy > Actions now uses inline (Task 3, 2026-08-24)
+    // - the Server URL field this used to read from was removed.
+    const serverUrl = `${window.location.origin}/api/v1/inventory`;
 
     byId('updatesPushButton').disabled = true;
     byId('updatesStatus').classList.add('empty');
@@ -4265,12 +4255,11 @@
     if (state.view === 'licenses') loadLicenses();
     if (state.view === 'clients' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
   });
-  byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
   byId('pkgServerUrl').value = `${window.location.origin}/api/v1/inventory`;
   byId('linuxPkgServerUrl').value = `${window.location.origin}/api/v1/linux/inventory`;
   byId('clientAction').addEventListener('change', updateInstallFieldVisibility);
   byId('clientActionMode').addEventListener('change', updateInstallFieldVisibility);
-  byId('installSshAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('installSshAuthMode', 'installSshCredentialsField', 'installSshPasswordField'));
+  byId('installSshAuthMode').addEventListener('change', updateInstallFieldVisibility);
   byId('installPreferredSubnetSaveButton').addEventListener('click', saveInstallPreferredSubnet);
   byId('installTrustNewHostKeys').addEventListener('change', updateInstallTrustNewHostKeysUi);
   byId('installAcknowledgeHostKeyRisk').addEventListener('change', updateInstallTrustNewHostKeysUi);
@@ -4286,7 +4275,7 @@
   byId('linuxUpdatesAcknowledgeHostKeyRisk').addEventListener('change', updateLinuxUpdatesTrustNewHostKeysUi);
   byId('linuxUpdatesScheduleMode').addEventListener('change', updateLinuxUpdatesScheduleFieldVisibility);
   byId('linuxUpdatesScheduleSaveButton').addEventListener('click', saveLinuxUpdateSchedule);
-  byId('installUseAdCredentials').addEventListener('change', updateInstallCredentialFieldsUi);
+  byId('installWinRmAuthMode').addEventListener('change', updateInstallFieldVisibility);
   byId('updatesUseAdCredentials').addEventListener('change', updateUpdatesCredentialFieldsUi);
   byId('installButton').addEventListener('click', startClientActionJob);
   byId('installLoadAdAllButton').addEventListener('click', () => loadTargetsFromAd(false));
@@ -4580,6 +4569,5 @@
   if (state.view === 'licenses') loadLicenses();
   updateInstallFieldVisibility();
   loadInstallHistory();
-  updateLinuxAuthModeFieldsUi('installSshAuthMode', 'installSshCredentialsField', 'installSshPasswordField');
   updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField');
 }());
