@@ -569,21 +569,24 @@
         </section>
 
         <section id="updatesView" class="install-panel card-glow hidden" aria-label="Client updates">
-          <h2 class="settings-block-title platform-section-title">Windows Client updates</h2>
+          <h2 class="settings-block-title platform-section-title">Client updates</h2>
           <div class="settings-block">
             <h3 class="settings-block-title">WinRM credentials</h3>
-            <p class="cert-hint">Leave both fields blank when pushing an update to use the saved account below, or the server service's own identity if nothing is saved (the same account WinRM client actions already require). Fill them in to override with a different account for this push only.</p>
+            <p class="cert-hint">Global uses the saved account below, or AD as a fallback if nothing is saved. Manual lets you type a different account for this push only.</p>
             <p id="updatesSavedAccountHint" class="cert-hint hidden"></p>
-            <label class="check-label updates-use-ad-field">
-              <input id="updatesUseAdCredentials" type="checkbox">
-              Use global AD settings (Settings &gt; Windows &gt; Active Directory)
+            <label class="pkg-token-field">
+              WinRM credential source
+              <select id="updatesWinRmAuthMode">
+                <option value="global">Global (saved account, AD fallback)</option>
+                <option value="manual">Manual credentials</option>
+              </select>
             </label>
             <div class="pkg-grid client-update-grid">
-              <label class="pkg-token-field">
+              <label id="updatesWinRmUsernameField" class="pkg-token-field hidden">
                 Client update username
                 <input id="updatesUsername" type="text" autocomplete="username" placeholder="DOMAIN\svc-account">
               </label>
-              <label class="pkg-token-field">
+              <label id="updatesWinRmPasswordField" class="pkg-token-field hidden">
                 Client update password
                 <input id="updatesPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current one">
               </label>
@@ -594,53 +597,121 @@
             </div>
             <div id="updatesCredentialsMessage" class="pkg-message hidden"></div>
           </div>
-          <div class="updates-top-row">
           <div class="settings-block">
-            <h3 class="settings-block-title">Schedule</h3>
-            <p class="cert-hint">Automatically pushes to whichever clients are outdated when the schedule fires - the same targets "Update selected" would reach if every outdated row were checked. Uses the saved WinRM account above, or the server's own service identity if nothing is saved.</p>
-            <p id="updatesScheduleCredentialWarning" class="cert-hint hidden">No saved WinRM account above - scheduled pushes will use the server's own service identity.</p>
-            <div class="pkg-grid client-update-schedule-panel">
-              <label class="pkg-token-field">
-                Schedule
-                <select id="updatesScheduleMode">
-                  <option value="off">Off</option>
-                  <option value="once">Run once</option>
-                  <option value="interval">Every N hours</option>
-                </select>
-              </label>
-              <label id="updatesScheduleOnceField" class="pkg-token-field hidden">
-                Run at
-                <input id="updatesScheduleOnceAt" type="datetime-local">
-              </label>
-              <label id="updatesScheduleIntervalField" class="pkg-token-field hidden">
-                Every (hours)
-                <input id="updatesScheduleIntervalHours" type="number" min="1" max="8760" value="24">
+            <h3 class="settings-block-title">SSH credentials</h3>
+            <label class="linux-updates-credential-field">
+              SSH credential source
+              <select id="linuxUpdatesAuthMode">
+                <option value="global">Global (saved account, AD fallback)</option>
+                <option value="manual">Manual credentials</option>
+                <option value="key">SSH key</option>
+              </select>
+            </label>
+            <label id="linuxUpdatesCredentialsField" class="linux-updates-credential-field hidden">
+              Linux user
+              <input id="linuxUpdatesUsername" type="text" autocomplete="username" placeholder="root">
+            </label>
+            <label id="linuxUpdatesPasswordField" class="linux-updates-credential-field hidden">
+              Linux password
+              <input id="linuxUpdatesPassword" type="password" autocomplete="current-password">
+            </label>
+            <label class="check-label">
+              <input id="linuxUpdatesTrustNewHostKeys" type="checkbox">
+              Trust new host keys automatically (skip verification)
+            </label>
+            <label id="linuxUpdatesAcknowledgeHostKeyRiskField" class="check-label hidden">
+              <input id="linuxUpdatesAcknowledgeHostKeyRisk" type="checkbox">
+              I understand this accepts an unverified SSH host key on first connection
+            </label>
+          </div>
+          <div class="updates-top-row">
+            <div class="settings-block">
+              <h3 class="settings-block-title">Windows schedule</h3>
+              <p class="cert-hint">Auto-pushes outdated Windows clients using the WinRM credentials above.</p>
+              <p id="updatesScheduleCredentialWarning" class="cert-hint hidden">No saved WinRM account above - scheduled pushes will use the server's own service identity.</p>
+              <div class="pkg-grid client-update-schedule-panel">
+                <label class="pkg-token-field">
+                  Schedule
+                  <select id="updatesScheduleMode">
+                    <option value="off">Off</option>
+                    <option value="once">Run once</option>
+                    <option value="interval">Every N hours</option>
+                  </select>
+                </label>
+                <label id="updatesScheduleOnceField" class="pkg-token-field hidden">
+                  Run at
+                  <input id="updatesScheduleOnceAt" type="datetime-local">
+                </label>
+                <label id="updatesScheduleIntervalField" class="pkg-token-field hidden">
+                  Every (hours)
+                  <input id="updatesScheduleIntervalHours" type="number" min="1" max="8760" value="24">
+                </label>
+                <div class="pkg-buttons">
+                  <button id="updatesScheduleSaveButton" class="primary-button" type="button">Save</button>
+                </div>
+              </div>
+              <div id="updatesScheduleMessage" class="pkg-message hidden"></div>
+            </div>
+            <div class="settings-block">
+              <h3 class="settings-block-title">Linux schedule</h3>
+              <p class="cert-hint">Auto-pushes outdated Linux clients using the SSH credentials above (no AD reuse for scheduled pushes).</p>
+              <div class="pkg-grid client-update-schedule-panel">
+                <label class="pkg-token-field">
+                  Schedule
+                  <select id="linuxUpdatesScheduleMode">
+                    <option value="off">Off</option>
+                    <option value="once">Run once</option>
+                    <option value="interval">Every N hours</option>
+                  </select>
+                </label>
+                <label id="linuxUpdatesScheduleOnceField" class="pkg-token-field hidden">
+                  Run at
+                  <input id="linuxUpdatesScheduleOnceAt" type="datetime-local">
+                </label>
+                <label id="linuxUpdatesScheduleIntervalField" class="pkg-token-field hidden">
+                  Every (hours)
+                  <input id="linuxUpdatesScheduleIntervalHours" type="number" min="1" max="8760" value="24">
+                </label>
+                <div class="pkg-buttons">
+                  <button id="linuxUpdatesScheduleSaveButton" class="primary-button" type="button">Save</button>
+                </div>
+              </div>
+              <div id="linuxUpdatesScheduleMessage" class="pkg-message hidden"></div>
+            </div>
+            <div class="settings-block">
+              <h3 class="settings-block-title">Linux client targeting</h3>
+              <label class="linux-updates-credential-field">
+                Preferred subnet (CIDR)
+                <input id="linuxUpdatesPreferredSubnet" type="text" placeholder="192.168.1.0/24">
               </label>
               <div class="pkg-buttons">
-                <button id="updatesScheduleSaveButton" class="primary-button" type="button">Save</button>
+                <button id="linuxUpdatesPreferredSubnetSaveButton" class="primary-button" type="button">Save</button>
               </div>
+              <div id="linuxUpdatesPreferredSubnetMessage" class="pkg-message hidden"></div>
             </div>
-            <div id="updatesScheduleMessage" class="pkg-message hidden"></div>
-          </div>
           </div>
           <p id="updatesPackageStatus" class="pkg-status">Loading client update status...</p>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Computer</th>
-                  <th>Domain</th>
-                  <th>Current version</th>
+                  <th data-sort-table="updates" data-sort-key="computerName">Computer</th>
+                  <th data-sort-table="updates" data-sort-key="domain">Domain</th>
+                  <th data-sort-table="updates" data-sort-key="clientVersion">Current version</th>
                   <th>Available version</th>
-                  <th>Last collected</th>
+                  <th data-sort-table="updates" data-sort-key="collectedAt">Last collected</th>
                   <th><input id="updatesSelectAll" type="checkbox" title="Select all"></th>
                 </tr>
               </thead>
               <tbody id="updatesBody"></tbody>
             </table>
           </div>
+          <div id="updatesPager" class="pager"></div>
           <button id="updatesPushButton" class="primary-button" type="button" disabled>Update selected</button>
+          <h3 class="settings-block-title">Windows push status</h3>
           <div id="updatesStatus" class="install-status empty">No update job started.</div>
+          <h3 class="settings-block-title">Linux push status</h3>
+          <div id="linuxUpdatesStatus" class="install-status empty">No update job started.</div>
         </section>
 
         <section id="installView" class="install-panel card-glow hidden" aria-label="Remote client actions">
@@ -724,93 +795,6 @@
 
         <section id="installHistoryView" class="install-panel card-glow hidden" aria-label="Saved client action logs">
           <div id="installHistory" class="install-history empty">No saved client action logs.</div>
-        </section>
-
-        <section id="linuxUpdatesView" class="install-panel card-glow hidden" aria-label="Linux client updates">
-          <h2 class="settings-block-title platform-section-title">Linux Client updates</h2>
-          <div class="updates-top-row">
-          <div class="settings-block">
-            <h3 class="settings-block-title">Authentication</h3>
-            <label class="linux-updates-credential-field">
-              Authentication
-              <select id="linuxUpdatesAuthMode">
-                <option value="credentials">Stored Linux credentials</option>
-                <option value="key">SSH key</option>
-                <option value="ad">Use global AD settings</option>
-              </select>
-            </label>
-            <label id="linuxUpdatesCredentialsField" class="linux-updates-credential-field hidden">
-              Linux user (leave blank to use the saved Settings account)
-              <input id="linuxUpdatesUsername" type="text" autocomplete="username" placeholder="root">
-            </label>
-            <label id="linuxUpdatesPasswordField" class="linux-updates-credential-field hidden">
-              Linux password (leave blank to use the saved Settings password)
-              <input id="linuxUpdatesPassword" type="password" autocomplete="current-password">
-            </label>
-            <label class="check-label">
-              <input id="linuxUpdatesTrustNewHostKeys" type="checkbox">
-              Trust new host keys automatically (skip verification)
-            </label>
-            <label id="linuxUpdatesAcknowledgeHostKeyRiskField" class="check-label hidden">
-              <input id="linuxUpdatesAcknowledgeHostKeyRisk" type="checkbox">
-              I understand this accepts an unverified SSH host key on first connection
-            </label>
-          </div>
-          <div class="settings-block">
-            <h3 class="settings-block-title">Linux client targeting</h3>
-            <label class="linux-updates-credential-field">
-              Preferred subnet (CIDR)
-              <input id="linuxUpdatesPreferredSubnet" type="text" placeholder="192.168.1.0/24">
-            </label>
-            <div class="pkg-buttons">
-              <button id="linuxUpdatesPreferredSubnetSaveButton" class="primary-button" type="button">Save</button>
-            </div>
-            <div id="linuxUpdatesPreferredSubnetMessage" class="pkg-message hidden"></div>
-          </div>
-          <div class="settings-block">
-            <h3 class="settings-block-title">Schedule</h3>
-            <p class="cert-hint">Auto-pushes outdated clients using the credentials above (no AD reuse for scheduled pushes).</p>
-            <div class="pkg-grid client-update-schedule-panel">
-              <label class="pkg-token-field">
-                Schedule
-                <select id="linuxUpdatesScheduleMode">
-                  <option value="off">Off</option>
-                  <option value="once">Run once</option>
-                  <option value="interval">Every N hours</option>
-                </select>
-              </label>
-              <label id="linuxUpdatesScheduleOnceField" class="pkg-token-field hidden">
-                Run at
-                <input id="linuxUpdatesScheduleOnceAt" type="datetime-local">
-              </label>
-              <label id="linuxUpdatesScheduleIntervalField" class="pkg-token-field hidden">
-                Every (hours)
-                <input id="linuxUpdatesScheduleIntervalHours" type="number" min="1" max="8760" value="24">
-              </label>
-              <div class="pkg-buttons">
-                <button id="linuxUpdatesScheduleSaveButton" class="primary-button" type="button">Save</button>
-              </div>
-            </div>
-            <div id="linuxUpdatesScheduleMessage" class="pkg-message hidden"></div>
-          </div>
-          </div>
-          <p id="linuxUpdatesPackageStatus" class="pkg-status">Loading client update status...</p>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Hostname</th>
-                  <th>Current version</th>
-                  <th>Available version</th>
-                  <th>Last collected</th>
-                  <th><input id="linuxUpdatesSelectAll" type="checkbox" title="Select all"></th>
-                </tr>
-              </thead>
-              <tbody id="linuxUpdatesBody"></tbody>
-            </table>
-          </div>
-          <button id="linuxUpdatesPushButton" class="primary-button" type="button" disabled>Update selected</button>
-          <div id="linuxUpdatesStatus" class="install-status empty">No update job started.</div>
         </section>
 
         <section id="clientsView" aria-label="Client inventory">
