@@ -1815,8 +1815,8 @@
       state.knownScheduledJobId = scheduledJobId;
       if (state.view === 'deploy' && state.subview === 'updates' && !state.updatePollTimer) {
         state.updateJobId = scheduledJobId;
-        pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', pruneCompletedUpdateTargets);
-        state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', pruneCompletedUpdateTargets), 3000);
+        pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows'));
+        state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows')), 3000);
       }
     }
   }
