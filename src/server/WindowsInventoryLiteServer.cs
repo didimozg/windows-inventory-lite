@@ -4445,16 +4445,6 @@ namespace WindowsInventoryLite
             return attempt;
         }
 
-        // Runs one target through Mode's chosen protocol(s), producing the
-        // per-target result RunClientActionJob appends to job.Results.
-        // Force modes skip probing entirely and call straight into the one
-        // relevant existing per-target function. Auto mode probes both
-        // ports, asks ResolveAttemptOrder for a try-order, and walks it -
-        // stopping at the first protocol whose attempt reports "completed",
-        // recording every attempt tried either way. Not self-tested: like
-        // RunClientInstallTarget/RunLinuxClientInstallTarget, it makes real
-        // network calls (see the comment on TryConnect for why those stay
-        // integration-only in this codebase).
         // The dashboard no longer lets an admin type a full ingestion URL
         // for Deploy > Actions (Server URL field removed, 2026-08-21) - it
         // always sends the Windows-shaped one (.../api/v1/inventory),
@@ -4482,6 +4472,16 @@ namespace WindowsInventoryLite
             return serverUrl;
         }
 
+        // Runs one target through Mode's chosen protocol(s), producing the
+        // per-target result RunClientActionJob appends to job.Results.
+        // Force modes skip probing entirely and call straight into the one
+        // relevant existing per-target function. Auto mode probes both
+        // ports, asks ResolveAttemptOrder for a try-order, and walks it -
+        // stopping at the first protocol whose attempt reports "completed",
+        // recording every attempt tried either way. Not self-tested: like
+        // RunClientInstallTarget/RunLinuxClientInstallTarget, it makes real
+        // network calls (see the comment on TryConnect for why those stay
+        // integration-only in this codebase).
         private Dictionary<string, object> RunUnifiedInstallTarget(
             string target, string action, string mode,
             string serverUrl, string token,
