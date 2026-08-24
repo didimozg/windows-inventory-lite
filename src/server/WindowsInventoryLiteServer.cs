@@ -782,6 +782,7 @@ namespace WindowsInventoryLite
             }
             CleanupInstallJobLogs();
             MigrateLegacyLinuxSshKey();
+            PurgeOrphanedLinuxInstallJobDirectory();
 
             if (options.EnableHttp)
             {
@@ -3138,6 +3139,20 @@ namespace WindowsInventoryLite
                     SendText(stream, "{\"error\":\"acknowledgeHostKeyRisk must be true when trustNewHostKeys is enabled\"}", "application/json; charset=utf-8", 400);
                     return;
                 }
+                // Auto mode can dispatch a target to SSH the operator never
+                // deliberately identified as a Linux host (it just happened
+                // to answer on port 22) - combined with bulk-auto-trust,
+                // that target's real SSH host key gets accepted sight
+                // unseen, and the SSH credential (saved/AD password) is
+                // sent to it in the same request. Force Linux carries the
+                // same risk but requires the operator to have chosen SSH
+                // explicitly for these targets first - keep the
+                // combination gated to that deliberate choice.
+                if (trustNewHostKeys && mode == "auto")
+                {
+                    SendText(stream, "{\"error\":\"Trust new host keys automatically is not available in Auto mode - select Force Linux to bulk-auto-trust SSH host keys for a target list you've deliberately identified as Linux hosts.\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
             }
 
             InstallJob job = new InstallJob();
@@ -3235,11 +3250,24 @@ namespace WindowsInventoryLite
             }
 
             InstallJob job = null;
+            // InstallJob.ToDictionary() shares its Results ArrayList by
+            // reference rather than copying it, so serializing it after
+            // releasing the lock would let RunClientActionJob's own
+            // lock(installJobsLock) { job.Results.Add(result); ... }
+            // mutate that same list mid-enumeration on a running job's
+            // GET (ArrayList is not safe for concurrent read+write) - the
+            // fix has to hold the lock for the whole serialize, not just
+            // the dictionary lookup. Serializer.Serialize is CPU-only
+            // (no I/O), so this doesn't meaningfully extend how long the
+            // job-running thread might wait for the same lock.
+            string serializedJob = null;
             lock (installJobsLock)
             {
                 if (installJobs.ContainsKey(id))
                 {
                     job = installJobs[id];
+                    JavaScriptSerializer serializer = CreateJsonSerializer();
+                    serializedJob = serializer.Serialize(job.ToDictionary());
                 }
             }
 
@@ -3256,8 +3284,7 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            JavaScriptSerializer serializer = CreateJsonSerializer();
-            SendJson(stream, serializer.Serialize(job.ToDictionary()));
+            SendJson(stream, serializedJob);
         }
 
         private void RunClientActionJob(object state)
@@ -4416,7 +4443,19 @@ namespace WindowsInventoryLite
             {
                 return new string[] { "ssh" };
             }
-            return DecideAutoDetectProtocols(winRmReachable, sshReachable);
+            if (mode == "auto")
+            {
+                return DecideAutoDetectProtocols(winRmReachable, sshReachable);
+            }
+            // Fail closed, not open: every caller today always sets a
+            // valid Mode ("auto"/"force-windows"/"force-linux"), so this
+            // is unreachable in practice - but a protocol-selection
+            // function silently defaulting an unrecognized value to
+            // "probe and try both protocols" is the wrong failure mode
+            // for a function a future caller could add without updating
+            // this check. No attempt is worth making against a mode this
+            // function doesn't recognize.
+            return new string[0];
         }
 
         // One entry in a per-target job result's future "attempts" array
@@ -7350,6 +7389,35 @@ namespace WindowsInventoryLite
             }
         }
 
+        // The Deploy > Actions unification (Phase 3, 2026-08-21) merged the
+        // separate Windows/Linux install job classes and storage into one -
+        // _linux-client-install-jobs (under LinuxDataPath) stopped being
+        // created, read, or pruned at that point, since job history now
+        // lives entirely under DataPath's _client-install-jobs instead.
+        // Any files left over from before that merge would otherwise
+        // persist forever, invisible in the dashboard and never subject to
+        // their own configured retention window. One-shot: the directory
+        // won't exist on a fresh install, and once deleted here it stays
+        // gone since nothing recreates it. Never blocks startup - logged
+        // and swallowed on failure, same as MigrateLegacyLinuxSshKey above.
+        private void PurgeOrphanedLinuxInstallJobDirectory()
+        {
+            try
+            {
+                string directory = Path.Combine(options.LinuxDataPath, "_linux-client-install-jobs");
+                if (!Directory.Exists(directory))
+                {
+                    return;
+                }
+                Directory.Delete(directory, true);
+                DebugLogger.Log(options, "Startup", "Removed the orphaned _linux-client-install-jobs directory (superseded by the unified install job storage under DataPath since v0.42.0).");
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Startup", "Could not remove the orphaned _linux-client-install-jobs directory: " + DebugLogger.SanitizeForLog(ex.Message));
+            }
+        }
+
         // Deliberately does NOT swallow read/parse errors into an empty list:
         // concurrent Linux install jobs (each dispatched via
         // ThreadPool.QueueUserWorkItem) and the manual trust-host-key
@@ -8487,6 +8555,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ResolveAttemptOrder tries only WinRM for force-windows regardless of probe results", TestResolveAttemptOrderForceWindowsIgnoresProbes);
             allPassed &= SelfTestCheck(output, "ResolveAttemptOrder tries only SSH for force-linux regardless of probe results", TestResolveAttemptOrderForceLinuxIgnoresProbes);
             allPassed &= SelfTestCheck(output, "ResolveAttemptOrder delegates to DecideAutoDetectProtocols for auto mode", TestResolveAttemptOrderAutoDelegatesToDecideAutoDetectProtocols);
+            allPassed &= SelfTestCheck(output, "ResolveAttemptOrder fails closed (empty array) on an unrecognized mode", TestResolveAttemptOrderFailsClosedOnUnrecognizedMode);
             allPassed &= SelfTestCheck(output, "ToLinuxServerUrl swaps the Windows ingestion suffix for the Linux one", TestToLinuxServerUrlSwapsWindowsSuffix);
             allPassed &= SelfTestCheck(output, "ToLinuxServerUrl leaves an already Linux-shaped URL unchanged", TestToLinuxServerUrlLeavesAlreadyLinuxShapedUrlUnchanged);
             allPassed &= SelfTestCheck(output, "ToLinuxServerUrl leaves blank and unrecognized-shape values unchanged", TestToLinuxServerUrlLeavesBlankAndCustomValuesUnchanged);
@@ -8782,6 +8851,16 @@ namespace WindowsInventoryLite
             if (neitherOpen.Length != 0)
             {
                 return "expected auto mode with neither port open to return an empty array but got [" + String.Join(", ", neitherOpen) + "]";
+            }
+            return null;
+        }
+
+        private static string TestResolveAttemptOrderFailsClosedOnUnrecognizedMode()
+        {
+            string[] result = ResolveAttemptOrder("not-a-real-mode", true, true);
+            if (result.Length != 0)
+            {
+                return "expected an unrecognized mode to return an empty array (no attempt worth making) even with both ports open, but got [" + String.Join(", ", result) + "]";
             }
             return null;
         }

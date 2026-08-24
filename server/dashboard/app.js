@@ -1235,14 +1235,22 @@
       element.classList.toggle('hidden', hideByAction || hideByMode);
     });
     byId('installButton').textContent = isInstall ? 'Install client' : 'Uninstall client';
-    // Also reset when leaving Force Windows, not just when leaving
-    // Install: these two checkboxes have no meaning once the Linux
-    // fields they belong to are mode-hidden, and their .checked state
-    // otherwise survives a mode switch invisibly (the checkbox itself
-    // being hidden doesn't uncheck it), which is exactly what let a
-    // stale "trust new host keys" from a prior Force Linux selection
-    // disable the submit button after switching to Force Windows.
-    if (!isInstall || mode === 'force-windows') {
+    // "Trust new host keys automatically" is Force Linux only, not Auto -
+    // the server rejects the combination outright (bulk-auto-trusting an
+    // SSH host key the operator never deliberately identified as Linux,
+    // just because it happened to answer on port 22, is a real exposure
+    // widening - see StartClientAction's own check). Hidden here on top
+    // of the .mode-linux-field pass above, which only ever hides it for
+    // Force Windows.
+    byId('installTrustNewHostKeysField').classList.toggle('hidden', mode !== 'force-linux');
+    // Also reset whenever the field above just got hidden (leaving
+    // Install, or leaving Force Linux specifically - not just Force
+    // Windows): these two checkboxes have no meaning once hidden, and
+    // their .checked state otherwise survives a mode switch invisibly
+    // (the checkbox itself being hidden doesn't uncheck it), which is
+    // exactly what let a stale "trust new host keys" from a prior Force
+    // Linux selection disable the submit button after switching away.
+    if (!isInstall || mode !== 'force-linux') {
       byId('installTrustNewHostKeys').checked = false;
       byId('installAcknowledgeHostKeyRisk').checked = false;
     }
@@ -1493,13 +1501,20 @@
     // missing/blank token as "use the current live one".
     const serverUrl = `${window.location.origin}/api/v1/inventory`;
     const winRmAuthMode = byId('installWinRmAuthMode').value;
-    const username = winRmAuthMode === 'manual' ? byId('installUsername').value.trim() : '';
-    const password = winRmAuthMode === 'manual' ? byId('installPassword').value : '';
+    // Blank whenever the field is hidden too (mode === 'force-linux'),
+    // not just when the credential-source dropdown itself says not to use
+    // it - a typed value from an earlier mode/dropdown selection survives
+    // a mode switch invisibly (the field being hidden doesn't clear it),
+    // and would otherwise still ride along on the wire on a submit the
+    // server discards it for anyway. Nothing is stored/logged server-side
+    // either way, but there's no reason to send it.
+    const username = (mode !== 'force-linux' && winRmAuthMode === 'manual') ? byId('installUsername').value.trim() : '';
+    const password = (mode !== 'force-linux' && winRmAuthMode === 'manual') ? byId('installPassword').value : '';
     const force = byId('installForce').checked;
     const addToTrustedHosts = byId('installTrustedHosts').checked;
     const sshAuthMode = byId('installSshAuthMode').value;
-    const sshUsername = sshAuthMode === 'global' ? '' : byId('installSshUsername').value.trim();
-    const sshPassword = sshAuthMode === 'manual' ? byId('installSshPassword').value : '';
+    const sshUsername = (mode !== 'force-windows' && sshAuthMode !== 'global') ? byId('installSshUsername').value.trim() : '';
+    const sshPassword = (mode !== 'force-windows' && sshAuthMode === 'manual') ? byId('installSshPassword').value : '';
     const intervalHours = Number(byId('installIntervalHours').value) || 6;
     const statusIntervalMinutes = Number(byId('installStatusIntervalMinutes').value) || 30;
     const installPath = byId('installLinuxPath').value.trim() || '/opt/windows-inventory-lite';
@@ -4353,7 +4368,14 @@
     if (attemptBtn) {
       const jobId = attemptBtn.dataset.attemptJob;
       const key = 'attempt:' + jobId + ':' + attemptBtn.dataset.attemptToggle;
-      const row = document.querySelector(`[data-attempt-details="${attemptBtn.dataset.attemptToggle}"][data-attempt-job="${CSS.escape(jobId)}"]`);
+      // Scoped to the button's own status box (.install-status), not a
+      // bare document-wide query - harmless today since only one status
+      // box (installStatus) ever renders attempt rows, but a job id +
+      // index pair is only unique WITHIN one status box's own render, not
+      // guaranteed unique document-wide if a future status box (e.g.
+      // Phase 4's Updates view) renders attempt rows too.
+      const container = attemptBtn.closest('.install-status');
+      const row = container && container.querySelector(`[data-attempt-details="${attemptBtn.dataset.attemptToggle}"][data-attempt-job="${CSS.escape(jobId)}"]`);
       if (row) {
         const nowHidden = row.classList.toggle('hidden');
         if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
