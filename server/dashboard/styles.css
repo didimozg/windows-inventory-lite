@@ -1475,9 +1475,43 @@ th.sort-desc::after {
   opacity: 0.5;
 }
 
-.pager-status {
+.pager-pages {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.pager-page-button {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
   font-size: var(--font-size-sm);
+}
+
+.pager-page-button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Matches .os-filter-option.active's gradient-fill convention - both are
+   a small pill selecting one option among visible peers. */
+.pager-page-button.active {
+  background: var(--accent-gradient);
+  color: var(--accent-text);
+  border-color: transparent;
+  cursor: default;
+}
+
+.pager-ellipsis {
   color: var(--muted);
+  font-size: var(--font-size-sm);
+  padding: 0 2px;
 }
 
 .hw-section-header {

@@ -530,10 +530,34 @@
     return { items: arr.slice(start, start + pageSize), page: clampedPage, totalPages };
   }
 
-  // Renders a "Prev  Page N of M  Next" control into containerId, wiring
-  // click handlers that update state.page[tableKey] and invoke onChange
-  // (the calling table's own render function) to redraw with the new
-  // page. Renders nothing when there's only one page, so small result
+  // Windowed page-number list with '…' gap markers: always keeps page 1,
+  // the last page, the current page, and one neighbor on each side of it -
+  // everything else collapses into a single '…' per gap so a table with
+  // e.g. 40 pages renders a handful of buttons, not 40. Small totals (the
+  // common case for most of this app's tables) come back with no gaps at
+  // all, e.g. [1,2,3,4,5].
+  function buildPagerPageNumbers(current, total) {
+    const delta = 1;
+    const kept = [];
+    for (let i = 1; i <= total; i += 1) {
+      if (i === 1 || i === total || (i >= current - delta && i <= current + delta)) {
+        kept.push(i);
+      }
+    }
+    const result = [];
+    let previous = null;
+    kept.forEach(i => {
+      if (previous !== null && i - previous > 1) result.push('…');
+      result.push(i);
+      previous = i;
+    });
+    return result;
+  }
+
+  // Renders a "Prev  1 … 9 10 11 … 20  Next" control into containerId,
+  // wiring click handlers that update state.page[tableKey] and invoke
+  // onChange (the calling table's own render function) to redraw with the
+  // new page. Renders nothing when there's only one page, so small result
   // sets (e.g. a handful of distinct CPU models) don't show a pager that
   // can never do anything.
   function renderPager(containerId, tableKey, page, totalPages, onChange) {
@@ -543,15 +567,22 @@
       container.innerHTML = '';
       return;
     }
+    const pagesHtml = buildPagerPageNumbers(page, totalPages).map(entry => entry === '…'
+      ? '<span class="pager-ellipsis">…</span>'
+      : `<button class="pager-page-button${entry === page ? ' active' : ''}" type="button" data-pager-page="${entry}"${entry === page ? ' disabled aria-current="page"' : ''} aria-label="Page ${entry}">${entry}</button>`
+    ).join('');
     container.innerHTML = `
       <button class="export-button pager-button" type="button" data-pager-prev${page <= 1 ? ' disabled' : ''}>Prev</button>
-      <span class="pager-status">Page ${page} of ${totalPages}</span>
+      <div class="pager-pages">${pagesHtml}</div>
       <button class="export-button pager-button" type="button" data-pager-next${page >= totalPages ? ' disabled' : ''}>Next</button>
     `;
     const prevBtn = container.querySelector('[data-pager-prev]');
     const nextBtn = container.querySelector('[data-pager-next]');
     if (prevBtn) prevBtn.addEventListener('click', () => { state.page[tableKey] = page - 1; onChange(); });
     if (nextBtn) nextBtn.addEventListener('click', () => { state.page[tableKey] = page + 1; onChange(); });
+    container.querySelectorAll('[data-pager-page]').forEach(button => {
+      button.addEventListener('click', () => { state.page[tableKey] = Number(button.dataset.pagerPage); onChange(); });
+    });
   }
 
   // Measures how many rows of the table rooted at tbodyId fit between its
