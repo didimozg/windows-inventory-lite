@@ -1601,17 +1601,39 @@ th.sort-desc::after {
 }
 
 /* Every other .pkg-buttons sits at the END of its form (Save/Upload/
-   Download), so it never needs bottom spacing of its own. Two places have a
-   .pkg-buttons block sitting BEFORE the next block instead of at the end of
-   its own: the Certificate view's Delete button (before the certificate
-   file field), and Settings > Linux's page-level Save button for "Linux
-   client targeting"/"Install defaults" (before the separate "Linux Client
-   update credentials" block below it, reported live as the Save button
-   crowding that heading) - without a gap, both read as belonging to the
-   wrong section. */
+   Download), so it never needs bottom spacing of its own. Three places
+   have a .pkg-buttons block sitting BEFORE the next block instead of at
+   the end of its own: the Certificate view's Delete button (before the
+   certificate file field), Settings > Linux's page-level Save button for
+   "Linux client targeting"/"Install defaults" (before the separate
+   "Linux Client update credentials" block below it), and Settings >
+   Windows' page-level Save button for "Active Directory" (before the
+   separate "Windows Client update credentials" block added alongside it -
+   same crowding bug, reported live a second time on the Windows side
+   after already being fixed once for Linux) - without a gap, all three
+   read as belonging to the wrong section. */
 #certificateView > .pkg-buttons,
-#linuxSettingsView > .pkg-buttons {
+#linuxSettingsView > .pkg-buttons,
+#windowsSettingsView > .pkg-buttons {
   margin-bottom: 16px;
+}
+
+/* "Windows push status"/"Linux push status" on the merged Deploy > Updates
+   page are the only .settings-block-title headings in the app that sit
+   bare, not as the first child of their own .settings-block - there's
+   nothing above them contributing the usual 12-18px separation a
+   .settings-block's own margin-bottom/border-bottom would give the
+   heading that follows it, so the button right above touched the heading
+   with zero gap (reported live). Scoped to this one class rather than
+   widening .settings-block-title's own margin, which every other
+   instance already gets correctly from its wrapping .settings-block.
+   h3.push-status-heading, not bare .push-status-heading: same specificity
+   (0,1,0) as .settings-block-title's own margin shorthand, which is
+   defined later in this file and would otherwise win on source order and
+   reset margin-top back to 0 - this project's own recurring specificity-
+   tie failure mode, caught here before shipping instead of after. */
+h3.push-status-heading {
+  margin-top: 18px;
 }
 
 .pkg-message {
