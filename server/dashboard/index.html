@@ -281,6 +281,25 @@
             <button id="windowsSettingsSaveButton" class="primary-button" type="button">Save</button>
           </div>
           <div id="windowsSettingsMessage" class="pkg-message hidden"></div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Windows Client update credentials</h2>
+            <p class="cert-hint">Used by Windows Client actions/updates pushes when "Global" WinRM credential source is selected on those pages. Leave password blank to keep the currently saved value.</p>
+            <div class="pkg-grid client-update-grid">
+              <label class="pkg-token-field">
+                Client update username
+                <input id="windowsCredsUsername" type="text" autocomplete="username" placeholder="DOMAIN\svc-account">
+              </label>
+              <label class="pkg-token-field">
+                Client update password
+                <input id="windowsCredsPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current one">
+              </label>
+              <div class="pkg-buttons">
+                <button id="windowsCredsSaveButton" class="primary-button" type="button">Save</button>
+                <button id="windowsCredsClearButton" class="danger-button-ghost" type="button">Delete saved credentials</button>
+              </div>
+            </div>
+            <div id="windowsCredsMessage" class="pkg-message hidden"></div>
+          </div>
         </section>
 
         <section id="linuxSettingsView" class="install-panel card-glow hidden" aria-label="Linux client settings">
@@ -572,7 +591,7 @@
           <h2 class="settings-block-title platform-section-title">Client updates</h2>
           <div class="settings-block">
             <h3 class="settings-block-title">WinRM credentials</h3>
-            <p class="cert-hint">Global uses the saved account below, or AD as a fallback if nothing is saved. Manual lets you type a different account for this push only.</p>
+            <p class="cert-hint">Global uses the saved account (Settings &gt; Windows &gt; Client update credentials), or AD as a fallback if nothing is saved. Manual lets you type a different account for this push only - typed here, never saved.</p>
             <p id="updatesSavedAccountHint" class="cert-hint hidden"></p>
             <label class="pkg-token-field">
               WinRM credential source
@@ -588,14 +607,9 @@
               </label>
               <label id="updatesWinRmPasswordField" class="pkg-token-field hidden">
                 Client update password
-                <input id="updatesPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current one">
+                <input id="updatesPassword" type="password" autocomplete="new-password">
               </label>
-              <div class="pkg-buttons">
-                <button id="updatesSaveCredentialsButton" class="primary-button" type="button">Save</button>
-                <button id="updatesClearCredentialsButton" class="danger-button-ghost" type="button">Delete saved credentials</button>
-              </div>
             </div>
-            <div id="updatesCredentialsMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block">
             <h3 class="settings-block-title">SSH credentials</h3>

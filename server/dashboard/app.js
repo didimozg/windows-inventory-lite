@@ -194,7 +194,7 @@
 
   function loadSettingsSubviewData(subview) {
     if (subview === 'server') { loadServerSettings(); loadIngestionTokenStatus(); }
-    if (subview === 'windows') loadWindowsSettings();
+    if (subview === 'windows') { loadWindowsSettings(); loadClientUpdateCredentials(); }
     if (subview === 'linux') { loadLinuxSettings(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (subview === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (subview === 'adminPassword') loadAdminPasswordStatus();
@@ -1285,20 +1285,14 @@
   // Global uses the saved Client Update account (or AD as a fallback);
   // Manual shows the username/password fields for a one-off override -
   // same show/hide convention Deploy > Actions' installWinRmAuthMode uses.
+  // No Save/Delete here any more (moved to Settings > Windows > Client
+  // update credentials, mirroring Deploy > Actions' own credential block,
+  // which never had an in-page save either) - Manual mode's fields are
+  // purely "what to send for this one push," never persisted from here.
   function updateUpdatesCredentialFieldVisibility() {
     const manual = byId('updatesWinRmAuthMode').value === 'manual';
     byId('updatesWinRmUsernameField').classList.toggle('hidden', !manual);
     byId('updatesWinRmPasswordField').classList.toggle('hidden', !manual);
-    // Save persists whatever's currently in the (now-hidden) fields above -
-    // without this, Global mode left Save visible next to two blank
-    // fields, and clicking it would silently overwrite the saved account
-    // with a blank username (the server treats a present-but-empty
-    // username as real) while the blank password fell through and kept
-    // the old one - exactly the mismatched-pair corruption
-    // loadClientUpdateCredentials's own hint text warns about. Delete
-    // stays visible regardless of mode - it sends {clear:true}, never the
-    // field values, so it's safe to use without switching to Manual.
-    byId('updatesSaveCredentialsButton').classList.toggle('hidden', !manual);
   }
 
   function loadLinuxUpdateCredentials() {
@@ -1929,12 +1923,14 @@
       });
   }
 
+  // Shared by Deploy > Updates' read-only "Saved account:" hint and
+  // Settings > Windows > Client update credentials' editable fields - one
+  // GET serves both. Settings pre-fills the username directly (a
+  // management context, like every other settings form); Deploy >
+  // Updates' own Manual-mode fields are a separate, never-pre-filled pair
+  // (see updateUpdatesCredentialFieldVisibility) - typing there sends a
+  // one-off override, it never reads or writes the saved account.
   function loadClientUpdateCredentials() {
-    // The username/password push fields are never pre-filled from the saved
-    // account: a form that looks empty but silently carries a stale
-    // username (with a genuinely blank password) would send a mismatched
-    // credential pair to WinRM instead of either the saved pair or the
-    // service identity. This hint is display-only.
     const hint = byId('updatesSavedAccountHint');
     fetch('/api/v1/client-updates/credentials', { cache: 'no-store' })
       .then(response => {
@@ -1948,17 +1944,18 @@
         } else {
           hint.classList.add('hidden');
         }
-        applyPasswordPlaceholder('updatesPassword', !!data.hasPassword, 'leave blank to keep the current one');
+        byId('windowsCredsUsername').value = data.username || '';
+        applyPasswordPlaceholder('windowsCredsPassword', !!data.hasPassword, 'leave blank to keep the current one');
       })
       .catch(() => {});
   }
 
   function saveClientUpdateCredentials() {
-    const username = byId('updatesUsername').value.trim();
-    const password = byId('updatesPassword').value;
-    const messageElement = byId('updatesCredentialsMessage');
+    const username = byId('windowsCredsUsername').value.trim();
+    const password = byId('windowsCredsPassword').value;
+    const messageElement = byId('windowsCredsMessage');
 
-    byId('updatesSaveCredentialsButton').disabled = true;
+    byId('windowsCredsSaveButton').disabled = true;
     fetch('/api/v1/client-updates/credentials', {
       method: 'POST',
       cache: 'no-store',
@@ -1970,13 +1967,7 @@
         return response.json();
       })
       .then(() => {
-        // Clear both fields, not just password: leaving the typed username
-        // behind paired with the just-cleared password reproduces the exact
-        // mismatched-pair bug fixed in 0.16.6 (real login + blank password
-        // sent straight to WinRM) the moment "Update selected" is clicked
-        // right after "Save" without retyping anything.
-        byId('updatesUsername').value = '';
-        byId('updatesPassword').value = '';
+        byId('windowsCredsPassword').value = '';
         showSavedMessage(messageElement, 'Saved.', false);
         loadClientUpdateCredentials();
       })
@@ -1984,14 +1975,14 @@
         showSavedMessage(messageElement, `Failed to save: ${error.message}`, true);
       })
       .finally(() => {
-        byId('updatesSaveCredentialsButton').disabled = false;
+        byId('windowsCredsSaveButton').disabled = false;
       });
   }
 
   function clearClientUpdateCredentials() {
-    const messageElement = byId('updatesCredentialsMessage');
+    const messageElement = byId('windowsCredsMessage');
 
-    byId('updatesClearCredentialsButton').disabled = true;
+    byId('windowsCredsClearButton').disabled = true;
     fetch('/api/v1/client-updates/credentials', {
       method: 'POST',
       cache: 'no-store',
@@ -2003,8 +1994,8 @@
         return response.json();
       })
       .then(() => {
-        byId('updatesUsername').value = '';
-        byId('updatesPassword').value = '';
+        byId('windowsCredsUsername').value = '';
+        byId('windowsCredsPassword').value = '';
         byId('updatesSavedAccountHint').classList.add('hidden');
         showSavedMessage(messageElement, 'Saved credentials deleted.', false);
       })
@@ -2012,7 +2003,7 @@
         showSavedMessage(messageElement, `Failed to delete: ${error.message}`, true);
       })
       .finally(() => {
-        byId('updatesClearCredentialsButton').disabled = false;
+        byId('windowsCredsClearButton').disabled = false;
       });
   }
 
@@ -4563,8 +4554,8 @@
     toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu', true);
     toggleDropdown('manageDropdownButton', 'manageDropdownMenu', true);
   });
-  byId('updatesSaveCredentialsButton').addEventListener('click', saveClientUpdateCredentials);
-  byId('updatesClearCredentialsButton').addEventListener('click', clearClientUpdateCredentials);
+  byId('windowsCredsSaveButton').addEventListener('click', saveClientUpdateCredentials);
+  byId('windowsCredsClearButton').addEventListener('click', clearClientUpdateCredentials);
   byId('updatesPushButton').addEventListener('click', startMergedUpdatesPush);
   byId('updatesSelectAll').addEventListener('change', () => {
     const checked = byId('updatesSelectAll').checked;
