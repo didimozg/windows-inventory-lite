@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.49.0]
+
+### Added
+
+- The Dashboard's Windows activated, Office activated, and Stale tiles are now clickable (and keyboard-activatable). Clicking one jumps to Clients pre-filtered/pre-sorted so whatever the tile promised is what's on top: Stale sorts all clients by Last collected ascending; the two activation tiles filter to Windows only and sort by their respective activation state, not-activated first.
+- Windows activated and Office activated turn green once their count equals the total Windows client count (and the fleet isn't empty).
+
 ## [0.48.0]
 
 Closes the CSRF finding left open since Phase 3's security review, plus a follow-up security sweep.
