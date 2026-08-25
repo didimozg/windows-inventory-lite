@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.45.1]
+
+### Fixed
+
+- Three live-reported layout overlaps from `[0.45.0]`'s new HTML: Settings > Windows' page-level Save button touched the new "Windows Client update credentials" heading with zero gap (same crowding bug already fixed once for the Linux equivalent, not yet extended to the new Windows sibling); Deploy > Updates' "Windows push status"/"Linux push status" headings sat flush against the button/status box above them, since they're the only `.settings-block-title` headings in the app not wrapped in their own `.settings-block` (the usual source of that spacing).
+
 ## [0.45.0]
 
 Follow-up from live troubleshooting of a real WinRM push failure right after `[0.44.0]` shipped.
