@@ -4615,6 +4615,19 @@ namespace WindowsInventoryLite
             result["message"] = attempts.Count > 1 && GetStringValue(result, "status") != "completed"
                 ? "Both WinRM and SSH attempts failed."
                 : GetStringValue(lastAttemptResult, "message");
+            // The dashboard's own per-target row (renderInstallJob) reads
+            // output/error straight off this top-level dict, not out of
+            // attempts[] - it only renders the attempts sub-table at all
+            // when there was more than one attempt (Auto mode trying both
+            // protocols). A Force-mode result always has exactly one
+            // attempt, so without copying these two fields here the real
+            // PowerShell/SSH output or error text was silently unreachable
+            // from the dashboard on every Force-mode job, regardless of
+            // success or failure - the Output column fell back to
+            // rendering the word "Unknown" (escapeHtml's own placeholder
+            // for a missing value) instead.
+            if (lastAttemptResult.ContainsKey("output")) result["output"] = lastAttemptResult["output"];
+            if (lastAttemptResult.ContainsKey("error")) result["error"] = lastAttemptResult["error"];
             if (lastAttemptResult.ContainsKey("startedAt")) result["startedAt"] = lastAttemptResult["startedAt"];
             if (lastAttemptResult.ContainsKey("completedAt")) result["completedAt"] = lastAttemptResult["completedAt"];
             if (lastAttemptResult.ContainsKey("exitCode")) result["exitCode"] = lastAttemptResult["exitCode"];
