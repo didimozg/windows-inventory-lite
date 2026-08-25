@@ -139,6 +139,13 @@ namespace WindowsInventoryLite
         // import a PFX at install time; the dashboard "Certificate" tab can import
         // and switch to a new PFX later without a service restart.
         public bool UseHttps;
+        // Off by default - HSTS is only ever added to a response actually
+        // served over the HTTPS listener (see BuildHstsHeaderOrEmpty), but
+        // a browser that has cached the policy can still lock itself out of
+        // this server if HTTPS is later disabled while this was on - opt-in
+        // rather than tied automatically to UseHttps.
+        public bool HstsEnabled;
+        public int HstsMaxAgeHours;
         public string CertificateThumbprint;
         public int StaleHours;
         public bool ConsoleMode;
@@ -235,6 +242,7 @@ namespace WindowsInventoryLite
             options.LoginLockoutThreshold = 10;
             options.LoginLockoutWindowMinutes = 15;
             options.LoginLockoutDurationMinutes = 15;
+            options.HstsMaxAgeHours = 24;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -438,6 +446,20 @@ namespace WindowsInventoryLite
                 {
                     string useHttps = GetConfigString(config, "UseHttps");
                     options.UseHttps = String.Equals(useHttps, "true", StringComparison.OrdinalIgnoreCase);
+                }
+                if (!options.HstsEnabled)
+                {
+                    string hstsEnabledText = GetConfigString(config, "HstsEnabled");
+                    options.HstsEnabled = String.Equals(hstsEnabledText, "true", StringComparison.OrdinalIgnoreCase);
+                }
+                if (options.HstsMaxAgeHours == 24)
+                {
+                    string hstsMaxAgeHoursText = GetConfigString(config, "HstsMaxAgeHours");
+                    int hstsMaxAgeHoursFromConfig;
+                    if (!String.IsNullOrEmpty(hstsMaxAgeHoursText) && Int32.TryParse(hstsMaxAgeHoursText, out hstsMaxAgeHoursFromConfig) && hstsMaxAgeHoursFromConfig >= 1 && hstsMaxAgeHoursFromConfig <= 8760)
+                    {
+                        options.HstsMaxAgeHours = hstsMaxAgeHoursFromConfig;
+                    }
                 }
                 if (String.IsNullOrEmpty(options.CertificateThumbprint))
                 {
@@ -5305,9 +5327,27 @@ namespace WindowsInventoryLite
             return -1;
         }
 
-        private static void SendJson(Stream stream, string json)
+        private void SendJson(Stream stream, string json)
         {
             SendText(stream, json, "application/json; charset=utf-8", 200);
+        }
+
+        // HSTS is opt-in (off by default, see ServerOptions.HstsEnabled) and
+        // only ever added to a response actually served over the HTTPS
+        // listener - "stream is SslStream" is exactly how HandleClient
+        // itself already distinguishes the two (see AuthenticateServerStream/
+        // sslStream there), so this needs no extra plumbing through
+        // RequestContext. A browser that has cached the policy can still
+        // lock itself out of this server if HTTPS is later disabled while
+        // this was on, so max-age is admin-configured rather than the
+        // textbook one-year default, and the toggle itself defaults off.
+        private string BuildHstsHeaderOrEmpty(Stream stream)
+        {
+            if (!options.HstsEnabled || !(stream is SslStream))
+            {
+                return "";
+            }
+            return "\r\nStrict-Transport-Security: max-age=" + (options.HstsMaxAgeHours * 3600);
         }
 
         private static JavaScriptSerializer CreateJsonSerializer()
@@ -5317,7 +5357,7 @@ namespace WindowsInventoryLite
             return serializer;
         }
 
-        private static void SendUnauthorized(Stream stream)
+        private void SendUnauthorized(Stream stream)
         {
             byte[] body = Encoding.UTF8.GetBytes("Unauthorized");
             // Picked up during a security-headers audit: this response
@@ -5326,7 +5366,7 @@ namespace WindowsInventoryLite
             // the headers below - not just the two new ones, the
             // pre-existing CSP/X-Frame-Options/nosniff too. A 401 is a
             // response like any other and deserves the same baseline.
-            string header = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Windows Inventory Lite\"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + body.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + "\r\nConnection: close\r\n\r\n";
+            string header = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Windows Inventory Lite\"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + body.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + BuildHstsHeaderOrEmpty(stream) + "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
             stream.Write(body, 0, body.Length);
@@ -5338,10 +5378,10 @@ namespace WindowsInventoryLite
         // Deliberately omits WWW-Authenticate - re-prompting the browser for
         // credentials while the IP is locked out would just produce a
         // confusing repeated login dialog that can't succeed yet.
-        private static void SendTooManyRequests(Stream stream, int retryAfterSeconds)
+        private void SendTooManyRequests(Stream stream, int retryAfterSeconds)
         {
             byte[] body = Encoding.UTF8.GetBytes("{\"error\":\"Too many failed login attempts. Try again later.\"}");
-            string header = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: " + retryAfterSeconds + "\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: " + body.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + "\r\nConnection: close\r\n\r\n";
+            string header = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: " + retryAfterSeconds + "\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: " + body.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + BuildHstsHeaderOrEmpty(stream) + "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
             stream.Write(body, 0, body.Length);
@@ -5379,12 +5419,12 @@ namespace WindowsInventoryLite
         // XSS gaining camera/microphone access) at zero functional cost.
         private const string PermissionsPolicy = "geolocation=(), camera=(), microphone=(), payment=(), usb=()";
 
-        private static void SendText(Stream stream, string text, string contentType, int statusCode)
+        private void SendText(Stream stream, string text, string contentType, int statusCode)
         {
             SendText(stream, text, contentType, statusCode, null);
         }
 
-        private static void SendText(Stream stream, string text, string contentType, int statusCode, string cacheControl)
+        private void SendText(Stream stream, string text, string contentType, int statusCode, string cacheControl)
         {
             byte[] body = Encoding.UTF8.GetBytes(text);
             string status = statusCode == 200 ? "OK" : (statusCode == 400 ? "Bad Request" : (statusCode == 401 ? "Unauthorized" : (statusCode == 404 ? "Not Found" : "Error")));
@@ -5396,6 +5436,7 @@ namespace WindowsInventoryLite
                 "\r\nContent-Security-Policy: " + ContentSecurityPolicy +
                 "\r\nReferrer-Policy: " + ReferrerPolicy +
                 "\r\nPermissions-Policy: " + PermissionsPolicy +
+                BuildHstsHeaderOrEmpty(stream) +
                 (String.IsNullOrEmpty(cacheControl) ? "" : "\r\nCache-Control: " + cacheControl) +
                 "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
@@ -5980,6 +6021,8 @@ namespace WindowsInventoryLite
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["useHttps"] = options.UseHttps;
+            result["hstsEnabled"] = options.HstsEnabled;
+            result["hstsMaxAgeHours"] = options.HstsMaxAgeHours;
             result["thumbprint"] = options.CertificateThumbprint;
 
             X509Certificate2 certificate = serverCertificate;
@@ -6715,6 +6758,24 @@ namespace WindowsInventoryLite
                 // of reverting to whatever was baked in at install time.
                 updates["ListenPrefix"] = "http://+:" + options.Port + "/";
                 updates["EnableHttp"] = options.EnableHttp ? "true" : "false";
+            }
+
+            if (payload.ContainsKey("hstsEnabled"))
+            {
+                options.HstsEnabled = Convert.ToBoolean(payload["hstsEnabled"]);
+                updates["HstsEnabled"] = options.HstsEnabled ? "true" : "false";
+            }
+
+            if (payload.ContainsKey("hstsMaxAgeHours"))
+            {
+                int hstsMaxAgeHours;
+                if (!Int32.TryParse(Convert.ToString(payload["hstsMaxAgeHours"]), out hstsMaxAgeHours) || hstsMaxAgeHours < 1 || hstsMaxAgeHours > 8760)
+                {
+                    SendText(stream, "{\"error\":\"hstsMaxAgeHours must be between 1 and 8760\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.HstsMaxAgeHours = hstsMaxAgeHours;
+                updates["HstsMaxAgeHours"] = hstsMaxAgeHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
             }
 
             if (payload.ContainsKey("adSyncEnabled") || payload.ContainsKey("adDescriptionSyncEnabled") || payload.ContainsKey("adSyncMode") || payload.ContainsKey("adSyncIntervalHours")
@@ -8918,9 +8979,9 @@ namespace WindowsInventoryLite
             ms.Write(BitConverter.GetBytes(value), 0, 4);
         }
 
-        private static void SendBytes(Stream stream, byte[] data, string contentType, string filename)
+        private void SendBytes(Stream stream, byte[] data, string contentType, string filename)
         {
-            string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Disposition: attachment; filename=\"" + filename + "\"\r\nContent-Length: " + data.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + "\r\nConnection: close\r\n\r\n";
+            string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Disposition: attachment; filename=\"" + filename + "\"\r\nContent-Length: " + data.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + BuildHstsHeaderOrEmpty(stream) + "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
             stream.Write(data, 0, data.Length);
@@ -9064,6 +9125,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "RecordAttemptOutcome resets the count once the counting window has elapsed", TestRecordAttemptOutcomeResetsAfterWindowElapses);
             allPassed &= SelfTestCheck(output, "RecordAttemptOutcome never locks out when the threshold is 0 (disabled)", TestRecordAttemptOutcomeNeverLocksOutWhenThresholdIsZero);
             allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized's recorded failures and IsBasicAuthLockedOut's read are wired together and scoped per-IP", TestIsWebRequestAuthorizedLocksOutAfterRepeatedFailures);
+            allPassed &= SelfTestCheck(output, "BuildHstsHeaderOrEmpty only adds Strict-Transport-Security when enabled AND the stream is TLS", TestBuildHstsHeaderOrEmpty);
             allPassed &= SelfTestCheck(output, "ResolveEffectiveToken falls back to the live server token when the request supplies none", TestResolveEffectiveTokenFallsBackToLiveTokenWhenBlank);
             allPassed &= SelfTestCheck(output, "RequiresIngestionTokenRiskAcknowledgment only fires on an actual on-to-off transition without prior acknowledgment", TestRequiresIngestionTokenRiskAcknowledgmentOnlyWhenTurningEnforcementOff);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
@@ -9773,6 +9835,46 @@ namespace WindowsInventoryLite
             if (server.IsBasicAuthLockedOut(otherIp, out otherRetryAfterSeconds))
             {
                 return "expected a different IP to be unaffected by another IP's lockout";
+            }
+
+            return null;
+        }
+
+        private static string TestBuildHstsHeaderOrEmpty()
+        {
+            ServerOptions options = new ServerOptions();
+            options.HstsEnabled = true;
+            options.HstsMaxAgeHours = 2;
+            InventoryServer server = new InventoryServer(options);
+
+            using (MemoryStream plainStream = new MemoryStream())
+            {
+                string plainResult = server.BuildHstsHeaderOrEmpty(plainStream);
+                if (plainResult != "")
+                {
+                    return "expected no HSTS header for a plain (non-TLS) stream, got '" + plainResult + "'";
+                }
+            }
+
+            using (MemoryStream inner = new MemoryStream())
+            using (SslStream sslStream = new SslStream(inner))
+            {
+                string tlsResult = server.BuildHstsHeaderOrEmpty(sslStream);
+                if (tlsResult != "\r\nStrict-Transport-Security: max-age=7200")
+                {
+                    return "expected an HSTS header with max-age=7200 (2 hours) for a TLS stream, got '" + tlsResult + "'";
+                }
+            }
+
+            options.HstsEnabled = false;
+            using (MemoryStream inner2 = new MemoryStream())
+            using (SslStream sslStream2 = new SslStream(inner2))
+            {
+                string disabledResult = server.BuildHstsHeaderOrEmpty(sslStream2);
+                if (disabledResult != "")
+                {
+                    return "expected no HSTS header when HstsEnabled is false, even over a TLS stream, got '" + disabledResult + "'";
+                }
             }
 
             return null;

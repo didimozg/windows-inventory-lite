@@ -13,6 +13,8 @@ This is a practical lookup document for the server's HTTP API, not an OpenAPI/Sw
 
 **Login lockout (v0.50.0+).** Every route that goes through Basic Auth is also subject to a per-source-IP failed-attempt lockout, checked before Basic Auth itself: once an IP has presented wrong Basic Auth credentials `LoginLockoutThreshold` times (default 10) within `LoginLockoutWindowMinutes` (default 15), every request from that IP - including one with the *correct* password - gets a `429 Too Many Requests` with a `Retry-After: <seconds>` header for `LoginLockoutDurationMinutes` (default 15). A request with no `Authorization` header at all (a browser's normal first request before it has cached credentials) never counts as a failed attempt. Configurable, and disable-able (`LoginLockoutThreshold: 0`), via Settings > Admin password > Login lockout or `POST /api/v1/server/settings`. Tracking is per source IP and in-memory only (reset by a server restart) - defense-in-depth on top of the documented network-level control (trusted management network), not a replacement for it.
 
+**HSTS (v0.50.0+).** Off by default (`HstsEnabled: false`). When turned on via Settings > Server > HTTPS or `POST /api/v1/server/settings`, every response actually served over the HTTPS listener (never plain HTTP, regardless of this setting) additionally carries `Strict-Transport-Security: max-age=<HstsMaxAgeHours * 3600>`. `HstsMaxAgeHours` (default 24, range 1-8760) is admin-configured rather than the commonly-recommended one-year value, since a browser that has cached this policy can lock itself out of the dashboard for the full duration if HTTPS is later disabled (e.g. during a certificate emergency) - start with a short value and only enable once HTTPS is stable.
+
 **Request/response envelope.** Request and response bodies are plain JSON objects, no envelope wrapper. Most POST/PUT bodies are read as a flat `{"key": value, ...}` object; most GET/success responses are a flat JSON object as well, with fields documented per endpoint below.
 
 **Error shape.** Every error response documented here (except the two `401` cases above) is a single-field JSON object:
@@ -379,7 +381,7 @@ GET returns `{"history": [...]}`, most-recent-first, each entry `{id, thumbprint
 
 ### GET /api/v1/server/settings
 
-Returns the general settings block: everything from the certificate status shape above, plus `staleHours`, `port`, `enableHttp`, `httpsPort`, `adSyncEnabled`, `adDescriptionSyncEnabled`, `adSyncMode`, `adSyncIntervalHours`, `adDomain`, `adUseServiceIdentity`, `adUsername` (`null` when using the service identity), `adPasswordConfigured` (boolean only, never the password itself), `adComputerImportOUs`, `loginLockoutThreshold`, `loginLockoutWindowMinutes`, `loginLockoutDurationMinutes` (see "Login lockout" under Conventions above), `installLogRetentionDays`, `debugLogEnabled`, `debugLogPath`. `requireIngestionToken` and the dashboard admin username/password are deliberately not part of this response - see the ingestion-token and admin-password endpoints below.
+Returns the general settings block: everything from the certificate status shape above, plus `staleHours`, `port`, `enableHttp`, `httpsPort`, `hstsEnabled`, `hstsMaxAgeHours` (off by default - see "HSTS" under Conventions above), `adSyncEnabled`, `adDescriptionSyncEnabled`, `adSyncMode`, `adSyncIntervalHours`, `adDomain`, `adUseServiceIdentity`, `adUsername` (`null` when using the service identity), `adPasswordConfigured` (boolean only, never the password itself), `adComputerImportOUs`, `loginLockoutThreshold`, `loginLockoutWindowMinutes`, `loginLockoutDurationMinutes` (see "Login lockout" under Conventions above), `installLogRetentionDays`, `debugLogEnabled`, `debugLogPath`. `requireIngestionToken` and the dashboard admin username/password are deliberately not part of this response - see the ingestion-token and admin-password endpoints below.
 
 ### POST /api/v1/server/settings
 
@@ -390,7 +392,7 @@ Two settings each require an explicit acknowledgment flag before a risky change 
 - Enabling `useHttps` while the configured certificate has flagged risks, without `acknowledgeRisks: true`.
 - Turning off an already-enabled `requireIngestionToken`, without `acknowledgeIngestionTokenRisk: true` - since that removes authentication from both inventory-ingestion endpoints.
 
-Other validation errors (`400 {"error": "..."}`) cover out-of-range numeric fields (`staleHours` 1-8760, `port`/`httpsPort` 1-65535, `installLogRetentionDays` 1-3650, `adSyncIntervalHours` 1-8760, `loginLockoutThreshold` 0-1000, `loginLockoutWindowMinutes`/`loginLockoutDurationMinutes` 1-1440), disabling HTTP while HTTPS is also off or not working (would make the dashboard unreachable), and HTTP/HTTPS ports colliding when both are enabled.
+Other validation errors (`400 {"error": "..."}`) cover out-of-range numeric fields (`staleHours` 1-8760, `port`/`httpsPort` 1-65535, `installLogRetentionDays` 1-3650, `adSyncIntervalHours` 1-8760, `loginLockoutThreshold` 0-1000, `loginLockoutWindowMinutes`/`loginLockoutDurationMinutes` 1-1440, `hstsMaxAgeHours` 1-8760), disabling HTTP while HTTPS is also off or not working (would make the dashboard unreachable), and HTTP/HTTPS ports colliding when both are enabled.
 
 ```bash
 curl -X GET https://server:8443/api/v1/server/settings -u admin:password

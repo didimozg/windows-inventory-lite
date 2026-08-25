@@ -2586,6 +2586,8 @@
         byId('generalEnableHttp').checked = data.enableHttp !== false;
         byId('generalHttpsPort').value = data.httpsPort || 8443;
         byId('generalUseHttps').checked = !!data.useHttps;
+        byId('generalHstsEnabled').checked = !!data.hstsEnabled;
+        byId('generalHstsMaxAgeHours').value = data.hstsMaxAgeHours || 24;
         // Compared against on save to decide whether the "this will disconnect
         // you" confirmation is actually needed - staleHours/useHttps changes
         // alone don't move the port this browser is talking to.
@@ -2693,6 +2695,8 @@
     const enableHttp = byId('generalEnableHttp').checked;
     const httpsPort = Number.parseInt(byId('generalHttpsPort').value, 10) || 8443;
     const useHttps = byId('generalUseHttps').checked;
+    const hstsEnabled = byId('generalHstsEnabled').checked;
+    const hstsMaxAgeHours = Number.parseInt(byId('generalHstsMaxAgeHours').value, 10) || 24;
     const requireIngestionToken = byId('generalRequireIngestionToken').checked;
 
     // Only the HTTP port and the Enable HTTP switch can actually move this
@@ -2726,7 +2730,7 @@
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        staleHours, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, requireIngestionToken,
+        staleHours, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, hstsEnabled, hstsMaxAgeHours, requireIngestionToken,
         acknowledgeRisks: !!acknowledgeRisks, acknowledgeIngestionTokenRisk: !!acknowledgeIngestionTokenRisk,
         debugLogEnabled: byId('generalDebugLogEnabled').checked
       })

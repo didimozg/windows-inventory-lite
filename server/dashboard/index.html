@@ -171,6 +171,17 @@
               </label>
             </div>
             <p id="generalCertHint" class="cert-hint hidden"></p>
+            <div class="pkg-grid general-grid">
+              <label class="pkg-token-field">
+                HSTS max-age (hours)
+                <input id="generalHstsMaxAgeHours" type="number" min="1" max="8760" value="24">
+              </label>
+              <label class="check-label">
+                <input id="generalHstsEnabled" type="checkbox">
+                Enable HSTS (Strict-Transport-Security, HTTPS responses only)
+              </label>
+            </div>
+            <p class="cert-hint">HSTS tells browsers to only ever use HTTPS for this server, for the max-age duration - only sent on responses actually served over HTTPS. Off by default: a browser that has cached this can lock itself out of the dashboard for the full max-age if HTTPS is later disabled (e.g. during a certificate emergency). Start with a short max-age and only enable once HTTPS is stable.</p>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Ingestion Token</h2>
