@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.51.0]
+
+Closes the "no HSTS header" finding logged during the v0.48.0 security audit.
+
+### Security
+
+- `Strict-Transport-Security` (HSTS) is now available, off by default (`HstsEnabled`). When enabled via Settings > Server > HTTPS, it's added only to responses actually served over the HTTPS listener - never plain HTTP, and never unconditionally regardless of the setting. `HstsMaxAgeHours` (default 24, configurable 1-8760) deliberately does not default to the commonly-recommended one-year value: a browser that has cached the policy will refuse plain HTTP to this host for the full max-age even if HTTPS is later disabled (e.g. a certificate emergency), so operators should start with a short value and only extend it once HTTPS has proven stable.
+
 ## [0.50.0]
 
 Closes the "no rate limiting on Basic Auth" finding logged during the v0.48.0 security audit.
