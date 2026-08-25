@@ -197,7 +197,7 @@
     if (subview === 'windows') { loadWindowsSettings(); loadClientUpdateCredentials(); }
     if (subview === 'linux') { loadLinuxSettings(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (subview === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
-    if (subview === 'adminPassword') loadAdminPasswordStatus();
+    if (subview === 'adminPassword') { loadAdminPasswordStatus(); loadLoginLockoutSettings(); }
   }
 
   function setView(view, subview) {
@@ -2945,6 +2945,56 @@
       });
   }
 
+  // Deliberately reads/writes the general settings endpoint, not
+  // /api/v1/server/admin-password - that endpoint's Save (changeAdminPassword
+  // below) unconditionally requires re-entering the current password and a
+  // new password >= 8 characters, which would be wrong UX for saving an
+  // unrelated numeric setting. This mirrors the "Windows/Linux Client update
+  // credentials" blocks elsewhere in Settings: an independently-saved
+  // .settings-block living on a tab that also has its own main Save button.
+  function loadLoginLockoutSettings() {
+    fetch('/api/v1/server/settings', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('loginLockoutThreshold').value = data.loginLockoutThreshold != null ? data.loginLockoutThreshold : 10;
+        byId('loginLockoutWindowMinutes').value = data.loginLockoutWindowMinutes || 15;
+        byId('loginLockoutDurationMinutes').value = data.loginLockoutDurationMinutes || 15;
+      })
+      .catch(error => {
+        showSavedMessage(byId('loginLockoutMessage'), `Settings unavailable: ${error.message}`, true);
+      });
+  }
+
+  function saveLoginLockoutSettings() {
+    byId('loginLockoutSaveButton').disabled = true;
+    byId('loginLockoutMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        loginLockoutThreshold: Number.parseInt(byId('loginLockoutThreshold').value, 10) || 0,
+        loginLockoutWindowMinutes: Number.parseInt(byId('loginLockoutWindowMinutes').value, 10) || 15,
+        loginLockoutDurationMinutes: Number.parseInt(byId('loginLockoutDurationMinutes').value, 10) || 15
+      })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        showSavedMessage(byId('loginLockoutMessage'), 'Settings saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('loginLockoutMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('loginLockoutSaveButton').disabled = false;
+      });
+  }
+
   function changeAdminPassword() {
     const configured = !!state.adminPasswordConfigured;
     const newUsername = byId('adminUsername').value.trim();
@@ -4670,6 +4720,7 @@
     }
   });
   byId('adminPasswordSaveButton').addEventListener('click', changeAdminPassword);
+  byId('loginLockoutSaveButton').addEventListener('click', saveLoginLockoutSettings);
   byId('ingestionTokenRegenerateButton').addEventListener('click', regenerateIngestionToken);
   byId('linuxCredsSaveButton').addEventListener('click', saveLinuxUpdateCredentials);
   byId('linuxCredsClearButton').addEventListener('click', clearLinuxUpdateCredentials);

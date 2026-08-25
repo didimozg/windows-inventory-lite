@@ -125,6 +125,13 @@ namespace WindowsInventoryLite
         public string Token;
         public string WebUsername;
         public string WebPassword;
+        // Dashboard-only (Settings > Admin password > Login lockout), no
+        // Install-Server.ps1 CLI flag - same reasoning as
+        // LinuxDefaultIntervalHours below. Threshold 0 disables the whole
+        // per-IP lockout mechanism (see IsBasicAuthLockedOut).
+        public int LoginLockoutThreshold;
+        public int LoginLockoutWindowMinutes;
+        public int LoginLockoutDurationMinutes;
         public int InstallLogRetentionDays;
         public string ConfigPath;
         // The certificate is resolved from the LocalMachine\My store by thumbprint
@@ -225,6 +232,9 @@ namespace WindowsInventoryLite
             options.LinuxDefaultIntervalHours = 6;
             options.LinuxDefaultStatusIntervalMinutes = 30;
             options.LinuxDefaultInstallPath = "/opt/windows-inventory-lite";
+            options.LoginLockoutThreshold = 10;
+            options.LoginLockoutWindowMinutes = 15;
+            options.LoginLockoutDurationMinutes = 15;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -569,6 +579,33 @@ namespace WindowsInventoryLite
                         options.LinuxDefaultInstallPath = linuxDefaultInstallPathFromConfig;
                     }
                 }
+                if (options.LoginLockoutThreshold == 10)
+                {
+                    string loginLockoutThresholdText = GetConfigString(config, "LoginLockoutThreshold");
+                    int loginLockoutThresholdFromConfig;
+                    if (!String.IsNullOrEmpty(loginLockoutThresholdText) && Int32.TryParse(loginLockoutThresholdText, out loginLockoutThresholdFromConfig) && loginLockoutThresholdFromConfig >= 0 && loginLockoutThresholdFromConfig <= 1000)
+                    {
+                        options.LoginLockoutThreshold = loginLockoutThresholdFromConfig;
+                    }
+                }
+                if (options.LoginLockoutWindowMinutes == 15)
+                {
+                    string loginLockoutWindowText = GetConfigString(config, "LoginLockoutWindowMinutes");
+                    int loginLockoutWindowFromConfig;
+                    if (!String.IsNullOrEmpty(loginLockoutWindowText) && Int32.TryParse(loginLockoutWindowText, out loginLockoutWindowFromConfig) && loginLockoutWindowFromConfig >= 1 && loginLockoutWindowFromConfig <= 1440)
+                    {
+                        options.LoginLockoutWindowMinutes = loginLockoutWindowFromConfig;
+                    }
+                }
+                if (options.LoginLockoutDurationMinutes == 15)
+                {
+                    string loginLockoutDurationText = GetConfigString(config, "LoginLockoutDurationMinutes");
+                    int loginLockoutDurationFromConfig;
+                    if (!String.IsNullOrEmpty(loginLockoutDurationText) && Int32.TryParse(loginLockoutDurationText, out loginLockoutDurationFromConfig) && loginLockoutDurationFromConfig >= 1 && loginLockoutDurationFromConfig <= 1440)
+                    {
+                        options.LoginLockoutDurationMinutes = loginLockoutDurationFromConfig;
+                    }
+                }
                 if (String.IsNullOrEmpty(options.ClientUpdateUsername))
                 {
                     options.ClientUpdateUsername = GetConfigString(config, "ClientUpdateUsername");
@@ -724,6 +761,12 @@ namespace WindowsInventoryLite
         private readonly ServerOptions options;
         private readonly object installJobsLock = new object();
         private readonly Dictionary<string, InstallJob> installJobs = new Dictionary<string, InstallJob>();
+        // Per-source-IP Basic Auth failure tracking (see IsBasicAuthLockedOut/
+        // IsWebRequestAuthorized). In-memory only, does not survive a server
+        // restart - defense-in-depth on top of the documented "trusted
+        // management network" control, not the sole line of defense.
+        private readonly object loginLockoutLock = new object();
+        private readonly Dictionary<IPAddress, LoginLockoutRecord> loginLockoutState = new Dictionary<IPAddress, LoginLockoutRecord>();
         // Lets an open dashboard tab notice a server-initiated (scheduled)
         // push exists at all - a scheduled push never goes through any HTTP
         // request the browser makes, so without this the browser has no way
@@ -1380,6 +1423,7 @@ namespace WindowsInventoryLite
 
                 Stream stream = networkStream;
                 SslStream sslStream = null;
+                int loginLockoutRetryAfterSeconds;
                 try
                 {
                     if (clientState.IsHttps)
@@ -1408,6 +1452,10 @@ namespace WindowsInventoryLite
                     else if (request.Method == "POST" && request.Path == "/api/v1/linux/inventory/service-status")
                     {
                         ReceiveLinuxServiceStatus(stream, request);
+                    }
+                    else if (IsBasicAuthLockedOut(request, out loginLockoutRetryAfterSeconds))
+                    {
+                        SendTooManyRequests(stream, loginLockoutRetryAfterSeconds);
                     }
                     else if (!IsWebRequestAuthorized(request))
                     {
@@ -4767,11 +4815,160 @@ namespace WindowsInventoryLite
                 // closes that too.
                 bool usernameMatches = FixedTimeEquals(username, options.WebUsername);
                 bool passwordMatches = FixedTimeEquals(password, options.WebPassword);
-                return usernameMatches & passwordMatches;
+                bool authorized = usernameMatches & passwordMatches;
+                // Only a request that actually presented Basic Auth
+                // credentials and got this far counts toward the lockout -
+                // not the header-less first request every browser makes
+                // (see IsBasicAuthLockedOut's own comment) and not a
+                // malformed Authorization header (caught below).
+                RecordBasicAuthAttempt(request.RemoteAddress, authorized);
+                return authorized;
             }
             catch
             {
                 return false;
+            }
+        }
+
+        // Pure read - does not itself record anything, so a locked-out IP
+        // hammering the server doesn't extend its own lockout (a sustained
+        // flood must not keep pushing the unlock time forward indefinitely)
+        // and doesn't cost a wasted FixedTimeEquals comparison. Called from
+        // HandleClient before IsWebRequestAuthorized is even reached.
+        private bool IsBasicAuthLockedOut(RequestContext request, out int retryAfterSeconds)
+        {
+            retryAfterSeconds = 0;
+            if (options.LoginLockoutThreshold <= 0)
+            {
+                // Mechanism disabled (e.g. a test bench doing rapid scripted
+                // auth checks) - never locked out.
+                return false;
+            }
+            if (String.IsNullOrEmpty(options.WebUsername) && String.IsNullOrEmpty(options.WebPassword))
+            {
+                // Loopback-only mode (Basic Auth unconfigured) never records
+                // attempts - nothing to check here.
+                return false;
+            }
+            if (request.RemoteAddress == null)
+            {
+                return false;
+            }
+
+            lock (loginLockoutLock)
+            {
+                LoginLockoutRecord existing;
+                loginLockoutState.TryGetValue(request.RemoteAddress, out existing);
+                return EvaluateLockoutState(existing, DateTime.UtcNow, out retryAfterSeconds);
+            }
+        }
+
+        // Pure - no I/O, no DateTime.UtcNow inside - takes "now" as an
+        // explicit parameter so self-tests can exercise lockout/expiry
+        // transitions without any real waiting.
+        private static bool EvaluateLockoutState(LoginLockoutRecord existing, DateTime nowUtc, out int retryAfterSeconds)
+        {
+            retryAfterSeconds = 0;
+            if (existing == null || !existing.LockedUntilUtc.HasValue || existing.LockedUntilUtc.Value <= nowUtc)
+            {
+                return false;
+            }
+            retryAfterSeconds = (int)Math.Ceiling((existing.LockedUntilUtc.Value - nowUtc).TotalSeconds);
+            return true;
+        }
+
+        // Pure - returns the updated record, or null to mean "remove this
+        // entry from the dictionary" (a successful attempt, or a counting
+        // window that had already fully expired with nothing worth keeping).
+        // An IP already locked out does NOT get its failure count bumped
+        // further by more attempts during the lockout - see EvaluateLockoutState's
+        // own comment on why the lockout must not self-extend.
+        private static LoginLockoutRecord RecordAttemptOutcome(LoginLockoutRecord existing, bool succeeded, DateTime nowUtc, int thresholdCount, TimeSpan window, TimeSpan lockoutDuration)
+        {
+            if (succeeded)
+            {
+                return null;
+            }
+
+            LoginLockoutRecord record = existing;
+            if (record == null || (nowUtc - record.WindowStartUtc) > window)
+            {
+                record = new LoginLockoutRecord();
+                record.WindowStartUtc = nowUtc;
+                record.FailedCount = 0;
+                record.LockedUntilUtc = null;
+            }
+
+            if (record.LockedUntilUtc.HasValue && record.LockedUntilUtc.Value > nowUtc)
+            {
+                return record;
+            }
+
+            record.FailedCount++;
+            if (thresholdCount > 0 && record.FailedCount >= thresholdCount)
+            {
+                record.LockedUntilUtc = nowUtc.Add(lockoutDuration);
+            }
+            return record;
+        }
+
+        private void RecordBasicAuthAttempt(IPAddress remoteAddress, bool succeeded)
+        {
+            if (options.LoginLockoutThreshold <= 0 || remoteAddress == null)
+            {
+                return;
+            }
+
+            lock (loginLockoutLock)
+            {
+                LoginLockoutRecord existing;
+                loginLockoutState.TryGetValue(remoteAddress, out existing);
+                LoginLockoutRecord updated = RecordAttemptOutcome(
+                    existing,
+                    succeeded,
+                    DateTime.UtcNow,
+                    options.LoginLockoutThreshold,
+                    TimeSpan.FromMinutes(options.LoginLockoutWindowMinutes),
+                    TimeSpan.FromMinutes(options.LoginLockoutDurationMinutes));
+
+                if (updated == null)
+                {
+                    loginLockoutState.Remove(remoteAddress);
+                }
+                else
+                {
+                    loginLockoutState[remoteAddress] = updated;
+                }
+
+                // Bounds memory under a sustained attack from many distinct
+                // IPs - piggybacks on the lock already held for this write
+                // rather than a dedicated timer/thread for what is a rare,
+                // self-limiting cleanup.
+                if (loginLockoutState.Count > 500)
+                {
+                    PruneExpiredLoginLockoutEntriesLocked(DateTime.UtcNow);
+                }
+            }
+        }
+
+        // Caller must already hold loginLockoutLock.
+        private void PruneExpiredLoginLockoutEntriesLocked(DateTime nowUtc)
+        {
+            TimeSpan window = TimeSpan.FromMinutes(options.LoginLockoutWindowMinutes);
+            List<IPAddress> expired = new List<IPAddress>();
+            foreach (KeyValuePair<IPAddress, LoginLockoutRecord> entry in loginLockoutState)
+            {
+                LoginLockoutRecord record = entry.Value;
+                bool stillLocked = record.LockedUntilUtc.HasValue && record.LockedUntilUtc.Value > nowUtc;
+                bool windowExpired = (nowUtc - record.WindowStartUtc) > window;
+                if (!stillLocked && windowExpired)
+                {
+                    expired.Add(entry.Key);
+                }
+            }
+            foreach (IPAddress ip in expired)
+            {
+                loginLockoutState.Remove(ip);
             }
         }
 
@@ -5135,6 +5332,21 @@ namespace WindowsInventoryLite
             stream.Write(body, 0, body.Length);
         }
 
+        // Distinct from SendUnauthorized so a legitimate admin who tripped
+        // the lockout by mistyping sees why (and how long to wait) instead
+        // of it looking like an ordinary wrong-password rejection.
+        // Deliberately omits WWW-Authenticate - re-prompting the browser for
+        // credentials while the IP is locked out would just produce a
+        // confusing repeated login dialog that can't succeed yet.
+        private static void SendTooManyRequests(Stream stream, int retryAfterSeconds)
+        {
+            byte[] body = Encoding.UTF8.GetBytes("{\"error\":\"Too many failed login attempts. Try again later.\"}");
+            string header = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: " + retryAfterSeconds + "\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: " + body.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + "\r\nConnection: close\r\n\r\n";
+            byte[] headerBytes = Encoding.ASCII.GetBytes(header);
+            stream.Write(headerBytes, 0, headerBytes.Length);
+            stream.Write(body, 0, body.Length);
+        }
+
         // script-src has no 'unsafe-inline' - the dashboard's ~20 innerHTML
         // sinks are consistently escaped (see escapeHtml/escapeHtmlOrEmpty
         // in app.js), so this is a backstop against a future unescaped sink,
@@ -5242,6 +5454,16 @@ namespace WindowsInventoryLite
             public Dictionary<string, string> Headers;
             public string Body;
             public IPAddress RemoteAddress;
+        }
+
+        // Reference type deliberately, not a struct - "no record yet for
+        // this IP" is a plain null rather than a Nullable<T>. See
+        // EvaluateLockoutState/RecordAttemptOutcome.
+        private sealed class LoginLockoutRecord
+        {
+            public int FailedCount;
+            public DateTime WindowStartUtc;
+            public DateTime? LockedUntilUtc;
         }
 
         private sealed class InstallJob
@@ -6277,6 +6499,9 @@ namespace WindowsInventoryLite
             result["linuxDefaultIntervalHours"] = options.LinuxDefaultIntervalHours;
             result["linuxDefaultStatusIntervalMinutes"] = options.LinuxDefaultStatusIntervalMinutes;
             result["linuxDefaultInstallPath"] = options.LinuxDefaultInstallPath;
+            result["loginLockoutThreshold"] = options.LoginLockoutThreshold;
+            result["loginLockoutWindowMinutes"] = options.LoginLockoutWindowMinutes;
+            result["loginLockoutDurationMinutes"] = options.LoginLockoutDurationMinutes;
             result["installLogRetentionDays"] = options.InstallLogRetentionDays;
             result["debugLogEnabled"] = options.DebugLogEnabled;
             result["debugLogPath"] = DebugLogger.ResolvePath(options);
@@ -6602,6 +6827,42 @@ namespace WindowsInventoryLite
                 }
                 options.LinuxDefaultInstallPath = linuxDefaultInstallPath;
                 updates["LinuxDefaultInstallPath"] = linuxDefaultInstallPath;
+            }
+
+            if (payload.ContainsKey("loginLockoutThreshold"))
+            {
+                int loginLockoutThreshold;
+                if (!Int32.TryParse(Convert.ToString(payload["loginLockoutThreshold"]), out loginLockoutThreshold) || loginLockoutThreshold < 0 || loginLockoutThreshold > 1000)
+                {
+                    SendText(stream, "{\"error\":\"loginLockoutThreshold must be between 0 and 1000 (0 disables lockout)\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.LoginLockoutThreshold = loginLockoutThreshold;
+                updates["LoginLockoutThreshold"] = loginLockoutThreshold.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("loginLockoutWindowMinutes"))
+            {
+                int loginLockoutWindowMinutes;
+                if (!Int32.TryParse(Convert.ToString(payload["loginLockoutWindowMinutes"]), out loginLockoutWindowMinutes) || loginLockoutWindowMinutes < 1 || loginLockoutWindowMinutes > 1440)
+                {
+                    SendText(stream, "{\"error\":\"loginLockoutWindowMinutes must be between 1 and 1440\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.LoginLockoutWindowMinutes = loginLockoutWindowMinutes;
+                updates["LoginLockoutWindowMinutes"] = loginLockoutWindowMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("loginLockoutDurationMinutes"))
+            {
+                int loginLockoutDurationMinutes;
+                if (!Int32.TryParse(Convert.ToString(payload["loginLockoutDurationMinutes"]), out loginLockoutDurationMinutes) || loginLockoutDurationMinutes < 1 || loginLockoutDurationMinutes > 1440)
+                {
+                    SendText(stream, "{\"error\":\"loginLockoutDurationMinutes must be between 1 and 1440\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.LoginLockoutDurationMinutes = loginLockoutDurationMinutes;
+                updates["LoginLockoutDurationMinutes"] = loginLockoutDurationMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
             }
 
             if (payload.ContainsKey("debugLogEnabled"))
@@ -8795,6 +9056,14 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "RequiresJsonContentType is true only for a state-changing request with a non-empty body", TestRequiresJsonContentTypeOnlyForStateChangingRequestsWithABody);
             allPassed &= SelfTestCheck(output, "HasJsonContentType accepts application/json with or without a charset suffix, case-insensitively", TestHasJsonContentTypeAcceptsJsonWithOrWithoutCharsetSuffix);
             allPassed &= SelfTestCheck(output, "HasJsonContentType rejects form-encoded, text/plain, and missing Content-Type", TestHasJsonContentTypeRejectsFormAndTextPlainAndMissing);
+            allPassed &= SelfTestCheck(output, "EvaluateLockoutState reports not-locked-out with no record or an elapsed lockout", TestEvaluateLockoutStateNotLockedOutCases);
+            allPassed &= SelfTestCheck(output, "EvaluateLockoutState reports locked-out with the correct Retry-After seconds while active", TestEvaluateLockoutStateLockedOutReportsRetryAfter);
+            allPassed &= SelfTestCheck(output, "RecordAttemptOutcome locks out once the threshold is reached within the window", TestRecordAttemptOutcomeLocksOutAtThreshold);
+            allPassed &= SelfTestCheck(output, "RecordAttemptOutcome does not extend an active lockout on further failed attempts", TestRecordAttemptOutcomeDoesNotExtendActiveLockout);
+            allPassed &= SelfTestCheck(output, "RecordAttemptOutcome clears the record entirely on a successful attempt", TestRecordAttemptOutcomeClearsRecordOnSuccess);
+            allPassed &= SelfTestCheck(output, "RecordAttemptOutcome resets the count once the counting window has elapsed", TestRecordAttemptOutcomeResetsAfterWindowElapses);
+            allPassed &= SelfTestCheck(output, "RecordAttemptOutcome never locks out when the threshold is 0 (disabled)", TestRecordAttemptOutcomeNeverLocksOutWhenThresholdIsZero);
+            allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized's recorded failures and IsBasicAuthLockedOut's read are wired together and scoped per-IP", TestIsWebRequestAuthorizedLocksOutAfterRepeatedFailures);
             allPassed &= SelfTestCheck(output, "ResolveEffectiveToken falls back to the live server token when the request supplies none", TestResolveEffectiveTokenFallsBackToLiveTokenWhenBlank);
             allPassed &= SelfTestCheck(output, "RequiresIngestionTokenRiskAcknowledgment only fires on an actual on-to-off transition without prior acknowledgment", TestRequiresIngestionTokenRiskAcknowledgmentOnlyWhenTurningEnforcementOff);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
@@ -9285,6 +9554,225 @@ namespace WindowsInventoryLite
             if (!server.IsWebRequestAuthorized(remoteWithAuth))
             {
                 return "expected a non-loopback request with correct Basic Auth credentials to be authorized once Basic Auth is configured";
+            }
+
+            return null;
+        }
+
+        private static string TestEvaluateLockoutStateNotLockedOutCases()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            int retryAfterSeconds;
+
+            if (EvaluateLockoutState(null, now, out retryAfterSeconds))
+            {
+                return "expected no record at all to mean not locked out";
+            }
+
+            LoginLockoutRecord noLockoutSet = new LoginLockoutRecord();
+            noLockoutSet.FailedCount = 2;
+            noLockoutSet.WindowStartUtc = now;
+            noLockoutSet.LockedUntilUtc = null;
+            if (EvaluateLockoutState(noLockoutSet, now, out retryAfterSeconds))
+            {
+                return "expected a record with no LockedUntilUtc to mean not locked out";
+            }
+
+            LoginLockoutRecord expiredLockout = new LoginLockoutRecord();
+            expiredLockout.FailedCount = 5;
+            expiredLockout.WindowStartUtc = now.AddMinutes(-30);
+            expiredLockout.LockedUntilUtc = now.AddSeconds(-1);
+            if (EvaluateLockoutState(expiredLockout, now, out retryAfterSeconds))
+            {
+                return "expected a lockout whose LockedUntilUtc is in the past to mean not locked out";
+            }
+            return null;
+        }
+
+        private static string TestEvaluateLockoutStateLockedOutReportsRetryAfter()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            LoginLockoutRecord record = new LoginLockoutRecord();
+            record.FailedCount = 10;
+            record.WindowStartUtc = now.AddMinutes(-5);
+            record.LockedUntilUtc = now.AddSeconds(42);
+
+            int retryAfterSeconds;
+            if (!EvaluateLockoutState(record, now, out retryAfterSeconds))
+            {
+                return "expected a future LockedUntilUtc to mean locked out";
+            }
+            if (retryAfterSeconds != 42)
+            {
+                return "expected Retry-After to be 42 seconds, got " + retryAfterSeconds;
+            }
+            return null;
+        }
+
+        private static string TestRecordAttemptOutcomeLocksOutAtThreshold()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            TimeSpan window = TimeSpan.FromMinutes(15);
+            TimeSpan lockoutDuration = TimeSpan.FromMinutes(15);
+
+            LoginLockoutRecord record = null;
+            record = RecordAttemptOutcome(record, false, now, 3, window, lockoutDuration);
+            if (record.LockedUntilUtc.HasValue)
+            {
+                return "expected no lockout after 1 of 3 failures";
+            }
+            record = RecordAttemptOutcome(record, false, now, 3, window, lockoutDuration);
+            if (record.LockedUntilUtc.HasValue)
+            {
+                return "expected no lockout after 2 of 3 failures";
+            }
+            record = RecordAttemptOutcome(record, false, now, 3, window, lockoutDuration);
+            if (!record.LockedUntilUtc.HasValue)
+            {
+                return "expected a lockout to trigger on the 3rd failure against a threshold of 3";
+            }
+            if (record.LockedUntilUtc.Value != now.Add(lockoutDuration))
+            {
+                return "expected LockedUntilUtc to be exactly now + lockoutDuration";
+            }
+            return null;
+        }
+
+        private static string TestRecordAttemptOutcomeDoesNotExtendActiveLockout()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            TimeSpan window = TimeSpan.FromMinutes(15);
+            TimeSpan lockoutDuration = TimeSpan.FromMinutes(15);
+
+            LoginLockoutRecord record = null;
+            for (int i = 0; i < 3; i++)
+            {
+                record = RecordAttemptOutcome(record, false, now, 3, window, lockoutDuration);
+            }
+            DateTime firstLockedUntil = record.LockedUntilUtc.Value;
+
+            // A further failure 5 minutes later, still inside the active
+            // lockout, must not push the unlock time forward - a sustained
+            // flood must not keep the IP locked out indefinitely.
+            DateTime later = now.AddMinutes(5);
+            record = RecordAttemptOutcome(record, false, later, 3, window, lockoutDuration);
+            if (record.LockedUntilUtc.Value != firstLockedUntil)
+            {
+                return "expected further failures during an active lockout to not extend it";
+            }
+            return null;
+        }
+
+        private static string TestRecordAttemptOutcomeClearsRecordOnSuccess()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            TimeSpan window = TimeSpan.FromMinutes(15);
+            TimeSpan lockoutDuration = TimeSpan.FromMinutes(15);
+
+            LoginLockoutRecord record = null;
+            record = RecordAttemptOutcome(record, false, now, 10, window, lockoutDuration);
+            record = RecordAttemptOutcome(record, false, now, 10, window, lockoutDuration);
+            if (record == null || record.FailedCount != 2)
+            {
+                return "expected 2 recorded failures before the successful attempt";
+            }
+
+            LoginLockoutRecord afterSuccess = RecordAttemptOutcome(record, true, now, 10, window, lockoutDuration);
+            if (afterSuccess != null)
+            {
+                return "expected a successful attempt to clear the record entirely";
+            }
+            return null;
+        }
+
+        private static string TestRecordAttemptOutcomeResetsAfterWindowElapses()
+        {
+            DateTime windowStart = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            TimeSpan window = TimeSpan.FromMinutes(15);
+            TimeSpan lockoutDuration = TimeSpan.FromMinutes(15);
+
+            LoginLockoutRecord record = null;
+            record = RecordAttemptOutcome(record, false, windowStart, 10, window, lockoutDuration);
+            record = RecordAttemptOutcome(record, false, windowStart, 10, window, lockoutDuration);
+            if (record.FailedCount != 2)
+            {
+                return "expected 2 failures within the same window";
+            }
+
+            DateTime afterWindow = windowStart.AddMinutes(20);
+            record = RecordAttemptOutcome(record, false, afterWindow, 10, window, lockoutDuration);
+            if (record.FailedCount != 1)
+            {
+                return "expected the count to reset to 1 for a failure after the counting window elapsed, got " + record.FailedCount;
+            }
+            if (record.WindowStartUtc != afterWindow)
+            {
+                return "expected a fresh window to start at the new failure's timestamp";
+            }
+            return null;
+        }
+
+        private static string TestRecordAttemptOutcomeNeverLocksOutWhenThresholdIsZero()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            TimeSpan window = TimeSpan.FromMinutes(15);
+            TimeSpan lockoutDuration = TimeSpan.FromMinutes(15);
+
+            LoginLockoutRecord record = null;
+            for (int i = 0; i < 20; i++)
+            {
+                record = RecordAttemptOutcome(record, false, now, 0, window, lockoutDuration);
+                if (record.LockedUntilUtc.HasValue)
+                {
+                    return "expected threshold 0 to never trigger a lockout, failed after attempt " + (i + 1);
+                }
+            }
+            return null;
+        }
+
+        private static string TestIsWebRequestAuthorizedLocksOutAfterRepeatedFailures()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.LoginLockoutThreshold = 3;
+            options.LoginLockoutWindowMinutes = 15;
+            options.LoginLockoutDurationMinutes = 15;
+            InventoryServer server = new InventoryServer(options);
+            IPAddress attackerIp = IPAddress.Parse("203.0.113.7");
+
+            for (int i = 0; i < 3; i++)
+            {
+                RequestContext wrongAuth = new RequestContext();
+                wrongAuth.Headers = new Dictionary<string, string>();
+                wrongAuth.Headers["authorization"] = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("admin:wrong-password"));
+                wrongAuth.RemoteAddress = attackerIp;
+                if (server.IsWebRequestAuthorized(wrongAuth))
+                {
+                    return "expected a wrong-password attempt to be rejected";
+                }
+            }
+
+            RequestContext lockoutCheck = new RequestContext();
+            lockoutCheck.Headers = new Dictionary<string, string>();
+            lockoutCheck.RemoteAddress = attackerIp;
+            int retryAfterSeconds;
+            if (!server.IsBasicAuthLockedOut(lockoutCheck, out retryAfterSeconds))
+            {
+                return "expected the IP to be locked out after 3 failed attempts against a threshold of 3";
+            }
+            if (retryAfterSeconds <= 0)
+            {
+                return "expected a positive Retry-After value while locked out, got " + retryAfterSeconds;
+            }
+
+            RequestContext otherIp = new RequestContext();
+            otherIp.Headers = new Dictionary<string, string>();
+            otherIp.RemoteAddress = IPAddress.Parse("198.51.100.9");
+            int otherRetryAfterSeconds;
+            if (server.IsBasicAuthLockedOut(otherIp, out otherRetryAfterSeconds))
+            {
+                return "expected a different IP to be unaffected by another IP's lockout";
             }
 
             return null;

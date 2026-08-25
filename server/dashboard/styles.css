@@ -1776,6 +1776,13 @@ h3.push-status-heading {
   grid-template-columns: minmax(200px, 420px) minmax(200px, 420px) auto;
 }
 
+/* Three short numeric fields (threshold/window/duration) - narrower tracks
+   than .client-update-grid's credential-shaped fields, matching this
+   block's actual content instead of stretching digits-only inputs wide. */
+.login-lockout-grid {
+  grid-template-columns: repeat(3, minmax(160px, 220px)) auto;
+}
+
 /* Same narrow single-column treatment as .ad-sync-panel/.ad-identity-panel -
    the schedule's mode dropdown and its one conditional field read as a
    small deliberate group, not stretched across the page. */
@@ -1984,6 +1991,7 @@ h3.push-status-heading {
   .license-grid,
   .admin-password-grid,
   .general-grid,
+  .login-lockout-grid,
   .ad-sync-mode-row {
     grid-template-columns: 1fr;
   }

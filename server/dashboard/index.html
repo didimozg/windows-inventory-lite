@@ -430,6 +430,28 @@
           </div>
           <p class="cert-hint">Your browser may prompt for the new credentials on the next request after saving.</p>
           <div id="adminPasswordMessage" class="pkg-message hidden"></div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Login lockout</h2>
+            <p class="cert-hint">After this many failed Basic Auth attempts from the same source IP within the counting window, that IP is blocked for the lockout duration - including correct-password attempts. Set threshold to 0 to disable.</p>
+            <div class="pkg-grid login-lockout-grid">
+              <label class="pkg-token-field">
+                Failed attempts before lockout
+                <input id="loginLockoutThreshold" type="number" min="0" max="1000" value="10">
+              </label>
+              <label class="pkg-token-field">
+                Counting window (minutes)
+                <input id="loginLockoutWindowMinutes" type="number" min="1" max="1440" value="15">
+              </label>
+              <label class="pkg-token-field">
+                Lockout duration (minutes)
+                <input id="loginLockoutDurationMinutes" type="number" min="1" max="1440" value="15">
+              </label>
+              <div class="pkg-buttons">
+                <button id="loginLockoutSaveButton" class="primary-button" type="button">Save</button>
+              </div>
+            </div>
+            <div id="loginLockoutMessage" class="pkg-message hidden"></div>
+          </div>
         </section>
 
         <section id="licensesView" class="hidden" aria-label="License inventory">
