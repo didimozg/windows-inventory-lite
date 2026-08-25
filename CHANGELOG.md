@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.45.0]
+
+Follow-up from live troubleshooting of a real WinRM push failure right after `[0.44.0]` shipped.
+
+### Changed
+
+- "Windows Client update credentials" moved from an embedded Save/Delete pair on Deploy > Updates to a new dedicated block in Settings > Windows, mirroring the existing "Linux Client update credentials" block in Settings > Linux. Deploy > Updates' WinRM credential fields are now purely for choosing Global vs typing a genuine one-off Manual override - the fields are no longer dual-purpose, and there's no save action on that page any more (matching Deploy > Actions, which never had one). This closes a real UX trap: Save cleared the fields it had just read, so clicking "Update selected" right after "Save" without retyping anything silently sent blank credentials for that push.
+- The Manual-mode WinRM password field on Deploy > Updates no longer shows "leave blank to keep the current one" - that placeholder was never true for a one-off override (it sends exactly what's typed, blank included, with no fallback to any saved value).
+
+### Fixed
+
+- Every Force Windows/Force Linux client install or update job's Output column showed the literal word "Unknown" instead of the real PowerShell/SSH output or error text, regardless of whether the job succeeded or failed - `RunUnifiedInstallTarget` copied status/message/exitCode onto the per-target result but never copied `output`/`error`, and the dashboard only renders those two fields from the top-level result (the attempts sub-table where they were present is hidden unless a target had more than one attempt, which Force modes never do). Pre-existing since `[0.42.0]`, only noticed now while live-troubleshooting a real push failure.
+
 ## [0.44.0]
 
 Phase 4 of the Deploy > Actions/Updates unification effort (see `docs/superpowers/specs/2026-08-17-deploy-actions-updates-unification-design.md`) - the spec's rollout plan is now fully shipped end to end. Deploy > Updates' separate Windows and Linux tabs are now one cross-platform table.
