@@ -1413,6 +1413,14 @@ namespace WindowsInventoryLite
                     {
                         SendUnauthorized(stream);
                     }
+                    else if (IsCrossSiteRequestRejected(request))
+                    {
+                        SendText(stream, "{\"error\":\"Cross-site request rejected - Origin/Referer does not match this server.\"}", "application/json; charset=utf-8", 400);
+                    }
+                    else if (RequiresJsonContentType(request) && !HasJsonContentType(request))
+                    {
+                        SendText(stream, "{\"error\":\"Content-Type must be application/json.\"}", "application/json; charset=utf-8", 400);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/clients")
                     {
                         SendJson(stream, BuildClientIndex());
@@ -4810,6 +4818,107 @@ namespace WindowsInventoryLite
             return !FixedTimeEquals(suppliedToken, configuredToken);
         }
 
+        private static bool IsStateChangingMethod(string method)
+        {
+            return method == "POST" || method == "PUT" || method == "DELETE";
+        }
+
+        // CSRF defense #1: Basic Auth has no equivalent of a SameSite cookie -
+        // once a browser has the admin's credentials cached for this origin,
+        // it attaches them automatically to ANY request to this server,
+        // including one a hostile page triggers via a cross-site form
+        // submission or fetch(). Origin/Referer are checked only when
+        // present, never required: every browser this project targets has
+        // sent Origin on state-changing requests for years, so a real
+        // browser being tricked into a cross-site request always gives us
+        // something to check - but a non-browser caller (curl, Postman, an
+        // automation script hitting the endpoints docs/api-reference.md
+        // documents directly) typically sends neither header at all, and is
+        // the intentional, authorized caller, not a tricked victim. Requiring
+        // one would break that documented, supported usage for no real
+        // security gain (there is no "victim" to trick when the same person
+        // who holds the credentials is also the one making the request).
+        // GET/HEAD are never checked - they're expected to be side-effect-
+        // free (see CleanupInstallJobLogs' own retention-only cleanup for
+        // the one narrow, attacker-uncontrolled exception, tracked
+        // separately in the backlog rather than folded in here).
+        private static bool IsCrossSiteRequestRejected(RequestContext request)
+        {
+            if (!IsStateChangingMethod(request.Method))
+            {
+                return false;
+            }
+
+            string host = request.Headers.ContainsKey("host") ? request.Headers["host"] : null;
+            if (String.IsNullOrEmpty(host))
+            {
+                return true;
+            }
+
+            string origin = request.Headers.ContainsKey("origin") ? request.Headers["origin"] : null;
+            if (!String.IsNullOrEmpty(origin))
+            {
+                // The literal string "null" is a real value browsers send for
+                // an opaque origin (a sandboxed iframe, some redirect chains,
+                // a data: URL) - it can never be verified to match this
+                // server, so it's treated as a mismatch, not as absent. Some
+                // CSRF checks elsewhere have been bypassed by treating "null"
+                // as a wildcard; this deliberately does not.
+                return !RequestHostMatches(origin, host);
+            }
+
+            string referer = request.Headers.ContainsKey("referer") ? request.Headers["referer"] : null;
+            if (!String.IsNullOrEmpty(referer))
+            {
+                return !RequestHostMatches(referer, host);
+            }
+
+            return false;
+        }
+
+        private static bool RequestHostMatches(string originOrReferer, string host)
+        {
+            try
+            {
+                Uri parsed = new Uri(originOrReferer);
+                return String.Equals(parsed.Authority, host, StringComparison.OrdinalIgnoreCase);
+            }
+            catch (UriFormatException)
+            {
+                return false;
+            }
+        }
+
+        // CSRF defense #2: a plain HTML <form> can only submit
+        // application/x-www-form-urlencoded, multipart/form-data, or
+        // text/plain - a browser refuses to let a cross-origin form set an
+        // arbitrary Content-Type like application/json. Without this check,
+        // that restriction wouldn't actually stop an attacker: a form using
+        // enctype="text/plain" with a single cleverly-named field can be made
+        // to submit a body that is ALSO syntactically valid JSON (a known,
+        // documented technique), so relying on "the body must parse as JSON"
+        // alone is not enough - the Content-Type header itself must be
+        // checked. Every route that reads a body already requires JSON
+        // (JavaScriptSerializer.Deserialize), so this loses no legitimate
+        // functionality; routes with no body (DELETE, RegenerateIngestionToken)
+        // are unaffected since RequiresJsonContentType is false for them.
+        private static bool RequiresJsonContentType(RequestContext request)
+        {
+            return IsStateChangingMethod(request.Method) && !String.IsNullOrEmpty(request.Body);
+        }
+
+        private static bool HasJsonContentType(RequestContext request)
+        {
+            string contentType = request.Headers.ContainsKey("content-type") ? request.Headers["content-type"] : null;
+            if (String.IsNullOrEmpty(contentType))
+            {
+                return false;
+            }
+            int semicolon = contentType.IndexOf(';');
+            string mediaType = (semicolon >= 0 ? contentType.Substring(0, semicolon) : contentType).Trim();
+            return String.Equals(mediaType, "application/json", StringComparison.OrdinalIgnoreCase);
+        }
+
         // Shared by the two Client Package generator endpoints below
         // (ConfigureClientPackage, ConfigureLinuxClientPackage), which had
         // no token fallback at all before this fix. StartClientAction has
@@ -5014,7 +5123,13 @@ namespace WindowsInventoryLite
         private static void SendUnauthorized(Stream stream)
         {
             byte[] body = Encoding.UTF8.GetBytes("Unauthorized");
-            string header = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Windows Inventory Lite\"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + body.Length + "\r\nConnection: close\r\n\r\n";
+            // Picked up during a security-headers audit: this response
+            // bypasses SendText (its own status line/WWW-Authenticate don't
+            // fit that helper's signature), so it had never carried ANY of
+            // the headers below - not just the two new ones, the
+            // pre-existing CSP/X-Frame-Options/nosniff too. A 401 is a
+            // response like any other and deserves the same baseline.
+            string header = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Windows Inventory Lite\"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + body.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
             stream.Write(body, 0, body.Length);
@@ -5036,6 +5151,22 @@ namespace WindowsInventoryLite
         private const string ContentSecurityPolicy =
             "default-src 'self'; script-src 'self' 'sha256-rqltRpQDffCU3nbpQC/zdbFn0/Eb4PSGrbmQ8EbS3q4='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
+        // same-origin (not the stricter no-referrer) deliberately: this
+        // dashboard's own pages never navigate cross-origin, so a leak to
+        // another site was never actually possible - the meaningful choice
+        // here is that Referer keeps flowing for genuine same-origin
+        // requests, which IsCrossSiteRequestRejected's own fallback path
+        // reads when Origin happens to be absent (see that function's
+        // comment). A stricter policy would silently narrow that fallback's
+        // coverage for zero real privacy benefit, since there's no cross-
+        // origin navigation to protect against here in the first place.
+        private const string ReferrerPolicy = "same-origin";
+
+        // This dashboard never uses any of these browser APIs - disabling
+        // them removes an otherwise-unused attack surface (e.g. a future
+        // XSS gaining camera/microphone access) at zero functional cost.
+        private const string PermissionsPolicy = "geolocation=(), camera=(), microphone=(), payment=(), usb=()";
+
         private static void SendText(Stream stream, string text, string contentType, int statusCode)
         {
             SendText(stream, text, contentType, statusCode, null);
@@ -5051,6 +5182,8 @@ namespace WindowsInventoryLite
                 "\r\nX-Content-Type-Options: nosniff" +
                 "\r\nX-Frame-Options: DENY" +
                 "\r\nContent-Security-Policy: " + ContentSecurityPolicy +
+                "\r\nReferrer-Policy: " + ReferrerPolicy +
+                "\r\nPermissions-Policy: " + PermissionsPolicy +
                 (String.IsNullOrEmpty(cacheControl) ? "" : "\r\nCache-Control: " + cacheControl) +
                 "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
@@ -8526,7 +8659,7 @@ namespace WindowsInventoryLite
 
         private static void SendBytes(Stream stream, byte[] data, string contentType, string filename)
         {
-            string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Disposition: attachment; filename=\"" + filename + "\"\r\nContent-Length: " + data.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nConnection: close\r\n\r\n";
+            string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Disposition: attachment; filename=\"" + filename + "\"\r\nContent-Length: " + data.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
             stream.Write(data, 0, data.Length);
@@ -8651,6 +8784,17 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected requires a matching token when enforcement is on", TestIsIngestionTokenRejectedRequiresMatchWhenEnforced);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected always accepts when enforcement is off, regardless of the supplied token", TestIsIngestionTokenRejectedAlwaysAcceptsWhenNotEnforced);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected fails closed when enforcement is on but no token is configured", TestIsIngestionTokenRejectedFailsClosedWhenEnforcedButNoTokenConfigured);
+            allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected ignores non-state-changing methods", TestIsCrossSiteRequestRejectedIgnoresNonStateChangingMethods);
+            allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected allows a state-changing request with neither Origin nor Referer", TestIsCrossSiteRequestRejectedAllowsMissingOriginAndReferer);
+            allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected requires a Host header", TestIsCrossSiteRequestRejectedRequiresHostHeader);
+            allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected accepts an Origin matching the Host header", TestIsCrossSiteRequestRejectedAcceptsMatchingOrigin);
+            allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected rejects an Origin that doesn't match the Host header", TestIsCrossSiteRequestRejectedRejectsMismatchedOrigin);
+            allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected treats the literal Origin 'null' as a mismatch, not as absent", TestIsCrossSiteRequestRejectedTreatsNullOriginAsMismatch);
+            allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected falls back to Referer when Origin is absent", TestIsCrossSiteRequestRejectedFallsBackToRefererWhenOriginAbsent);
+            allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected fails closed on a malformed Origin header", TestIsCrossSiteRequestRejectedFailsClosedOnMalformedOrigin);
+            allPassed &= SelfTestCheck(output, "RequiresJsonContentType is true only for a state-changing request with a non-empty body", TestRequiresJsonContentTypeOnlyForStateChangingRequestsWithABody);
+            allPassed &= SelfTestCheck(output, "HasJsonContentType accepts application/json with or without a charset suffix, case-insensitively", TestHasJsonContentTypeAcceptsJsonWithOrWithoutCharsetSuffix);
+            allPassed &= SelfTestCheck(output, "HasJsonContentType rejects form-encoded, text/plain, and missing Content-Type", TestHasJsonContentTypeRejectsFormAndTextPlainAndMissing);
             allPassed &= SelfTestCheck(output, "ResolveEffectiveToken falls back to the live server token when the request supplies none", TestResolveEffectiveTokenFallsBackToLiveTokenWhenBlank);
             allPassed &= SelfTestCheck(output, "RequiresIngestionTokenRiskAcknowledgment only fires on an actual on-to-off transition without prior acknowledgment", TestRequiresIngestionTokenRiskAcknowledgmentOnlyWhenTurningEnforcementOff);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
@@ -10110,6 +10254,208 @@ namespace WindowsInventoryLite
             if (!InventoryServer.IsIngestionTokenRejected(true, "", ""))
             {
                 return "expected rejection when enforcement is on but no token is configured (empty supplied, empty configured)";
+            }
+            return null;
+        }
+
+        private static string TestIsCrossSiteRequestRejectedIgnoresNonStateChangingMethods()
+        {
+            RequestContext get = new RequestContext();
+            get.Method = "GET";
+            get.Headers = new Dictionary<string, string>();
+            get.Headers["host"] = "server.example.com";
+            get.Headers["origin"] = "https://evil.example.com";
+            if (InventoryServer.IsCrossSiteRequestRejected(get))
+            {
+                return "expected a GET request to never be rejected, regardless of a mismatched Origin";
+            }
+            return null;
+        }
+
+        private static string TestIsCrossSiteRequestRejectedAllowsMissingOriginAndReferer()
+        {
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["host"] = "server.example.com";
+            if (InventoryServer.IsCrossSiteRequestRejected(request))
+            {
+                return "expected a POST with neither Origin nor Referer to be allowed - this is the documented curl/automation case, not a browser being tricked";
+            }
+            return null;
+        }
+
+        private static string TestIsCrossSiteRequestRejectedRequiresHostHeader()
+        {
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Headers = new Dictionary<string, string>();
+            if (!InventoryServer.IsCrossSiteRequestRejected(request))
+            {
+                return "expected a state-changing request with no Host header at all to be rejected (malformed HTTP/1.1, fail closed)";
+            }
+            return null;
+        }
+
+        private static string TestIsCrossSiteRequestRejectedAcceptsMatchingOrigin()
+        {
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["host"] = "server.example.com:8443";
+            request.Headers["origin"] = "https://server.example.com:8443";
+            if (InventoryServer.IsCrossSiteRequestRejected(request))
+            {
+                return "expected an Origin whose host:port matches the Host header to be accepted";
+            }
+            return null;
+        }
+
+        private static string TestIsCrossSiteRequestRejectedRejectsMismatchedOrigin()
+        {
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["host"] = "server.example.com";
+            request.Headers["origin"] = "https://evil.example.com";
+            if (!InventoryServer.IsCrossSiteRequestRejected(request))
+            {
+                return "expected an Origin that doesn't match the Host header to be rejected";
+            }
+            return null;
+        }
+
+        private static string TestIsCrossSiteRequestRejectedTreatsNullOriginAsMismatch()
+        {
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["host"] = "server.example.com";
+            request.Headers["origin"] = "null";
+            if (!InventoryServer.IsCrossSiteRequestRejected(request))
+            {
+                return "expected the literal Origin value 'null' (an opaque origin) to be treated as a mismatch, not as absent";
+            }
+            return null;
+        }
+
+        private static string TestIsCrossSiteRequestRejectedFallsBackToRefererWhenOriginAbsent()
+        {
+            RequestContext accepted = new RequestContext();
+            accepted.Method = "POST";
+            accepted.Headers = new Dictionary<string, string>();
+            accepted.Headers["host"] = "server.example.com";
+            accepted.Headers["referer"] = "https://server.example.com/deploy-actions";
+            if (InventoryServer.IsCrossSiteRequestRejected(accepted))
+            {
+                return "expected a matching Referer to be accepted when Origin is absent";
+            }
+
+            RequestContext rejected = new RequestContext();
+            rejected.Method = "POST";
+            rejected.Headers = new Dictionary<string, string>();
+            rejected.Headers["host"] = "server.example.com";
+            rejected.Headers["referer"] = "https://evil.example.com/attack.html";
+            if (!InventoryServer.IsCrossSiteRequestRejected(rejected))
+            {
+                return "expected a mismatched Referer to be rejected when Origin is absent";
+            }
+            return null;
+        }
+
+        private static string TestIsCrossSiteRequestRejectedFailsClosedOnMalformedOrigin()
+        {
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["host"] = "server.example.com";
+            request.Headers["origin"] = "not a valid uri at all";
+            if (!InventoryServer.IsCrossSiteRequestRejected(request))
+            {
+                return "expected a malformed Origin header to be rejected (fail closed), not silently accepted";
+            }
+            return null;
+        }
+
+        private static string TestRequiresJsonContentTypeOnlyForStateChangingRequestsWithABody()
+        {
+            RequestContext getWithBody = new RequestContext();
+            getWithBody.Method = "GET";
+            getWithBody.Body = "{}";
+            if (InventoryServer.RequiresJsonContentType(getWithBody))
+            {
+                return "expected a GET request to never require a JSON Content-Type, even with a body";
+            }
+
+            RequestContext postNoBody = new RequestContext();
+            postNoBody.Method = "POST";
+            postNoBody.Body = "";
+            if (InventoryServer.RequiresJsonContentType(postNoBody))
+            {
+                return "expected a POST with an empty body (e.g. a DELETE-shaped no-body route) to not require a Content-Type";
+            }
+
+            RequestContext postWithBody = new RequestContext();
+            postWithBody.Method = "POST";
+            postWithBody.Body = "{\"targets\":\"PC-001\"}";
+            if (!InventoryServer.RequiresJsonContentType(postWithBody))
+            {
+                return "expected a POST with a non-empty body to require a JSON Content-Type";
+            }
+            return null;
+        }
+
+        private static string TestHasJsonContentTypeAcceptsJsonWithOrWithoutCharsetSuffix()
+        {
+            RequestContext plain = new RequestContext();
+            plain.Headers = new Dictionary<string, string>();
+            plain.Headers["content-type"] = "application/json";
+            if (!InventoryServer.HasJsonContentType(plain))
+            {
+                return "expected bare 'application/json' to be accepted";
+            }
+
+            RequestContext withCharset = new RequestContext();
+            withCharset.Headers = new Dictionary<string, string>();
+            withCharset.Headers["content-type"] = "application/json; charset=utf-8";
+            if (!InventoryServer.HasJsonContentType(withCharset))
+            {
+                return "expected 'application/json; charset=utf-8' to be accepted";
+            }
+
+            RequestContext mixedCase = new RequestContext();
+            mixedCase.Headers = new Dictionary<string, string>();
+            mixedCase.Headers["content-type"] = "Application/JSON";
+            if (!InventoryServer.HasJsonContentType(mixedCase))
+            {
+                return "expected a differently-cased media type to still be accepted";
+            }
+            return null;
+        }
+
+        private static string TestHasJsonContentTypeRejectsFormAndTextPlainAndMissing()
+        {
+            RequestContext formEncoded = new RequestContext();
+            formEncoded.Headers = new Dictionary<string, string>();
+            formEncoded.Headers["content-type"] = "application/x-www-form-urlencoded";
+            if (InventoryServer.HasJsonContentType(formEncoded))
+            {
+                return "expected 'application/x-www-form-urlencoded' to be rejected";
+            }
+
+            RequestContext textPlain = new RequestContext();
+            textPlain.Headers = new Dictionary<string, string>();
+            textPlain.Headers["content-type"] = "text/plain";
+            if (InventoryServer.HasJsonContentType(textPlain))
+            {
+                return "expected 'text/plain' to be rejected - this is exactly the enctype a form-based JSON-body CSRF attempt would use";
+            }
+
+            RequestContext missing = new RequestContext();
+            missing.Headers = new Dictionary<string, string>();
+            if (InventoryServer.HasJsonContentType(missing))
+            {
+                return "expected a missing Content-Type header to be rejected";
             }
             return null;
         }
