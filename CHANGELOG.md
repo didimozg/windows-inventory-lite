@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.48.0]
+
+Closes the CSRF finding left open since Phase 3's security review, plus a follow-up security sweep.
+
+### Security
+
+- Every state-changing route (POST/PUT/DELETE, except the two device-ingestion endpoints) now rejects a request whose `Origin`/`Referer` header is present but doesn't match the server's own `Host`, and rejects any request with a body unless `Content-Type: application/json` is set. Closes both the classic HTML-form CSRF vector and the `enctype="text/plain"` JSON-smuggling variant. Both checks are skipped when the corresponding header is absent, so direct API automation (curl, the `docs/api-reference.md` examples) is unaffected.
+- Added `Referrer-Policy: same-origin` and a restrictive `Permissions-Policy` to every response, including the `401 Unauthorized` response, which previously carried no security headers at all.
+
+### Fixed
+
+- `SendUnauthorized` (the 401 response) never sent `X-Content-Type-Options`, `X-Frame-Options`, or the Content-Security-Policy either, pre-dating this change - now consistent with every other response.
+
 ## [0.47.0]
 
 ### Changed
