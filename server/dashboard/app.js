@@ -643,6 +643,12 @@
       case 'os': return isWindows ? clientSortValue(client, 'os') : linuxClientSortValue(client, 'os');
       case 'office': return isWindows ? clientSortValue(client, 'office') : null;
       case 'activation': return isWindows ? clientSortValue(client, 'windowsActivated') : null;
+      // Not exposed as its own clickable column header (the Activation
+      // column shows both Windows and Office dots together, and splitting
+      // it into two sortable columns is a bigger table-layout change than
+      // this needs) - reachable only via the Dashboard's "Office activated"
+      // tile setting state.sort.clients directly.
+      case 'officeActivation': return isWindows ? clientSortValue(client, 'officeActivated') : null;
       case 'items': return isWindows ? clientSortValue(client, 'softwareCount') : linuxClientSortValue(client, 'softwareCount');
       case 'collectedAt': return new Date(client.collectedAt || client.sourceUpdatedAt || 0).getTime();
       default: return '';
@@ -3586,8 +3592,16 @@
     // Windows-only by design, not an oversight: neither Windows activation
     // nor Office activation has any Linux equivalent, so these two tiles
     // stay state.clients-only while Clients/Stale go fleet-wide.
-    byId('dashWindowsActivated').textContent = clients.filter(client => client.activation && client.activation.windows && client.activation.windows.activated).length;
-    byId('dashOfficeActivated').textContent = clients.filter(client => client.activation && client.activation.office && client.activation.office.activated).length;
+    const windowsActivatedCount = clients.filter(client => client.activation && client.activation.windows && client.activation.windows.activated).length;
+    const officeActivatedCount = clients.filter(client => client.activation && client.activation.office && client.activation.office.activated).length;
+    byId('dashWindowsActivated').textContent = windowsActivatedCount;
+    byId('dashOfficeActivated').textContent = officeActivatedCount;
+    // Green only at 100% of the same Windows-only denominator the counts
+    // above use - and only when there's at least one Windows client to be
+    // activated, so an empty fleet doesn't render as a false "fully
+    // activated" success state.
+    byId('dashWindowsActivatedTile').classList.toggle('tile-success', clients.length > 0 && windowsActivatedCount === clients.length);
+    byId('dashOfficeActivatedTile').classList.toggle('tile-success', clients.length > 0 && officeActivatedCount === clients.length);
     // isStale needs no platform handling - it reads collectedAt ||
     // sourceUpdatedAt, both of which Linux client reports also carry.
     const dashStaleCount = allClients.filter(isStale).length;
@@ -4298,6 +4312,36 @@
   window.addEventListener('resize', () => {
     clearTimeout(paginationResizeTimer);
     paginationResizeTimer = setTimeout(recalculateActivePagination, 150);
+  });
+  // Shared by the three clickable Dashboard tiles below: jumps to Clients
+  // pre-filtered/pre-sorted so whatever the tile promised (the stalest
+  // clients, the ones missing an activation) is what's actually on top -
+  // clearing any leftover search text so it can't hide them, and resetting
+  // to page 1 since the old page number belongs to a completely different
+  // sort order.
+  function navigateToClientsSortedBy(sortKey, osFilter) {
+    byId('searchInput').value = '';
+    state.osFilter.clients = osFilter;
+    state.sort.clients = { key: sortKey, dir: 1 };
+    state.page.clients = 1;
+    setView('clients');
+  }
+  // role="button"/tabindex="0" in the HTML make these keyboard-focusable,
+  // but only <button>/<a> get Enter/Space activation for free from the
+  // browser - a plain div with role="button" needs it wired by hand.
+  const dashboardTileHandlers = [
+    ['dashWindowsActivatedTile', () => navigateToClientsSortedBy('activation', 'windows')],
+    ['dashOfficeActivatedTile', () => navigateToClientsSortedBy('officeActivation', 'windows')],
+    ['dashStaleTile', () => navigateToClientsSortedBy('collectedAt', 'all')]
+  ];
+  dashboardTileHandlers.forEach(([id, handler]) => {
+    byId(id).addEventListener('click', handler);
+    byId(id).addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        handler();
+      }
+    });
   });
   byId('dashboardTab').addEventListener('click', () => {
     setView('dashboard');

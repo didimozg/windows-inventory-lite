@@ -833,6 +833,35 @@ main {
   color: var(--usb-text);
 }
 
+/* Same reasoning and declaration-order requirement as .tile-alert just
+   above (must win at equal specificity against .summary span/div,
+   declared later in source order to do so) - reuses the existing success
+   palette (already used for .pkg-message's saved-successfully state)
+   rather than inventing a new green. */
+.tile-success {
+  border-left: 3px solid var(--success-border);
+  background: var(--success-bg);
+}
+
+.tile-success span {
+  color: var(--success-text);
+}
+
+.tile-clickable {
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+/* --card-glow-hero, not a hand-picked rgba: it's already the theme-aware
+   "stronger glow" token (used for the hero tile), correctly tuned for
+   both light and dark --accent values - a hardcoded rgba here would only
+   be right in one theme. */
+.tile-clickable:hover,
+.tile-clickable:focus-visible {
+  box-shadow: 0 0 0 1px var(--accent), var(--card-glow-hero);
+  transform: translateY(-2px);
+}
+
 /* Same radius/glow treatment as .card-glow (Bold Card System) - table row/
    header styling itself is still out of scope (never mocked up), but the
    flat 8px/1px-border chrome around every table was the one piece of
