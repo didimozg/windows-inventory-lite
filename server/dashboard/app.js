@@ -4022,7 +4022,6 @@
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
     byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'licenses'].includes(state.view));
-    byId('manageDropdownButton').classList.toggle('active', state.view === 'deploy' || state.view === 'settings');
     byId('deployTab').classList.toggle('active', state.view === 'deploy');
     byId('settingsTab').classList.toggle('active', state.view === 'settings');
     const isInventoryView = inventoryViews.includes(state.view);
@@ -4500,12 +4499,11 @@
     }
   }
 
-  // Escape closes whichever dropdown the keypress happened inside and
-  // returns focus to that menu's own trigger button; ArrowDown/ArrowUp
-  // move focus between its items, wrapping at each end. One handler for
-  // both Fleet and Manage - they're structurally identical (a trigger
-  // button plus a menu of item buttons), read from the closest
-  // .topnav-dropdown-menu rather than hardcoded to either one.
+  // Escape closes the Fleet dropdown (the only one left since Install/
+  // Settings became standalone top-level buttons) and returns focus to
+  // its trigger button; ArrowDown/ArrowUp move focus between its items,
+  // wrapping at each end. Reads from the closest .topnav-dropdown-menu
+  // rather than hardcoding the id, in case a future dropdown reuses it.
   function handleDropdownKeydown(event) {
     if (event.key !== 'Escape' && event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
     const menu = event.target.closest('.topnav-dropdown-menu');
@@ -4530,15 +4528,8 @@
   byId('fleetDropdownButton').addEventListener('click', (event) => {
     event.stopPropagation();
     toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu');
-    toggleDropdown('manageDropdownButton', 'manageDropdownMenu', true);
-  });
-  byId('manageDropdownButton').addEventListener('click', (event) => {
-    event.stopPropagation();
-    toggleDropdown('manageDropdownButton', 'manageDropdownMenu');
-    toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu', true);
   });
   byId('fleetDropdownMenu').addEventListener('keydown', handleDropdownKeydown);
-  byId('manageDropdownMenu').addEventListener('keydown', handleDropdownKeydown);
   // Clicking any dropdown item closes its own menu (the item's own click
   // handler, registered above/in earlier tasks, has already fired and set
   // the view by the time this delegated listener runs).
@@ -4552,7 +4543,6 @@
   });
   document.addEventListener('click', () => {
     toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu', true);
-    toggleDropdown('manageDropdownButton', 'manageDropdownMenu', true);
   });
   byId('windowsCredsSaveButton').addEventListener('click', saveClientUpdateCredentials);
   byId('windowsCredsClearButton').addEventListener('click', clearClientUpdateCredentials);
