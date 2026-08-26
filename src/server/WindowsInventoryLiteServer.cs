@@ -1544,6 +1544,10 @@ namespace WindowsInventoryLite
                     {
                         SendTooManyRequests(stream, loginLockoutRetryAfterSeconds);
                     }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/server/login")
+                    {
+                        SendLoginResult(stream, request);
+                    }
                     else if (!IsWebRequestAuthorized(request))
                     {
                         SendUnauthorized(stream);
@@ -1715,6 +1719,10 @@ namespace WindowsInventoryLite
                     else if (request.Method == "POST" && request.Path == "/api/v1/server/admin-password")
                     {
                         ChangeAdminPassword(stream, request);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/server/logout")
+                    {
+                        SendLogoutResult(stream, request);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/server/ingestion-token")
                     {
@@ -5438,6 +5446,103 @@ namespace WindowsInventoryLite
             return newestMatch.Reason;
         }
 
+        // Secure only over HTTPS (stream is SslStream - the same test
+        // BuildHstsHeaderOrEmpty already uses): a Secure cookie is silently
+        // dropped by the browser entirely over plain HTTP, which this app
+        // still supports running under. HttpOnly always (never readable
+        // from JS). SameSite=Strict (no legitimate cross-site use, matches
+        // this app's CSRF-hardening posture).
+        private static string BuildSessionCookieHeader(Stream stream, string token, int maxAgeSeconds)
+        {
+            string secureFlag = stream is SslStream ? "; Secure" : "";
+            return "Set-Cookie: wil_session=" + token + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" + maxAgeSeconds + secureFlag;
+        }
+
+        private const string ClearSessionCookieHeader = "Set-Cookie: wil_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0";
+
+        // Dispatched from HandleClient BEFORE the IsWebRequestAuthorized
+        // gate (you are not authenticated yet when logging in) but AFTER
+        // IsBasicAuthLockedOut (a locked-out IP must not get unlimited
+        // login attempts here either - see HandleClient's dispatch chain).
+        // No IsCrossSiteRequestRejected check either, by the same
+        // reasoning the three ingestion routes already skip it: a
+        // cross-site POST here can't exploit any pre-existing
+        // authenticated state (there isn't one yet), and even a successful
+        // cross-origin login would only set a cookie the attacker's own
+        // page can never read back (HttpOnly) or have sent anywhere but
+        // this origin (SameSite=Strict) - there is nothing for a forged
+        // cross-site request to gain here.
+        private void SendLoginResult(Stream stream, RequestContext request)
+        {
+            if (String.IsNullOrEmpty(options.WebUsername) && String.IsNullOrEmpty(options.WebPassword))
+            {
+                // Loopback-only mode: no admin credential is configured to
+                // check against. Login must never succeed here - unlike
+                // the loopback check itself, a session cookie is not
+                // IP-scoped, so a session minted in this mode would let a
+                // request bypass the loopback restriction from anywhere.
+                SendUnauthorized(stream);
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string username = payload.ContainsKey("username") ? Convert.ToString(payload["username"]) : "";
+            string password = payload.ContainsKey("password") ? Convert.ToString(payload["password"]) : "";
+            bool usernameMatches = FixedTimeEquals(username, options.WebUsername);
+            bool passwordMatches = FixedTimeEquals(password, options.WebPassword);
+            bool authorized = usernameMatches & passwordMatches;
+            RecordBasicAuthAttempt(request.RemoteAddress, authorized);
+
+            if (!authorized)
+            {
+                SendUnauthorized(stream);
+                return;
+            }
+
+            string token = GenerateRandomToken();
+            SessionRecord record = new SessionRecord();
+            record.ExpiresUtc = ComputeSessionExpiry(DateTime.UtcNow, options.SessionLifetimeHours);
+            lock (sessionLock)
+            {
+                sessionStore[token] = record;
+            }
+
+            string setCookie = BuildSessionCookieHeader(stream, token, options.SessionLifetimeHours * 3600);
+            SendText(stream, "{\"status\":\"ok\"}", "application/json; charset=utf-8", 200, null, setCookie);
+        }
+
+        // Always 200 - logging out a missing/already-expired session is a
+        // no-op success, not an error (the caller's goal - "I should no
+        // longer be logged in" - is already satisfied).
+        private void SendLogoutResult(Stream stream, RequestContext request)
+        {
+            string cookieHeader = request.Headers.ContainsKey("cookie") ? request.Headers["cookie"] : null;
+            string sessionToken = GetCookieValue(cookieHeader, "wil_session");
+            if (!String.IsNullOrEmpty(sessionToken))
+            {
+                lock (sessionLock)
+                {
+                    sessionStore.Remove(sessionToken);
+                }
+            }
+            SendText(stream, "{\"status\":\"ok\"}", "application/json; charset=utf-8", 200, null, ClearSessionCookieHeader);
+        }
+
         // Cookie header is "name1=value1; name2=value2" - no quoting or
         // escaping to worry about here, since this app's own cookie value
         // is always a fixed-format hex token from GenerateRandomToken,
@@ -5983,6 +6088,19 @@ namespace WindowsInventoryLite
 
         private void SendText(Stream stream, string text, string contentType, int statusCode, string cacheControl)
         {
+            SendText(stream, text, contentType, statusCode, cacheControl, null);
+        }
+
+        // extraHeaders, when non-null, is one or more already-formatted
+        // "Name: value" lines (no leading/trailing \r\n) to splice into the
+        // response - currently only used for Set-Cookie (see
+        // BuildSessionCookieHeader/ClearSessionCookieHeader). Existing
+        // 4-arg/5-arg SendText callers are unaffected - see the delegation
+        // above, matching this file's established "add an overload, don't
+        // touch existing call sites" convention (compare BuildHstsHeaderOrEmpty's
+        // own introduction).
+        private void SendText(Stream stream, string text, string contentType, int statusCode, string cacheControl, string extraHeaders)
+        {
             byte[] body = Encoding.UTF8.GetBytes(text);
             string status = statusCode == 200 ? "OK" : (statusCode == 400 ? "Bad Request" : (statusCode == 401 ? "Unauthorized" : (statusCode == 404 ? "Not Found" : "Error")));
             string header = "HTTP/1.1 " + statusCode + " " + status +
@@ -5995,6 +6113,7 @@ namespace WindowsInventoryLite
                 "\r\nPermissions-Policy: " + PermissionsPolicy +
                 BuildHstsHeaderOrEmpty(stream) +
                 (String.IsNullOrEmpty(cacheControl) ? "" : "\r\nCache-Control: " + cacheControl) +
+                (String.IsNullOrEmpty(extraHeaders) ? "" : "\r\n" + extraHeaders) +
                 "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
@@ -9729,6 +9848,11 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized accepts a valid session cookie with no Authorization header", TestIsWebRequestAuthorizedAcceptsValidSessionCookieWithNoAuthorizationHeader);
             allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized rejects an expired session cookie and falls through to Basic Auth", TestIsWebRequestAuthorizedRejectsExpiredSessionCookie);
             allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized refreshes a session's expiry on successful use (sliding expiration)", TestIsWebRequestAuthorizedRefreshesSessionExpiryOnUse);
+            allPassed &= SelfTestCheck(output, "SendLoginResult creates a session and sets a cookie on correct credentials", TestSendLoginResultCreatesSessionOnCorrectCredentials);
+            allPassed &= SelfTestCheck(output, "SendLoginResult rejects wrong credentials without creating a session", TestSendLoginResultRejectsWrongCredentials);
+            allPassed &= SelfTestCheck(output, "SendLoginResult refuses to create a session while Basic Auth is unconfigured", TestSendLoginResultRejectsWhenBasicAuthUnconfigured);
+            allPassed &= SelfTestCheck(output, "SendLogoutResult removes the session from the server-side store", TestSendLogoutResultRemovesSessionFromStore);
+            allPassed &= SelfTestCheck(output, "SendLogoutResult is idempotent when no session cookie is present", TestSendLogoutResultIsIdempotentWithNoSessionCookie);
             allPassed &= SelfTestCheck(output, "TryParsePortFromPrefix extracts the port from a ListenPrefix URL", TestTryParsePortFromPrefix);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper escapes RFC 4515 special characters", TestLdapFilterEscapeSpecialChars);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper leaves a normal computer name untouched", TestLdapFilterEscapeNormalName);
@@ -10465,6 +10589,174 @@ namespace WindowsInventoryLite
             if (refreshed == null || refreshed.ExpiresUtc <= almostExpired.AddHours(1))
             {
                 return "expected a successful session-cookie authorization to push ExpiresUtc forward by SessionLifetimeHours (sliding expiration)";
+            }
+
+            return null;
+        }
+
+        private static string TestSendLoginResultCreatesSessionOnCorrectCredentials()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.SessionLifetimeHours = 12;
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Path = "/api/v1/server/login";
+            request.Headers = new Dictionary<string, string>();
+            request.RemoteAddress = IPAddress.Parse("192.168.1.50");
+            request.Body = "{\"username\":\"admin\",\"password\":\"secret\"}";
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.SendLoginResult(stream, request);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("200 OK"))
+                {
+                    return "expected correct credentials to return 200 OK, got: " + response;
+                }
+                if (!response.Contains("Set-Cookie: wil_session="))
+                {
+                    return "expected a successful login to set the wil_session cookie";
+                }
+                if (!response.Contains("HttpOnly") || !response.Contains("SameSite=Strict"))
+                {
+                    return "expected the session cookie to carry HttpOnly and SameSite=Strict";
+                }
+            }
+
+            if (server.sessionStore.Count != 1)
+            {
+                return "expected exactly one session to be created in the store";
+            }
+
+            return null;
+        }
+
+        private static string TestSendLoginResultRejectsWrongCredentials()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Path = "/api/v1/server/login";
+            request.Headers = new Dictionary<string, string>();
+            request.RemoteAddress = IPAddress.Parse("192.168.1.50");
+            request.Body = "{\"username\":\"admin\",\"password\":\"wrong\"}";
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.SendLoginResult(stream, request);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("401"))
+                {
+                    return "expected wrong credentials to return 401, got: " + response;
+                }
+                if (response.Contains("Set-Cookie: wil_session="))
+                {
+                    return "expected wrong credentials to never set a session cookie";
+                }
+            }
+
+            if (server.sessionStore.Count != 0)
+            {
+                return "expected no session to be created on failed login";
+            }
+
+            return null;
+        }
+
+        private static string TestSendLoginResultRejectsWhenBasicAuthUnconfigured()
+        {
+            ServerOptions options = new ServerOptions();
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Path = "/api/v1/server/login";
+            request.Headers = new Dictionary<string, string>();
+            request.RemoteAddress = IPAddress.Parse("192.168.1.50");
+            request.Body = "{\"username\":\"\",\"password\":\"\"}";
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.SendLoginResult(stream, request);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("401"))
+                {
+                    return "expected login to be rejected outright when WebUsername/WebPassword are both unconfigured (loopback-only mode), got: " + response;
+                }
+            }
+
+            if (server.sessionStore.Count != 0)
+            {
+                return "expected no session to ever be created while Basic Auth is unconfigured - a session cookie would bypass the loopback-only IP restriction";
+            }
+
+            return null;
+        }
+
+        private static string TestSendLogoutResultRemovesSessionFromStore()
+        {
+            ServerOptions options = new ServerOptions();
+            InventoryServer server = new InventoryServer(options);
+
+            string token = "logout-test-token";
+            SessionRecord record = new SessionRecord();
+            record.ExpiresUtc = DateTime.UtcNow.AddHours(1);
+            server.sessionStore[token] = record;
+
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Path = "/api/v1/server/logout";
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["cookie"] = "wil_session=" + token;
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.SendLogoutResult(stream, request);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("200 OK"))
+                {
+                    return "expected logout to return 200 OK, got: " + response;
+                }
+                if (!response.Contains("Max-Age=0"))
+                {
+                    return "expected logout to send a cookie-clearing Set-Cookie with Max-Age=0";
+                }
+            }
+
+            if (server.sessionStore.ContainsKey(token))
+            {
+                return "expected the session to be removed from the store, not just cleared client-side";
+            }
+
+            return null;
+        }
+
+        private static string TestSendLogoutResultIsIdempotentWithNoSessionCookie()
+        {
+            ServerOptions options = new ServerOptions();
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Path = "/api/v1/server/logout";
+            request.Headers = new Dictionary<string, string>();
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.SendLogoutResult(stream, request);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("200 OK"))
+                {
+                    return "expected logout with no session cookie present to still succeed (idempotent no-op), got: " + response;
+                }
             }
 
             return null;
