@@ -1559,7 +1559,7 @@ namespace WindowsInventoryLite
                     }
                     else if (!IsWebRequestAuthorized(request))
                     {
-                        SendUnauthorized(stream);
+                        SendUnauthorized(stream, request);
                     }
                     else if (IsCrossSiteRequestRejected(request))
                     {
@@ -5490,7 +5490,7 @@ namespace WindowsInventoryLite
                 // the loopback check itself, a session cookie is not
                 // IP-scoped, so a session minted in this mode would let a
                 // request bypass the loopback restriction from anywhere.
-                SendUnauthorized(stream);
+                SendUnauthorized(stream, request);
                 return;
             }
 
@@ -5519,7 +5519,7 @@ namespace WindowsInventoryLite
 
             if (!authorized)
             {
-                SendUnauthorized(stream);
+                SendUnauthorized(stream, request);
                 return;
             }
 
@@ -6028,16 +6028,98 @@ namespace WindowsInventoryLite
             return serializer;
         }
 
-        private void SendUnauthorized(Stream stream)
+        // Self-contained on purpose - no dependency on styles.css/app.js,
+        // since those themselves are only reachable once authenticated
+        // (see SendDashboardFile, gated the same as every other route).
+        // Inline colors are a light echo of this app's real dark theme
+        // (see styles.css's Ocean Blue tokens), not a pixel-accurate copy.
+        private const string LoginPageHtml =
+@"<!doctype html>
+<html>
+<head>
+<meta charset=""utf-8"">
+<meta name=""viewport"" content=""width=device-width, initial-scale=1"">
+<title>Windows Inventory Lite - Sign in</title>
+<style>
+body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #0c2340; font-family: system-ui, sans-serif; }
+.login-card { background: #153a63; border-radius: 14px; padding: 32px; width: 280px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+.login-card h1 { color: #fff; font-size: 1.1rem; margin: 0 0 20px; }
+.login-card label { display: block; color: #cfe3f5; font-size: 0.85rem; margin-bottom: 4px; }
+.login-card input { width: 100%; box-sizing: border-box; padding: 8px 10px; margin-bottom: 14px; border-radius: 6px; border: 1px solid #2a4d75; background: #0c2340; color: #fff; }
+.login-card button { width: 100%; padding: 10px; border: none; border-radius: 6px; background: #126f8f; color: #fff; font-weight: 600; cursor: pointer; }
+.login-error { color: #ff8080; font-size: 0.85rem; min-height: 1.2em; margin-top: 10px; }
+</style>
+</head>
+<body>
+<form class=""login-card"" id=""loginForm"">
+<h1>Windows Inventory Lite</h1>
+<label for=""loginUsername"">Username</label>
+<input id=""loginUsername"" name=""username"" type=""text"" autocomplete=""username"" required autofocus>
+<label for=""loginPassword"">Password</label>
+<input id=""loginPassword"" name=""password"" type=""password"" autocomplete=""current-password"" required>
+<button type=""submit"">Sign in</button>
+<div class=""login-error"" id=""loginError""></div>
+</form>
+<script>
+document.getElementById('loginForm').addEventListener('submit', function (event) {
+  event.preventDefault();
+  var errorEl = document.getElementById('loginError');
+  errorEl.textContent = '';
+  fetch('/api/v1/server/login', {
+    method: 'POST',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: document.getElementById('loginUsername').value,
+      password: document.getElementById('loginPassword').value
+    })
+  }).then(function (response) {
+    if (!response.ok) {
+      errorEl.textContent = 'Incorrect username or password.';
+      return;
+    }
+    window.location.reload();
+  }).catch(function () {
+    errorEl.textContent = 'Sign-in failed - check the connection and try again.';
+  });
+});
+</script>
+</body>
+</html>";
+
+        private void SendUnauthorized(Stream stream, RequestContext request)
         {
-            byte[] body = Encoding.UTF8.GetBytes("Unauthorized");
+            // WWW-Authenticate: Basic is deliberately NOT sent (removed as
+            // part of the session-based logout feature) - that header is
+            // exactly what makes a browser pop its native Basic Auth
+            // dialog and cache whatever gets typed into it at the HTTP
+            // stack level, with no JS-reachable way to evict it later.
+            // curl -u user:pass does not depend on this header - it sends
+            // Basic Auth preemptively on the first request regardless of
+            // any challenge - so this is safe for existing automation.
+            //
+            // A real browser navigating to / or /index.html (Accept
+            // contains text/html) gets the embedded login page instead of
+            // a bare 401 body, since there is otherwise nothing for it to
+            // show a human. Every other case - any API route, any non-GET
+            // method, app.js's own fetch() calls (which don't send an
+            // HTML-navigation Accept header) - keeps the original
+            // plain-text 401 body unchanged, so existing error handling
+            // that expects a non-HTML response is unaffected.
+            bool isHtmlNavigationToRoot = request.Method == "GET"
+                && (request.Path == "/" || request.Path == "/index.html")
+                && request.Headers.ContainsKey("accept")
+                && request.Headers["accept"].IndexOf("text/html", StringComparison.OrdinalIgnoreCase) >= 0;
+
+            byte[] body = Encoding.UTF8.GetBytes(isHtmlNavigationToRoot ? LoginPageHtml : "Unauthorized");
+            string contentType = isHtmlNavigationToRoot ? "text/html; charset=utf-8" : "text/plain; charset=utf-8";
             // Picked up during a security-headers audit: this response
-            // bypasses SendText (its own status line/WWW-Authenticate don't
-            // fit that helper's signature), so it had never carried ANY of
-            // the headers below - not just the two new ones, the
-            // pre-existing CSP/X-Frame-Options/nosniff too. A 401 is a
-            // response like any other and deserves the same baseline.
-            string header = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Windows Inventory Lite\"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + body.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + BuildHstsHeaderOrEmpty(stream) + "\r\nConnection: close\r\n\r\n";
+            // bypasses SendText (its own status line doesn't fit that
+            // helper's signature), so it had never carried ANY of the
+            // headers below - not just the two new ones, the pre-existing
+            // CSP/X-Frame-Options/nosniff too. A 401 is a response like
+            // any other and deserves the same baseline.
+            string header = "HTTP/1.1 401 Unauthorized\r\nContent-Type: " + contentType + "\r\nContent-Length: " + body.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + BuildHstsHeaderOrEmpty(stream) + "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
             stream.Write(body, 0, body.Length);
@@ -6063,16 +6145,21 @@ namespace WindowsInventoryLite
         // in app.js), so this is a backstop against a future unescaped sink,
         // not the primary defense. style-src needs 'unsafe-inline' for the
         // one legitimate case (bar-chart width) that sets a real inline
-        // style="..." attribute through innerHTML. The one sha256 source
-        // allows index.html's inline theme-restore <script> (reads
-        // localStorage before styles.css loads, so a saved dark preference
-        // doesn't flash light first) - it was silently CSP-blocked without
-        // this, breaking theme persistence across reloads. If that inline
-        // script's content ever changes, this hash must be recomputed to
-        // match (the browser's own CSP-violation console message reports
-        // the exact hash it expected - the fastest way to get a fresh one).
+        // style="..." attribute through innerHTML. Two sha256 sources are
+        // allow-listed: the first is index.html's inline theme-restore
+        // <script> (reads localStorage before styles.css loads, so a saved
+        // dark preference doesn't flash light first); the second is
+        // LoginPageHtml's inline <script> (wires the login form's submit to
+        // a fetch() POST instead of falling through to the form's native
+        // GET submission, which would otherwise put the password in the
+        // URL - found live: without this hash the script was silently
+        // CSP-blocked, and the login form degraded to exactly that GET). If
+        // either inline script's content ever changes, its hash must be
+        // recomputed to match (the browser's own CSP-violation console
+        // message reports the exact hash it expected - the fastest way to
+        // get a fresh one).
         private const string ContentSecurityPolicy =
-            "default-src 'self'; script-src 'self' 'sha256-rqltRpQDffCU3nbpQC/zdbFn0/Eb4PSGrbmQ8EbS3q4='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+            "default-src 'self'; script-src 'self' 'sha256-rqltRpQDffCU3nbpQC/zdbFn0/Eb4PSGrbmQ8EbS3q4=' 'sha256-l2wB/4MpOu7AEB0C+1HsoQKKmFiduxM15qduMb9gwFw='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
         // same-origin (not the stricter no-referrer) deliberately: this
         // dashboard's own pages never navigate cross-origin, so a leak to
@@ -9876,6 +9963,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "SendLogoutResult removes the session from the server-side store", TestSendLogoutResultRemovesSessionFromStore);
             allPassed &= SelfTestCheck(output, "SendLogoutResult is idempotent when no session cookie is present", TestSendLogoutResultIsIdempotentWithNoSessionCookie);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings validates sessionLifetimeHours is between 1 and 720", TestConfigureServerSettingsValidatesSessionLifetimeHours);
+            allPassed &= SelfTestCheck(output, "SendUnauthorized serves the embedded login page for a browser navigation to /, with no WWW-Authenticate", TestSendUnauthorizedServesLoginPageForBrowserNavigation);
+            allPassed &= SelfTestCheck(output, "SendUnauthorized keeps the plain-text 401 body for API routes", TestSendUnauthorizedServesPlainTextForApiRequests);
             allPassed &= SelfTestCheck(output, "TryParsePortFromPrefix extracts the port from a ListenPrefix URL", TestTryParsePortFromPrefix);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper escapes RFC 4515 special characters", TestLdapFilterEscapeSpecialChars);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper leaves a normal computer name untouched", TestLdapFilterEscapeNormalName);
@@ -10835,6 +10924,69 @@ namespace WindowsInventoryLite
             if (options.SessionLifetimeHours != 24)
             {
                 return "expected options.SessionLifetimeHours to be updated to 24";
+            }
+
+            return null;
+        }
+
+        private static string TestSendUnauthorizedServesLoginPageForBrowserNavigation()
+        {
+            ServerOptions options = new ServerOptions();
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext request = new RequestContext();
+            request.Method = "GET";
+            request.Path = "/";
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.SendUnauthorized(stream, request);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("401 Unauthorized"))
+                {
+                    return "expected a 401 status even when serving the login page";
+                }
+                if (response.Contains("WWW-Authenticate"))
+                {
+                    return "expected WWW-Authenticate to never be sent, on any 401 response";
+                }
+                if (!response.Contains("id=\"loginForm\""))
+                {
+                    return "expected a browser navigation to / to receive the embedded login page";
+                }
+                if (!response.Contains("Content-Type: text/html"))
+                {
+                    return "expected the login page response to declare text/html";
+                }
+            }
+
+            return null;
+        }
+
+        private static string TestSendUnauthorizedServesPlainTextForApiRequests()
+        {
+            ServerOptions options = new ServerOptions();
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext request = new RequestContext();
+            request.Method = "GET";
+            request.Path = "/api/v1/clients";
+            request.Headers = new Dictionary<string, string>();
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.SendUnauthorized(stream, request);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (response.Contains("id=\"loginForm\""))
+                {
+                    return "expected an API route's 401 to stay plain text, not the HTML login page";
+                }
+                if (!response.Contains("Content-Type: text/plain"))
+                {
+                    return "expected the API route's 401 to keep declaring text/plain";
+                }
             }
 
             return null;
