@@ -816,6 +816,20 @@ namespace WindowsInventoryLite
         // management network" control, not the sole line of defense.
         private readonly object loginLockoutLock = new object();
         private readonly Dictionary<IPAddress, LoginLockoutRecord> loginLockoutState = new Dictionary<IPAddress, LoginLockoutRecord>();
+        // Rejected-ingestion-token attempt log (see IngestionRejectionEntry/
+        // RecordIngestionRejection). Persisted to disk (see
+        // GetIngestionRejectionLogPath) and loaded into this list once at
+        // Start() - unlike loginLockoutState, this is meant to survive a
+        // restart, since it's a history an admin reviews, not a transient
+        // lockout counter.
+        private readonly object ingestionRejectionLogLock = new object();
+        private readonly List<IngestionRejectionEntry> ingestionRejectionLog = new List<IngestionRejectionEntry>();
+        // IP -> resolved PTR hostname, or null for "resolution attempted,
+        // no result" (still cached, so a non-resolving IP is never
+        // retried). Cleared entirely (not partially evicted) if it exceeds
+        // 1000 entries - see QueueReverseDnsLookup.
+        private readonly object reverseDnsCacheLock = new object();
+        private readonly Dictionary<IPAddress, string> reverseDnsCache = new Dictionary<IPAddress, string>();
         // Lets an open dashboard tab notice a server-initiated (scheduled)
         // push exists at all - a scheduled push never goes through any HTTP
         // request the browser makes, so without this the browser has no way
@@ -875,6 +889,7 @@ namespace WindowsInventoryLite
             CleanupInstallJobLogs();
             MigrateLegacyLinuxSshKey();
             PurgeOrphanedLinuxInstallJobDirectory();
+            LoadIngestionRejectionLogFromDisk();
 
             if (options.EnableHttp)
             {
@@ -1686,6 +1701,10 @@ namespace WindowsInventoryLite
                     {
                         RegenerateIngestionToken(stream, request);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/server/ingestion-rejections")
+                    {
+                        SendIngestionRejectionLog(stream);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/licenses")
                     {
                         SendLicenses(stream);
@@ -1768,6 +1787,7 @@ namespace WindowsInventoryLite
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
             if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
             {
+                RecordIngestionRejection(request, "windows-inventory", ResolveIngestionRejectionReason(token));
                 DebugLogger.Log(options, "Client", "Rejected inventory report: invalid or missing token");
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
                 return;
@@ -1821,6 +1841,7 @@ namespace WindowsInventoryLite
             lock (reportFileLock)
             {
                 ApplyAdSyncFields(inventory, adFields);
+                inventory["lastIngestSourceIp"] = request.RemoteAddress != null ? request.RemoteAddress.ToString() : null;
 
                 string json = serializer.Serialize(inventory);
                 File.WriteAllText(path, json, new UTF8Encoding(false));
@@ -2174,6 +2195,7 @@ namespace WindowsInventoryLite
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
             if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
             {
+                RecordIngestionRejection(request, "linux-inventory", ResolveIngestionRejectionReason(token));
                 DebugLogger.Log(options, "Client", "Rejected Linux inventory report: invalid or missing token");
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
                 return;
@@ -2225,6 +2247,7 @@ namespace WindowsInventoryLite
             lock (reportFileLock)
             {
                 ApplyAdSyncFields(inventory, adFields);
+                inventory["lastIngestSourceIp"] = request.RemoteAddress != null ? request.RemoteAddress.ToString() : null;
 
                 string json = serializer.Serialize(inventory);
                 File.WriteAllText(path, json, new UTF8Encoding(false));
@@ -2238,6 +2261,7 @@ namespace WindowsInventoryLite
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
             if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
             {
+                RecordIngestionRejection(request, "linux-service-status", ResolveIngestionRejectionReason(token));
                 DebugLogger.Log(options, "Client", "Rejected Linux service-status report: invalid or missing token");
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
                 return;
@@ -4097,6 +4121,160 @@ namespace WindowsInventoryLite
         private string GetInstallJobDirectory()
         {
             return Path.Combine(options.DataPath, "_client-install-jobs");
+        }
+
+        private string GetIngestionRejectionLogPath()
+        {
+            return Path.Combine(options.DataPath, "_logs", "ingestion-rejections.jsonl");
+        }
+
+        private void LoadIngestionRejectionLogFromDisk()
+        {
+            string path = GetIngestionRejectionLogPath();
+            if (!File.Exists(path))
+            {
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            lock (ingestionRejectionLogLock)
+            {
+                foreach (string line in File.ReadAllLines(path, Encoding.UTF8))
+                {
+                    if (String.IsNullOrEmpty(line))
+                    {
+                        continue;
+                    }
+                    try
+                    {
+                        Dictionary<string, object> raw = serializer.Deserialize<Dictionary<string, object>>(line);
+                        IngestionRejectionEntry entry = new IngestionRejectionEntry();
+                        entry.TimestampUtc = ParseUtcDate(GetStringValue(raw, "timestampUtc"), DateTime.UtcNow);
+                        entry.SourceIp = GetStringValue(raw, "sourceIp");
+                        entry.Endpoint = GetStringValue(raw, "endpoint");
+                        entry.Reason = GetStringValue(raw, "reason");
+                        ingestionRejectionLog.Add(entry);
+                    }
+                    catch
+                    {
+                        // One corrupt line (e.g. a partial write from an
+                        // unclean shutdown) must not lose every other
+                        // entry - skip it and keep loading the rest.
+                    }
+                }
+            }
+        }
+
+        // Called from all three ingestion handlers immediately after
+        // IsIngestionTokenRejected returns true - never before it, and
+        // never after the request body has been touched (see the Global
+        // Constraints at the top of this plan / spec decision 1).
+        private void RecordIngestionRejection(RequestContext request, string endpoint, string reason)
+        {
+            if (request.RemoteAddress == null)
+            {
+                return;
+            }
+
+            IngestionRejectionEntry entry = new IngestionRejectionEntry();
+            entry.TimestampUtc = DateTime.UtcNow;
+            entry.SourceIp = request.RemoteAddress.ToString();
+            entry.Endpoint = endpoint;
+            entry.Reason = reason;
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> line = new Dictionary<string, object>();
+            line["timestampUtc"] = entry.TimestampUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+            line["sourceIp"] = entry.SourceIp;
+            line["endpoint"] = entry.Endpoint;
+            line["reason"] = entry.Reason;
+
+            lock (ingestionRejectionLogLock)
+            {
+                ingestionRejectionLog.Add(entry);
+
+                string path = GetIngestionRejectionLogPath();
+                string directory = Path.GetDirectoryName(path);
+                if (!String.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+                File.AppendAllText(path, serializer.Serialize(line) + Environment.NewLine, new UTF8Encoding(false));
+
+                List<IngestionRejectionEntry> pruned = PruneIngestionRejectionEntries(ingestionRejectionLog, DateTime.UtcNow, options.IngestionRejectionLogRetentionDays, options.IngestionRejectionLogMaxEntries);
+                if (pruned.Count != ingestionRejectionLog.Count)
+                {
+                    ingestionRejectionLog.Clear();
+                    ingestionRejectionLog.AddRange(pruned);
+                    RewriteIngestionRejectionLogFileLocked();
+                }
+            }
+
+            QueueReverseDnsLookup(request.RemoteAddress);
+        }
+
+        // Caller must already hold ingestionRejectionLogLock. Only called
+        // when a prune pass actually removed something - the common case
+        // (no pruning needed) never rewrites the file, only appends.
+        private void RewriteIngestionRejectionLogFileLocked()
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            StringBuilder sb = new StringBuilder();
+            foreach (IngestionRejectionEntry entry in ingestionRejectionLog)
+            {
+                Dictionary<string, object> line = new Dictionary<string, object>();
+                line["timestampUtc"] = entry.TimestampUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                line["sourceIp"] = entry.SourceIp;
+                line["endpoint"] = entry.Endpoint;
+                line["reason"] = entry.Reason;
+                sb.Append(serializer.Serialize(line));
+                sb.Append(Environment.NewLine);
+            }
+            File.WriteAllText(GetIngestionRejectionLogPath(), sb.ToString(), new UTF8Encoding(false));
+        }
+
+        // Never runs on the request-handling path - queued to the thread
+        // pool so a slow/unresponsive resolver cannot delay the 401 already
+        // sent to the caller, and cannot be used to make this server do
+        // extra synchronous work per guess. Caches both a real hostname AND
+        // a failure/timeout (as null) so a repeat offender from the same IP
+        // is never re-resolved.
+        private void QueueReverseDnsLookup(IPAddress address)
+        {
+            lock (reverseDnsCacheLock)
+            {
+                if (reverseDnsCache.ContainsKey(address))
+                {
+                    return;
+                }
+            }
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string hostname = null;
+                try
+                {
+                    IAsyncResult asyncResult = Dns.BeginGetHostEntry(address, null, null);
+                    if (asyncResult.AsyncWaitHandle.WaitOne(2000))
+                    {
+                        IPHostEntry entry = Dns.EndGetHostEntry(asyncResult);
+                        hostname = entry.HostName;
+                    }
+                }
+                catch
+                {
+                    hostname = null;
+                }
+
+                lock (reverseDnsCacheLock)
+                {
+                    if (reverseDnsCache.Count > 1000)
+                    {
+                        reverseDnsCache.Clear();
+                    }
+                    reverseDnsCache[address] = hostname;
+                }
+            });
         }
 
         private string GetInstallJobPath(string id)
@@ -6649,6 +6827,8 @@ namespace WindowsInventoryLite
             result["loginLockoutThreshold"] = options.LoginLockoutThreshold;
             result["loginLockoutWindowMinutes"] = options.LoginLockoutWindowMinutes;
             result["loginLockoutDurationMinutes"] = options.LoginLockoutDurationMinutes;
+            result["ingestionRejectionLogRetentionDays"] = options.IngestionRejectionLogRetentionDays;
+            result["ingestionRejectionLogMaxEntries"] = options.IngestionRejectionLogMaxEntries;
             result["installLogRetentionDays"] = options.InstallLogRetentionDays;
             result["debugLogEnabled"] = options.DebugLogEnabled;
             result["debugLogPath"] = DebugLogger.ResolvePath(options);
@@ -7030,6 +7210,30 @@ namespace WindowsInventoryLite
                 updates["LoginLockoutDurationMinutes"] = loginLockoutDurationMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
             }
 
+            if (payload.ContainsKey("ingestionRejectionLogRetentionDays"))
+            {
+                int ingestionRejectionLogRetentionDays;
+                if (!Int32.TryParse(Convert.ToString(payload["ingestionRejectionLogRetentionDays"]), out ingestionRejectionLogRetentionDays) || ingestionRejectionLogRetentionDays < 1 || ingestionRejectionLogRetentionDays > 3650)
+                {
+                    SendText(stream, "{\"error\":\"ingestionRejectionLogRetentionDays must be between 1 and 3650\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.IngestionRejectionLogRetentionDays = ingestionRejectionLogRetentionDays;
+                updates["IngestionRejectionLogRetentionDays"] = ingestionRejectionLogRetentionDays.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("ingestionRejectionLogMaxEntries"))
+            {
+                int ingestionRejectionLogMaxEntries;
+                if (!Int32.TryParse(Convert.ToString(payload["ingestionRejectionLogMaxEntries"]), out ingestionRejectionLogMaxEntries) || ingestionRejectionLogMaxEntries < 100 || ingestionRejectionLogMaxEntries > 100000)
+                {
+                    SendText(stream, "{\"error\":\"ingestionRejectionLogMaxEntries must be between 100 and 100000\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.IngestionRejectionLogMaxEntries = ingestionRejectionLogMaxEntries;
+                updates["IngestionRejectionLogMaxEntries"] = ingestionRejectionLogMaxEntries.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
             if (payload.ContainsKey("debugLogEnabled"))
             {
                 // The log path is deliberately not settable from here - it
@@ -7078,6 +7282,77 @@ namespace WindowsInventoryLite
             result["configured"] = !String.IsNullOrEmpty(options.Token);
             result["token"] = options.Token;
             result["requireIngestionToken"] = options.RequireIngestionToken;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void SendIngestionRejectionLog(Stream stream)
+        {
+            List<IngestionRejectionEntry> snapshot;
+            lock (ingestionRejectionLogLock)
+            {
+                snapshot = new List<IngestionRejectionEntry>(ingestionRejectionLog);
+            }
+
+            // Source IP -> client display name, built once for this
+            // request rather than once per log entry - see spec's
+            // SendIngestionRejectionLog description for why.
+            Dictionary<string, string> clientsByIp = new Dictionary<string, string>();
+            Dictionary<string, DateTime> lastCollectedByIp = new Dictionary<string, DateTime>();
+            foreach (Dictionary<string, object> client in LoadClientReports())
+            {
+                string ip = GetStringValue(client, "lastIngestSourceIp");
+                if (String.IsNullOrEmpty(ip))
+                {
+                    continue;
+                }
+                string name = GetStringValue(client, "computerName");
+                if (String.IsNullOrEmpty(name))
+                {
+                    name = GetStringValue(client, "hostname");
+                }
+                DateTime lastCollectedUtc = ParseUtcDate(GetStringValue(client, "collectedAt"), ParseUtcDate(GetStringValue(client, "sourceUpdatedAt"), DateTime.MinValue));
+                clientsByIp[ip] = name;
+                lastCollectedByIp[ip] = lastCollectedUtc;
+            }
+
+            ArrayList entries = new ArrayList();
+            for (int i = snapshot.Count - 1; i >= 0; i--)
+            {
+                IngestionRejectionEntry entry = snapshot[i];
+                Dictionary<string, object> row = new Dictionary<string, object>();
+                row["timestampUtc"] = entry.TimestampUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                row["sourceIp"] = entry.SourceIp;
+                row["endpoint"] = entry.Endpoint;
+                row["reason"] = entry.Reason;
+
+                string hostname = null;
+                IPAddress parsedSourceIp;
+                if (IPAddress.TryParse(entry.SourceIp, out parsedSourceIp))
+                {
+                    lock (reverseDnsCacheLock)
+                    {
+                        reverseDnsCache.TryGetValue(parsedSourceIp, out hostname);
+                    }
+                }
+                row["hostname"] = hostname;
+
+                string matchedClient = null;
+                DateTime lastCollectedUtc;
+                if (clientsByIp.TryGetValue(entry.SourceIp, out matchedClient) && lastCollectedByIp.TryGetValue(entry.SourceIp, out lastCollectedUtc) && entry.TimestampUtc > lastCollectedUtc)
+                {
+                    row["matchedClient"] = matchedClient;
+                }
+                else
+                {
+                    row["matchedClient"] = null;
+                }
+
+                entries.Add(row);
+            }
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["entries"] = entries;
             JavaScriptSerializer serializer = CreateJsonSerializer();
             SendJson(stream, serializer.Serialize(result));
         }
