@@ -177,7 +177,7 @@ curl -X POST https://server:8443/api/v1/linux/inventory/service-status \
 
 ### GET /api/v1/clients
 
-Returns the full Windows client inventory index in one response. Top-level fields: `schemaVersion`, `serverVersion`, `generatedAt`, `clientCount`, `staleHours`, `adDescriptionSyncEnabled`, and `clients` - an array where each entry is a client's stored inventory report (the report body as last submitted to `POST /api/v1/inventory`, plus `sourceFile` and `sourceUpdatedAt` added by the server, the latter from the report file's last-write time).
+Returns the full Windows client inventory index in one response. Top-level fields: `schemaVersion`, `serverVersion`, `generatedAt`, `clientCount`, `staleHours`, `adDescriptionSyncEnabled`, and `clients` - an array where each entry is a client's stored inventory report (the report body as last submitted to `POST /api/v1/inventory`, plus `sourceFile` and `sourceUpdatedAt` added by the server, the latter from the report file's last-write time; `tokenIssue` is one of `"missing"` or `"mismatched"` when a token problem is detected, absent from the object when there is none).
 
 ### PUT /api/v1/clients/{computerName}/description
 
@@ -381,7 +381,7 @@ GET returns `{"history": [...]}`, most-recent-first, each entry `{id, thumbprint
 
 ### GET /api/v1/server/settings
 
-Returns the general settings block: everything from the certificate status shape above, plus `staleHours`, `port`, `enableHttp`, `httpsPort`, `hstsEnabled`, `hstsMaxAgeHours` (off by default - see "HSTS" under Conventions above), `adSyncEnabled`, `adDescriptionSyncEnabled`, `adSyncMode`, `adSyncIntervalHours`, `adDomain`, `adUseServiceIdentity`, `adUsername` (`null` when using the service identity), `adPasswordConfigured` (boolean only, never the password itself), `adComputerImportOUs`, `loginLockoutThreshold`, `loginLockoutWindowMinutes`, `loginLockoutDurationMinutes` (see "Login lockout" under Conventions above), `installLogRetentionDays`, `debugLogEnabled`, `debugLogPath`. `requireIngestionToken` and the dashboard admin username/password are deliberately not part of this response - see the ingestion-token and admin-password endpoints below.
+Returns the general settings block: everything from the certificate status shape above, plus `staleHours`, `port`, `enableHttp`, `httpsPort`, `hstsEnabled`, `hstsMaxAgeHours` (off by default - see "HSTS" under Conventions above), `adSyncEnabled`, `adDescriptionSyncEnabled`, `adSyncMode`, `adSyncIntervalHours`, `adDomain`, `adUseServiceIdentity`, `adUsername` (`null` when using the service identity), `adPasswordConfigured` (boolean only, never the password itself), `adComputerImportOUs`, `loginLockoutThreshold`, `loginLockoutWindowMinutes`, `loginLockoutDurationMinutes` (see "Login lockout" under Conventions above), `installLogRetentionDays`, `ingestionRejectionLogRetentionDays`, `ingestionRejectionLogMaxEntries`, `debugLogEnabled`, `debugLogPath`. `requireIngestionToken` and the dashboard admin username/password are deliberately not part of this response - see the ingestion-token and admin-password endpoints below.
 
 ### POST /api/v1/server/settings
 
@@ -392,7 +392,7 @@ Two settings each require an explicit acknowledgment flag before a risky change 
 - Enabling `useHttps` while the configured certificate has flagged risks, without `acknowledgeRisks: true`.
 - Turning off an already-enabled `requireIngestionToken`, without `acknowledgeIngestionTokenRisk: true` - since that removes authentication from both inventory-ingestion endpoints.
 
-Other validation errors (`400 {"error": "..."}`) cover out-of-range numeric fields (`staleHours` 1-8760, `port`/`httpsPort` 1-65535, `installLogRetentionDays` 1-3650, `adSyncIntervalHours` 1-8760, `loginLockoutThreshold` 0-1000, `loginLockoutWindowMinutes`/`loginLockoutDurationMinutes` 1-1440, `hstsMaxAgeHours` 1-8760), disabling HTTP while HTTPS is also off or not working (would make the dashboard unreachable), and HTTP/HTTPS ports colliding when both are enabled.
+Other validation errors (`400 {"error": "..."}`) cover out-of-range numeric fields (`staleHours` 1-8760, `port`/`httpsPort` 1-65535, `installLogRetentionDays` 1-3650, `ingestionRejectionLogRetentionDays` 1-3650, `ingestionRejectionLogMaxEntries` 100-100000, `adSyncIntervalHours` 1-8760, `loginLockoutThreshold` 0-1000, `loginLockoutWindowMinutes`/`loginLockoutDurationMinutes` 1-1440, `hstsMaxAgeHours` 1-8760), disabling HTTP while HTTPS is also off or not working (would make the dashboard unreachable), and HTTP/HTTPS ports colliding when both are enabled.
 
 ```bash
 curl -X GET https://server:8443/api/v1/server/settings -u admin:password
@@ -418,6 +418,10 @@ POST generates a new 64-character random token, persists it, and only then swaps
 ```bash
 curl -X POST https://server:8443/api/v1/server/ingestion-token/regenerate -u admin:password
 ```
+
+### GET /api/v1/server/ingestion-rejections
+
+Returns the server's log of rejected ingestion-token attempts, most-recent-first: `{"entries": [...]}` where each entry has `timestampUtc`, `sourceIp`, `hostname` (reverse-DNS lookup, best-effort and unauthenticated - can be `null`), `endpoint` (which ingestion route), `reason` (`"missing"` or `"mismatched"`), and `matchedClient` (the known client's name if matched by source IP, else `null`). Log size is controlled by `ingestionRejectionLogRetentionDays` and `ingestionRejectionLogMaxEntries` settings.
 
 ## AD computer import
 
