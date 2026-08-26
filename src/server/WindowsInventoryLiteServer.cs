@@ -644,6 +644,15 @@ namespace WindowsInventoryLite
                         options.LoginLockoutDurationMinutes = loginLockoutDurationFromConfig;
                     }
                 }
+                if (options.SessionLifetimeHours == 12)
+                {
+                    string sessionLifetimeHoursText = GetConfigString(config, "SessionLifetimeHours");
+                    int sessionLifetimeHoursFromConfig;
+                    if (!String.IsNullOrEmpty(sessionLifetimeHoursText) && Int32.TryParse(sessionLifetimeHoursText, out sessionLifetimeHoursFromConfig) && sessionLifetimeHoursFromConfig >= 1 && sessionLifetimeHoursFromConfig <= 720)
+                    {
+                        options.SessionLifetimeHours = sessionLifetimeHoursFromConfig;
+                    }
+                }
                 if (options.IngestionRejectionLogRetentionDays == 30)
                 {
                     string ingestionRejectionRetentionText = GetConfigString(config, "IngestionRejectionLogRetentionDays");
@@ -7246,6 +7255,7 @@ namespace WindowsInventoryLite
             result["loginLockoutThreshold"] = options.LoginLockoutThreshold;
             result["loginLockoutWindowMinutes"] = options.LoginLockoutWindowMinutes;
             result["loginLockoutDurationMinutes"] = options.LoginLockoutDurationMinutes;
+            result["sessionLifetimeHours"] = options.SessionLifetimeHours;
             result["ingestionRejectionLogRetentionDays"] = options.IngestionRejectionLogRetentionDays;
             result["ingestionRejectionLogMaxEntries"] = options.IngestionRejectionLogMaxEntries;
             result["installLogRetentionDays"] = options.InstallLogRetentionDays;
@@ -7627,6 +7637,18 @@ namespace WindowsInventoryLite
                 }
                 options.LoginLockoutDurationMinutes = loginLockoutDurationMinutes;
                 updates["LoginLockoutDurationMinutes"] = loginLockoutDurationMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("sessionLifetimeHours"))
+            {
+                int sessionLifetimeHours;
+                if (!Int32.TryParse(Convert.ToString(payload["sessionLifetimeHours"]), out sessionLifetimeHours) || sessionLifetimeHours < 1 || sessionLifetimeHours > 720)
+                {
+                    SendText(stream, "{\"error\":\"sessionLifetimeHours must be between 1 and 720\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.SessionLifetimeHours = sessionLifetimeHours;
+                updates["SessionLifetimeHours"] = sessionLifetimeHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
             }
 
             if (payload.ContainsKey("ingestionRejectionLogRetentionDays"))
@@ -9853,6 +9875,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "SendLoginResult refuses to create a session while Basic Auth is unconfigured", TestSendLoginResultRejectsWhenBasicAuthUnconfigured);
             allPassed &= SelfTestCheck(output, "SendLogoutResult removes the session from the server-side store", TestSendLogoutResultRemovesSessionFromStore);
             allPassed &= SelfTestCheck(output, "SendLogoutResult is idempotent when no session cookie is present", TestSendLogoutResultIsIdempotentWithNoSessionCookie);
+            allPassed &= SelfTestCheck(output, "ConfigureServerSettings validates sessionLifetimeHours is between 1 and 720", TestConfigureServerSettingsValidatesSessionLifetimeHours);
             allPassed &= SelfTestCheck(output, "TryParsePortFromPrefix extracts the port from a ListenPrefix URL", TestTryParsePortFromPrefix);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper escapes RFC 4515 special characters", TestLdapFilterEscapeSpecialChars);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper leaves a normal computer name untouched", TestLdapFilterEscapeNormalName);
@@ -10757,6 +10780,53 @@ namespace WindowsInventoryLite
                 {
                     return "expected logout with no session cookie present to still succeed (idempotent no-op), got: " + response;
                 }
+            }
+
+            return null;
+        }
+
+        private static string TestConfigureServerSettingsValidatesSessionLifetimeHours()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext outOfRange = new RequestContext();
+            outOfRange.Method = "POST";
+            outOfRange.Path = "/api/v1/server/settings";
+            outOfRange.Headers = new Dictionary<string, string>();
+            outOfRange.Body = "{\"sessionLifetimeHours\":0}";
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.ConfigureServerSettings(stream, outOfRange);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("400"))
+                {
+                    return "expected sessionLifetimeHours of 0 to be rejected as out of range (1-720), got: " + response;
+                }
+            }
+
+            RequestContext valid = new RequestContext();
+            valid.Method = "POST";
+            valid.Path = "/api/v1/server/settings";
+            valid.Headers = new Dictionary<string, string>();
+            valid.Body = "{\"sessionLifetimeHours\":24}";
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.ConfigureServerSettings(stream, valid);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("200 OK"))
+                {
+                    return "expected sessionLifetimeHours of 24 to be accepted, got: " + response;
+                }
+            }
+
+            if (options.SessionLifetimeHours != 24)
+            {
+                return "expected options.SessionLifetimeHours to be updated to 24";
             }
 
             return null;
