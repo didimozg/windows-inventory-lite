@@ -132,6 +132,12 @@ namespace WindowsInventoryLite
         public int LoginLockoutThreshold;
         public int LoginLockoutWindowMinutes;
         public int LoginLockoutDurationMinutes;
+        // Dashboard-only (Settings > Admin password > Login lockout, same
+        // block), no Install-Server.ps1 CLI flag - same reasoning as
+        // LoginLockoutThreshold above. Governs how long a dashboard login
+        // session stays valid (sliding - see IsWebRequestAuthorized's
+        // session-cookie branch), not anything Basic-Auth-related.
+        public int SessionLifetimeHours;
         // Dashboard-only (Settings > Server > Ingestion Token), no
         // Install-Server.ps1 CLI flag - same reasoning as
         // LoginLockoutThreshold above. Governs the rejected-ingestion-
@@ -249,6 +255,7 @@ namespace WindowsInventoryLite
             options.LoginLockoutThreshold = 10;
             options.LoginLockoutWindowMinutes = 15;
             options.LoginLockoutDurationMinutes = 15;
+            options.SessionLifetimeHours = 12;
             options.HstsMaxAgeHours = 24;
             options.IngestionRejectionLogRetentionDays = 30;
             options.IngestionRejectionLogMaxEntries = 5000;
@@ -816,6 +823,14 @@ namespace WindowsInventoryLite
         // management network" control, not the sole line of defense.
         private readonly object loginLockoutLock = new object();
         private readonly Dictionary<IPAddress, LoginLockoutRecord> loginLockoutState = new Dictionary<IPAddress, LoginLockoutRecord>();
+
+        // Not persisted to disk - a server restart naturally requires
+        // everyone to log in again, matching how loginLockoutState above
+        // already resets on restart. Keyed by the random token that is
+        // also the wil_session cookie's value (see GenerateRandomToken).
+        private readonly object sessionLock = new object();
+        private readonly Dictionary<string, SessionRecord> sessionStore = new Dictionary<string, SessionRecord>();
+
         // Rejected-ingestion-token attempt log (see IngestionRejectionEntry/
         // RecordIngestionRejection). Persisted to disk (see
         // GetIngestionRejectionLogPath) and loaded into this list once at
@@ -5140,6 +5155,22 @@ namespace WindowsInventoryLite
 
         private bool IsWebRequestAuthorized(RequestContext request)
         {
+            string cookieHeader = request.Headers.ContainsKey("cookie") ? request.Headers["cookie"] : null;
+            string sessionToken = GetCookieValue(cookieHeader, "wil_session");
+            if (!String.IsNullOrEmpty(sessionToken))
+            {
+                lock (sessionLock)
+                {
+                    SessionRecord record;
+                    sessionStore.TryGetValue(sessionToken, out record);
+                    if (IsSessionValid(record, DateTime.UtcNow))
+                    {
+                        record.ExpiresUtc = ComputeSessionExpiry(DateTime.UtcNow, options.SessionLifetimeHours);
+                        return true;
+                    }
+                }
+            }
+
             if (String.IsNullOrEmpty(options.WebUsername) && String.IsNullOrEmpty(options.WebPassword))
             {
                 // Every route reaching this check - dashboard, settings,
@@ -5405,6 +5436,51 @@ namespace WindowsInventoryLite
                 return null;
             }
             return newestMatch.Reason;
+        }
+
+        // Cookie header is "name1=value1; name2=value2" - no quoting or
+        // escaping to worry about here, since this app's own cookie value
+        // is always a fixed-format hex token from GenerateRandomToken,
+        // never something a user typed. Returns null if the header is
+        // absent/empty or the named cookie isn't present.
+        private static string GetCookieValue(string cookieHeader, string name)
+        {
+            if (String.IsNullOrEmpty(cookieHeader))
+            {
+                return null;
+            }
+            string[] pairs = cookieHeader.Split(';');
+            foreach (string pair in pairs)
+            {
+                string trimmed = pair.Trim();
+                int separator = trimmed.IndexOf('=');
+                if (separator < 0)
+                {
+                    continue;
+                }
+                string cookieName = trimmed.Substring(0, separator);
+                if (String.Equals(cookieName, name, StringComparison.Ordinal))
+                {
+                    return trimmed.Substring(separator + 1);
+                }
+            }
+            return null;
+        }
+
+        // Pure - no I/O, no DateTime.UtcNow inside. Strict ">" (not ">="):
+        // a record expiring at exactly nowUtc is already invalid, matching
+        // EvaluateLockoutState's own strict-comparison convention.
+        private static bool IsSessionValid(SessionRecord record, DateTime nowUtc)
+        {
+            return record != null && record.ExpiresUtc > nowUtc;
+        }
+
+        // Pure - the trivial arithmetic is its own function (rather than
+        // inlined at both the login and sliding-refresh call sites) so a
+        // self-test can pin the exact "hours -> DateTime" behavior once.
+        private static DateTime ComputeSessionExpiry(DateTime nowUtc, int sessionLifetimeHours)
+        {
+            return nowUtc.AddHours(sessionLifetimeHours);
         }
 
         // Ordinary == (or String.Equals) fails fast at the first mismatched
@@ -5986,6 +6062,16 @@ namespace WindowsInventoryLite
             public int FailedCount;
             public DateTime WindowStartUtc;
             public DateTime? LockedUntilUtc;
+        }
+
+        // One active dashboard login session, created by SendLoginResult
+        // and removed by SendLogoutResult - see IsWebRequestAuthorized's
+        // session-cookie branch. Sliding expiration: ExpiresUtc is pushed
+        // forward by SessionLifetimeHours on every authorized request that
+        // used this session, not fixed from creation time.
+        private sealed class SessionRecord
+        {
+            public DateTime ExpiresUtc;
         }
 
         // One rejected ingestion-token attempt. Persisted as one JSON-lines
@@ -9637,6 +9723,12 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "SanitizeFileName leaves a normal computer name untouched", TestSanitizeFileNameNormalName);
             allPassed &= SelfTestCheck(output, "FixedTimeEquals matches identical strings and rejects everything else", TestFixedTimeEquals);
             allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized restricts to loopback while Basic Auth is unconfigured", TestIsWebRequestAuthorizedRestrictsToLoopbackWhenUnconfigured);
+            allPassed &= SelfTestCheck(output, "GetCookieValue parses a named cookie out of a raw Cookie header", TestGetCookieValueParsesNamedCookie);
+            allPassed &= SelfTestCheck(output, "IsSessionValid checks expiry with a strict (not inclusive) comparison", TestIsSessionValidChecksExpiry);
+            allPassed &= SelfTestCheck(output, "ComputeSessionExpiry adds the given number of hours to now", TestComputeSessionExpiryAddsHours);
+            allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized accepts a valid session cookie with no Authorization header", TestIsWebRequestAuthorizedAcceptsValidSessionCookieWithNoAuthorizationHeader);
+            allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized rejects an expired session cookie and falls through to Basic Auth", TestIsWebRequestAuthorizedRejectsExpiredSessionCookie);
+            allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized refreshes a session's expiry on successful use (sliding expiration)", TestIsWebRequestAuthorizedRefreshesSessionExpiryOnUse);
             allPassed &= SelfTestCheck(output, "TryParsePortFromPrefix extracts the port from a ListenPrefix URL", TestTryParsePortFromPrefix);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper escapes RFC 4515 special characters", TestLdapFilterEscapeSpecialChars);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper leaves a normal computer name untouched", TestLdapFilterEscapeNormalName);
@@ -10222,6 +10314,157 @@ namespace WindowsInventoryLite
             if (!server.IsWebRequestAuthorized(remoteWithAuth))
             {
                 return "expected a non-loopback request with correct Basic Auth credentials to be authorized once Basic Auth is configured";
+            }
+
+            return null;
+        }
+
+        private static string TestGetCookieValueParsesNamedCookie()
+        {
+            if (GetCookieValue(null, "wil_session") != null)
+            {
+                return "expected a null cookie header to yield null";
+            }
+            if (GetCookieValue("", "wil_session") != null)
+            {
+                return "expected an empty cookie header to yield null";
+            }
+            if (GetCookieValue("foo=bar", "wil_session") != null)
+            {
+                return "expected a cookie header with no matching name to yield null";
+            }
+            if (GetCookieValue("wil_session=abc123", "wil_session") != "abc123")
+            {
+                return "expected a single-cookie header to parse its value";
+            }
+            if (GetCookieValue("foo=bar; wil_session=abc123; baz=qux", "wil_session") != "abc123")
+            {
+                return "expected the named cookie to parse correctly among several";
+            }
+            return null;
+        }
+
+        private static string TestIsSessionValidChecksExpiry()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+
+            if (IsSessionValid(null, now))
+            {
+                return "expected a null record to be invalid";
+            }
+
+            SessionRecord expired = new SessionRecord();
+            expired.ExpiresUtc = now.AddSeconds(-1);
+            if (IsSessionValid(expired, now))
+            {
+                return "expected a record that expired one second ago to be invalid";
+            }
+
+            SessionRecord exactlyAtExpiry = new SessionRecord();
+            exactlyAtExpiry.ExpiresUtc = now;
+            if (IsSessionValid(exactlyAtExpiry, now))
+            {
+                return "expected a record expiring exactly now to be invalid (strict comparison)";
+            }
+
+            SessionRecord stillValid = new SessionRecord();
+            stillValid.ExpiresUtc = now.AddMinutes(1);
+            if (!IsSessionValid(stillValid, now))
+            {
+                return "expected a record expiring one minute from now to be valid";
+            }
+
+            return null;
+        }
+
+        private static string TestComputeSessionExpiryAddsHours()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            DateTime expiry = ComputeSessionExpiry(now, 12);
+            if (expiry != now.AddHours(12))
+            {
+                return "expected ComputeSessionExpiry to add exactly the given number of hours to now";
+            }
+            return null;
+        }
+
+        private static string TestIsWebRequestAuthorizedAcceptsValidSessionCookieWithNoAuthorizationHeader()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.SessionLifetimeHours = 12;
+            InventoryServer server = new InventoryServer(options);
+
+            string token = "test-session-token";
+            SessionRecord record = new SessionRecord();
+            record.ExpiresUtc = DateTime.UtcNow.AddHours(1);
+            server.sessionStore[token] = record;
+
+            RequestContext request = new RequestContext();
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["cookie"] = "wil_session=" + token;
+            request.RemoteAddress = IPAddress.Parse("192.168.1.50");
+
+            if (!server.IsWebRequestAuthorized(request))
+            {
+                return "expected a valid session cookie to authorize the request with no Authorization header present";
+            }
+
+            return null;
+        }
+
+        private static string TestIsWebRequestAuthorizedRejectsExpiredSessionCookie()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            InventoryServer server = new InventoryServer(options);
+
+            string token = "expired-session-token";
+            SessionRecord record = new SessionRecord();
+            record.ExpiresUtc = DateTime.UtcNow.AddMinutes(-1);
+            server.sessionStore[token] = record;
+
+            RequestContext request = new RequestContext();
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["cookie"] = "wil_session=" + token;
+            request.RemoteAddress = IPAddress.Parse("192.168.1.50");
+
+            if (server.IsWebRequestAuthorized(request))
+            {
+                return "expected an expired session cookie to fall through to (and fail) Basic Auth, not authorize the request";
+            }
+
+            return null;
+        }
+
+        private static string TestIsWebRequestAuthorizedRefreshesSessionExpiryOnUse()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.SessionLifetimeHours = 12;
+            InventoryServer server = new InventoryServer(options);
+
+            string token = "sliding-session-token";
+            SessionRecord record = new SessionRecord();
+            DateTime almostExpired = DateTime.UtcNow.AddMinutes(1);
+            record.ExpiresUtc = almostExpired;
+            server.sessionStore[token] = record;
+
+            RequestContext request = new RequestContext();
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["cookie"] = "wil_session=" + token;
+            request.RemoteAddress = IPAddress.Parse("192.168.1.50");
+
+            server.IsWebRequestAuthorized(request);
+
+            SessionRecord refreshed;
+            server.sessionStore.TryGetValue(token, out refreshed);
+            if (refreshed == null || refreshed.ExpiresUtc <= almostExpired.AddHours(1))
+            {
+                return "expected a successful session-cookie authorization to push ExpiresUtc forward by SessionLifetimeHours (sliding expiration)";
             }
 
             return null;
