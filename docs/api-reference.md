@@ -381,7 +381,7 @@ GET returns `{"history": [...]}`, most-recent-first, each entry `{id, thumbprint
 
 ### GET /api/v1/server/settings
 
-Returns the general settings block: everything from the certificate status shape above, plus `staleHours`, `port`, `enableHttp`, `httpsPort`, `hstsEnabled`, `hstsMaxAgeHours` (off by default - see "HSTS" under Conventions above), `adSyncEnabled`, `adDescriptionSyncEnabled`, `adSyncMode`, `adSyncIntervalHours`, `adDomain`, `adUseServiceIdentity`, `adUsername` (`null` when using the service identity), `adPasswordConfigured` (boolean only, never the password itself), `adComputerImportOUs`, `preferredLinuxSubnet` (empty string means no filtering), `linuxDefaultIntervalHours`, `linuxDefaultStatusIntervalMinutes`, `linuxDefaultInstallPath`, `loginLockoutThreshold`, `loginLockoutWindowMinutes`, `loginLockoutDurationMinutes` (see "Login lockout" under Conventions above), `installLogRetentionDays`, `ingestionRejectionLogRetentionDays`, `ingestionRejectionLogMaxEntries`, `debugLogEnabled`, `debugLogPath`. `requireIngestionToken` and the dashboard admin username/password are deliberately not part of this response - see the ingestion-token and admin-password endpoints below.
+Returns the general settings block: everything from the certificate status shape above, plus `staleHours`, `port`, `enableHttp`, `httpsPort`, `hstsEnabled`, `hstsMaxAgeHours` (off by default - see "HSTS" under Conventions above), `adSyncEnabled`, `adDescriptionSyncEnabled`, `adSyncMode`, `adSyncIntervalHours`, `adDomain`, `adUseServiceIdentity`, `adUsername` (`null` when using the service identity), `adPasswordConfigured` (boolean only, never the password itself), `adComputerImportOUs`, `preferredLinuxSubnet` (empty string means no filtering), `linuxDefaultIntervalHours`, `linuxDefaultStatusIntervalMinutes`, `linuxDefaultInstallPath`, `loginLockoutThreshold`, `loginLockoutWindowMinutes`, `loginLockoutDurationMinutes` (see "Login lockout" under Conventions above), `sessionLifetimeHours`, `installLogRetentionDays`, `ingestionRejectionLogRetentionDays`, `ingestionRejectionLogMaxEntries`, `debugLogEnabled`, `debugLogPath`. `requireIngestionToken` and the dashboard admin username/password are deliberately not part of this response - see the ingestion-token and admin-password endpoints below.
 
 ### POST /api/v1/server/settings
 
@@ -392,7 +392,7 @@ Two settings each require an explicit acknowledgment flag before a risky change 
 - Enabling `useHttps` while the configured certificate has flagged risks, without `acknowledgeRisks: true`.
 - Turning off an already-enabled `requireIngestionToken`, without `acknowledgeIngestionTokenRisk: true` - since that removes authentication from both inventory-ingestion endpoints.
 
-Other validation errors (`400 {"error": "..."}`) cover out-of-range numeric fields (`staleHours` 1-8760, `port`/`httpsPort` 1-65535, `installLogRetentionDays` 1-3650, `ingestionRejectionLogRetentionDays` 1-3650, `ingestionRejectionLogMaxEntries` 100-100000, `adSyncIntervalHours` 1-8760, `linuxDefaultIntervalHours` 1-24, `linuxDefaultStatusIntervalMinutes` 1-1440, `loginLockoutThreshold` 0-1000, `loginLockoutWindowMinutes`/`loginLockoutDurationMinutes` 1-1440, `hstsMaxAgeHours` 1-8760), a malformed `preferredLinuxSubnet` (must be blank or a valid IPv4 CIDR, e.g. `192.168.1.0/24`), an empty or non-absolute `linuxDefaultInstallPath` (must start with `/`), disabling HTTP while HTTPS is also off or not working (would make the dashboard unreachable), and HTTP/HTTPS ports colliding when both are enabled.
+Other validation errors (`400 {"error": "..."}`) cover out-of-range numeric fields (`staleHours` 1-8760, `port`/`httpsPort` 1-65535, `installLogRetentionDays` 1-3650, `ingestionRejectionLogRetentionDays` 1-3650, `ingestionRejectionLogMaxEntries` 100-100000, `adSyncIntervalHours` 1-8760, `linuxDefaultIntervalHours` 1-24, `linuxDefaultStatusIntervalMinutes` 1-1440, `loginLockoutThreshold` 0-1000, `loginLockoutWindowMinutes`/`loginLockoutDurationMinutes` 1-1440, `sessionLifetimeHours` 1-720, `hstsMaxAgeHours` 1-8760), a malformed `preferredLinuxSubnet` (must be blank or a valid IPv4 CIDR, e.g. `192.168.1.0/24`), an empty or non-absolute `linuxDefaultInstallPath` (must start with `/`), disabling HTTP while HTTPS is also off or not working (would make the dashboard unreachable), and HTTP/HTTPS ports colliding when both are enabled.
 
 ```bash
 curl -X GET https://server:8443/api/v1/server/settings -u admin:password
@@ -422,6 +422,33 @@ curl -X POST https://server:8443/api/v1/server/ingestion-token/regenerate -u adm
 ### GET /api/v1/server/ingestion-rejections
 
 Returns the server's log of rejected ingestion-token attempts, most-recent-first: `{"entries": [...]}` where each entry has `timestampUtc`, `sourceIp`, `hostname` (a best-effort reverse-DNS lookup of `sourceIp` - can be `null`; an attacker controls what PTR record their own IP resolves to, if any, so never treat it as a verified identity), `endpoint` (which ingestion route), `reason` (`"missing"` or `"mismatched"`), and `matchedClient` (the known client's name if matched by source IP, else `null`). `ingestionRejectionLogRetentionDays` and `ingestionRejectionLogMaxEntries` are targets the log is kept close to, not an exact real-time bound: both are re-checked on every new rejection and again at server startup (not on a timer), and the count cap is enforced in batches for write efficiency, so entry count can transiently run over `ingestionRejectionLogMaxEntries` by a small margin, or entries can briefly outlive `ingestionRejectionLogRetentionDays`, between prune passes.
+
+### POST /api/v1/server/login
+
+Establishes a server-side session with valid dashboard admin credentials. Request body: `{username, password}` (both required).
+
+Success response: `200` with `Set-Cookie: wil_session=...` in response headers. The cookie carries `HttpOnly` and `SameSite=Strict` flags. Over HTTPS, it also carries the `Secure` flag; over plain HTTP, the flag is omitted and the cookie travels in cleartext, the same as Basic Auth credentials already do. Response body: `{"status": "ok"}`.
+
+Failure response: `401` with body `{"error": "Invalid username or password"}` - the same error shape as other unauthenticated responses. Failed attempts are rate-limited per source IP using the same lockout mechanism as Basic Auth (see "Login lockout" under Conventions above).
+
+Loopback-only mode: Always returns `401` when both `WebUsername` and `WebPassword` are unconfigured, even with correct credentials - a session cookie would bypass the IP-based loopback restriction, so the endpoint does not issue one until credentials are configured.
+
+```bash
+curl -X POST https://server:8443/api/v1/server/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin", "password":"password"}'
+```
+
+### POST /api/v1/server/logout
+
+Invalidates the server-side session and clears the session cookie. No request body required (unauthenticated requests to this endpoint are also accepted).
+
+Response: always `200` with body `{"status": "ok"}`. Logout is idempotent - logging out an already-missing or expired session is a no-op success, not an error. The response includes a cookie-clearing `Set-Cookie: wil_session=` header.
+
+```bash
+curl -X POST https://server:8443/api/v1/server/logout \
+  -H "Content-Type: application/json"
+```
 
 ## AD computer import
 
