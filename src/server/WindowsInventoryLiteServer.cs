@@ -132,6 +132,13 @@ namespace WindowsInventoryLite
         public int LoginLockoutThreshold;
         public int LoginLockoutWindowMinutes;
         public int LoginLockoutDurationMinutes;
+        // Dashboard-only (Settings > Server > Ingestion Token), no
+        // Install-Server.ps1 CLI flag - same reasoning as
+        // LoginLockoutThreshold above. Governs the rejected-ingestion-
+        // attempt log (see IngestionRejectionEntry/RecordIngestionRejection),
+        // not the token itself.
+        public int IngestionRejectionLogRetentionDays;
+        public int IngestionRejectionLogMaxEntries;
         public int InstallLogRetentionDays;
         public string ConfigPath;
         // The certificate is resolved from the LocalMachine\My store by thumbprint
@@ -243,6 +250,8 @@ namespace WindowsInventoryLite
             options.LoginLockoutWindowMinutes = 15;
             options.LoginLockoutDurationMinutes = 15;
             options.HstsMaxAgeHours = 24;
+            options.IngestionRejectionLogRetentionDays = 30;
+            options.IngestionRejectionLogMaxEntries = 5000;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -626,6 +635,24 @@ namespace WindowsInventoryLite
                     if (!String.IsNullOrEmpty(loginLockoutDurationText) && Int32.TryParse(loginLockoutDurationText, out loginLockoutDurationFromConfig) && loginLockoutDurationFromConfig >= 1 && loginLockoutDurationFromConfig <= 1440)
                     {
                         options.LoginLockoutDurationMinutes = loginLockoutDurationFromConfig;
+                    }
+                }
+                if (options.IngestionRejectionLogRetentionDays == 30)
+                {
+                    string ingestionRejectionRetentionText = GetConfigString(config, "IngestionRejectionLogRetentionDays");
+                    int ingestionRejectionRetentionFromConfig;
+                    if (!String.IsNullOrEmpty(ingestionRejectionRetentionText) && Int32.TryParse(ingestionRejectionRetentionText, out ingestionRejectionRetentionFromConfig) && ingestionRejectionRetentionFromConfig >= 1 && ingestionRejectionRetentionFromConfig <= 3650)
+                    {
+                        options.IngestionRejectionLogRetentionDays = ingestionRejectionRetentionFromConfig;
+                    }
+                }
+                if (options.IngestionRejectionLogMaxEntries == 5000)
+                {
+                    string ingestionRejectionMaxEntriesText = GetConfigString(config, "IngestionRejectionLogMaxEntries");
+                    int ingestionRejectionMaxEntriesFromConfig;
+                    if (!String.IsNullOrEmpty(ingestionRejectionMaxEntriesText) && Int32.TryParse(ingestionRejectionMaxEntriesText, out ingestionRejectionMaxEntriesFromConfig) && ingestionRejectionMaxEntriesFromConfig >= 100 && ingestionRejectionMaxEntriesFromConfig <= 100000)
+                    {
+                        options.IngestionRejectionLogMaxEntries = ingestionRejectionMaxEntriesFromConfig;
                     }
                 }
                 if (String.IsNullOrEmpty(options.ClientUpdateUsername))
@@ -4994,6 +5021,68 @@ namespace WindowsInventoryLite
             }
         }
 
+        private static string ResolveIngestionRejectionReason(string suppliedToken)
+        {
+            return String.IsNullOrEmpty(suppliedToken) ? "missing" : "mismatched";
+        }
+
+        // Pure - no I/O, no DateTime.UtcNow inside. Applies whichever cap
+        // (age or count) is more restrictive - each is evaluated
+        // independently against the input, and the surviving set is their
+        // intersection (an entry must pass BOTH to survive).
+        private static List<IngestionRejectionEntry> PruneIngestionRejectionEntries(List<IngestionRejectionEntry> entries, DateTime nowUtc, int retentionDays, int maxEntries)
+        {
+            List<IngestionRejectionEntry> withinAge = new List<IngestionRejectionEntry>();
+            foreach (IngestionRejectionEntry entry in entries)
+            {
+                if ((nowUtc - entry.TimestampUtc).TotalDays <= retentionDays)
+                {
+                    withinAge.Add(entry);
+                }
+            }
+
+            if (withinAge.Count <= maxEntries)
+            {
+                return withinAge;
+            }
+
+            // entries arrive in chronological (oldest-first) order - keep
+            // only the newest maxEntries.
+            return withinAge.GetRange(withinAge.Count - maxEntries, maxEntries);
+        }
+
+        // Pure - no I/O. "Last successful report timestamp" is resolved by
+        // the caller (BuildClientIndex/LoadClientReports) using the same
+        // collectedAt-then-sourceUpdatedAt fallback the dashboard's own
+        // allClientSortValue already uses - this function just compares
+        // against whatever DateTime it's handed.
+        private static string ComputeClientTokenIssue(string lastIngestSourceIp, DateTime lastCollectedUtc, List<IngestionRejectionEntry> rejectionLog)
+        {
+            if (String.IsNullOrEmpty(lastIngestSourceIp) || rejectionLog == null)
+            {
+                return null;
+            }
+
+            IngestionRejectionEntry newestMatch = null;
+            foreach (IngestionRejectionEntry entry in rejectionLog)
+            {
+                if (!String.Equals(entry.SourceIp, lastIngestSourceIp, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                if (newestMatch == null || entry.TimestampUtc > newestMatch.TimestampUtc)
+                {
+                    newestMatch = entry;
+                }
+            }
+
+            if (newestMatch == null || newestMatch.TimestampUtc <= lastCollectedUtc)
+            {
+                return null;
+            }
+            return newestMatch.Reason;
+        }
+
         // Ordinary == (or String.Equals) fails fast at the first mismatched
         // character, which leaks how many leading characters of a guess were
         // correct via response timing - a textbook side-channel against
@@ -5505,6 +5594,21 @@ namespace WindowsInventoryLite
             public int FailedCount;
             public DateTime WindowStartUtc;
             public DateTime? LockedUntilUtc;
+        }
+
+        // One rejected ingestion-token attempt. Persisted as one JSON-lines
+        // record (see RecordIngestionRejection) and kept in memory in
+        // ingestionRejectionLog for fast correlation/serving without
+        // re-reading the file. Endpoint is one of "windows-inventory",
+        // "linux-inventory", "linux-service-status"; Reason is one of
+        // "missing" (no token header at all) or "mismatched" (a token was
+        // supplied but did not match).
+        private sealed class IngestionRejectionEntry
+        {
+            public DateTime TimestampUtc;
+            public string SourceIp;
+            public string Endpoint;
+            public string Reason;
         }
 
         private sealed class InstallJob
@@ -9126,6 +9230,15 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "RecordAttemptOutcome never locks out when the threshold is 0 (disabled)", TestRecordAttemptOutcomeNeverLocksOutWhenThresholdIsZero);
             allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized's recorded failures and IsBasicAuthLockedOut's read are wired together and scoped per-IP", TestIsWebRequestAuthorizedLocksOutAfterRepeatedFailures);
             allPassed &= SelfTestCheck(output, "BuildHstsHeaderOrEmpty only adds Strict-Transport-Security when enabled AND the stream is TLS", TestBuildHstsHeaderOrEmpty);
+            allPassed &= SelfTestCheck(output, "ResolveIngestionRejectionReason distinguishes a missing token from a wrong one", TestResolveIngestionRejectionReason);
+            allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries keeps everything under both caps", TestPruneIngestionRejectionEntriesUnderBothCaps);
+            allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries trims oldest-first over the count cap", TestPruneIngestionRejectionEntriesOverCountCap);
+            allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries removes entries older than the retention-days cap", TestPruneIngestionRejectionEntriesOverAgeCap);
+            allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries applies whichever cap is more restrictive", TestPruneIngestionRejectionEntriesBothCapsEngaged);
+            allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue returns null when no log entry matches the client's IP", TestComputeClientTokenIssueNoMatch);
+            allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue ignores a matching-IP rejection older than the client's last report", TestComputeClientTokenIssueStaleRejectionIgnored);
+            allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue flags a matching-IP rejection newer than the client's last report", TestComputeClientTokenIssueRecentRejectionFlagged);
+            allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue picks the newest matching-IP entry's reason when several match", TestComputeClientTokenIssueNewestWins);
             allPassed &= SelfTestCheck(output, "ResolveEffectiveToken falls back to the live server token when the request supplies none", TestResolveEffectiveTokenFallsBackToLiveTokenWhenBlank);
             allPassed &= SelfTestCheck(output, "RequiresIngestionTokenRiskAcknowledgment only fires on an actual on-to-off transition without prior acknowledgment", TestRequiresIngestionTokenRiskAcknowledgmentOnlyWhenTurningEnforcementOff);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
@@ -9837,6 +9950,165 @@ namespace WindowsInventoryLite
                 return "expected a different IP to be unaffected by another IP's lockout";
             }
 
+            return null;
+        }
+
+        private static string TestResolveIngestionRejectionReason()
+        {
+            if (ResolveIngestionRejectionReason(null) != "missing")
+            {
+                return "expected a null token to resolve to 'missing'";
+            }
+            if (ResolveIngestionRejectionReason("") != "missing")
+            {
+                return "expected an empty token to resolve to 'missing'";
+            }
+            if (ResolveIngestionRejectionReason("wrong-token") != "mismatched")
+            {
+                return "expected a non-empty (wrong) token to resolve to 'mismatched'";
+            }
+            return null;
+        }
+
+        // Test-only construction helper - avoids object-initializer syntax
+        // (`new Foo { A = 1 }`), which compiles fine under this project's
+        // C# 3.0/.NET 3.5 toolchain but isn't used anywhere else in this
+        // file; every other type here is built field-by-field instead.
+        private static IngestionRejectionEntry MakeIngestionRejectionEntry(DateTime timestampUtc, string sourceIp, string endpoint, string reason)
+        {
+            IngestionRejectionEntry entry = new IngestionRejectionEntry();
+            entry.TimestampUtc = timestampUtc;
+            entry.SourceIp = sourceIp;
+            entry.Endpoint = endpoint;
+            entry.Reason = reason;
+            return entry;
+        }
+
+        private static string TestPruneIngestionRejectionEntriesUnderBothCaps()
+        {
+            DateTime now = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> entries = new List<IngestionRejectionEntry>();
+            entries.Add(MakeIngestionRejectionEntry(now.AddDays(-1), "10.0.0.1", "windows-inventory", "missing"));
+            entries.Add(MakeIngestionRejectionEntry(now, "10.0.0.2", "linux-inventory", "mismatched"));
+
+            List<IngestionRejectionEntry> result = PruneIngestionRejectionEntries(entries, now, 30, 5000);
+            if (result.Count != 2)
+            {
+                return "expected both entries to survive when under both caps, got " + result.Count;
+            }
+            return null;
+        }
+
+        private static string TestPruneIngestionRejectionEntriesOverCountCap()
+        {
+            DateTime now = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> entries = new List<IngestionRejectionEntry>();
+            for (int i = 0; i < 5; i++)
+            {
+                entries.Add(MakeIngestionRejectionEntry(now.AddMinutes(i), "10.0.0." + i, "windows-inventory", "missing"));
+            }
+
+            List<IngestionRejectionEntry> result = PruneIngestionRejectionEntries(entries, now, 30, 3);
+            if (result.Count != 3)
+            {
+                return "expected exactly 3 entries to survive a max-entries cap of 3, got " + result.Count;
+            }
+            if (result[0].SourceIp != "10.0.0.2" || result[2].SourceIp != "10.0.0.4")
+            {
+                return "expected the oldest entries to be trimmed first (newest 3 survive, oldest-to-newest order preserved)";
+            }
+            return null;
+        }
+
+        private static string TestPruneIngestionRejectionEntriesOverAgeCap()
+        {
+            DateTime now = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> entries = new List<IngestionRejectionEntry>();
+            entries.Add(MakeIngestionRejectionEntry(now.AddDays(-40), "10.0.0.1", "windows-inventory", "missing"));
+            entries.Add(MakeIngestionRejectionEntry(now.AddDays(-1), "10.0.0.2", "linux-inventory", "mismatched"));
+
+            List<IngestionRejectionEntry> result = PruneIngestionRejectionEntries(entries, now, 30, 5000);
+            if (result.Count != 1 || result[0].SourceIp != "10.0.0.2")
+            {
+                return "expected the 40-day-old entry to be pruned by a 30-day retention cap regardless of the count cap";
+            }
+            return null;
+        }
+
+        private static string TestPruneIngestionRejectionEntriesBothCapsEngaged()
+        {
+            DateTime now = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> entries = new List<IngestionRejectionEntry>();
+            entries.Add(MakeIngestionRejectionEntry(now.AddDays(-40), "10.0.0.1", "windows-inventory", "missing"));
+            for (int i = 0; i < 5; i++)
+            {
+                entries.Add(MakeIngestionRejectionEntry(now.AddMinutes(i), "10.0.0." + (i + 2), "windows-inventory", "missing"));
+            }
+
+            // Age cap removes the 1 old entry (6 -> 5); count cap of 2 then
+            // trims further (5 -> 2) - the more restrictive result (2) wins.
+            List<IngestionRejectionEntry> result = PruneIngestionRejectionEntries(entries, now, 30, 2);
+            if (result.Count != 2)
+            {
+                return "expected the more restrictive cap (count=2) to win when both caps would otherwise remove different entries, got " + result.Count;
+            }
+            return null;
+        }
+
+        private static string TestComputeClientTokenIssueNoMatch()
+        {
+            DateTime lastCollected = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> log = new List<IngestionRejectionEntry>();
+            log.Add(MakeIngestionRejectionEntry(lastCollected.AddMinutes(5), "10.0.0.99", "windows-inventory", "missing"));
+
+            string result = ComputeClientTokenIssue("10.0.0.1", lastCollected, log);
+            if (result != null)
+            {
+                return "expected no indicator when no log entry matches the client's source IP, got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestComputeClientTokenIssueStaleRejectionIgnored()
+        {
+            DateTime lastCollected = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> log = new List<IngestionRejectionEntry>();
+            log.Add(MakeIngestionRejectionEntry(lastCollected.AddMinutes(-5), "10.0.0.1", "windows-inventory", "mismatched"));
+
+            string result = ComputeClientTokenIssue("10.0.0.1", lastCollected, log);
+            if (result != null)
+            {
+                return "expected a matching-IP rejection OLDER than the client's last report to be ignored (client has since reported fine), got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestComputeClientTokenIssueRecentRejectionFlagged()
+        {
+            DateTime lastCollected = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> log = new List<IngestionRejectionEntry>();
+            log.Add(MakeIngestionRejectionEntry(lastCollected.AddMinutes(5), "10.0.0.1", "windows-inventory", "mismatched"));
+
+            string result = ComputeClientTokenIssue("10.0.0.1", lastCollected, log);
+            if (result != "mismatched")
+            {
+                return "expected 'mismatched' for a matching-IP rejection newer than the client's last report, got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestComputeClientTokenIssueNewestWins()
+        {
+            DateTime lastCollected = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> log = new List<IngestionRejectionEntry>();
+            log.Add(MakeIngestionRejectionEntry(lastCollected.AddMinutes(5), "10.0.0.1", "windows-inventory", "missing"));
+            log.Add(MakeIngestionRejectionEntry(lastCollected.AddMinutes(10), "10.0.0.1", "windows-inventory", "mismatched"));
+
+            string result = ComputeClientTokenIssue("10.0.0.1", lastCollected, log);
+            if (result != "mismatched")
+            {
+                return "expected the NEWEST matching-IP entry's reason to win ('mismatched'), got '" + result + "'";
+            }
             return null;
         }
 
