@@ -429,7 +429,7 @@ Establishes a server-side session with valid dashboard admin credentials. Reques
 
 Success response: `200` with `Set-Cookie: wil_session=...` in response headers. The cookie carries `HttpOnly` and `SameSite=Strict` flags. Over HTTPS, it also carries the `Secure` flag; over plain HTTP, the flag is omitted and the cookie travels in cleartext, the same as Basic Auth credentials already do. Response body: `{"status": "ok"}`.
 
-Failure response: `401` with body `{"error": "Invalid username or password"}` - the same error shape as other unauthenticated responses. Failed attempts are rate-limited per source IP using the same lockout mechanism as Basic Auth (see "Login lockout" under Conventions above).
+Failure response: `401` with body `Unauthorized` (plain text, not JSON) - the same `SendUnauthorized` response every other unauthenticated request in this API gets, including the Basic Auth `401` case documented under Conventions above. Failed attempts are rate-limited per source IP using the same lockout mechanism as Basic Auth (see "Login lockout" under Conventions above).
 
 Loopback-only mode: Always returns `401` when both `WebUsername` and `WebPassword` are unconfigured, even with correct credentials - a session cookie would bypass the IP-based loopback restriction, so the endpoint does not issue one until credentials are configured.
 
@@ -441,12 +441,13 @@ curl -X POST https://server:8443/api/v1/server/login \
 
 ### POST /api/v1/server/logout
 
-Invalidates the server-side session and clears the session cookie. No request body required (unauthenticated requests to this endpoint are also accepted).
+Invalidates the server-side session and clears the session cookie. No request body required. Reachable the same way as every other management endpoint documented here - a valid session cookie or Basic Auth is required to reach the handler at all; unlike `/api/v1/server/login`, this route is dispatched after the `IsWebRequestAuthorized` check, with no unauthenticated carve-out.
 
 Response: always `200` with body `{"status": "ok"}`. Logout is idempotent - logging out an already-missing or expired session is a no-op success, not an error. The response includes a cookie-clearing `Set-Cookie: wil_session=` header.
 
 ```bash
 curl -X POST https://server:8443/api/v1/server/logout \
+  -u admin:password \
   -H "Content-Type: application/json"
 ```
 
