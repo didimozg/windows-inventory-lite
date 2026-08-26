@@ -621,14 +621,14 @@
             <h3 class="settings-block-title">WinRM credentials</h3>
             <p class="cert-hint">Global uses the saved account (Settings &gt; Windows &gt; Client update credentials), or AD as a fallback if nothing is saved. Manual lets you type a different account for this push only - typed here, never saved.</p>
             <p id="updatesSavedAccountHint" class="cert-hint hidden"></p>
-            <label class="pkg-token-field">
-              WinRM credential source
-              <select id="updatesWinRmAuthMode">
-                <option value="global">Global (saved account, AD fallback)</option>
-                <option value="manual">Manual credentials</option>
-              </select>
-            </label>
             <div class="pkg-grid client-update-grid">
+              <label class="pkg-token-field">
+                WinRM credential source
+                <select id="updatesWinRmAuthMode">
+                  <option value="global">Global (saved account, AD fallback)</option>
+                  <option value="manual">Manual credentials</option>
+                </select>
+              </label>
               <label id="updatesWinRmUsernameField" class="pkg-token-field hidden">
                 Client update username
                 <input id="updatesUsername" type="text" autocomplete="username" placeholder="DOMAIN\svc-account">
@@ -657,11 +657,11 @@
               Linux password
               <input id="linuxUpdatesPassword" type="password" autocomplete="current-password">
             </label>
-            <label class="check-label">
+            <label class="check-label linux-updates-trust-field">
               <input id="linuxUpdatesTrustNewHostKeys" type="checkbox">
               Trust new host keys automatically (skip verification)
             </label>
-            <label id="linuxUpdatesAcknowledgeHostKeyRiskField" class="check-label hidden">
+            <label id="linuxUpdatesAcknowledgeHostKeyRiskField" class="check-label linux-updates-trust-field hidden">
               <input id="linuxUpdatesAcknowledgeHostKeyRisk" type="checkbox">
               I understand this accepts an unverified SSH host key on first connection
             </label>

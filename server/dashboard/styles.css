@@ -1606,6 +1606,17 @@ th.sort-desc::after {
   max-width: 420px;
 }
 
+/* The two "Trust new host keys"/"I understand..." checkboxes right below
+   the credential fields above share the exact same root cause but were
+   missed when .linux-updates-credential-field was added: .check-label's
+   own min-height/grid-template-columns/align-items (styles.css, further
+   down) never apply without something setting display:grid first, same
+   as .ingestion-require-token-field's fix elsewhere on this page. */
+.linux-updates-trust-field {
+  display: grid;
+  margin-bottom: var(--space-md);
+}
+
 .pkg-grid {
   display: grid;
   grid-template-columns: minmax(240px, 2fr) minmax(160px, 1fr) 110px auto;
