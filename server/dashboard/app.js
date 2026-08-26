@@ -121,18 +121,15 @@
     updateThemeToggle();
   }
 
-  // Basic Auth has no server-side session to invalidate, so this is a
-  // best-effort client-side clear: an explicit, deliberately-wrong
-  // Authorization header gives the browser a chance to drop the real
-  // cached credentials, but not every browser honors it. The overlay text
-  // says so - closing the tab/window is the only guaranteed way out.
+  // The session is now a real server-side record (see POST
+  // /api/v1/server/logout) that gets removed immediately - no more
+  // reliance on tricking the browser into dropping cached Basic Auth
+  // credentials, and no more residual risk requiring a "close the tab"
+  // hedge.
   function handleLogout() {
-    if (!window.confirm('Log out of Windows Inventory Lite? On some browsers you may need to close this tab to fully clear your saved sign-in.')) return;
+    if (!window.confirm('Log out of Windows Inventory Lite?')) return;
     stopPolling();
-    fetch('/api/v1/clients', {
-      cache: 'no-store',
-      headers: { Authorization: 'Basic ' + btoa('logout:' + Math.random().toString(36).slice(2)) }
-    }).catch(() => {}).then(() => {
+    fetch('/api/v1/server/logout', { method: 'POST', cache: 'no-store' }).catch(() => {}).then(() => {
       byId('logoutOverlay').classList.remove('hidden');
     });
   }
@@ -2987,6 +2984,7 @@
         byId('loginLockoutThreshold').value = data.loginLockoutThreshold != null ? data.loginLockoutThreshold : 10;
         byId('loginLockoutWindowMinutes').value = data.loginLockoutWindowMinutes || 15;
         byId('loginLockoutDurationMinutes').value = data.loginLockoutDurationMinutes || 15;
+        byId('sessionLifetimeHours').value = data.sessionLifetimeHours || 12;
       })
       .catch(error => {
         showSavedMessage(byId('loginLockoutMessage'), `Settings unavailable: ${error.message}`, true);
@@ -3004,7 +3002,8 @@
       body: JSON.stringify({
         loginLockoutThreshold: Number.parseInt(byId('loginLockoutThreshold').value, 10) || 0,
         loginLockoutWindowMinutes: Number.parseInt(byId('loginLockoutWindowMinutes').value, 10) || 15,
-        loginLockoutDurationMinutes: Number.parseInt(byId('loginLockoutDurationMinutes').value, 10) || 15
+        loginLockoutDurationMinutes: Number.parseInt(byId('loginLockoutDurationMinutes').value, 10) || 15,
+        sessionLifetimeHours: Number.parseInt(byId('sessionLifetimeHours').value, 10) || 12
       })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, data })))
@@ -4268,6 +4267,15 @@
   function pollForUpdates() {
     fetch('/api/v1/clients', { cache: 'no-store' })
       .then(response => {
+        if (response.status === 401) {
+          // The session expired while this tab was already open (or the
+          // admin logged this session out remotely). Reload rather than
+          // just failing silently - a fresh unauthenticated request to /
+          // now correctly renders the login page (see SendUnauthorized).
+          stopPolling();
+          window.location.reload();
+          throw new Error('Session expired');
+        }
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
       })

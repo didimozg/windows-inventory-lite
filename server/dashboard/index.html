@@ -468,6 +468,10 @@
                 Lockout duration (minutes)
                 <input id="loginLockoutDurationMinutes" type="number" min="1" max="1440" value="15">
               </label>
+              <label class="pkg-token-field">
+                Session lifetime (hours)
+                <input id="sessionLifetimeHours" type="number" min="1" max="720" value="12">
+              </label>
               <div class="pkg-buttons">
                 <button id="loginLockoutSaveButton" class="primary-button" type="button">Save</button>
               </div>
@@ -982,7 +986,7 @@
   <div id="logoutOverlay" class="logout-overlay hidden" role="alertdialog" aria-label="Logged out">
     <div class="logout-overlay-card">
       <h2>Logged out</h2>
-      <p>Your saved sign-in for this tab has been cleared where the browser allows it. Some browsers keep it cached until every tab using this site is closed - for full security on a shared computer, close this browser tab or window.</p>
+      <p>Your session has been ended.</p>
       <button id="logoutReloadButton" class="primary-button" type="button">Log back in</button>
     </div>
   </div>

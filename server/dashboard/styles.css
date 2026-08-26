@@ -1791,7 +1791,7 @@ h3.push-status-heading {
    than .client-update-grid's credential-shaped fields, matching this
    block's actual content instead of stretching digits-only inputs wide. */
 .login-lockout-grid {
-  grid-template-columns: repeat(3, minmax(160px, 220px)) auto;
+  grid-template-columns: repeat(4, minmax(160px, 220px)) auto;
 }
 
 /* Same narrow single-column treatment as .ad-sync-panel/.ad-identity-panel -
