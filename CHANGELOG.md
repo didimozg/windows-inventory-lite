@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## Client 0.2.2
+
+Client-only fix, no server/dashboard change - see the versioning note above for why this has its own version line instead of a `[X.Y.Z]` heading.
+
+### Fixed
+
+- Windows client: Office 2010 activation was still never detected despite the v0.40.3/client-0.2.1 fix - that fix queried the wrong WMI location entirely (`root\Microsoft\OfficeSoftwareProtectionPlatform`, a namespace that does not exist on a real Office 2010 install) and silently swallowed the resulting exception, always falling through to "not activated." Live-diagnosed against a real Office 2010 (VOLUME_KMSCLIENT) host: the `OfficeSoftwareProtectionProduct` class actually lives directly in `root\cimv2`, the same namespace already used for the Windows/Office 2013+ query - confirmed via `Get-CimClass`/`Get-CimInstance` showing the real class and its populated `PartialProductKey`/`LicenseStatus` fields. Now queries the correct namespace.
+
 ## [0.51.0]
 
 Closes the "no HSTS header" finding logged during the v0.48.0 security audit.

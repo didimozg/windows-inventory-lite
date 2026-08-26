@@ -15,7 +15,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLiteClient";
-        internal const string ProductVersion = "0.2.1";
+        internal const string ProductVersion = "0.2.2";
 
         private static int Main(string[] args)
         {
@@ -588,12 +588,19 @@ namespace WindowsInventoryLite
                 }
             }
 
-            // Office 2010 predates Office's move into the unified Software
-            // Protection Platform SoftwareLicensingProduct above queries (Office
-            // 2013+/365 and the OS itself all use it) - it registers its own
-            // activation state in a separate, older WMI namespace instead. Only
-            // checked for the Office branch: Windows OS activation has always
-            // lived in SoftwareLicensingProduct, no equivalent gap there.
+            // Office 2010 predates Office's move into the unified
+            // SoftwareLicensingProduct class above (Office 2013+/365 and the
+            // OS itself all use it) - it registers its own activation state
+            // in a separate class, OfficeSoftwareProtectionProduct, instead.
+            // Confirmed live on a real Office 2010 VOLUME_KMSCLIENT host
+            // (2026-08-26): that class lives directly in root\cimv2, the
+            // SAME namespace as the query above - NOT in a dedicated
+            // root\Microsoft\OfficeSoftwareProtectionPlatform namespace as
+            // originally assumed (that namespace does not exist at all on a
+            // real Office 2010 install; querying it always threw, silently
+            // caught below, which is why this never worked). Only checked
+            // for the Office branch: Windows OS activation has always lived
+            // in SoftwareLicensingProduct, no equivalent gap there.
             if (!windows)
             {
                 ArrayList officeLegacyProducts;
@@ -601,13 +608,14 @@ namespace WindowsInventoryLite
                 {
                     officeLegacyProducts = QueryList(
                         "SELECT ProductKeyID, LicenseStatus FROM OfficeSoftwareProtectionProduct WHERE PartialProductKey IS NOT NULL",
-                        "root\\Microsoft\\OfficeSoftwareProtectionPlatform");
+                        "root\\cimv2");
                 }
                 catch
                 {
-                    // Namespace doesn't exist on hosts with no legacy Office
-                    // Software Protection Platform installed (i.e. no Office 2010
-                    // or earlier ever present) - not an error, just no data.
+                    // OfficeSoftwareProtectionProduct doesn't exist as a class
+                    // on hosts with no legacy Office Software Protection
+                    // Platform installed (i.e. no Office 2010 or earlier ever
+                    // present) - not an error, just no data.
                     officeLegacyProducts = new ArrayList();
                 }
 
