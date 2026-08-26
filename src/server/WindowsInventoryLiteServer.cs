@@ -6,6 +6,7 @@ using System.IO;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Security.AccessControl;
 using System.Security.Authentication;
 using System.Security.Cryptography;
@@ -5450,10 +5451,16 @@ namespace WindowsInventoryLite
             SendText(stream, fallback, contentType, 200, "no-cache");
         }
 
-        private ArrayList LoadClientReports()
+        internal ArrayList LoadClientReports()
         {
             ArrayList clients = new ArrayList();
             JavaScriptSerializer serializer = CreateJsonSerializer();
+
+            List<IngestionRejectionEntry> rejectionLogSnapshot;
+            lock (ingestionRejectionLogLock)
+            {
+                rejectionLogSnapshot = new List<IngestionRejectionEntry>(ingestionRejectionLog);
+            }
 
             foreach (string file in Directory.GetFiles(options.DataPath, "*.json"))
             {
@@ -5462,7 +5469,20 @@ namespace WindowsInventoryLite
                     string raw = File.ReadAllText(file, Encoding.UTF8);
                     Dictionary<string, object> client = serializer.Deserialize<Dictionary<string, object>>(raw);
                     client["sourceFile"] = Path.GetFileName(file);
-                    client["sourceUpdatedAt"] = File.GetLastWriteTimeUtc(file).ToString("yyyy-MM-ddTHH:mm:ssZ");
+                    DateTime sourceUpdatedAtUtc = File.GetLastWriteTimeUtc(file);
+                    client["sourceUpdatedAt"] = sourceUpdatedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+                    string lastIngestSourceIp = GetStringValue(client, "lastIngestSourceIp");
+                    if (!String.IsNullOrEmpty(lastIngestSourceIp))
+                    {
+                        DateTime lastCollectedUtc = ParseUtcDate(GetStringValue(client, "collectedAt"), sourceUpdatedAtUtc);
+                        string tokenIssue = ComputeClientTokenIssue(lastIngestSourceIp, lastCollectedUtc, rejectionLogSnapshot);
+                        if (tokenIssue != null)
+                        {
+                            client["tokenIssue"] = tokenIssue;
+                        }
+                    }
+
                     clients.Add(client);
                 }
                 catch
@@ -9514,6 +9534,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue ignores a matching-IP rejection older than the client's last report", TestComputeClientTokenIssueStaleRejectionIgnored);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue flags a matching-IP rejection newer than the client's last report", TestComputeClientTokenIssueRecentRejectionFlagged);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue picks the newest matching-IP entry's reason when several match", TestComputeClientTokenIssueNewestWins);
+            allPassed &= SelfTestCheck(output, "LoadClientReports sets tokenIssue on a client whose IP has a newer rejected attempt", TestLoadClientReportsSetsTokenIssueFromRejectionLog);
             allPassed &= SelfTestCheck(output, "ResolveEffectiveToken falls back to the live server token when the request supplies none", TestResolveEffectiveTokenFallsBackToLiveTokenWhenBlank);
             allPassed &= SelfTestCheck(output, "RequiresIngestionTokenRiskAcknowledgment only fires on an actual on-to-off transition without prior acknowledgment", TestRequiresIngestionTokenRiskAcknowledgmentOnlyWhenTurningEnforcementOff);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
@@ -10385,6 +10406,56 @@ namespace WindowsInventoryLite
                 return "expected the NEWEST matching-IP entry's reason to win ('mismatched'), got '" + result + "'";
             }
             return null;
+        }
+
+        private static string TestLoadClientReportsSetsTokenIssueFromRejectionLog()
+        {
+            ServerOptions options = new ServerOptions();
+            // A bare `new ServerOptions()` does NOT run Parse()'s defaults -
+            // these two default to 0 otherwise, which would make
+            // RecordIngestionRejection's own prune pass (retentionDays=0)
+            // immediately discard the very entry this test just recorded,
+            // before LoadClientReports ever sees it.
+            options.IngestionRejectionLogRetentionDays = 30;
+            options.IngestionRejectionLogMaxEntries = 5000;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-tokenissue-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                DateTime collectedAt = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                report["computerName"] = "PC-TEST";
+                report["collectedAt"] = collectedAt.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                report["lastIngestSourceIp"] = "203.0.113.9";
+                File.WriteAllText(Path.Combine(options.DataPath, "PC-TEST.json"), serializer.Serialize(report), Encoding.UTF8);
+
+                RequestContext rejectedRequest = new RequestContext();
+                rejectedRequest.Headers = new Dictionary<string, string>();
+                rejectedRequest.RemoteAddress = IPAddress.Parse("203.0.113.9");
+                typeof(InventoryServer)
+                    .GetMethod("RecordIngestionRejection", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                    .Invoke(server, new object[] { rejectedRequest, "windows-inventory", "mismatched" });
+
+                ArrayList clients = server.LoadClientReports();
+
+                if (clients.Count != 1)
+                {
+                    return "expected exactly one loaded client report, got " + clients.Count;
+                }
+                Dictionary<string, object> loaded = (Dictionary<string, object>)clients[0];
+                if (!loaded.ContainsKey("tokenIssue") || Convert.ToString(loaded["tokenIssue"]) != "mismatched")
+                {
+                    return "expected LoadClientReports to set tokenIssue='mismatched' after a matching rejected attempt newer than collectedAt";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
         }
 
         private static string TestBuildHstsHeaderOrEmpty()
