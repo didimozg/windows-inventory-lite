@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.52.0";
+        internal const string ProductVersion = "0.52.1";
 
         private static int Main(string[] args)
         {
@@ -109,7 +109,7 @@ namespace WindowsInventoryLite
         public string LinuxUpdateKeyPath;
         public string LinuxClientPackagePath;
         // CIDR block (e.g. "192.168.1.0/24") an admin can set in Settings >
-        // General when a Linux host reports several NICs and the "wrong"
+        // Linux when a Linux host reports several NICs and the "wrong"
         // one (a storage/cluster network, not the one reachable from this
         // server) would otherwise win GetLinuxClientUpdateTarget's plain
         // first-IPv4 heuristic. Empty by default - no filtering, unchanged
@@ -4191,14 +4191,16 @@ namespace WindowsInventoryLite
                 // from both Main() and OnStart(), with no try/catch anywhere
                 // above it) over what is only a diagnostic log - a disk-full
                 // condition, an ACL/permissions issue, or a backup/AV tool
-                // holding the file locked must not crash the whole server
-                // (see Important Fix 2 in the re-review of the fix above).
+                // holding the file locked must not crash the whole server.
                 // Matches RecordIngestionRejection's own established
                 // try/catch pattern: log via DebugLogger.Log and swallow, so
                 // the server still starts with whatever was already loaded
-                // into memory - even if that means this in-memory copy stays
-                // in its pre-prune, over-retention state until the next
-                // successful RecordIngestionRejection call prunes it.
+                // into memory - even if the rewrite below fails, memory has
+                // already been pruned (Clear()+AddRange() ran first); it's
+                // the on-disk file that's left stale in its pre-prune,
+                // over-retention state until some later write succeeds
+                // (RecordIngestionRejection's own batched prune+rewrite, or
+                // the next restart's reload).
                 try
                 {
                     List<IngestionRejectionEntry> pruned = PruneIngestionRejectionEntries(ingestionRejectionLog, DateTime.UtcNow, options.IngestionRejectionLogRetentionDays, options.IngestionRejectionLogMaxEntries);

@@ -12,7 +12,7 @@
 - The license inventory catalog (`licenses.json`) with admin-entered Name, Version, License, and Comment fields.
 - The certificate history log (`_certificates/certificate-history.json`) recording every uploaded certificate and the risks found at upload time.
 - Cached Active Directory computer descriptions (adDescription field on each report), and AD credentials when explicit AD credentials (rather than the service identity) are configured.
-- Client Auto-Update credentials (`ClientUpdateUsername`/`ClientUpdatePassword`), when a dedicated WinRM account is configured on the `Client updates` page instead of relying on the service identity.
+- Client Auto-Update credentials (`ClientUpdateUsername`/`ClientUpdatePassword`), when a dedicated WinRM account is configured on Settings > Windows > "Windows Client update credentials" instead of relying on the service identity.
 
 ## Trust Boundaries
 
@@ -111,7 +111,7 @@
 - Keep WinRM action log retention short enough for the environment and protect the log directory with server-side ACLs.
 - Enable Basic Auth before using the `Client package` configure endpoint in any environment where unauthorized access is possible. The endpoint writes to the server filesystem and changes the deployment target URL for GPO clients.
 - Configure Basic Auth immediately after install, from the dashboard `Change admin password` page or `-WebUsername`/`-WebPassword` at install time, before exposing the server beyond a trusted network - the initial setup step itself is intentionally unauthenticated (see Main Risks).
-- Enable Basic Auth before exposing the `Certificate` or `General` tabs in any environment where unauthorized access is possible; together they can import a certificate into the machine store and switch the listener to HTTPS.
+- Enable Basic Auth before exposing the `Certificate` tab or Settings > `Server` in any environment where unauthorized access is possible; together they can import a certificate into the machine store and switch the listener to HTTPS.
 - Perform the first PFX upload from a trusted network or the server console, since it may travel over plain HTTP.
 - Run the server service under an account with rights to write to `LocalMachine\My` if certificate management from the dashboard is required; `LocalSystem` already has this by default.
 - Use the Settings `Change admin password` page to rotate `WebPassword` instead of editing `server-config.json` directly; rotating an existing password still requires the current one and updates the ACL-protected config file in place.
@@ -120,7 +120,7 @@
 - Do not disable HTTP until HTTPS has been verified reachable from an actual client, not just accepted by the settings endpoint. Keep local server access (RDP, console) available for the recovery procedure in case a certificate degrades after HTTP is off.
 - Monitor certificate expiry independently of this application if HTTP is disabled in production; there is no built-in alerting for an approaching expiry date.
 - Prefer the service account identity over explicit AD credentials when the service already runs under a domain account (which WinRM client actions already require) - it needs no additional secret in server-config.json.
-- The same identity-first preference applies to Client Auto-Update: only configure `ClientUpdateUsername`/`ClientUpdatePassword` on the `Client updates` page if the service identity genuinely cannot reach update targets.
+- The same identity-first preference applies to Client Auto-Update: only configure `ClientUpdateUsername`/`ClientUpdatePassword` on Settings > Windows > "Windows Client update credentials" if the service identity genuinely cannot reach update targets. (Deploy > Updates only *uses* this saved account - it is not where it is configured.)
 
 ## Operational Notes
 
@@ -129,7 +129,7 @@ Day-to-day guidance that follows from the controls above, aimed at an operator r
 - The collector stores activation facts only. It does not export product keys.
 - Basic Auth protects browser access. Plain HTTP does not encrypt credentials in transit - enable HTTPS or restrict access to trusted management networks.
 - The first PFX upload travels over whatever transport is active at that moment. Do it from a trusted network or the server console if the server is still plain HTTP.
-- A certificate with known risks (expired, no private key, no SAN, weak key) can still be enabled on Settings > General, but only after the operator explicitly acknowledges the specific risks shown - it is not a silent action.
+- A certificate with known risks (expired, no private key, no SAN, weak key) can still be enabled on Settings > Server (HTTPS section), but only after the operator explicitly acknowledges the specific risks shown - it is not a silent action.
 - Use `-Token`, firewall rules, and network ACLs to limit who can submit inventory reports.
 - Do not place a sensitive token in a broadly readable SYSVOL script. For GPO deployments, prefer firewall scope or a low-sensitivity ingestion token.
 - If you enable the commented central GPO logging block, limit write access to that log folder to the required computer accounts.

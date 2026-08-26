@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.52.1]
+
+### Fixed
+
+- Docs drift: `docs/parameters-reference.md` was missing 12 real server-config.json settings (HSTS, login lockout, ingestion-rejection log retention, several AD/Linux fields), and `docs/api-reference.md` was missing 4 Linux install-default fields from its settings endpoint documentation. Fixed 4 stale "Settings > General" references and 2 stale "Client updates page" references across `docs/threat-model.md`/`docs/parameters-reference.md`/`docs/api-reference.md` (the Settings tab was split into Server/Windows/Linux sub-tabs a while back; these were never updated), including one quoted API error string that no longer matched the actual runtime text. Also corrected a stale code comment (wrong Settings sub-tab named) and an overstated "enforced continuously" claim about the ingestion-rejection log's retention. No behavior change.
+
 ## [0.52.0]
 
 ### Added
