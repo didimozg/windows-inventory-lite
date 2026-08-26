@@ -40,19 +40,20 @@
       hwRam: { key: 'totalMb', dir: -1 },
       licenses: { key: 'name', dir: 1 },
       linuxServices: { key: 'name', dir: 1 },
+      ingestionRejections: { key: 'timestampUtc', dir: -1 },
       // Sorts the merged Deploy > Updates table (Windows + Linux outdated
       // clients combined) - same per-view-key convention as every other
       // table above.
       updates: { key: 'computerName', dir: 1 }
     },
-    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxServices: 1, updates: 1 },
+    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxServices: 1, updates: 1, ingestionRejections: 1 },
     // clients/software start at a reasonable fallback and are corrected to
     // the real viewport-fitting value the first time their table becomes
     // visible (see computeLiveRowsPerPage/recalculateActivePagination).
     // hwCpu/hwDisk/hwRam are fixed (see HW_PAGE_SIZE) - the three Hardware
     // sub-tables render stacked in one view and are rarely large enough to
     // need viewport-adaptive sizing.
-    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20, linuxServices: 20, updates: 20 },
+    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20, linuxServices: 20, updates: 20, ingestionRejections: 20 },
     // Prefixed keys ('client:'/'software:'/'hw:' + id) so the three
     // separate data-*-details attribute namespaces can't collide in one
     // Set. Drives each render function's initial hidden/visible class for
@@ -61,6 +62,7 @@
     // live-resize page-size correction, or a background data poll), not
     // just the one that happened to be showing when the row was expanded.
     expandedDetails: new Set(),
+    ingestionRejectionEntries: [],
     // Keyed per consuming view, same convention as state.sort/state.page/
     // state.pageSize. 'all' | 'windows' | 'linux'. The keys are literally
     // view names, so renderOsFilterActive can repaint the one shared pill
@@ -149,6 +151,7 @@
     if (hash === 'software') return { view: 'software', subview: null };
     if (hash === 'hardware' || hash === 'linux-hardware') return { view: 'hardware', subview: null };
     if (hash === 'licenses') return { view: 'licenses', subview: null };
+    if (hash === 'logging') return { view: 'logging', subview: null };
     // #linux-clients / #linux are kept as aliases of the merged Clients
     // page (same backward-compat pattern as #linux-hardware above and
     // #certificate below) - old bookmarks land on Clients, unfiltered.
@@ -2594,6 +2597,8 @@
       })
       .then(data => {
         byId('generalStaleHours').value = data.staleHours || 48;
+        byId('generalIngestionRejectionLogRetentionDays').value = data.ingestionRejectionLogRetentionDays || 30;
+        byId('generalIngestionRejectionLogMaxEntries').value = data.ingestionRejectionLogMaxEntries || 5000;
         byId('generalInstallLogRetentionDays').value = data.installLogRetentionDays || 30;
         byId('generalPort').value = data.port || 8080;
         byId('generalEnableHttp').checked = data.enableHttp !== false;
@@ -2703,6 +2708,8 @@
 
   function saveServerSettings(acknowledgeRisks, confirmedDisruption, acknowledgeIngestionTokenRisk) {
     const staleHours = Number.parseInt(byId('generalStaleHours').value, 10) || 48;
+    const ingestionRejectionLogRetentionDays = Number.parseInt(byId('generalIngestionRejectionLogRetentionDays').value, 10) || 30;
+    const ingestionRejectionLogMaxEntries = Number.parseInt(byId('generalIngestionRejectionLogMaxEntries').value, 10) || 5000;
     const installLogRetentionDays = Number.parseInt(byId('generalInstallLogRetentionDays').value, 10) || 30;
     const port = Number.parseInt(byId('generalPort').value, 10) || 8080;
     const enableHttp = byId('generalEnableHttp').checked;
@@ -2743,7 +2750,7 @@
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        staleHours, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, hstsEnabled, hstsMaxAgeHours, requireIngestionToken,
+        staleHours, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, hstsEnabled, hstsMaxAgeHours, ingestionRejectionLogRetentionDays, ingestionRejectionLogMaxEntries, requireIngestionToken,
         acknowledgeRisks: !!acknowledgeRisks, acknowledgeIngestionTokenRisk: !!acknowledgeIngestionTokenRisk,
         debugLogEnabled: byId('generalDebugLogEnabled').checked
       })
@@ -3838,7 +3845,7 @@
 
       return `<tr class="${staleClass}">
         <td><button class="link-button" type="button" ${expandAttr}>${escapeHtml(clientDisplayName(client))}</button> <small class="platform-tag">${escapeHtml(clientPlatformLabel(client))}</small>${usbBadge}${staleBadge}${domainHtml}${ipAddressesHtml ? `<small class="mono">${ipAddressesHtml}</small>` : ''}</td>
-        <td>${escapeHtml(client.clientVersion)}</td>
+        <td>${escapeHtml(client.clientVersion)}${client.tokenIssue ? ` <span class="usb-badge" title="A recent request from this client's last known address ${client.tokenIssue === 'missing' ? 'had no ingestion token' : 'had a wrong ingestion token'}">${client.tokenIssue === 'missing' ? 'TOKEN MISSING' : 'TOKEN MISMATCH'}</span>` : ''}</td>
         <td>${osCell}</td>
         <td>${officeCell}</td>
         <td>${activationCell}</td>
@@ -3986,6 +3993,51 @@
     renderPager('linuxServicesPager', 'linuxServices', page, totalPages, () => renderLinuxServicesTable(state.linuxClients));
   }
 
+  function loadIngestionRejectionLog() {
+    fetch('/api/v1/server/ingestion-rejections', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.ingestionRejectionEntries = data.entries || [];
+        renderIngestionRejectionsTable();
+      })
+      .catch(error => {
+        byId('ingestionRejectionsBody').innerHTML = `<tr><td colspan="6" class="empty">Log unavailable: ${escapeHtml(error.message)}</td></tr>`;
+      });
+  }
+
+  function ingestionRejectionSortValue(entry, key) {
+    switch (key) {
+      case 'timestampUtc': return new Date(entry.timestampUtc || 0).getTime();
+      case 'sourceIp': return (entry.sourceIp || '').toLowerCase();
+      case 'endpoint': return (entry.endpoint || '').toLowerCase();
+      case 'reason': return (entry.reason || '').toLowerCase();
+      default: return '';
+    }
+  }
+
+  function renderIngestionRejectionsTable() {
+    const entries = state.ingestionRejectionEntries || [];
+    const { key: sortKey, dir: sortDir } = state.sort.ingestionRejections;
+    const sorted = applySort(entries, entry => ingestionRejectionSortValue(entry, sortKey), sortDir);
+    const { items: pageItems, page, totalPages } = paginate(sorted, state.page.ingestionRejections, state.pageSize.ingestionRejections);
+    state.page.ingestionRejections = page;
+
+    const rows = pageItems.map(entry => `<tr>
+        <td class="mono">${escapeHtml(formatDateTime(entry.timestampUtc))}</td>
+        <td class="mono">${escapeHtml(entry.sourceIp)}</td>
+        <td>${entry.hostname ? escapeHtml(entry.hostname) : '—'}</td>
+        <td>${escapeHtml(entry.endpoint)}</td>
+        <td>${entry.reason === 'missing' ? 'Token missing' : 'Token mismatch'}</td>
+        <td>${entry.matchedClient ? escapeHtml(entry.matchedClient) : '—'}</td>
+      </tr>`);
+
+    byId('ingestionRejectionsBody').innerHTML = rows.join('') || '<tr><td colspan="6" class="empty">No rejected ingestion attempts recorded.</td></tr>';
+    renderPager('ingestionRejectionsPager', 'ingestionRejections', page, totalPages, () => renderIngestionRejectionsTable());
+  }
+
   // One <li> per computer inside an expanded hardware group. Cross-platform:
   // the display name falls back to hostname for Linux clients, the platform
   // tag is derived from which name field is present, and domain (Windows
@@ -4106,12 +4158,14 @@
     renderSoftwareTable(state.clients);
     renderFilteredHardwarePage();
     renderLicenses();
+    renderIngestionRejectionsTable();
     populateSoftwareDatalists();
     byId('dashboardView').classList.toggle('hidden', state.view !== 'dashboard');
     byId('clientsView').classList.toggle('hidden', state.view !== 'clients');
     byId('softwareView').classList.toggle('hidden', state.view !== 'software');
     byId('hardwareView').classList.toggle('hidden', state.view !== 'hardware');
     byId('licensesView').classList.toggle('hidden', state.view !== 'licenses');
+    byId('loggingView').classList.toggle('hidden', state.view !== 'logging');
     byId('linuxServicesView').classList.toggle('hidden', state.view !== 'linuxServices');
     // Deploy: Actions shows both platforms' sections together (stacked, own
     // headings), Updates and Package are each already cross-platform on one
@@ -4132,6 +4186,7 @@
     byId('softwareTab').classList.toggle('active', state.view === 'software');
     byId('hardwareTab').classList.toggle('active', state.view === 'hardware');
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
+    byId('loggingTab').classList.toggle('active', state.view === 'logging');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
     byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'licenses'].includes(state.view));
     byId('deployTab').classList.toggle('active', state.view === 'deploy');
@@ -4428,6 +4483,7 @@
     if (state.view === 'deploy') loadDeploySubviewData(state.subview);
     if (state.view === 'settings') loadSettingsSubviewData(state.subview);
     if (state.view === 'licenses') loadLicenses();
+    if (state.view === 'logging') loadIngestionRejectionLog();
     if (state.view === 'clients' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
   });
   byId('pkgServerUrl').value = `${window.location.origin}/api/v1/inventory`;
@@ -4717,6 +4773,7 @@
   byId('certUploadButton').addEventListener('click', uploadCertificate);
   byId('certDeleteButton').addEventListener('click', deleteCertificate);
   byId('licensesTab').addEventListener('click', () => setView('licenses'));
+  byId('loggingTab').addEventListener('click', () => setView('logging'));
   byId('linuxServicesTab').addEventListener('click', () => setView('linuxServices'));
   byId('exportLinuxServicesBtn').addEventListener('click', exportLinuxServices);
   byId('exportLicensesBtn').addEventListener('click', exportLicenses);
@@ -4750,6 +4807,7 @@
   if (state.view === 'deploy') loadDeploySubviewData(state.subview);
   if (state.view === 'settings') loadSettingsSubviewData(state.subview);
   if (state.view === 'licenses') loadLicenses();
+  if (state.view === 'logging') loadIngestionRejectionLog();
   updateInstallFieldVisibility();
   loadInstallHistory();
   updateLinuxUpdatesAuthModeFieldsUi();

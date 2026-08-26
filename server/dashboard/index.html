@@ -60,6 +60,7 @@
       </div>
       <button id="deployTab" class="topnav-item" type="button">Install <span id="updatesBadge" class="nav-badge hidden">0</span><span id="linuxUpdatesBadge" class="nav-badge hidden">0</span></button>
       <button id="settingsTab" class="topnav-item" type="button">Settings</button>
+      <button id="loggingTab" class="topnav-item" type="button">Logging</button>
       <div class="topnav-spacer"></div>
       <span id="generatedAt" class="nav-status-text hidden">Waiting for inventory data.</span>
       <span id="serverVersionBadge" class="nav-status-text">Server: unknown</span>
@@ -198,6 +199,16 @@
               <button id="ingestionTokenRegenerateButton" class="danger-button" type="button">Regenerate</button>
             </div>
             <div id="ingestionTokenMessage" class="pkg-message hidden"></div>
+            <div class="pkg-grid general-grid">
+              <label class="pkg-token-field">
+                Rejection log retention (days)
+                <input id="generalIngestionRejectionLogRetentionDays" type="number" min="1" max="3650" value="30">
+              </label>
+              <label class="pkg-token-field">
+                Rejection log max entries
+                <input id="generalIngestionRejectionLogMaxEntries" type="number" min="100" max="100000" value="5000">
+              </label>
+            </div>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Diagnostics</h2>
@@ -523,6 +534,26 @@
               <tbody id="licensesBody"></tbody>
             </table>
           </div>
+        </section>
+
+        <section id="loggingView" class="hidden" aria-label="Ingestion rejection log">
+          <p class="cert-hint">Requests to the inventory-ingestion endpoints rejected for a missing or wrong token. Correlated to a known client by source IP when that IP matches the client's most recent successful report - a best-effort heuristic, not a guarantee (see Settings &gt; Server &gt; Ingestion Token for retention settings).</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th data-sort-table="ingestionRejections" data-sort-key="timestampUtc" class="sortable">Time</th>
+                  <th data-sort-table="ingestionRejections" data-sort-key="sourceIp" class="sortable">Source IP</th>
+                  <th>Hostname</th>
+                  <th data-sort-table="ingestionRejections" data-sort-key="endpoint" class="sortable">Endpoint</th>
+                  <th data-sort-table="ingestionRejections" data-sort-key="reason" class="sortable">Reason</th>
+                  <th>Matched client</th>
+                </tr>
+              </thead>
+              <tbody id="ingestionRejectionsBody"></tbody>
+            </table>
+          </div>
+          <div id="ingestionRejectionsPager" class="pager"></div>
         </section>
 
         <section id="linuxServicesView" class="hidden" aria-label="Linux services inventory">
