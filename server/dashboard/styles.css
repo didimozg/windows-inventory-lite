@@ -1787,9 +1787,10 @@ h3.push-status-heading {
   grid-template-columns: minmax(200px, 420px) minmax(200px, 420px) auto;
 }
 
-/* Three short numeric fields (threshold/window/duration) - narrower tracks
-   than .client-update-grid's credential-shaped fields, matching this
-   block's actual content instead of stretching digits-only inputs wide. */
+/* Four short numeric fields (threshold/window/duration/session lifetime) -
+   narrower tracks than .client-update-grid's credential-shaped fields,
+   matching this block's actual content instead of stretching digits-only
+   inputs wide. */
 .login-lockout-grid {
   grid-template-columns: repeat(4, minmax(160px, 220px)) auto;
 }
