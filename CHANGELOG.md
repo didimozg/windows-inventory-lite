@@ -14,6 +14,12 @@ Client-only fix, no server/dashboard change - see the versioning note above for 
 
 - Windows client: Office 2010 activation was still never detected despite the v0.40.3/client-0.2.1 fix - that fix queried the wrong WMI location entirely (`root\Microsoft\OfficeSoftwareProtectionPlatform`, a namespace that does not exist on a real Office 2010 install) and silently swallowed the resulting exception, always falling through to "not activated." Live-diagnosed against a real Office 2010 (VOLUME_KMSCLIENT) host: the `OfficeSoftwareProtectionProduct` class actually lives directly in `root\cimv2`, the same namespace already used for the Windows/Office 2013+ query - confirmed via `Get-CimClass`/`Get-CimInstance` showing the real class and its populated `PartialProductKey`/`LicenseStatus` fields. Now queries the correct namespace.
 
+## [0.51.2]
+
+### Fixed
+
+- Clients table's Office/OS columns sorted by product name only, completely ignoring the version - rows with the same name but different versions landed in an arbitrary (pre-sort) order relative to each other, and different-year Office editions (e.g. 2010 "профессиональный плюс" vs "стандартный") didn't sort adjacently since their localized names diverge alphabetically. Both columns now sort by version first (numerically, not lexicographically - a naive string comparison would put "16.0.14334.20570" before "16.0.4266.1001"), then by name as a tie-breaker.
+
 ## [0.51.1]
 
 ### Fixed
