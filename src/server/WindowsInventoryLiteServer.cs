@@ -6,7 +6,6 @@ using System.IO;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
-using System.Reflection;
 using System.Security.AccessControl;
 using System.Security.Authentication;
 using System.Security.Cryptography;
@@ -831,6 +830,14 @@ namespace WindowsInventoryLite
         // 1000 entries - see QueueReverseDnsLookup.
         private readonly object reverseDnsCacheLock = new object();
         private readonly Dictionary<IPAddress, string> reverseDnsCache = new Dictionary<IPAddress, string>();
+        // Caps how many reverse-DNS lookups can be in flight on the
+        // ThreadPool at once - the same pool HandleClient itself runs on.
+        // Without this, a burst of first-time-seen source IPs (trivial for
+        // an unauthenticated attacker to trigger) can tie up many pool
+        // threads at once, each blocked up to 2 seconds, and starve real
+        // request handling. See QueueReverseDnsLookup.
+        private const int MaxConcurrentReverseDnsLookups = 20;
+        private int reverseDnsLookupsInFlight;
         // Lets an open dashboard tab notice a server-initiated (scheduled)
         // push exists at all - a scheduled push never goes through any HTTP
         // request the browser makes, so without this the browser has no way
@@ -4150,7 +4157,14 @@ namespace WindowsInventoryLite
                     {
                         Dictionary<string, object> raw = serializer.Deserialize<Dictionary<string, object>>(line);
                         IngestionRejectionEntry entry = new IngestionRejectionEntry();
-                        entry.TimestampUtc = ParseUtcDate(GetStringValue(raw, "timestampUtc"), DateTime.UtcNow);
+                        // A corrupt/unparseable timestamp falls back to
+                        // DateTime.MinValue, not DateTime.UtcNow - the
+                        // latter would make a broken line look like the
+                        // NEWEST entry, immune to the age-based prune below
+                        // (it would never look "old enough" to remove).
+                        // MinValue instead makes it look maximally old, so
+                        // it gets pruned on the very next pass.
+                        entry.TimestampUtc = ParseUtcDate(GetStringValue(raw, "timestampUtc"), DateTime.MinValue);
                         entry.SourceIp = GetStringValue(raw, "sourceIp");
                         entry.Endpoint = GetStringValue(raw, "endpoint");
                         entry.Reason = GetStringValue(raw, "reason");
@@ -4163,6 +4177,22 @@ namespace WindowsInventoryLite
                         // entry - skip it and keep loading the rest.
                     }
                 }
+
+                // Enforce retention/max-entries at startup too, not only
+                // when a new rejection arrives - otherwise a fleet with no
+                // rejections between restarts never actually ages out old
+                // entries, contradicting what docs/api-reference.md already
+                // claims about retention (see Important Fix 3 in the final
+                // review). Mirrors RecordIngestionRejection's own
+                // conditional-rewrite pattern: only touch the file if
+                // pruning actually removed something.
+                List<IngestionRejectionEntry> pruned = PruneIngestionRejectionEntries(ingestionRejectionLog, DateTime.UtcNow, options.IngestionRejectionLogRetentionDays, options.IngestionRejectionLogMaxEntries);
+                if (pruned.Count != ingestionRejectionLog.Count)
+                {
+                    ingestionRejectionLog.Clear();
+                    ingestionRejectionLog.AddRange(pruned);
+                    RewriteIngestionRejectionLogFileLocked();
+                }
             }
         }
 
@@ -4172,7 +4202,14 @@ namespace WindowsInventoryLite
         // Constraints at the top of this plan / spec decision 1).
         private void RecordIngestionRejection(RequestContext request, string endpoint, string reason)
         {
-            if (request.RemoteAddress == null)
+            // HandleClient never actually sets RemoteAddress to null for an
+            // unresolvable peer - it uses the IPAddress.None sentinel
+            // instead. The null check alone let an unresolvable peer's
+            // rejection through and get logged with sourceIp
+            // "255.255.255.255" rather than being skipped as intended; the
+            // null check is kept only as a safety net for direct callers
+            // (e.g. self-tests) that never set RemoteAddress at all.
+            if (request.RemoteAddress == null || request.RemoteAddress.Equals(IPAddress.None))
             {
                 return;
             }
@@ -4190,25 +4227,63 @@ namespace WindowsInventoryLite
             line["endpoint"] = entry.Endpoint;
             line["reason"] = entry.Reason;
 
-            lock (ingestionRejectionLogLock)
+            try
             {
-                ingestionRejectionLog.Add(entry);
-
-                string path = GetIngestionRejectionLogPath();
-                string directory = Path.GetDirectoryName(path);
-                if (!String.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+                lock (ingestionRejectionLogLock)
                 {
-                    Directory.CreateDirectory(directory);
-                }
-                File.AppendAllText(path, serializer.Serialize(line) + Environment.NewLine, new UTF8Encoding(false));
+                    ingestionRejectionLog.Add(entry);
 
-                List<IngestionRejectionEntry> pruned = PruneIngestionRejectionEntries(ingestionRejectionLog, DateTime.UtcNow, options.IngestionRejectionLogRetentionDays, options.IngestionRejectionLogMaxEntries);
-                if (pruned.Count != ingestionRejectionLog.Count)
-                {
-                    ingestionRejectionLog.Clear();
-                    ingestionRejectionLog.AddRange(pruned);
-                    RewriteIngestionRejectionLogFileLocked();
+                    string path = GetIngestionRejectionLogPath();
+                    string directory = Path.GetDirectoryName(path);
+                    if (!String.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+                    {
+                        Directory.CreateDirectory(directory);
+                    }
+                    File.AppendAllText(path, serializer.Serialize(line) + Environment.NewLine, new UTF8Encoding(false));
+
+                    // Amortize the prune+rewrite cost. Once the log is at
+                    // maxEntries, pruning removes exactly one entry per
+                    // call, which would otherwise force a full
+                    // serialize-and-rewrite of the whole file on every
+                    // single rejection - an attacker sending one request
+                    // per rewrite gets up to maxEntries-times the write
+                    // cost for free (see Important Fix 1 in the final
+                    // review). Letting the in-memory list grow past
+                    // maxEntries by a slack margin before paying for the
+                    // expensive prune+rewrite path turns this into roughly
+                    // one full rewrite per slack-sized batch of new
+                    // rejections instead of one per rejection. Retention-day
+                    // pruning is enforced at this same cadence now too -
+                    // acceptable, since day-based retention doesn't need
+                    // per-request precision.
+                    int slack = Math.Max(options.IngestionRejectionLogMaxEntries / 10, 50);
+                    if (ingestionRejectionLog.Count > options.IngestionRejectionLogMaxEntries + slack)
+                    {
+                        List<IngestionRejectionEntry> pruned = PruneIngestionRejectionEntries(ingestionRejectionLog, DateTime.UtcNow, options.IngestionRejectionLogRetentionDays, options.IngestionRejectionLogMaxEntries);
+                        if (pruned.Count != ingestionRejectionLog.Count)
+                        {
+                            ingestionRejectionLog.Clear();
+                            ingestionRejectionLog.AddRange(pruned);
+                            RewriteIngestionRejectionLogFileLocked();
+                        }
+                    }
                 }
+            }
+            catch (Exception ex)
+            {
+                // Every other diagnostic write in this file (and
+                // DebugLogger.Log itself, called right after this method at
+                // each of the 3 rejection call sites) never throws. Disk
+                // I/O here (full disk, ACL drift, a sharing violation) must
+                // not propagate out through ReceiveInventory/
+                // ReceiveLinuxInventory/the Linux service-status handler
+                // into HandleClient's catch block, which would turn an
+                // expected 401 into a 500 plus a stack trace written to the
+                // Windows Event Log - on an unauthenticated endpoint, so
+                // attacker-triggerable (see Important Fix 2 in the final
+                // review). Logging this failure must not itself risk
+                // changing the 401 response the caller already sent.
+                DebugLogger.Log(options, "Error", "RecordIngestionRejection failed to persist a rejected ingestion attempt: " + ex.Message);
             }
 
             QueueReverseDnsLookup(request.RemoteAddress);
@@ -4250,30 +4325,54 @@ namespace WindowsInventoryLite
                 }
             }
 
+            // Bounds how many lookups can be in flight on the ThreadPool at
+            // once (see Important Fix 5 in the final review, and
+            // MaxConcurrentReverseDnsLookups' declaration). Exceeding the
+            // cap fails closed: the lookup is silently skipped rather than
+            // queued, matching this feature's existing best-effort framing
+            // (no hostname is not a functional failure, just a missing
+            // hint). This also resolves the non-atomic check-then-enqueue
+            // race above on the cache lookup - a burst of redundant
+            // concurrent lookups for the same not-yet-cached IP is now a
+            // bounded, harmless occurrence rather than something needing
+            // separate dedup.
+            if (Interlocked.Increment(ref reverseDnsLookupsInFlight) > MaxConcurrentReverseDnsLookups)
+            {
+                Interlocked.Decrement(ref reverseDnsLookupsInFlight);
+                return;
+            }
+
             ThreadPool.QueueUserWorkItem(delegate
             {
-                string hostname = null;
                 try
                 {
-                    IAsyncResult asyncResult = Dns.BeginGetHostEntry(address, null, null);
-                    if (asyncResult.AsyncWaitHandle.WaitOne(2000))
+                    string hostname = null;
+                    try
                     {
-                        IPHostEntry entry = Dns.EndGetHostEntry(asyncResult);
-                        hostname = entry.HostName;
+                        IAsyncResult asyncResult = Dns.BeginGetHostEntry(address, null, null);
+                        if (asyncResult.AsyncWaitHandle.WaitOne(2000))
+                        {
+                            IPHostEntry entry = Dns.EndGetHostEntry(asyncResult);
+                            hostname = entry.HostName;
+                        }
                     }
-                }
-                catch
-                {
-                    hostname = null;
-                }
+                    catch
+                    {
+                        hostname = null;
+                    }
 
-                lock (reverseDnsCacheLock)
-                {
-                    if (reverseDnsCache.Count > 1000)
+                    lock (reverseDnsCacheLock)
                     {
-                        reverseDnsCache.Clear();
+                        if (reverseDnsCache.Count > 1000)
+                        {
+                            reverseDnsCache.Clear();
+                        }
+                        reverseDnsCache[address] = hostname;
                     }
-                    reverseDnsCache[address] = hostname;
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref reverseDnsLookupsInFlight);
                 }
             });
         }
@@ -5220,6 +5319,16 @@ namespace WindowsInventoryLite
                 }
             }
 
+            // A bare `new ServerOptions()` (as opposed to one that has gone
+            // through Parse()) defaults IngestionRejectionLogMaxEntries to 0
+            // - without this guard that would silently discard everything
+            // that survived the age check above. Skip the max-entries trim
+            // entirely rather than trimming to a 0 or negative range.
+            if (maxEntries <= 0)
+            {
+                return withinAge;
+            }
+
             if (withinAge.Count <= maxEntries)
             {
                 return withinAge;
@@ -5461,6 +5570,17 @@ namespace WindowsInventoryLite
             {
                 rejectionLogSnapshot = new List<IngestionRejectionEntry>(ingestionRejectionLog);
             }
+            // One pass over the whole rejection log up front instead of one
+            // full linear scan per client inside the loop below. Before this,
+            // ComputeClientTokenIssue(ip, ..., rejectionLogSnapshot) ran once
+            // per client and each call re-scanned the entire snapshot, making
+            // this O(clients x logEntries) - real cost at the max
+            // configurable IngestionRejectionLogMaxEntries (100000), on a
+            // method called from 4 places, 3 of which never even use the
+            // resulting tokenIssue (see Important Fix 4 in the final
+            // review). Building this map costs O(logEntries) once, and each
+            // client's lookup below is then O(1).
+            Dictionary<string, IngestionRejectionEntry> newestRejectionByIp = BuildNewestRejectionByIp(rejectionLogSnapshot);
 
             foreach (string file in Directory.GetFiles(options.DataPath, "*.json"))
             {
@@ -5476,7 +5596,19 @@ namespace WindowsInventoryLite
                     if (!String.IsNullOrEmpty(lastIngestSourceIp))
                     {
                         DateTime lastCollectedUtc = ParseUtcDate(GetStringValue(client, "collectedAt"), sourceUpdatedAtUtc);
-                        string tokenIssue = ComputeClientTokenIssue(lastIngestSourceIp, lastCollectedUtc, rejectionLogSnapshot);
+                        // ComputeClientTokenIssue's own signature and self-tests
+                        // are unchanged - it still takes a list and scans it,
+                        // but that list now has at most one element (the
+                        // newest rejection already resolved for this IP), so
+                        // its internal scan is trivial regardless of how many
+                        // entries the real log holds.
+                        IngestionRejectionEntry newestMatch;
+                        List<IngestionRejectionEntry> newestMatchAsList = new List<IngestionRejectionEntry>();
+                        if (newestRejectionByIp.TryGetValue(lastIngestSourceIp, out newestMatch))
+                        {
+                            newestMatchAsList.Add(newestMatch);
+                        }
+                        string tokenIssue = ComputeClientTokenIssue(lastIngestSourceIp, lastCollectedUtc, newestMatchAsList);
                         if (tokenIssue != null)
                         {
                             client["tokenIssue"] = tokenIssue;
@@ -5491,6 +5623,22 @@ namespace WindowsInventoryLite
             }
 
             return clients;
+        }
+
+        // Pure - no I/O. One pass over the rejection log, keeping only the
+        // newest entry per sourceIp. See LoadClientReports, the only caller.
+        private static Dictionary<string, IngestionRejectionEntry> BuildNewestRejectionByIp(List<IngestionRejectionEntry> rejectionLog)
+        {
+            Dictionary<string, IngestionRejectionEntry> newestByIp = new Dictionary<string, IngestionRejectionEntry>(StringComparer.Ordinal);
+            foreach (IngestionRejectionEntry entry in rejectionLog)
+            {
+                IngestionRejectionEntry existing;
+                if (!newestByIp.TryGetValue(entry.SourceIp, out existing) || entry.TimestampUtc > existing.TimestampUtc)
+                {
+                    newestByIp[entry.SourceIp] = entry;
+                }
+            }
+            return newestByIp;
         }
 
         private string BuildClientIndex()
@@ -9530,6 +9678,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries trims oldest-first over the count cap", TestPruneIngestionRejectionEntriesOverCountCap);
             allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries removes entries older than the retention-days cap", TestPruneIngestionRejectionEntriesOverAgeCap);
             allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries applies whichever cap is more restrictive", TestPruneIngestionRejectionEntriesBothCapsEngaged);
+            allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries skips the max-entries trim (rather than discarding everything) when maxEntries is 0 or negative", TestPruneIngestionRejectionEntriesZeroMaxEntriesKeepsWithinAge);
+            allPassed &= SelfTestCheck(output, "RecordIngestionRejection batches its prune+rewrite instead of rewriting the whole log on every call once at cap", TestRecordIngestionRejectionBatchesRewrites);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue returns null when no log entry matches the client's IP", TestComputeClientTokenIssueNoMatch);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue ignores a matching-IP rejection older than the client's last report", TestComputeClientTokenIssueStaleRejectionIgnored);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue flags a matching-IP rejection newer than the client's last report", TestComputeClientTokenIssueRecentRejectionFlagged);
@@ -10349,6 +10499,93 @@ namespace WindowsInventoryLite
                 return "expected the more restrictive cap (count=2) to win when both caps would otherwise remove different entries, got " + result.Count;
             }
             return null;
+        }
+
+        private static string TestPruneIngestionRejectionEntriesZeroMaxEntriesKeepsWithinAge()
+        {
+            // A bare `new ServerOptions()` defaults both
+            // IngestionRejectionLogRetentionDays and
+            // IngestionRejectionLogMaxEntries to 0 - before the maxEntries
+            // <= 0 guard, that silently discarded every entry that had
+            // otherwise survived the age check, a footgun that already cost
+            // one implementer debugging time this session (see Minor H in
+            // the final review).
+            DateTime now = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> entries = new List<IngestionRejectionEntry>();
+            entries.Add(MakeIngestionRejectionEntry(now.AddMinutes(-5), "10.0.0.1", "windows-inventory", "missing"));
+            entries.Add(MakeIngestionRejectionEntry(now, "10.0.0.2", "linux-inventory", "mismatched"));
+
+            List<IngestionRejectionEntry> resultWithZero = PruneIngestionRejectionEntries(entries, now, 3650, 0);
+            if (resultWithZero.Count != 2)
+            {
+                return "expected maxEntries=0 to skip the max-entries trim entirely (both entries survive the age check), got " + resultWithZero.Count;
+            }
+
+            List<IngestionRejectionEntry> resultWithNegative = PruneIngestionRejectionEntries(entries, now, 3650, -1);
+            if (resultWithNegative.Count != 2)
+            {
+                return "expected a negative maxEntries to also skip the max-entries trim entirely, got " + resultWithNegative.Count;
+            }
+            return null;
+        }
+
+        private static string TestRecordIngestionRejectionBatchesRewrites()
+        {
+            ServerOptions options = new ServerOptions();
+            // Deliberately small maxEntries so the slack floor (50, see
+            // RecordIngestionRejection's amortization in Important Fix 1)
+            // dominates and this test can exercise a full batch without
+            // needing thousands of calls. retentionDays is generous so only
+            // the max-entries trim - not age - is what fires here.
+            options.IngestionRejectionLogRetentionDays = 30;
+            options.IngestionRejectionLogMaxEntries = 10;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-rejectionbatch-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo recordMethod = typeof(InventoryServer)
+                    .GetMethod("RecordIngestionRejection", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                string logPath = Path.Combine(options.DataPath, "_logs", "ingestion-rejections.jsonl");
+                IPAddress sourceAddress = IPAddress.Parse("203.0.113.50");
+
+                int slack = Math.Max(options.IngestionRejectionLogMaxEntries / 10, 50);
+                int justOverMaxEntries = options.IngestionRejectionLogMaxEntries + 1;
+                int totalToRecord = options.IngestionRejectionLogMaxEntries + slack + 1;
+
+                for (int i = 0; i < justOverMaxEntries; i++)
+                {
+                    RequestContext request = new RequestContext();
+                    request.Headers = new Dictionary<string, string>();
+                    request.RemoteAddress = sourceAddress;
+                    recordMethod.Invoke(server, new object[] { request, "windows-inventory", "mismatched" });
+                }
+
+                int linesBeforeSlackThreshold = File.ReadAllLines(logPath).Length;
+                if (linesBeforeSlackThreshold != justOverMaxEntries)
+                {
+                    return "expected " + justOverMaxEntries + " lines on disk before the slack threshold is crossed (no rewrite yet), got " + linesBeforeSlackThreshold;
+                }
+
+                for (int i = justOverMaxEntries; i < totalToRecord; i++)
+                {
+                    RequestContext request = new RequestContext();
+                    request.Headers = new Dictionary<string, string>();
+                    request.RemoteAddress = sourceAddress;
+                    recordMethod.Invoke(server, new object[] { request, "windows-inventory", "mismatched" });
+                }
+
+                int linesAfterBatch = File.ReadAllLines(logPath).Length;
+                if (linesAfterBatch != options.IngestionRejectionLogMaxEntries)
+                {
+                    return "expected exactly " + options.IngestionRejectionLogMaxEntries + " lines on disk once the batch prune+rewrite fires, got " + linesAfterBatch;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
         }
 
         private static string TestComputeClientTokenIssueNoMatch()

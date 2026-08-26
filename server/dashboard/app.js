@@ -215,6 +215,7 @@
     if (view === 'deploy') loadDeploySubviewData(state.subview);
     if (view === 'settings') loadSettingsSubviewData(state.subview);
     if (view === 'licenses') loadLicenses();
+    if (view === 'logging') loadIngestionRejectionLog();
     // 'clients' and 'hardware' are in this list because both merged views
     // read Linux data too - opening either tab re-fetches it rather than
     // waiting up to 30s for the next poll tick.
