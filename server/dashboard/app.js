@@ -502,6 +502,19 @@
     return `id-${Math.abs(hash)}`;
   }
 
+  // Pads each dot-separated numeric segment of a version string to a fixed
+  // width so a plain lexicographic (string) comparison - all applySort
+  // supports - sorts it the same way a true numeric comparison would.
+  // Without this, "16.0.14334.20570" sorts BEFORE "16.0.4266.1001" (Office
+  // 2021 before Office 2016) because '1' < '4' as the first differing
+  // character, even though 14334 > 4266 numerically.
+  function versionSortKey(version) {
+    return String(version || '')
+      .split('.')
+      .map(part => /^\d+$/.test(part) ? part.padStart(8, '0') : part)
+      .join('.');
+  }
+
   function softwareKey(item) {
     return [item.name || '', item.version || '', item.publisher || ''].join('\u001f').toLowerCase();
   }
@@ -606,8 +619,8 @@
     switch (key) {
       case 'computerName': return (client.computerName || '').toLowerCase();
       case 'clientVersion': return client.clientVersion || '';
-      case 'os': return ((client.os && client.os.caption) || '').toLowerCase();
-      case 'office': return ((client.office && client.office.name) || '').toLowerCase();
+      case 'os': return versionSortKey(client.os && client.os.version) + '\u001f' + ((client.os && client.os.caption) || '').toLowerCase();
+      case 'office': return versionSortKey(client.office && client.office.version) + '\u001f' + ((client.office && client.office.name) || '').toLowerCase();
       case 'windowsActivated': return (client.activation && client.activation.windows && client.activation.windows.activated) ? 1 : 0;
       case 'officeActivated': return (client.activation && client.activation.office && client.activation.office.activated) ? 1 : 0;
       case 'softwareCount': return (client.software || []).length;
