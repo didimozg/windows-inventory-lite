@@ -421,7 +421,7 @@ curl -X POST https://server:8443/api/v1/server/ingestion-token/regenerate -u adm
 
 ### GET /api/v1/server/ingestion-rejections
 
-Returns the server's log of rejected ingestion-token attempts, most-recent-first: `{"entries": [...]}` where each entry has `timestampUtc`, `sourceIp`, `hostname` (a best-effort reverse-DNS lookup of `sourceIp` - can be `null`; an attacker controls what PTR record their own IP resolves to, if any, so never treat it as a verified identity), `endpoint` (which ingestion route), `reason` (`"missing"` or `"mismatched"`), and `matchedClient` (the known client's name if matched by source IP, else `null`). Log size is controlled by `ingestionRejectionLogRetentionDays` and `ingestionRejectionLogMaxEntries` settings.
+Returns the server's log of rejected ingestion-token attempts, most-recent-first: `{"entries": [...]}` where each entry has `timestampUtc`, `sourceIp`, `hostname` (a best-effort reverse-DNS lookup of `sourceIp` - can be `null`; an attacker controls what PTR record their own IP resolves to, if any, so never treat it as a verified identity), `endpoint` (which ingestion route), `reason` (`"missing"` or `"mismatched"`), and `matchedClient` (the known client's name if matched by source IP, else `null`). `ingestionRejectionLogRetentionDays` and `ingestionRejectionLogMaxEntries` are targets the log is kept close to, not an exact real-time bound: day-based retention is enforced continuously, but the count cap is enforced in batches for write efficiency, so entry count can transiently run over `ingestionRejectionLogMaxEntries` by a small margin between prune passes.
 
 ## AD computer import
 

@@ -4186,12 +4186,32 @@ namespace WindowsInventoryLite
                 // review). Mirrors RecordIngestionRejection's own
                 // conditional-rewrite pattern: only touch the file if
                 // pruning actually removed something.
-                List<IngestionRejectionEntry> pruned = PruneIngestionRejectionEntries(ingestionRejectionLog, DateTime.UtcNow, options.IngestionRejectionLogRetentionDays, options.IngestionRejectionLogMaxEntries);
-                if (pruned.Count != ingestionRejectionLog.Count)
+                //
+                // This runs on the startup path (Start(), called unguarded
+                // from both Main() and OnStart(), with no try/catch anywhere
+                // above it) over what is only a diagnostic log - a disk-full
+                // condition, an ACL/permissions issue, or a backup/AV tool
+                // holding the file locked must not crash the whole server
+                // (see Important Fix 2 in the re-review of the fix above).
+                // Matches RecordIngestionRejection's own established
+                // try/catch pattern: log via DebugLogger.Log and swallow, so
+                // the server still starts with whatever was already loaded
+                // into memory - even if that means this in-memory copy stays
+                // in its pre-prune, over-retention state until the next
+                // successful RecordIngestionRejection call prunes it.
+                try
                 {
-                    ingestionRejectionLog.Clear();
-                    ingestionRejectionLog.AddRange(pruned);
-                    RewriteIngestionRejectionLogFileLocked();
+                    List<IngestionRejectionEntry> pruned = PruneIngestionRejectionEntries(ingestionRejectionLog, DateTime.UtcNow, options.IngestionRejectionLogRetentionDays, options.IngestionRejectionLogMaxEntries);
+                    if (pruned.Count != ingestionRejectionLog.Count)
+                    {
+                        ingestionRejectionLog.Clear();
+                        ingestionRejectionLog.AddRange(pruned);
+                        RewriteIngestionRejectionLogFileLocked();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DebugLogger.Log(options, "Error", "LoadIngestionRejectionLogFromDisk failed to prune/persist the loaded ingestion-rejection log at startup: " + ex.Message);
                 }
             }
         }
@@ -4252,12 +4272,26 @@ namespace WindowsInventoryLite
                     // maxEntries by a slack margin before paying for the
                     // expensive prune+rewrite path turns this into roughly
                     // one full rewrite per slack-sized batch of new
-                    // rejections instead of one per rejection. Retention-day
-                    // pruning is enforced at this same cadence now too -
-                    // acceptable, since day-based retention doesn't need
-                    // per-request precision.
+                    // rejections instead of one per rejection.
+                    //
+                    // Gating day-based retention behind that SAME count-based
+                    // check breaks continuous enforcement: a fleet whose
+                    // rejection volume never crosses maxEntries+slack would
+                    // then keep every entry indefinitely at runtime,
+                    // regardless of IngestionRejectionLogRetentionDays (see
+                    // Important Fix 1 in the re-review of the fix above).
+                    // ingestionRejectionLog is chronological, oldest-first
+                    // (see PruneIngestionRejectionEntries), so index 0 is
+                    // always the oldest entry - checking whether just that
+                    // one entry has aged out is an O(1) stand-in for what the
+                    // O(n) prune pass would otherwise have to discover. This
+                    // lets the prune+rewrite fire either when the count is
+                    // genuinely oversized OR the oldest entry is genuinely
+                    // too old, without reintroducing a rewrite-per-rejection.
                     int slack = Math.Max(options.IngestionRejectionLogMaxEntries / 10, 50);
-                    if (ingestionRejectionLog.Count > options.IngestionRejectionLogMaxEntries + slack)
+                    bool oldestEntryAgedOut = ingestionRejectionLog.Count > 0
+                        && ingestionRejectionLog[0].TimestampUtc < DateTime.UtcNow.AddDays(-options.IngestionRejectionLogRetentionDays);
+                    if (ingestionRejectionLog.Count > options.IngestionRejectionLogMaxEntries + slack || oldestEntryAgedOut)
                     {
                         List<IngestionRejectionEntry> pruned = PruneIngestionRejectionEntries(ingestionRejectionLog, DateTime.UtcNow, options.IngestionRejectionLogRetentionDays, options.IngestionRejectionLogMaxEntries);
                         if (pruned.Count != ingestionRejectionLog.Count)
@@ -5632,6 +5666,16 @@ namespace WindowsInventoryLite
             Dictionary<string, IngestionRejectionEntry> newestByIp = new Dictionary<string, IngestionRejectionEntry>(StringComparer.Ordinal);
             foreach (IngestionRejectionEntry entry in rejectionLog)
             {
+                // TryGetValue/index-assignment below throw on a null key.
+                // Not reachable today (RecordIngestionRejection always sets
+                // SourceIp from a non-null RemoteAddress, and the disk loader
+                // falls back to "" rather than null), but this file is
+                // otherwise null-tolerant throughout its dictionary-keying
+                // loops - skip defensively rather than crash this endpoint.
+                if (String.IsNullOrEmpty(entry.SourceIp))
+                {
+                    continue;
+                }
                 IngestionRejectionEntry existing;
                 if (!newestByIp.TryGetValue(entry.SourceIp, out existing) || entry.TimestampUtc > existing.TimestampUtc)
                 {
@@ -9680,6 +9724,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries applies whichever cap is more restrictive", TestPruneIngestionRejectionEntriesBothCapsEngaged);
             allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries skips the max-entries trim (rather than discarding everything) when maxEntries is 0 or negative", TestPruneIngestionRejectionEntriesZeroMaxEntriesKeepsWithinAge);
             allPassed &= SelfTestCheck(output, "RecordIngestionRejection batches its prune+rewrite instead of rewriting the whole log on every call once at cap", TestRecordIngestionRejectionBatchesRewrites);
+            allPassed &= SelfTestCheck(output, "RecordIngestionRejection still enforces day-based retention continuously even when the count-based batch gate never trips", TestRecordIngestionRejectionEnforcesRetentionContinuously);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue returns null when no log entry matches the client's IP", TestComputeClientTokenIssueNoMatch);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue ignores a matching-IP rejection older than the client's last report", TestComputeClientTokenIssueStaleRejectionIgnored);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue flags a matching-IP rejection newer than the client's last report", TestComputeClientTokenIssueRecentRejectionFlagged);
@@ -10579,6 +10624,75 @@ namespace WindowsInventoryLite
                 if (linesAfterBatch != options.IngestionRejectionLogMaxEntries)
                 {
                     return "expected exactly " + options.IngestionRejectionLogMaxEntries + " lines on disk once the batch prune+rewrite fires, got " + linesAfterBatch;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        // Covers the re-review's Important Fix 1: batching the prune+rewrite
+        // behind the count-based slack gate (see
+        // TestRecordIngestionRejectionBatchesRewrites above) must not disable
+        // day-based retention for a fleet whose rejection volume never
+        // approaches maxEntries+slack. maxEntries here is set high enough
+        // that the count-based gate can never trip within this test, so only
+        // the added oldest-entry-age check can be what prunes the backdated
+        // entry.
+        private static string TestRecordIngestionRejectionEnforcesRetentionContinuously()
+        {
+            ServerOptions options = new ServerOptions();
+            options.IngestionRejectionLogRetentionDays = 30;
+            options.IngestionRejectionLogMaxEntries = 5000;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-rejectionretention-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                // RecordIngestionRejection always stamps DateTime.UtcNow, so
+                // an aged entry can't be produced through the public call
+                // path - seed one directly into the in-memory log instead,
+                // as index 0 (oldest), matching the chronological ordering
+                // RecordIngestionRejection itself always appends in.
+                System.Reflection.FieldInfo logField = typeof(InventoryServer)
+                    .GetField("ingestionRejectionLog", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                List<IngestionRejectionEntry> log = (List<IngestionRejectionEntry>)logField.GetValue(server);
+                log.Add(MakeIngestionRejectionEntry(DateTime.UtcNow.AddDays(-31), "203.0.113.90", "windows-inventory", "missing"));
+
+                System.Reflection.MethodInfo recordMethod = typeof(InventoryServer)
+                    .GetMethod("RecordIngestionRejection", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                string logPath = Path.Combine(options.DataPath, "_logs", "ingestion-rejections.jsonl");
+
+                // A handful of in-range rejections - nowhere near
+                // maxEntries+slack (5000 + 500), so the count-based half of
+                // the gate can never be what fires here.
+                for (int i = 0; i < 3; i++)
+                {
+                    RequestContext request = new RequestContext();
+                    request.Headers = new Dictionary<string, string>();
+                    request.RemoteAddress = IPAddress.Parse("203.0.113." + (91 + i));
+                    recordMethod.Invoke(server, new object[] { request, "windows-inventory", "mismatched" });
+                }
+
+                if (log.Count != 3)
+                {
+                    return "expected the backdated entry to be pruned by age on the first subsequent call (count-based gate never trips here), got " + log.Count + " entries in memory";
+                }
+                foreach (IngestionRejectionEntry entry in log)
+                {
+                    if (entry.SourceIp == "203.0.113.90")
+                    {
+                        return "expected the 31-day-old backdated entry to be pruned by the 30-day retention cap, but it is still present";
+                    }
+                }
+
+                int linesOnDisk = File.ReadAllLines(logPath).Length;
+                if (linesOnDisk != log.Count)
+                {
+                    return "expected the log file to be rewritten to match the pruned in-memory log (" + log.Count + " lines), got " + linesOnDisk;
                 }
                 return null;
             }
