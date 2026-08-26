@@ -10790,6 +10790,14 @@ namespace WindowsInventoryLite
             ServerOptions options = new ServerOptions();
             options.WebUsername = "admin";
             options.WebPassword = "secret";
+            options.EnableHttp = true;
+            // SendServerSettings (called at the end of a successful
+            // ConfigureServerSettings) resolves DebugLogger.ResolvePath(options)
+            // for display, which falls back to Path.Combine(options.DataPath, ...)
+            // when DebugLogPath is unset - DataPath must be non-null for that
+            // call to succeed, even though this test never enables debug
+            // logging or touches disk.
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-sessionlifetimehours-" + Guid.NewGuid().ToString("N"));
             InventoryServer server = new InventoryServer(options);
 
             RequestContext outOfRange = new RequestContext();
