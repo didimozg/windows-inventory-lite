@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.52.0]
+
+### Added
+
+- Ingestion Token indicator: when a client's last-known source IP shows up in a recently rejected (missing- or wrong-token) request, the Clients table now shows a "TOKEN MISSING"/"TOKEN MISMATCH" badge next to that client's version. Correlation is by source IP against the client's most recent successful report - a best-effort heuristic, not a guarantee (a client behind a shared NAT/VPN egress, or one whose IP just changed, may not correlate correctly in either direction). A new top-level "Logging" section lists every rejected ingestion attempt (time, source IP, best-effort reverse-DNS hostname, endpoint, reason, matched client), backed by a new `GET /api/v1/server/ingestion-rejections` endpoint and a disk-persisted, dual-capped (age + entry count) log, configurable under Settings > Server > Ingestion Token.
+
+### Security
+
+- The rejection log's write cost is amortized rather than rewriting the full file on every single rejection once at capacity, and its disk I/O (both on write and at server startup) is wrapped so a failure there degrades gracefully instead of turning an expected 401 into a 500 or aborting startup. Background reverse-DNS lookups on rejected requests' source IPs are capped in-flight so a burst of first-seen addresses cannot starve the server's request-handling thread pool.
+
 ## Client 0.2.2
 
 Client-only fix, no server/dashboard change - see the versioning note above for why this has its own version line instead of a `[X.Y.Z]` heading.
