@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.54.2";
+        internal const string ProductVersion = "0.54.4";
 
         private static int Main(string[] args)
         {
@@ -3948,6 +3948,28 @@ namespace WindowsInventoryLite
             return !String.IsNullOrEmpty(target) && target.Length <= 253 && SshTargetFormatPattern.IsMatch(target);
         }
 
+        // ValidatePosixShellSafe only screens for shell metacharacters - it has
+        // no opinion on whether the path itself is a sane place to `rm -rf`.
+        // This field's own validation was originally just "non-empty, starts
+        // with /" because Deploy > Actions always sent its own hardcoded
+        // override and this value was never actually exercised by an install
+        // or uninstall (see the v0.41.0 CHANGELOG entry) - now that override
+        // is gone (v0.54.0), this value alone governs every SSH-based install
+        // AND uninstall Deploy > Actions runs, so a value like "/etc" or
+        // "/usr" would pass the old check straight into a remote
+        // "rm -rf $InstallPath". Require at least two path segments so a
+        // bare top-level directory is rejected without needing to enumerate
+        // every dangerous name.
+        internal static bool IsValidLinuxInstallPath(string path)
+        {
+            if (String.IsNullOrEmpty(path) || !path.StartsWith("/"))
+            {
+                return false;
+            }
+            string[] segments = path.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+            return segments.Length >= 2;
+        }
+
         private static readonly Regex HostKeyFingerprintPattern = new Regex(
             @"The server's ([\w-]+) key fingerprint is:\s*\r?\n\s*[\w-]+ \d+ (SHA256:\S+)",
             RegexOptions.IgnoreCase);
@@ -7767,9 +7789,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (payload.ContainsKey("linuxDefaultInstallPath"))
             {
                 string linuxDefaultInstallPath = Convert.ToString(payload["linuxDefaultInstallPath"]).Trim();
-                if (String.IsNullOrEmpty(linuxDefaultInstallPath) || !linuxDefaultInstallPath.StartsWith("/"))
+                if (!IsValidLinuxInstallPath(linuxDefaultInstallPath))
                 {
-                    SendText(stream, "{\"error\":\"linuxDefaultInstallPath must be a non-empty absolute Linux path (starting with /)\"}", "application/json; charset=utf-8", 400);
+                    SendText(stream, "{\"error\":\"linuxDefaultInstallPath must be an absolute Linux path with at least two segments (e.g. /opt/windows-inventory-lite) - a bare top-level directory like /usr or /etc is rejected, since this value is used in a remote 'rm -rf' during uninstall\"}", "application/json; charset=utf-8", 400);
                     return;
                 }
                 options.LinuxDefaultInstallPath = linuxDefaultInstallPath;
@@ -9486,13 +9508,22 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // than attempting to safely quote/escape them, matching this
         // project's existing reject-rather-than-escape convention for the
         // Windows GPO cmd-generation path.
-        private static readonly char[] PosixShellUnsafeChars = { '`', '$', '"', '\'', '\\', ';', '|', '&', '<', '>', '(', ')', '\r', '\n' };
+        // Space and tab are rejected alongside the shell metacharacters below -
+        // none of this validator's callers (URLs, tokens, host/install paths,
+        // fingerprints) legitimately need whitespace, and every one of them
+        // gets interpolated unquoted into a remote POSIX command line built as
+        // a plain string (e.g. Uninstall-ClientDebianSSH.ps1's "rm -rf
+        // $InstallPath"). A value like "/opt/wil /usr" has no character this
+        // list used to forbid, so it passed straight through and word-split
+        // into two arguments on the remote shell - turning a scoped "rm -rf
+        // $InstallPath" into "rm -rf /opt/wil /usr" on every target.
+        private static readonly char[] PosixShellUnsafeChars = { '`', '$', '"', '\'', '\\', ';', '|', '&', '<', '>', '(', ')', '\r', '\n', ' ', '\t' };
 
         private static void ValidatePosixShellSafe(string value, string fieldName)
         {
             if (!String.IsNullOrEmpty(value) && value.IndexOfAny(PosixShellUnsafeChars) >= 0)
             {
-                throw new ArgumentException(fieldName + " contains a character that is not allowed here (`, $, \", ', \\, ;, |, &, <, >, (, ), or a line break).");
+                throw new ArgumentException(fieldName + " contains a character that is not allowed here (`, $, \", ', \\, ;, |, &, <, >, (, ), whitespace, or a line break).");
             }
         }
 
@@ -10081,6 +10112,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings validates sessionLifetimeHours is between 1 and 720", TestConfigureServerSettingsValidatesSessionLifetimeHours);
             allPassed &= SelfTestCheck(output, "SendUnauthorized serves the embedded login page for a browser navigation to /, with no WWW-Authenticate", TestSendUnauthorizedServesLoginPageForBrowserNavigation);
             allPassed &= SelfTestCheck(output, "SendUnauthorized keeps the plain-text 401 body for API routes", TestSendUnauthorizedServesPlainTextForApiRequests);
+            allPassed &= SelfTestCheck(output, "SendDashboardImage returns 404 with no body when the file is missing", TestSendDashboardImageReturns404WhenFileMissing);
+            allPassed &= SelfTestCheck(output, "SendDashboardImage's 200 response carries the same security headers as every other response", TestSendDashboardImageIncludesSecurityHeaders);
             allPassed &= SelfTestCheck(output, "TryParsePortFromPrefix extracts the port from a ListenPrefix URL", TestTryParsePortFromPrefix);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper escapes RFC 4515 special characters", TestLdapFilterEscapeSpecialChars);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper leaves a normal computer name untouched", TestLdapFilterEscapeNormalName);
@@ -10192,6 +10225,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "trust-host-key fingerprint format validation accepts SHA256:... and rejects everything else", TestTrustLinuxHostKeyRejectsMalformedFingerprint);
             allPassed &= SelfTestCheck(output, "IsValidSshTarget accepts hostnames and IPv4 literals", TestIsValidSshTargetAcceptsHostnamesAndIPv4);
             allPassed &= SelfTestCheck(output, "IsValidSshTarget rejects shell-injection shapes, flag-lookalikes, and empty values", TestIsValidSshTargetRejectsInjectionAndEmpty);
+            allPassed &= SelfTestCheck(output, "IsValidLinuxInstallPath accepts a real multi-segment absolute path", TestIsValidLinuxInstallPathAcceptsMultiSegmentPath);
+            allPassed &= SelfTestCheck(output, "IsValidLinuxInstallPath rejects a bare top-level directory, a relative path, and empty/null", TestIsValidLinuxInstallPathRejectsTopLevelAndInvalid);
             allPassed &= SelfTestCheck(output, "GenerateRandomToken returns a 64-character lowercase hex string, different each call", TestGenerateRandomTokenShape);
             allPassed &= SelfTestCheck(output, "Ingestion token configured-state reflects whether options.Token is set", TestSendIngestionTokenStatusReflectsConfiguredState);
             allPassed &= SelfTestCheck(output, "Linux SSH tools status reflects plink.exe/pscp.exe file presence", TestSendLinuxSshToolsStatusReflectsFilePresence);
@@ -11104,6 +11139,92 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 {
                     return "expected the API route's 401 to keep declaring text/plain";
                 }
+            }
+
+            return null;
+        }
+
+        private static string TestSendDashboardImageReturns404WhenFileMissing()
+        {
+            ServerOptions options = new ServerOptions();
+            options.ContentPath = Path.Combine(Path.GetTempPath(), "wil-selftest-dashimg-missing-" + Guid.NewGuid().ToString("N"));
+            InventoryServer server = new InventoryServer(options);
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.SendDashboardImage(stream, "brand-mark.png", "image/png");
+                string response = Encoding.ASCII.GetString(stream.ToArray());
+                if (!response.Contains("404"))
+                {
+                    return "expected a missing image file to produce a 404, got: " + response.Substring(0, Math.Min(response.Length, 40));
+                }
+            }
+
+            return null;
+        }
+
+        private static string TestSendDashboardImageIncludesSecurityHeaders()
+        {
+            ServerOptions options = new ServerOptions();
+            options.ContentPath = Path.Combine(Path.GetTempPath(), "wil-selftest-dashimg-present-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.ContentPath);
+            byte[] fakeImageBytes = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+            string filePath = Path.Combine(options.ContentPath, "brand-mark.png");
+            File.WriteAllBytes(filePath, fakeImageBytes);
+
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendDashboardImage(stream, "brand-mark.png", "image/png");
+                    byte[] responseBytes = stream.ToArray();
+
+                    byte[] terminator = { (byte)'\r', (byte)'\n', (byte)'\r', (byte)'\n' };
+                    int headerEnd = -1;
+                    for (int i = 0; i <= responseBytes.Length - terminator.Length; i++)
+                    {
+                        bool match = true;
+                        for (int j = 0; j < terminator.Length; j++)
+                        {
+                            if (responseBytes[i + j] != terminator[j]) { match = false; break; }
+                        }
+                        if (match) { headerEnd = i + terminator.Length; break; }
+                    }
+                    if (headerEnd < 0)
+                    {
+                        return "expected a header/body separator (\\r\\n\\r\\n) in the response";
+                    }
+
+                    string header = Encoding.ASCII.GetString(responseBytes, 0, headerEnd);
+                    string[] expectedHeaders = { "200 OK", "Content-Type: image/png", "X-Content-Type-Options: nosniff", "X-Frame-Options: DENY", "Content-Security-Policy:", "Referrer-Policy:", "Permissions-Policy:" };
+                    foreach (string expected in expectedHeaders)
+                    {
+                        if (!header.Contains(expected))
+                        {
+                            return "expected the response header to contain '" + expected + "', got: " + header;
+                        }
+                    }
+
+                    byte[] body = new byte[responseBytes.Length - headerEnd];
+                    Array.Copy(responseBytes, headerEnd, body, 0, body.Length);
+                    if (body.Length != fakeImageBytes.Length)
+                    {
+                        return "expected the response body to be exactly the file's bytes (" + fakeImageBytes.Length + "), got " + body.Length;
+                    }
+                    for (int i = 0; i < fakeImageBytes.Length; i++)
+                    {
+                        if (body[i] != fakeImageBytes[i])
+                        {
+                            return "expected the response body to match the source file's bytes exactly, byte " + i + " differed";
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                Directory.Delete(options.ContentPath, true);
             }
 
             return null;
@@ -12143,7 +12264,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private static string TestValidatePosixShellSafeRejectsUnsafeCharacters()
         {
-            string[] unsafeValues = { "/opt/wil; rm -rf /", "$(rm -rf /)", "`rm -rf /`", "path\"with\"quotes", "path'with'quotes", "path\\with\\backslash", "a|b", "a&b", "a<b", "a>b", "a(b)", "line1\nline2", "line1\rline2" };
+            string[] unsafeValues = { "/opt/wil; rm -rf /", "$(rm -rf /)", "`rm -rf /`", "path\"with\"quotes", "path'with'quotes", "path\\with\\backslash", "a|b", "a&b", "a<b", "a>b", "a(b)", "line1\nline2", "line1\rline2", "/opt/wil /usr", "path\twith\ttab" };
             foreach (string unsafeValue in unsafeValues)
             {
                 try
@@ -13350,6 +13471,32 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (IsValidSshTarget(target))
                 {
                     return "expected target '" + target + "' to be rejected, but IsValidSshTarget accepted it";
+                }
+            }
+            return null;
+        }
+
+        private static string TestIsValidLinuxInstallPathAcceptsMultiSegmentPath()
+        {
+            string[] valid = { "/opt/windows-inventory-lite", "/home/svc/wil", "/opt/wil/" };
+            foreach (string path in valid)
+            {
+                if (!IsValidLinuxInstallPath(path))
+                {
+                    return "expected path '" + path + "' to be accepted, but IsValidLinuxInstallPath rejected it";
+                }
+            }
+            return null;
+        }
+
+        private static string TestIsValidLinuxInstallPathRejectsTopLevelAndInvalid()
+        {
+            string[] invalid = { "/", "/usr", "/etc", "/opt", "opt/wil", "", null };
+            foreach (string path in invalid)
+            {
+                if (IsValidLinuxInstallPath(path))
+                {
+                    return "expected path '" + path + "' to be rejected, but IsValidLinuxInstallPath accepted it";
                 }
             }
             return null;

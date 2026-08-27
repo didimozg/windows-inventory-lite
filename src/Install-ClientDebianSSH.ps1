@@ -61,6 +61,10 @@ $script:LinuxClientEnvFilePath = '/etc/wil-linux-client.env'
 # these could inject additional commands on the TARGET machine. Rejects
 # rather than attempts to safely quote/escape, matching this project's
 # existing ValidateBatchSafe convention for the Windows GPO cmd path.
+# Space/tab are rejected too: none of the interpolation sites below quote
+# these variables, so e.g. "/opt/wil /usr" word-splits into two arguments
+# on the remote shell despite containing no character this list used to
+# forbid.
 function Test-PosixShellSafe {
     param(
         [AllowEmptyString()]
@@ -71,10 +75,10 @@ function Test-PosixShellSafe {
     if ([string]::IsNullOrEmpty($Value)) {
         return
     }
-    $unsafeChars = '`', '$', '"', "'", '\', ';', '|', '&', '<', '>', '(', ')', "`r", "`n"
+    $unsafeChars = '`', '$', '"', "'", '\', ';', '|', '&', '<', '>', '(', ')', "`r", "`n", ' ', "`t"
     foreach ($char in $unsafeChars) {
         if ($Value.Contains($char)) {
-            throw "$FieldName contains a character that is not allowed here (``, `$, `", ', \, ;, |, &, <, >, (, ), or a line break)."
+            throw "$FieldName contains a character that is not allowed here (``, `$, `", ', \, ;, |, &, <, >, (, ), whitespace, or a line break)."
         }
     }
 }

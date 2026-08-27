@@ -1,9 +1,10 @@
 # Screenshot manifest
 
-Captured from a scratch server instance (Chromium, 1440x900 viewport, headless Playwright) seeded with fictional test data — no real hosts, credentials, or license keys.
+Captured from a scratch server instance (Chromium, 1440x900 viewport, headless Playwright) seeded with fictional test data - no real hosts, credentials, or license keys. Domain `CONTOSO`, hostnames like `PC-ACCT-01`/`SRV-FILE-01`.
 
-- `dashboard-overview.png` — Dashboard landing view: summary tiles (clients, activation counts, stale count, license count, USB storage), top-software/OS-version charts, and cross-platform CPU/RAM/storage breakdowns.
-- `windows-clients.png` — Windows Clients table: six machines spanning Server 2019/2022 and Windows 10/11, with a USB badge and a STALE badge visible.
-- `linux-clients.png` — Linux Clients table: three hosts on Ubuntu 22.04, Debian 12, and Rocky Linux 9.
-- `hardware-view.png` — Combined Hardware view: CPU model and storage tables merging Windows and Linux fleet data into one inventory.
-- `licenses.png` — Licenses view: six license records mixing assigned and unassigned seats.
+- `dashboard-overview.png` - Dashboard landing view: summary tiles (clients, activation counts, stale count), the Software card (license count, OS-version breakdown), and the Hardware card (USB storage count, CPU/RAM/storage breakdowns) across both fleets.
+- `clients.png` - The merged Clients table (Fleet > Clients): five Windows machines spanning Windows 7/10/11 and Server 2022 plus a Linux host, with the All/Windows/Linux filter, a USB badge, and a STALE badge all visible, and page 1 of 2.
+- `hardware-view.png` - Combined Hardware view (Fleet > Hardware): CPU model and storage tables merging Windows and Linux fleet data into one inventory, same All/Windows/Linux filter as Clients.
+- `licenses.png` - Licenses view (Fleet > Licenses): three license records with Cyrillic product names, each assigned to one computer.
+
+Regenerating these: start the server against a scratch `--data`/`--linux-data` pair (NOT the default `%ProgramData%\WindowsInventoryLite\...` paths, which are shared across every local run of this app), POST synthetic Windows/Linux inventory reports and license records, then capture with Playwright's `browser_take_screenshot` (`browser_navigate` to a `page.goto` for each view, `browser_wait_for` ~1s before capturing - a fresh headless Chromium can render Cyrillic as tofu/replacement glyphs on the very first paint after navigation despite the underlying data and DOM text already being correct UTF-8). Licenses specifically: POST bodies with non-ASCII text via a real HTTP client (e.g. Node's `http` module with `JSON.stringify`) - piping Cyrillic through a shell command line (`curl -d '...'` in Git Bash) can mangle the encoding before it ever reaches the server. `licenses.json` is also ACL-restricted to Administrators+SYSTEM after every write (by design, since it holds plaintext license keys); a non-elevated session needs `icacls <path> /grant "<user>:(F)"` before each subsequent read/write if not running as admin.

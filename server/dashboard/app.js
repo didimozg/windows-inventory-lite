@@ -1204,6 +1204,14 @@
       })
       .then(data => {
         byId('installPreferredSubnet').value = data.preferredLinuxSubnet || '';
+        // Deploy > Actions has no install-path field of its own (removed in
+        // v0.54.0 - the server already falls back to this same setting when
+        // the request omits it) - shown read-only here so an uninstall's
+        // actual target isn't a guess. Doesn't help if a specific client was
+        // installed under a path this setting no longer matches (the server
+        // has no per-client record of what path it was actually installed
+        // under), only the hint text says so.
+        byId('installEffectiveLinuxPath').textContent = data.linuxDefaultInstallPath || '/opt/windows-inventory-lite';
       })
       .catch(() => {});
   }

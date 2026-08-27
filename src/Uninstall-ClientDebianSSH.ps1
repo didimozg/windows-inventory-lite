@@ -39,6 +39,9 @@ $script:usingPassword = $PSCmdlet.ParameterSetName -eq 'Password'
 # Windows GPO cmd path - duplicated here rather than shared via a .psm1,
 # matching how Install-ClientDebianSSH.ps1 already duplicates its own
 # small helpers instead of sharing a module with Install-ClientWinRM.ps1.
+# Space/tab are rejected too: "rm -rf $InstallPath" has no quoting around
+# the variable, so "/opt/wil /usr" word-splits into two arguments on the
+# remote shell despite containing no character this list used to forbid.
 function Test-PosixShellSafe {
     param(
         [AllowEmptyString()]
@@ -49,10 +52,10 @@ function Test-PosixShellSafe {
     if ([string]::IsNullOrEmpty($Value)) {
         return
     }
-    $unsafeChars = '`', '$', '"', "'", '\', ';', '|', '&', '<', '>', '(', ')', "`r", "`n"
+    $unsafeChars = '`', '$', '"', "'", '\', ';', '|', '&', '<', '>', '(', ')', "`r", "`n", ' ', "`t"
     foreach ($char in $unsafeChars) {
         if ($Value.Contains($char)) {
-            throw "$FieldName contains a character that is not allowed here (``, `$, `", ', \, ;, |, &, <, >, (, ), or a line break)."
+            throw "$FieldName contains a character that is not allowed here (``, `$, `", ', \, ;, |, &, <, >, (, ), whitespace, or a line break)."
         }
     }
 }
