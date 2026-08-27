@@ -3058,7 +3058,7 @@
         byId('adminCurrentPassword').value = '';
         byId('adminNewPassword').value = '';
         byId('adminConfirmPassword').value = '';
-        showAdminPasswordMessage('Saved. Your browser may prompt for the new credentials on the next request.', false);
+        showAdminPasswordMessage('Saved. Your session was refreshed automatically - no need to log in again.', false);
         loadAdminPasswordStatus();
       })
       .catch(error => {
