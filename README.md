@@ -17,7 +17,7 @@ The Windows client and server are small self-contained C# services on .NET Frame
 ## What it does
 
 - Collects OS version, hardware (CPU, RAM, storage, USB detection), installed software, and Windows/Office activation status from every reporting machine, Windows or Linux.
-- One dashboard shows both fleets side by side: separate Clients/Software tables per platform, plus a combined Hardware view and combined summary tiles across both.
+- One dashboard shows both fleets together: a merged Clients table (with an All/Windows/Linux filter), a combined Hardware view, and shared summary tiles - plus a Software table and a Linux-only Services table.
 - Installs, updates, or uninstalls the Windows client over WinRM, or the Linux client over SSH (key or password), straight from the dashboard - no need to touch each machine by hand.
 - Optional GPO deployment for Windows fleets that prefer a computer startup script over a WinRM push.
 - A manually maintained software license catalog, linked to the computers that use each license.
@@ -63,7 +63,7 @@ Full parameters for every script, every `server-config.json` key, GPO deployment
 
 ## Using the dashboard
 
-The sidebar is a tree with five sections: **Dashboard** (the landing page - summary tiles and top-software/hardware charts across both fleets), **Windows Inventory** and **Linux Inventory** (each with Clients and Software tables), a single **Hardware** view merging both platforms into one, **Licenses**, **Installation** (Client actions/updates for Windows, the same pair for Linux, and package configuration for both), and **Settings** (general options, HTTPS certificate management, admin password).
+The dashboard is a single-page app with a horizontal top bar: **Dashboard** (summary tiles and OS/hardware breakdown charts across both fleets), **Fleet** (a dropdown for Clients, Software, Services, Hardware, and Licenses - Clients and Hardware merge both platforms behind an All/Windows/Linux filter), **Install** (Actions, Updates, and Package tabs - install or uninstall over WinRM/SSH with an Auto-detect mode, push outdated clients, or download a self-contained install package), **Settings** (Server, Windows, Linux, Certificate, and Admin password), and **Logging** (a log of rejected ingestion-token attempts). Signing in uses a small dedicated login page and a real server-side session, not the browser's native Basic Auth prompt - Basic Auth (`curl -u user:pass`) still works unchanged for scripts and automation.
 
 The dashboard polls every 30 seconds and updates in place - sort order, search, and expanded rows are preserved. Every table supports column sorting, a search filter, and CSV export (semicolon-delimited, UTF-8 BOM, for direct opening in Excel). Click a computer, software title, or hardware group to expand its detail row.
 
@@ -73,9 +73,7 @@ Captured from a scratch instance seeded with fictional test data - no real hosts
 
 ![Dashboard overview](./docs/screenshots/dashboard-overview.png)
 
-![Windows Clients](./docs/screenshots/windows-clients.png)
-
-![Linux Clients](./docs/screenshots/linux-clients.png)
+![Clients](./docs/screenshots/clients.png)
 
 ![Combined Hardware view](./docs/screenshots/hardware-view.png)
 
