@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.54.2]
+
+### Fixed
+
+- The dashboard login page still embedded the old (second-generation) logo - a separate base64 copy baked directly into the server's `LoginPageHtml`, not read from `docs/images/logo.png`. Regenerated from the current corrected logo, re-encoded as JPEG instead of PNG (this artwork's chip-texture/gradient detail made an equivalent-quality PNG embed ~10x larger) to keep the unauthenticated login page's response size in the same range as before (13.5KB -> 26KB, not the 140KB+ a naive PNG re-embed would have cost every unauthenticated request).
+
 ## [0.54.1]
 
 ### Fixed
