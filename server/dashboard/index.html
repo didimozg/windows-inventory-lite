@@ -21,27 +21,7 @@
   <div class="app-shell">
     <nav class="topnav" aria-label="Dashboard navigation">
       <div class="brand" role="img" aria-label="Windows Inventory Lite">
-        <svg class="brand-mark" viewBox="0 0 120 90" aria-hidden="true">
-          <rect x="10" y="8" width="100" height="62" rx="4" fill="none" stroke="var(--accent)" stroke-width="5"/>
-          <path d="M55 70 L55 76 L50 82 L70 82 L65 76 L65 70" fill="none" stroke="var(--accent)" stroke-width="4" stroke-linejoin="round"/>
-          <line x1="40" y1="83" x2="80" y2="83" stroke="var(--accent)" stroke-width="4" stroke-linecap="round"/>
-          <line x1="36" y1="27" x2="44" y2="27" stroke="var(--accent)" stroke-width="3"/>
-          <line x1="50" y1="32" x2="57" y2="38" stroke="var(--accent)" stroke-width="3"/>
-          <line x1="78" y1="31" x2="71" y2="38" stroke="var(--accent)" stroke-width="3"/>
-          <line x1="82" y1="27" x2="88" y2="27" stroke="var(--accent)" stroke-width="3"/>
-          <line x1="56" y1="48" x2="35" y2="55" stroke="var(--accent)" stroke-width="3"/>
-          <line x1="61" y1="52" x2="55" y2="58" stroke="var(--accent)" stroke-width="3"/>
-          <line x1="68" y1="48" x2="78" y2="55" stroke="var(--accent)" stroke-width="3"/>
-          <rect x="24" y="22" width="12" height="10" rx="1.5" fill="var(--accent)"/>
-          <rect x="44" y="22" width="12" height="10" rx="1.5" fill="var(--accent)"/>
-          <circle cx="78" cy="27" r="4" fill="var(--accent)"/>
-          <rect x="88" y="22" width="12" height="10" rx="1.5" fill="var(--accent)"/>
-          <rect x="22" y="52" width="11" height="9" rx="1.5" fill="var(--accent)"/>
-          <rect x="50" y="55" width="11" height="9" rx="1.5" fill="var(--accent)"/>
-          <circle cx="82" cy="58" r="4" fill="var(--accent)"/>
-          <rect x="51" y="36" width="21" height="17" rx="3" fill="var(--accent)"/>
-          <path d="M56 44.5 L60 48.5 L68 39.5" fill="none" stroke="var(--accent-text)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
+        <img class="brand-mark" src="brand-mark.png" alt="" aria-hidden="true">
         <span class="brand-word">
           <span class="brand-word-main">Windows Inventory</span>
           <span class="brand-word-sub">Lite</span>
@@ -820,50 +800,53 @@
                   <option value="force-linux">Force Linux (SSH only)</option>
                 </select>
               </label>
-              <label class="mode-windows-field">WinRM credential source
-                <select id="installWinRmAuthMode">
-                  <option value="global">Global (saved account, AD fallback)</option>
-                  <option value="manual">Manual credentials</option>
-                </select>
-              </label>
-              <label id="installWinRmUsernameField" class="mode-windows-field hidden">WinRM user
-                <input id="installUsername" type="text" autocomplete="username" placeholder="DOMAIN\User">
-              </label>
-              <label id="installWinRmPasswordField" class="mode-windows-field hidden">WinRM password
-                <input id="installPassword" type="password" autocomplete="current-password">
-              </label>
-              <label class="check-label install-only mode-windows-field"><input id="installForce" type="checkbox"> Force reinstall</label>
-              <label class="check-label mode-windows-field"><input id="installTrustedHosts" type="checkbox"> Add to TrustedHosts</label>
-              <label class="mode-linux-field">SSH credential source
-                <select id="installSshAuthMode">
-                  <option value="global">Global (saved account, AD fallback)</option>
-                  <option value="manual">Manual credentials</option>
-                  <option value="key">SSH key</option>
-                </select>
-              </label>
-              <label class="install-only mode-linux-field">Interval (hours)
-                <input id="installIntervalHours" type="number" min="1" max="24" value="6">
-              </label>
-              <label class="install-only mode-linux-field">Status check interval (minutes)
-                <input id="installStatusIntervalMinutes" type="number" min="1" max="1440" value="30">
-              </label>
-              <label class="mode-linux-field">Install path
-                <input id="installLinuxPath" type="text" value="/opt/windows-inventory-lite">
-              </label>
-              <label id="installPreferredSubnetField" class="pkg-token-field mode-linux-field">Preferred subnet (CIDR)
-                <div class="install-inline-field-row">
-                  <input id="installPreferredSubnet" type="text" placeholder="192.168.1.0/24">
-                  <button id="installPreferredSubnetSaveButton" class="edit-button" type="button">Save</button>
-                </div>
-              </label>
-              <label id="installSshCredentialsField" class="mode-linux-field hidden">Linux user
-                <input id="installSshUsername" type="text" autocomplete="username" placeholder="root">
-              </label>
-              <label id="installSshPasswordField" class="mode-linux-field hidden">Linux password
-                <input id="installSshPassword" type="password" autocomplete="current-password">
-              </label>
-              <label id="installTrustNewHostKeysField" class="check-label install-only mode-linux-field"><input id="installTrustNewHostKeys" type="checkbox"> Trust new host keys automatically (skip verification)</label>
-              <label id="installAcknowledgeHostKeyRiskField" class="check-label install-only mode-linux-field hidden"><input id="installAcknowledgeHostKeyRisk" type="checkbox"> I understand this accepts an unverified SSH host key on first connection</label>
+              <div class="install-credentials-column">
+                <label class="mode-windows-field">WinRM credential source
+                  <select id="installWinRmAuthMode">
+                    <option value="global">Global (saved account, AD fallback)</option>
+                    <option value="manual">Manual credentials</option>
+                  </select>
+                </label>
+                <label id="installWinRmUsernameField" class="mode-windows-field hidden">WinRM user
+                  <input id="installUsername" type="text" autocomplete="username" placeholder="DOMAIN\User">
+                </label>
+                <label id="installWinRmPasswordField" class="mode-windows-field hidden">WinRM password
+                  <input id="installPassword" type="password" autocomplete="current-password">
+                </label>
+                <label class="mode-linux-field">SSH credential source
+                  <select id="installSshAuthMode">
+                    <option value="global">Global (saved account, AD fallback)</option>
+                    <option value="manual">Manual credentials</option>
+                    <option value="key">SSH key</option>
+                  </select>
+                </label>
+                <label id="installSshCredentialsField" class="mode-linux-field hidden">Linux user
+                  <input id="installSshUsername" type="text" autocomplete="username" placeholder="root">
+                </label>
+                <label id="installSshPasswordField" class="mode-linux-field hidden">Linux password
+                  <input id="installSshPassword" type="password" autocomplete="current-password">
+                </label>
+              </div>
+              <div class="install-settings-column">
+                <label class="install-only mode-linux-field">Interval (hours)
+                  <input id="installIntervalHours" type="number" min="1" max="24" value="6">
+                </label>
+                <label class="install-only mode-linux-field">Status check interval (minutes)
+                  <input id="installStatusIntervalMinutes" type="number" min="1" max="1440" value="30">
+                </label>
+                <label id="installPreferredSubnetField" class="pkg-token-field mode-linux-field">Preferred subnet (CIDR)
+                  <div class="install-inline-field-row">
+                    <input id="installPreferredSubnet" type="text" placeholder="192.168.1.0/24">
+                    <button id="installPreferredSubnetSaveButton" class="edit-button" type="button">Save</button>
+                  </div>
+                </label>
+              </div>
+              <div class="install-checkboxes-row">
+                <label class="check-label install-only mode-windows-field"><input id="installForce" type="checkbox"> Force reinstall</label>
+                <label class="check-label mode-windows-field"><input id="installTrustedHosts" type="checkbox"> Add to TrustedHosts</label>
+                <label id="installTrustNewHostKeysField" class="check-label install-only mode-linux-field"><input id="installTrustNewHostKeys" type="checkbox"> Trust new host keys automatically (skip verification)</label>
+                <label id="installAcknowledgeHostKeyRiskField" class="check-label install-only mode-linux-field hidden"><input id="installAcknowledgeHostKeyRisk" type="checkbox"> I understand this accepts an unverified SSH host key on first connection</label>
+              </div>
               <button id="installButton" class="primary-button install-submit-field" type="button">Install client</button>
             </div>
           </div>

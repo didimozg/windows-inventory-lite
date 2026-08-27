@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.53.0";
+        internal const string ProductVersion = "0.54.0";
 
         private static int Main(string[] args)
         {
@@ -1776,6 +1776,10 @@ namespace WindowsInventoryLite
                     else if (request.Method == "GET" && request.Path == "/favicon.svg")
                     {
                         SendDashboardFile(stream, "favicon.svg", FaviconSvg, "image/svg+xml");
+                    }
+                    else if (request.Method == "GET" && request.Path == "/brand-mark.png")
+                    {
+                        SendDashboardImage(stream, "brand-mark.png", "image/png");
                     }
                     else
                     {
@@ -5840,6 +5844,28 @@ namespace WindowsInventoryLite
             }
 
             SendText(stream, fallback, contentType, 200, "no-cache");
+        }
+
+        // Binary counterpart to SendDashboardFile - reads raw bytes instead of
+        // File.ReadAllText, since a text-mode read/re-encode would corrupt a
+        // PNG's arbitrary byte content. No fallback constant (unlike the text
+        // assets above): this is a decorative brand icon, not a load-bearing
+        // page - a missing file degrades to a broken image, not a blank
+        // dashboard, so embedding a base64 fallback isn't worth the size.
+        private void SendDashboardImage(Stream stream, string fileName, string contentType)
+        {
+            string path = Path.Combine(options.ContentPath, fileName);
+            if (!File.Exists(path))
+            {
+                SendText(stream, "Not found", "text/plain; charset=utf-8", 404);
+                return;
+            }
+
+            byte[] data = File.ReadAllBytes(path);
+            string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Length: " + data.Length + "\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + BuildHstsHeaderOrEmpty(stream) + "\r\nConnection: close\r\n\r\n";
+            byte[] headerBytes = Encoding.ASCII.GetBytes(header);
+            stream.Write(headerBytes, 0, headerBytes.Length);
+            stream.Write(data, 0, data.Length);
         }
 
         internal ArrayList LoadClientReports()

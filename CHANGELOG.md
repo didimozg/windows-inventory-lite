@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.54.0]
+
+### Changed
+
+- Replaced the project logo (`docs/images/logo.png`, and a new cropped `server/dashboard/brand-mark.png`) with a corrected transparent-background version; the dashboard header icon is now that image instead of a hand-drawn inline SVG.
+- Restructured Deploy > Actions: WinRM and SSH credential sources are now stacked in a single column, with their Manual-mode fields appearing directly beneath the matching dropdown instead of scattered across the grid; Interval/Status check interval/Preferred subnet are grouped together; Force reinstall/Add to TrustedHosts/host-key checkboxes moved to the bottom of the form. The previously chaotic layout was caused by hidden conditional fields being fully removed from a flat 2-column CSS grid, which shifted every later field whenever a dropdown toggled.
+- Removed the "Install path" field from Deploy > Actions - the server already falls back to the configured default install path when the field is omitted from the request, so the client-side override served no purpose there (the separate Settings > Linux and Package-tab install-path fields are unaffected).
+
 ## [0.53.0]
 
 ### Added

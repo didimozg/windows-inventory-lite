@@ -375,6 +375,7 @@ body {
   flex-shrink: 0;
   width: 26px;
   height: 26px;
+  object-fit: contain;
 }
 
 .brand-word {
@@ -1150,6 +1151,31 @@ input[type="number"] {
   grid-row: auto;
   justify-self: end;
   margin-top: 8px;
+}
+
+/* WinRM and SSH credential source stacked in one column, each with its
+   own Manual-mode fields directly beneath it - fixes them landing in
+   whichever of the parent grid's two auto-flow cells happened to be next
+   in DOM order, which shifted unpredictably every time a conditional
+   field (Manual username/password) appeared or disappeared. */
+.install-credentials-column,
+.install-settings-column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+/* Deliberately last in DOM order and full-width (not interleaved with
+   the credential/settings fields above) - these checkboxes are
+   independent toggles, not part of either column's own field flow, and
+   grouping them together at the bottom keeps the two columns above a
+   predictable one-field-per-row list regardless of which checkboxes are
+   currently visible for the selected mode. */
+.install-checkboxes-row {
+  grid-column: 1 / span 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
 }
 
 .check-label {

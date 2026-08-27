@@ -1247,7 +1247,6 @@
         const serverUrl = `${window.location.origin}/api/v1/inventory`;
         const intervalHours = Number(byId('installIntervalHours').value) || 6;
         const statusIntervalMinutes = Number(byId('installStatusIntervalMinutes').value) || 30;
-        const installPath = byId('installLinuxPath').value.trim() || '/opt/windows-inventory-lite';
         const sshAuthMode = byId('installSshAuthMode').value;
         const sshUsername = sshAuthMode === 'global' ? '' : byId('installSshUsername').value.trim();
         const sshPassword = sshAuthMode === 'manual' ? byId('installSshPassword').value : '';
@@ -1256,7 +1255,7 @@
           method: 'POST',
           cache: 'no-store',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ targets: host, mode: 'force-linux', serverUrl, intervalHours, statusIntervalMinutes, installPath, sshAuthMode, sshUsername, sshPassword, trustNewHostKeys: false, acknowledgeHostKeyRisk: false })
+          body: JSON.stringify({ targets: host, mode: 'force-linux', serverUrl, intervalHours, statusIntervalMinutes, sshAuthMode, sshUsername, sshPassword, trustNewHostKeys: false, acknowledgeHostKeyRisk: false })
         });
       })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
@@ -1579,7 +1578,6 @@
     const sshPassword = (mode !== 'force-windows' && sshAuthMode === 'manual') ? byId('installSshPassword').value : '';
     const intervalHours = Number(byId('installIntervalHours').value) || 6;
     const statusIntervalMinutes = Number(byId('installStatusIntervalMinutes').value) || 30;
-    const installPath = byId('installLinuxPath').value.trim() || '/opt/windows-inventory-lite';
     const trustNewHostKeys = action === 'install' && byId('installTrustNewHostKeys').checked;
     const acknowledgeHostKeyRisk = action === 'install' && byId('installAcknowledgeHostKeyRisk').checked;
 
@@ -1601,7 +1599,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets, mode, serverUrl, winRmAuthMode, username, password, force, addToTrustedHosts, sshAuthMode, sshUsername, sshPassword, intervalHours, statusIntervalMinutes, installPath, trustNewHostKeys, acknowledgeHostKeyRisk })
+      body: JSON.stringify({ targets, mode, serverUrl, winRmAuthMode, username, password, force, addToTrustedHosts, sshAuthMode, sshUsername, sshPassword, intervalHours, statusIntervalMinutes, trustNewHostKeys, acknowledgeHostKeyRisk })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
