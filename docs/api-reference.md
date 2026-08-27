@@ -6,7 +6,8 @@ This is a practical lookup document for the server's HTTP API, not an OpenAPI/Sw
 
 **Auth models.** Two separate models are in use, and a route uses exactly one of them:
 
-- **Basic Auth** guards the dashboard/management surface: every route below except the three inventory-ingestion endpoints. It is checked once, centrally, by `IsWebRequestAuthorized` before the request reaches any handler. A missing or wrong `Authorization: Basic ...` header gets a `401` with body `Unauthorized` (plain text, not JSON) and a `WWW-Authenticate: Basic` header. If no admin username/password has been configured yet, this check instead falls back to restricting the route to the local machine (loopback) only.
+- **Basic Auth** guards the dashboard/management surface: every route below except the three inventory-ingestion endpoints. It is checked once, centrally, by `IsWebRequestAuthorized` before the request reaches any handler. A missing or wrong `Authorization: Basic ...` header gets a `401` with body `Unauthorized` (plain text, not JSON) - deliberately without a `WWW-Authenticate: Basic` header, since that header is what makes a browser pop its native credential dialog and cache whatever is typed into it at the HTTP stack level, with no way to evict it later short of closing the browser (see "Session cookie" below for the supported alternative). If no admin username/password has been configured yet, this check instead falls back to restricting the route to the local machine (loopback) only.
+- **Session cookie.** A `wil_session` cookie is checked by `IsWebRequestAuthorized` before Basic Auth, on every route the bullet above covers - a valid session authorizes the request with no `Authorization` header at all. It is an alternative to Basic Auth, not an additional requirement on top of it: either one alone is sufficient. `POST /api/v1/server/login` establishes a session and returns the cookie; `POST /api/v1/server/logout` invalidates it. See those two endpoints below for the full behavior.
 - **Ingestion token** guards the three inventory-ingestion endpoints only, via the `X-Inventory-Token` request header, checked inside each handler before Basic Auth would otherwise apply (these routes are dispatched before the Basic Auth check runs at all). Enforcement is controlled by the `RequireIngestionToken` server setting; when it is off, these three endpoints accept any request unauthenticated. A rejected token also gets a `401` with plain-text body `Unauthorized`, not the JSON error shape below.
 
 **Cross-site request checks (v0.48.0+).** Every `POST`/`PUT`/`DELETE` route that goes through Basic Auth (i.e. every route except the three ingestion endpoints above) additionally requires: if the request has an `Origin` or `Referer` header, it must match this server's own `Host`; and if the request has a body, `Content-Type` must be `application/json` (an optional `; charset=...` suffix is fine). Both checks are skipped entirely when the corresponding header is absent - direct API automation (like the `curl` examples below) that sends neither `Origin` nor `Referer` is unaffected. A violation gets a `400` with the usual `{"error": "..."}` shape. Every `curl` example below already sends `Content-Type: application/json` on any request with a body, so none of them need updating.
@@ -110,6 +111,8 @@ This project does not use a structured `{"error": {"code": ..., "message": ...}}
 | POST | `/api/v1/server/admin-password` | Basic Auth | Set or rotate the dashboard admin username/password. |
 | GET | `/api/v1/server/ingestion-token` | Basic Auth | Return the live ingestion token value. |
 | POST | `/api/v1/server/ingestion-token/regenerate` | Basic Auth | Generate and save a new ingestion token. |
+| POST | `/api/v1/server/login` | None | Establish a server-side dashboard session with valid admin credentials; returns a `wil_session` cookie. |
+| POST | `/api/v1/server/logout` | Basic Auth | Invalidate the current session and clear the `wil_session` cookie. |
 
 ### AD computer import
 
@@ -425,11 +428,11 @@ Returns the server's log of rejected ingestion-token attempts, most-recent-first
 
 ### POST /api/v1/server/login
 
-Establishes a server-side session with valid dashboard admin credentials. Request body: `{username, password}` (both required).
+Establishes a server-side session with valid dashboard admin credentials. Request body: `{username, password}` (both required). Subject to the same cross-site request checks and `LoginLockoutThreshold` rate limiting as every other state-changing route (see "Cross-site request checks" and "Login lockout" under Conventions above) - unlike the three ingestion endpoints, this route is not exempt from either.
 
-Success response: `200` with `Set-Cookie: wil_session=...` in response headers. The cookie carries `HttpOnly` and `SameSite=Strict` flags. Over HTTPS, it also carries the `Secure` flag; over plain HTTP, the flag is omitted and the cookie travels in cleartext, the same as Basic Auth credentials already do. Response body: `{"status": "ok"}`.
+Success response: `200` with `Set-Cookie: wil_session=...` in response headers and `Cache-Control: no-store`. The cookie carries `HttpOnly` and `SameSite=Strict` flags. Over HTTPS, it also carries the `Secure` flag; over plain HTTP, the flag is omitted and the cookie travels in cleartext, the same as Basic Auth credentials already do. Response body: `{"status": "ok"}`.
 
-Failure response: `401` with body `Unauthorized` (plain text, not JSON) - the same `SendUnauthorized` response every other unauthenticated request in this API gets, including the Basic Auth `401` case documented under Conventions above. Failed attempts are rate-limited per source IP using the same lockout mechanism as Basic Auth (see "Login lockout" under Conventions above).
+Failure response: `401` with body `Unauthorized` (plain text, not JSON) - the same `SendUnauthorized` response every other unauthenticated request in this API gets, including the Basic Auth `401` case documented under Conventions above. Failed attempts are rate-limited per source IP using the same lockout mechanism as Basic Auth (see "Login lockout" under Conventions above). A malformed (non-JSON, or JSON that doesn't decode to an object) request body gets `400 {"error": "invalid request body"}` instead, the same shape used elsewhere in this API.
 
 Loopback-only mode: Always returns `401` when both `WebUsername` and `WebPassword` are unconfigured, even with correct credentials - a session cookie would bypass the IP-based loopback restriction, so the endpoint does not issue one until credentials are configured.
 
