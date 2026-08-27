@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.54.2";
+        internal const string ProductVersion = "0.54.3";
 
         private static int Main(string[] args)
         {
@@ -3948,6 +3948,28 @@ namespace WindowsInventoryLite
             return !String.IsNullOrEmpty(target) && target.Length <= 253 && SshTargetFormatPattern.IsMatch(target);
         }
 
+        // ValidatePosixShellSafe only screens for shell metacharacters - it has
+        // no opinion on whether the path itself is a sane place to `rm -rf`.
+        // This field's own validation was originally just "non-empty, starts
+        // with /" because Deploy > Actions always sent its own hardcoded
+        // override and this value was never actually exercised by an install
+        // or uninstall (see the v0.41.0 CHANGELOG entry) - now that override
+        // is gone (v0.54.0), this value alone governs every SSH-based install
+        // AND uninstall Deploy > Actions runs, so a value like "/etc" or
+        // "/usr" would pass the old check straight into a remote
+        // "rm -rf $InstallPath". Require at least two path segments so a
+        // bare top-level directory is rejected without needing to enumerate
+        // every dangerous name.
+        internal static bool IsValidLinuxInstallPath(string path)
+        {
+            if (String.IsNullOrEmpty(path) || !path.StartsWith("/"))
+            {
+                return false;
+            }
+            string[] segments = path.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+            return segments.Length >= 2;
+        }
+
         private static readonly Regex HostKeyFingerprintPattern = new Regex(
             @"The server's ([\w-]+) key fingerprint is:\s*\r?\n\s*[\w-]+ \d+ (SHA256:\S+)",
             RegexOptions.IgnoreCase);
@@ -7767,9 +7789,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (payload.ContainsKey("linuxDefaultInstallPath"))
             {
                 string linuxDefaultInstallPath = Convert.ToString(payload["linuxDefaultInstallPath"]).Trim();
-                if (String.IsNullOrEmpty(linuxDefaultInstallPath) || !linuxDefaultInstallPath.StartsWith("/"))
+                if (!IsValidLinuxInstallPath(linuxDefaultInstallPath))
                 {
-                    SendText(stream, "{\"error\":\"linuxDefaultInstallPath must be a non-empty absolute Linux path (starting with /)\"}", "application/json; charset=utf-8", 400);
+                    SendText(stream, "{\"error\":\"linuxDefaultInstallPath must be an absolute Linux path with at least two segments (e.g. /opt/windows-inventory-lite) - a bare top-level directory like /usr or /etc is rejected, since this value is used in a remote 'rm -rf' during uninstall\"}", "application/json; charset=utf-8", 400);
                     return;
                 }
                 options.LinuxDefaultInstallPath = linuxDefaultInstallPath;
@@ -9486,13 +9508,22 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // than attempting to safely quote/escape them, matching this
         // project's existing reject-rather-than-escape convention for the
         // Windows GPO cmd-generation path.
-        private static readonly char[] PosixShellUnsafeChars = { '`', '$', '"', '\'', '\\', ';', '|', '&', '<', '>', '(', ')', '\r', '\n' };
+        // Space and tab are rejected alongside the shell metacharacters below -
+        // none of this validator's callers (URLs, tokens, host/install paths,
+        // fingerprints) legitimately need whitespace, and every one of them
+        // gets interpolated unquoted into a remote POSIX command line built as
+        // a plain string (e.g. Uninstall-ClientDebianSSH.ps1's "rm -rf
+        // $InstallPath"). A value like "/opt/wil /usr" has no character this
+        // list used to forbid, so it passed straight through and word-split
+        // into two arguments on the remote shell - turning a scoped "rm -rf
+        // $InstallPath" into "rm -rf /opt/wil /usr" on every target.
+        private static readonly char[] PosixShellUnsafeChars = { '`', '$', '"', '\'', '\\', ';', '|', '&', '<', '>', '(', ')', '\r', '\n', ' ', '\t' };
 
         private static void ValidatePosixShellSafe(string value, string fieldName)
         {
             if (!String.IsNullOrEmpty(value) && value.IndexOfAny(PosixShellUnsafeChars) >= 0)
             {
-                throw new ArgumentException(fieldName + " contains a character that is not allowed here (`, $, \", ', \\, ;, |, &, <, >, (, ), or a line break).");
+                throw new ArgumentException(fieldName + " contains a character that is not allowed here (`, $, \", ', \\, ;, |, &, <, >, (, ), whitespace, or a line break).");
             }
         }
 
@@ -10192,6 +10223,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "trust-host-key fingerprint format validation accepts SHA256:... and rejects everything else", TestTrustLinuxHostKeyRejectsMalformedFingerprint);
             allPassed &= SelfTestCheck(output, "IsValidSshTarget accepts hostnames and IPv4 literals", TestIsValidSshTargetAcceptsHostnamesAndIPv4);
             allPassed &= SelfTestCheck(output, "IsValidSshTarget rejects shell-injection shapes, flag-lookalikes, and empty values", TestIsValidSshTargetRejectsInjectionAndEmpty);
+            allPassed &= SelfTestCheck(output, "IsValidLinuxInstallPath accepts a real multi-segment absolute path", TestIsValidLinuxInstallPathAcceptsMultiSegmentPath);
+            allPassed &= SelfTestCheck(output, "IsValidLinuxInstallPath rejects a bare top-level directory, a relative path, and empty/null", TestIsValidLinuxInstallPathRejectsTopLevelAndInvalid);
             allPassed &= SelfTestCheck(output, "GenerateRandomToken returns a 64-character lowercase hex string, different each call", TestGenerateRandomTokenShape);
             allPassed &= SelfTestCheck(output, "Ingestion token configured-state reflects whether options.Token is set", TestSendIngestionTokenStatusReflectsConfiguredState);
             allPassed &= SelfTestCheck(output, "Linux SSH tools status reflects plink.exe/pscp.exe file presence", TestSendLinuxSshToolsStatusReflectsFilePresence);
@@ -12143,7 +12176,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private static string TestValidatePosixShellSafeRejectsUnsafeCharacters()
         {
-            string[] unsafeValues = { "/opt/wil; rm -rf /", "$(rm -rf /)", "`rm -rf /`", "path\"with\"quotes", "path'with'quotes", "path\\with\\backslash", "a|b", "a&b", "a<b", "a>b", "a(b)", "line1\nline2", "line1\rline2" };
+            string[] unsafeValues = { "/opt/wil; rm -rf /", "$(rm -rf /)", "`rm -rf /`", "path\"with\"quotes", "path'with'quotes", "path\\with\\backslash", "a|b", "a&b", "a<b", "a>b", "a(b)", "line1\nline2", "line1\rline2", "/opt/wil /usr", "path\twith\ttab" };
             foreach (string unsafeValue in unsafeValues)
             {
                 try
@@ -13350,6 +13383,32 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (IsValidSshTarget(target))
                 {
                     return "expected target '" + target + "' to be rejected, but IsValidSshTarget accepted it";
+                }
+            }
+            return null;
+        }
+
+        private static string TestIsValidLinuxInstallPathAcceptsMultiSegmentPath()
+        {
+            string[] valid = { "/opt/windows-inventory-lite", "/home/svc/wil", "/opt/wil/" };
+            foreach (string path in valid)
+            {
+                if (!IsValidLinuxInstallPath(path))
+                {
+                    return "expected path '" + path + "' to be accepted, but IsValidLinuxInstallPath rejected it";
+                }
+            }
+            return null;
+        }
+
+        private static string TestIsValidLinuxInstallPathRejectsTopLevelAndInvalid()
+        {
+            string[] invalid = { "/", "/usr", "/etc", "/opt", "opt/wil", "", null };
+            foreach (string path in invalid)
+            {
+                if (IsValidLinuxInstallPath(path))
+                {
+                    return "expected path '" + path + "' to be rejected, but IsValidLinuxInstallPath accepted it";
                 }
             }
             return null;

@@ -26,6 +26,14 @@ Describe 'Windows Inventory Lite Uninstall-ClientDebianSSH' {
         { Get-LinuxUninstallCommand -InstallPath '/opt/wil; rm -rf /' -SudoPrefix 'sudo ' } | Should -Throw
     }
 
+    It 'Get-LinuxUninstallCommand rejects an InstallPath containing a space' {
+        # "rm -rf $InstallPath" has no quoting around the variable, so a
+        # space-containing value would otherwise word-split into a second
+        # argument on the remote shell (e.g. "/opt/wil /usr" -> rm -rf on
+        # both directories).
+        { Get-LinuxUninstallCommand -InstallPath '/opt/wil /usr' -SudoPrefix 'sudo ' } | Should -Throw
+    }
+
     It 'Invoke-RemoteCommand uses ssh.exe for key auth' {
         Mock ssh.exe { $global:LASTEXITCODE = 0; return 'ok' }
         $script:usingPassword = $false

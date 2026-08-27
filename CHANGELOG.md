@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.54.3]
+
+### Security
+
+- A security review of v0.54.0-0.54.2 (requested after the fact, since those commits skipped this project's usual review gate) found that removing Deploy > Actions' "Install path" field made an under-validated Settings value reachable by every SSH-based install/uninstall: `linuxDefaultInstallPath` was only checked for "non-empty, starts with /" because Deploy > Actions previously always sent its own hardcoded override, so this fallback was never actually exercised. A Settings value like `/usr` or `/etc` passed that check straight into a remote `rm -rf $InstallPath` run against every managed Linux host. Now requires at least two path segments (`/opt/foo`, not a bare `/usr`).
+- Separately, `ValidatePosixShellSafe`/`Test-PosixShellSafe` (the shell-injection guard used for `serverUrl`/`token`/`installPath`/host fields across the server and both Linux SSH scripts) didn't reject spaces or tabs. None of the remote command strings these values get interpolated into quote the variable, so a value like `/opt/wil /usr` had no character the old check forbade, and would have word-split into two arguments on the remote shell (`rm -rf /opt/wil /usr`). This affected both scripts (`Install-ClientDebianSSH.ps1`, `Uninstall-ClientDebianSSH.ps1`) and every field validated the same way, not just the install path.
+
 ## [0.54.2]
 
 ### Fixed

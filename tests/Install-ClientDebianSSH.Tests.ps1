@@ -9,7 +9,7 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
     }
 
     It 'Test-PosixShellSafe throws on POSIX shell metacharacters' {
-        $unsafeValues = @('/opt/wil; rm -rf /', '$(rm -rf /)', '`rm -rf /`', 'a|b', 'a&b', "line1`nline2")
+        $unsafeValues = @('/opt/wil; rm -rf /', '$(rm -rf /)', '`rm -rf /`', 'a|b', 'a&b', "line1`nline2", '/opt/wil /usr', "path`twith`ttab")
         foreach ($value in $unsafeValues) {
             { Test-PosixShellSafe -Value $value -FieldName 'testField' } | Should -Throw
         }
