@@ -2,7 +2,7 @@
 
 > Проект сделан под личные потребности автора. Идея и контроль - автора. Реализация - ИИ Claude (Anthropic).
 
-![Windows Inventory Lite](./docs/images/logo.svg)
+![Windows Inventory Lite](./docs/images/logo.png)
 
 [![Release](https://img.shields.io/github/v/release/didimozg/windows-inventory-lite?display_name=tag)](https://github.com/didimozg/windows-inventory-lite/releases)
 [![CI](https://github.com/didimozg/windows-inventory-lite/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/didimozg/windows-inventory-lite/actions/workflows/ci.yml)

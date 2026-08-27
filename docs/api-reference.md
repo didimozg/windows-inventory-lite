@@ -1,13 +1,20 @@
 # API Reference
 
-This is a practical lookup document for the server's HTTP API, not an OpenAPI/Swagger spec. It covers the real, current route surface: 53 routes (44 exact-match paths, 9 with a parameterized path segment). It does not cover the static dashboard asset routes (`/`, `/app.js`, `/styles.css`, `/favicon.svg`), which serve dashboard files rather than API data.
+This is a practical lookup document for the server's HTTP API, not an OpenAPI/Swagger spec. It covers the real, current route surface: 51 routes (43 exact-match paths, 8 with a parameterized path segment) - down from 53 as of v0.42.0, which removed the four separate Linux install/uninstall job routes (`/api/v1/linux-client-install`, `/linux-client-uninstall`, and their GET list/detail equivalents) in favor of the unified `/api/v1/client-install`/`/client-uninstall` pair, and up again with the two new session endpoints below. It does not cover the static dashboard asset routes (`/`, `/app.js`, `/styles.css`, `/favicon.svg`), which serve dashboard files rather than API data.
 
 ## Conventions
 
 **Auth models.** Two separate models are in use, and a route uses exactly one of them:
 
-- **Basic Auth** guards the dashboard/management surface: every route below except the three inventory-ingestion endpoints. It is checked once, centrally, by `IsWebRequestAuthorized` before the request reaches any handler. A missing or wrong `Authorization: Basic ...` header gets a `401` with body `Unauthorized` (plain text, not JSON) and a `WWW-Authenticate: Basic` header. If no admin username/password has been configured yet, this check instead falls back to restricting the route to the local machine (loopback) only.
+- **Basic Auth** guards the dashboard/management surface: every route below except the three inventory-ingestion endpoints and `POST /api/v1/server/login` (which checks credentials itself, before either the session-cookie or Basic Auth check would otherwise apply - see that endpoint below). It is checked once, centrally, by `IsWebRequestAuthorized` before the request reaches any handler. A missing or wrong `Authorization: Basic ...` header gets a `401` with body `Unauthorized` (plain text, not JSON) - deliberately without a `WWW-Authenticate: Basic` header, since that header is what makes a browser pop its native credential dialog and cache whatever is typed into it at the HTTP stack level, with no way to evict it later short of closing the browser (see "Session cookie" below for the supported alternative). If no admin username/password has been configured yet, this check instead falls back to restricting the route to the local machine (loopback) only.
+- **Session cookie.** A `wil_session` cookie is checked by `IsWebRequestAuthorized` before Basic Auth, on every route the bullet above covers - a valid session authorizes the request with no `Authorization` header at all. It is an alternative to Basic Auth, not an additional requirement on top of it: either one alone is sufficient. `POST /api/v1/server/login` establishes a session and returns the cookie; `POST /api/v1/server/logout` invalidates it. See those two endpoints below for the full behavior.
 - **Ingestion token** guards the three inventory-ingestion endpoints only, via the `X-Inventory-Token` request header, checked inside each handler before Basic Auth would otherwise apply (these routes are dispatched before the Basic Auth check runs at all). Enforcement is controlled by the `RequireIngestionToken` server setting; when it is off, these three endpoints accept any request unauthenticated. A rejected token also gets a `401` with plain-text body `Unauthorized`, not the JSON error shape below.
+
+**Cross-site request checks (v0.48.0+).** Every `POST`/`PUT`/`DELETE` route that goes through Basic Auth (i.e. every route except the three ingestion endpoints above) additionally requires: if the request has an `Origin` or `Referer` header, it must match this server's own `Host`; and if the request has a body, `Content-Type` must be `application/json` (an optional `; charset=...` suffix is fine). Both checks are skipped entirely when the corresponding header is absent - direct API automation (like the `curl` examples below) that sends neither `Origin` nor `Referer` is unaffected. A violation gets a `400` with the usual `{"error": "..."}` shape. Every `curl` example below already sends `Content-Type: application/json` on any request with a body, so none of them need updating.
+
+**Login lockout (v0.50.0+).** Every route that goes through Basic Auth is also subject to a per-source-IP failed-attempt lockout, checked before Basic Auth itself: once an IP has presented wrong Basic Auth credentials `LoginLockoutThreshold` times (default 10) within `LoginLockoutWindowMinutes` (default 15), every request from that IP - including one with the *correct* password - gets a `429 Too Many Requests` with a `Retry-After: <seconds>` header for `LoginLockoutDurationMinutes` (default 15). A request with no `Authorization` header at all (a browser's normal first request before it has cached credentials) never counts as a failed attempt. Configurable, and disable-able (`LoginLockoutThreshold: 0`), via Settings > Admin password > Login lockout or `POST /api/v1/server/settings`. Tracking is per source IP and in-memory only (reset by a server restart) - defense-in-depth on top of the documented network-level control (trusted management network), not a replacement for it.
+
+**HSTS (v0.50.0+).** Off by default (`HstsEnabled: false`). When turned on via Settings > Server > HTTPS or `POST /api/v1/server/settings`, every response actually served over the HTTPS listener (never plain HTTP, regardless of this setting) additionally carries `Strict-Transport-Security: max-age=<HstsMaxAgeHours * 3600>`. `HstsMaxAgeHours` (default 24, range 1-8760) is admin-configured rather than the commonly-recommended one-year value, since a browser that has cached this policy can lock itself out of the dashboard for the full duration if HTTPS is later disabled (e.g. during a certificate emergency) - start with a short value and only enable once HTTPS is stable.
 
 **Request/response envelope.** Request and response bodies are plain JSON objects, no envelope wrapper. Most POST/PUT bodies are read as a flat `{"key": value, ...}` object; most GET/success responses are a flat JSON object as well, with fields documented per endpoint below.
 
@@ -40,14 +47,20 @@ This project does not use a structured `{"error": {"code": ..., "message": ...}}
 | PUT | `/api/v1/linux/clients/{hostname}/description` | Basic Auth | Set a manual description override for one Linux client. |
 | DELETE | `/api/v1/linux/clients/{hostname}` | Basic Auth | Delete one Linux client's stored report. |
 
-### Windows client install/update
+### Client install/update (Windows + Linux)
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| POST | `/api/v1/client-install` | Basic Auth | Queue a WinRM push-install job against one or more Windows targets. |
-| POST | `/api/v1/client-uninstall` | Basic Auth | Queue a WinRM push-uninstall job. |
-| GET | `/api/v1/client-install` | Basic Auth | List recent install/uninstall job summaries. |
-| GET | `/api/v1/client-install/{jobId}` | Basic Auth | Return full detail for one install/uninstall job. |
+| POST | `/api/v1/client-install` | Basic Auth | Queue a mode-aware (Auto/Force Windows/Force Linux) push-install job, WinRM and/or SSH, against one or more targets of either platform. |
+| POST | `/api/v1/client-uninstall` | Basic Auth | Queue a mode-aware push-uninstall job. |
+| GET | `/api/v1/client-install` | Basic Auth | List recent install/uninstall job summaries, both platforms. |
+| GET | `/api/v1/client-install/{jobId}` | Basic Auth | Return full detail for one install/uninstall job, including per-target protocol attempts. |
+| POST | `/api/v1/linux-client-install/trust-host-key` | Basic Auth | Manually trust (pin) a Linux target's SSH host key. |
+
+### Windows client updates
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
 | GET | `/api/v1/client-updates` | Basic Auth | List Windows clients running an outdated client version. |
 | GET | `/api/v1/client-updates/credentials` | Basic Auth | Report whether WinRM update credentials are saved. |
 | POST | `/api/v1/client-updates/credentials` | Basic Auth | Save WinRM update credentials. |
@@ -62,15 +75,10 @@ This project does not use a structured `{"error": {"code": ..., "message": ...}}
 | POST | `/api/v1/client-package/configure` | Basic Auth | Regenerate `Install-ClientGpo.cmd` with a server URL, token, and interval. |
 | GET | `/api/v1/client-package/download` | Basic Auth | Download a zip of the GPO deployment package. |
 
-### Linux client install/update
+### Linux client updates
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
-| POST | `/api/v1/linux-client-install` | Basic Auth | Queue an SSH push-install job against one or more Linux targets. |
-| POST | `/api/v1/linux-client-uninstall` | Basic Auth | Queue an SSH push-uninstall job. |
-| POST | `/api/v1/linux-client-install/trust-host-key` | Basic Auth | Manually trust (pin) a Linux target's SSH host key. |
-| GET | `/api/v1/linux-client-install` | Basic Auth | List recent Linux install/uninstall job summaries. |
-| GET | `/api/v1/linux-client-install/{jobId}` | Basic Auth | Return full detail for one Linux install/uninstall job. |
 | GET | `/api/v1/linux-client-updates` | Basic Auth | List Linux clients running an outdated client version. |
 | GET | `/api/v1/linux-client-updates/credentials` | Basic Auth | Report whether SSH update credentials or a key are saved. |
 | POST | `/api/v1/linux-client-updates/credentials` | Basic Auth | Save the SSH username/password used for update pushes. |
@@ -103,6 +111,8 @@ This project does not use a structured `{"error": {"code": ..., "message": ...}}
 | POST | `/api/v1/server/admin-password` | Basic Auth | Set or rotate the dashboard admin username/password. |
 | GET | `/api/v1/server/ingestion-token` | Basic Auth | Return the live ingestion token value. |
 | POST | `/api/v1/server/ingestion-token/regenerate` | Basic Auth | Generate and save a new ingestion token. |
+| POST | `/api/v1/server/login` | None | Establish a server-side dashboard session with valid admin credentials; returns a `wil_session` cookie. |
+| POST | `/api/v1/server/logout` | Basic Auth | Invalidate the current session and clear the `wil_session` cookie. |
 
 ### AD computer import
 
@@ -170,7 +180,7 @@ curl -X POST https://server:8443/api/v1/linux/inventory/service-status \
 
 ### GET /api/v1/clients
 
-Returns the full Windows client inventory index in one response. Top-level fields: `schemaVersion`, `serverVersion`, `generatedAt`, `clientCount`, `staleHours`, `adDescriptionSyncEnabled`, and `clients` - an array where each entry is a client's stored inventory report (the report body as last submitted to `POST /api/v1/inventory`, plus `sourceFile` and `sourceUpdatedAt` added by the server, the latter from the report file's last-write time).
+Returns the full Windows client inventory index in one response. Top-level fields: `schemaVersion`, `serverVersion`, `generatedAt`, `clientCount`, `staleHours`, `adDescriptionSyncEnabled`, and `clients` - an array where each entry is a client's stored inventory report (the report body as last submitted to `POST /api/v1/inventory`, plus `sourceFile` and `sourceUpdatedAt` added by the server, the latter from the report file's last-write time; `lastIngestSourceIp` is a string, the source IP of the client's most recent successful report, used for ingestion-token-issue correlation; `tokenIssue` is one of `"missing"` or `"mismatched"` when a token problem is detected, absent from the object when there is none).
 
 ### PUT /api/v1/clients/{computerName}/description
 
@@ -194,41 +204,78 @@ Same shape as `GET /api/v1/clients` for Linux clients, with one difference: the 
 
 Linux equivalents of the two Windows endpoints above, operating on `LinuxDataPath` instead of `DataPath`. Same request/response shapes, same `/description` suffix requirement on PUT, same AD-sync guard, same 1024-character limit, same error shapes.
 
-## Windows client install/update
+## Client install/update (Windows + Linux)
+
+As of the Deploy > Actions unification (v0.42.0), one endpoint pair serves both platforms; the earlier separate `/api/v1/linux-client-install`/`/linux-client-uninstall`/`/linux-client-install` (GET list/detail) routes no longer exist. Anything that called them, or called the Windows routes without a `mode` field, needs updating - see the CHANGELOG's `[0.42.0]` entry. v0.43.0 added `winRmAuthMode`/new `sshAuthMode` values (`"global"`/`"manual"`) as the current way to pick a credential source - the older `useSavedCredentials`/`useAdCredentials`/`sshAuthMode: "ad"|"credentials"` fields still work unchanged for any existing caller. v0.44.0's Deploy > Updates unification switched the dashboard's own "Update selected" push (previously the last first-party user of the older fields) onto the same `winRmAuthMode`/`sshAuthMode` shape Deploy > Actions already used - the older fields are now kept purely for backward compatibility with anything that scripted the old payload shape directly.
 
 ### POST /api/v1/client-install and POST /api/v1/client-uninstall
 
-Both routes share one handler, distinguished only by which action it runs. Request body fields: `targets` (free-text, newline/comma/space-separated computer names, supports IP ranges), `serverUrl` (required for install, not for uninstall), `username`/`password` (optional; falls back to saved WinRM update credentials or an AD service identity, see `useSavedCredentials`/`useAdCredentials`), `force`, `addToTrustedHosts`, `retentionDays`.
+Both routes share one handler, serving both platforms, distinguished only by which action it runs. A request must declare a **mode**, required: `"auto"` (TCP-probes WinRM port 5985 and SSH port 22 per target, tries WinRM first if both respond, falls back to SSH only if the WinRM attempt itself fails), `"force-windows"` (WinRM only, no probing), or `"force-linux"` (SSH only, no probing). Missing or invalid `mode` is `400 {"error": "mode must be 'auto', 'force-windows', or 'force-linux'"}`.
 
-The response comes back immediately with a job ID; the actual WinRM install/uninstall work happens asynchronously on a background thread pool, tracked by that job:
+Request body fields:
+
+- `targets` (free-text, newline/comma/space-separated hostnames/computer names or IPs, supports IP ranges) - required.
+- `mode` - required, as above.
+- `serverUrl` (required for install unless a saved Linux package configuration supplies a fallback - see below; not required for uninstall). Whenever a target actually dispatches over SSH, the server rewrites a `serverUrl` ending in `/api/v1/inventory` to end in `/api/v1/linux/inventory` instead (`ToLinuxServerUrl`) - the dashboard always sends the Windows-shaped URL (it has no way to know in advance which protocol Auto mode will pick per target), so a caller providing its own `serverUrl` should do the same and rely on this rewrite for SSH targets, rather than trying to guess the platform itself. A URL that doesn't end in that exact suffix passes through unchanged. `token` (blank falls back to the server's live ingestion token).
+- WinRM fields, read whenever `mode` is `"auto"` or `"force-windows"`: `winRmAuthMode` (`"global"` or `"manual"`, optional - **as of v0.43.0**, the current/recommended way to select a credential source). `"global"` tries the saved WinRM update credentials first, then AD (service identity or a saved AD account) as a fallback, ignoring `username`/`password`; if nothing resolves, the install proceeds with no `-Credential` (the server's own service identity), not an error. `"manual"` uses `username`/`password` as given. If `winRmAuthMode` is omitted entirely, the endpoint falls back to the older `useSavedCredentials`/`useAdCredentials` boolean pair (still supported for backward compatibility - no first-party caller sends it since the Deploy > Updates unification, v0.44.0) with the same resolution semantics. `force` (reinstall over an existing install), `addToTrustedHosts`.
+- SSH fields, read whenever `mode` is `"auto"` or `"force-linux"`: `sshAuthMode` - accepts `"global"`, `"manual"`, or `"key"` (current values, **as of v0.43.0**), plus the older `"ad"`/`"credentials"` (still supported for backward compatibility - same behavior as `"manual"` was for `"credentials"`; no first-party caller sends either since the Deploy > Updates unification, v0.44.0). `"global"` tries the saved Linux update credentials first, then AD as a fallback, ignoring `sshUsername`/`sshPassword` - unlike WinRM's `"global"`, this is a hard `400` if nothing resolves (there is no SSH equivalent of "run as no one"). `"manual"`/`"credentials"` use `sshUsername`/`sshPassword`, falling back to the saved account for whichever field is left blank. `"key"` mode uses the server's stored SSH private key and needs only `sshUsername` (also falls back to the saved username if blank). `installPath`/`intervalHours`/`statusIntervalMinutes` (default from Settings > Linux > Install defaults if omitted), and, for install only, `trustNewHostKeys` plus `acknowledgeHostKeyRisk` (both must be set together to let a first-contact SSH host key be auto-trusted instead of failing).
+- `retentionDays` (optional, overrides the server's default job-log retention for this one job).
+
+**Known characteristic:** Auto mode requires both credential sets (WinRM and SSH) to be resolvable before the job is queued, even if every target in the batch turns out to be one platform only. A deployment with no Linux credentials/SSH key saved (Settings > Linux) gets a validation error on Auto mode until that's configured, or Force Windows is used instead.
+
+If `username`/`password` end up blank in a mode that reaches WinRM, that install runs without a WinRM `-Credential`, i.e. as whatever identity the server's own Windows service runs as - not rejected as an error.
+
+The response comes back immediately with a job ID; the actual install/uninstall work happens asynchronously on a background thread pool, tracked by that job:
 
 ```json
 {"jobId": "a1b2c3...", "status": "queued"}
 ```
 
-If `username`/`password` end up blank, the install runs without a WinRM `-Credential`, i.e. as whatever identity the server's own Windows service runs as - not rejected as an error. `serverUrl` and other string inputs are validated against a small unsafe-character set before being interpolated into the generated PowerShell/cmd invocation, and a validation failure comes back as `400 {"error": "at least one target is required"}` or a similar message describing which field failed.
+`serverUrl` and other string inputs are validated against unsafe-character sets before being interpolated into the generated PowerShell (WinRM) or shell (SSH) invocation, and a validation failure comes back as `400 {"error": "..."}` describing which field failed. Target hostname-format validation (letters/digits/`.`/`-` only) applies for every mode except `force-windows` - Windows NetBIOS names can legally contain `_`, which that check would otherwise wrongly reject.
 
 ```bash
 curl -X POST https://server:8443/api/v1/client-install \
   -u admin:password \
   -H "Content-Type: application/json" \
-  -d '{"targets":"192.168.1.10-20", "serverUrl":"https://server:8443", "useSavedCredentials":true}'
+  -d '{"targets":"192.168.1.10-20", "mode":"force-windows", "serverUrl":"https://server:8443", "winRmAuthMode":"global"}'
 ```
 
 ```bash
 curl -X POST https://server:8443/api/v1/client-uninstall \
   -u admin:password \
   -H "Content-Type: application/json" \
-  -d '{"targets":"WORKSTATION01", "useSavedCredentials":true}'
+  -d '{"targets":"web01.example.com", "mode":"force-linux", "sshAuthMode":"key", "sshUsername":"deploy"}'
+```
+
+```bash
+curl -X POST https://server:8443/api/v1/client-install \
+  -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{"targets":"PC-01\nweb01.example.com", "mode":"auto", "serverUrl":"https://server:8443", "winRmAuthMode":"global", "sshAuthMode":"global"}'
 ```
 
 ### GET /api/v1/client-install
 
-Lists install/uninstall job summaries: `{"defaultRetentionDays": ..., "jobs": [...]}`. Each summary has `id`, `action`, `status`, `createdAt`, `startedAt`, `completedAt`, `serverUrl`, `username`, `retentionDays`, `targetCount`, `resultCount`, `failedCount` - counts only, not the full per-target result list. As a side effect, every call also prunes job files older than their retention window from disk.
+Lists install/uninstall job summaries across both platforms: `{"defaultRetentionDays": ..., "jobs": [...]}`. Each summary has `id`, `action`, `status`, `createdAt`, `startedAt`, `completedAt`, `mode`, `serverUrl`, `username` (falls back to the SSH username when the job had no WinRM username), `retentionDays`, `targetCount`, `resultCount`, `failedCount` - counts only, not the full per-target result list. As a side effect, every call also prunes job files older than their retention window from disk. A job saved before v0.42.0 has no `mode` field (reads as an empty string, shown as a legacy Windows job by the dashboard).
 
 ### GET /api/v1/client-install/{jobId}
 
-Returns one job's full detail, including the per-target `results` array (with `target`, `status`, `output`, `error` per target). Neither this endpoint nor the list endpoint above ever returns a `password` field. `404 {"error": "job not found"}` if the ID matches neither an in-memory job nor a persisted job file.
+Returns one job's full detail, including the per-target `results` array. Each result carries the existing summary fields (`target`, `status`, `message`, `protocol` - which protocol the summary reflects, `output`/`error`) plus a new `attempts` array: one entry per protocol actually tried (`protocol`, `status`, `message`, `output`/`error`, timestamps, and for an `ssh` attempt only, `hostKeyTrust`/`hostKeyStatus`/`hostKeyFingerprint`). A force-mode job's `attempts` always has exactly one entry; an Auto-mode job that tried both protocols has two. Neither this endpoint nor the list endpoint above ever returns a `password`/`sshPassword`/`token`/SSH-key-path field. `404 {"error": "job not found"}` if the ID matches neither an in-memory job nor a persisted job file.
+
+### POST /api/v1/linux-client-install/trust-host-key
+
+Manually pins a Linux target's SSH host key (TOFU/known-hosts style), a prerequisite for non-key-auth installs against a host the server has never connected to before. Unaffected by the install/uninstall unification above - this route predates it and was deliberately left at its original path. Request body: `host` (required), `fingerprint` (required, must look like `SHA256:...`), `keyType` (default `ssh-ed25519`), `port` (default 22).
+
+Stores the upserted record (`Host`, `Port`, `KeyType`, `Fingerprint`, `TrustedAtUtc`, `TrustMethod: "manual"`) and returns it directly as the response body. A subsequent install for that host pins the connection to this fingerprint; if the real key ever no longer matches, the result is classified `hostKeyStatus: "changed"` and is never auto-accepted, regardless of `trustNewHostKeys`.
+
+```bash
+curl -X POST https://server:8443/api/v1/linux-client-install/trust-host-key \
+  -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{"host":"web01.example.com", "fingerprint":"SHA256:AbCdEf...", "keyType":"ssh-ed25519"}'
+```
+
+## Windows client updates
 
 ### GET /api/v1/client-updates
 
@@ -263,44 +310,9 @@ curl -X POST https://server:8443/api/v1/client-package/configure \
 
 Streams a ZIP built on the fly from whatever exists on disk: the client executables, `Deploy-ClientGpo.ps1`, and `Install-ClientGpo.cmd`. Requires `POST /api/v1/client-package/configure` to have run first - `400 {"error": "..."}` with guidance text if `Install-ClientGpo.cmd` or a client executable is missing. Response headers: `Content-Type: application/zip`, `Content-Disposition: attachment; filename="windows-inventory-lite-client.zip"`.
 
-## Linux client install/update
+## Linux client updates
 
-### POST /api/v1/linux-client-install and POST /api/v1/linux-client-uninstall
-
-Shared handler, SSH-based equivalent of the Windows install/uninstall pair. Request body: `targets`, `authMode` (`"ad"`, `"credentials"`, or `"key"`, default `"credentials"`), `username`/`password` (for `credentials`/`key` modes; `key` mode uses the server's stored SSH private key file and needs only `username`), `serverUrl` (falls back to the saved package `serverUrl` for install if omitted), `token` (falls back to the live server token), `installPath` (default `/opt/windows-inventory-lite`), `intervalHours`, `statusIntervalMinutes`, and, for install only, `trustNewHostKeys` plus `acknowledgeHostKeyRisk` (both must be set together to let a first-contact SSH host key be auto-trusted instead of failing).
-
-Same async job pattern as the Windows endpoints: immediate `{"jobId": "...", "status": "queued"}`, work runs in the background. A first install attempt against a never-seen host fails with a per-target result carrying `hostKeyStatus: "unknown"` and a `hostKeyFingerprint` - the dashboard is expected to feed that into `trust-host-key` (below) before retrying, unless `trustNewHostKeys`/`acknowledgeHostKeyRisk` were set on the original request.
-
-```bash
-curl -X POST https://server:8443/api/v1/linux-client-install \
-  -u admin:password \
-  -H "Content-Type: application/json" \
-  -d '{"targets":"web01.example.com", "authMode":"credentials", "username":"deploy", "password":"...", "serverUrl":"https://server:8443"}'
-```
-
-```bash
-curl -X POST https://server:8443/api/v1/linux-client-uninstall \
-  -u admin:password \
-  -H "Content-Type: application/json" \
-  -d '{"targets":"web01.example.com", "authMode":"key", "username":"deploy"}'
-```
-
-### POST /api/v1/linux-client-install/trust-host-key
-
-Manually pins a Linux target's SSH host key (TOFU/known-hosts style), a prerequisite for non-key-auth installs against a host the server has never connected to before. Request body: `host` (required), `fingerprint` (required, must look like `SHA256:...`), `keyType` (default `ssh-ed25519`), `port` (default 22).
-
-Stores the upserted record (`Host`, `Port`, `KeyType`, `Fingerprint`, `TrustedAtUtc`, `TrustMethod: "manual"`) and returns it directly as the response body. A subsequent install for that host pins the connection to this fingerprint; if the real key ever no longer matches, the result is classified `hostKeyStatus: "changed"` and is never auto-accepted, regardless of `trustNewHostKeys`.
-
-```bash
-curl -X POST https://server:8443/api/v1/linux-client-install/trust-host-key \
-  -u admin:password \
-  -H "Content-Type: application/json" \
-  -d '{"host":"web01.example.com", "fingerprint":"SHA256:AbCdEf...", "keyType":"ssh-ed25519"}'
-```
-
-### GET /api/v1/linux-client-install and GET /api/v1/linux-client-install/{jobId}
-
-Same shape and behavior as the Windows job list/detail endpoints. List summary fields: `id`, `action`, `status`, `createdAt`, `startedAt`, `completedAt`, `authMode`, `username`, `retentionDays`, `targetCount`, `resultCount`, `failedCount`. Detail adds `targets`, `results`, `serverUrl`, `installPath`, `trustNewHostKeys`. `password` and the SSH key path are never included in either response. `404 {"error": "job not found"}` on an unknown ID.
+Install/uninstall job endpoints for Linux moved into the unified [Client install/update (Windows + Linux)](#post-apiv1client-install-and-post-apiv1client-uninstall) section above (v0.42.0). This section covers only the scheduled/manual update-push machinery, which the unification did not touch.
 
 ### GET /api/v1/linux-client-updates
 
@@ -372,7 +384,7 @@ GET returns `{"history": [...]}`, most-recent-first, each entry `{id, thumbprint
 
 ### GET /api/v1/server/settings
 
-Returns the general settings block: everything from the certificate status shape above, plus `staleHours`, `port`, `enableHttp`, `httpsPort`, `adSyncEnabled`, `adDescriptionSyncEnabled`, `adSyncMode`, `adSyncIntervalHours`, `adDomain`, `adUseServiceIdentity`, `adUsername` (`null` when using the service identity), `adPasswordConfigured` (boolean only, never the password itself), `adComputerImportOUs`, `installLogRetentionDays`, `debugLogEnabled`, `debugLogPath`. `requireIngestionToken` and the dashboard admin username/password are deliberately not part of this response - see the ingestion-token and admin-password endpoints below.
+Returns the general settings block: everything from the certificate status shape above, plus `staleHours`, `port`, `enableHttp`, `httpsPort`, `hstsEnabled`, `hstsMaxAgeHours` (off by default - see "HSTS" under Conventions above), `adSyncEnabled`, `adDescriptionSyncEnabled`, `adSyncMode`, `adSyncIntervalHours`, `adDomain`, `adUseServiceIdentity`, `adUsername` (`null` when using the service identity), `adPasswordConfigured` (boolean only, never the password itself), `adComputerImportOUs`, `preferredLinuxSubnet` (empty string means no filtering), `linuxDefaultIntervalHours`, `linuxDefaultStatusIntervalMinutes`, `linuxDefaultInstallPath`, `loginLockoutThreshold`, `loginLockoutWindowMinutes`, `loginLockoutDurationMinutes` (see "Login lockout" under Conventions above), `sessionLifetimeHours`, `installLogRetentionDays`, `ingestionRejectionLogRetentionDays`, `ingestionRejectionLogMaxEntries`, `debugLogEnabled`, `debugLogPath`. `requireIngestionToken` and the dashboard admin username/password are deliberately not part of this response - see the ingestion-token and admin-password endpoints below.
 
 ### POST /api/v1/server/settings
 
@@ -383,7 +395,7 @@ Two settings each require an explicit acknowledgment flag before a risky change 
 - Enabling `useHttps` while the configured certificate has flagged risks, without `acknowledgeRisks: true`.
 - Turning off an already-enabled `requireIngestionToken`, without `acknowledgeIngestionTokenRisk: true` - since that removes authentication from both inventory-ingestion endpoints.
 
-Other validation errors (`400 {"error": "..."}`) cover out-of-range numeric fields (`staleHours` 1-8760, `port`/`httpsPort` 1-65535, `installLogRetentionDays` 1-3650, `adSyncIntervalHours` 1-8760), disabling HTTP while HTTPS is also off or not working (would make the dashboard unreachable), and HTTP/HTTPS ports colliding when both are enabled.
+Other validation errors (`400 {"error": "..."}`) cover out-of-range numeric fields (`staleHours` 1-8760, `port`/`httpsPort` 1-65535, `installLogRetentionDays` 1-3650, `ingestionRejectionLogRetentionDays` 1-3650, `ingestionRejectionLogMaxEntries` 100-100000, `adSyncIntervalHours` 1-8760, `linuxDefaultIntervalHours` 1-24, `linuxDefaultStatusIntervalMinutes` 1-1440, `loginLockoutThreshold` 0-1000, `loginLockoutWindowMinutes`/`loginLockoutDurationMinutes` 1-1440, `sessionLifetimeHours` 1-720, `hstsMaxAgeHours` 1-8760), a malformed `preferredLinuxSubnet` (must be blank or a valid IPv4 CIDR, e.g. `192.168.1.0/24`), an empty or non-absolute `linuxDefaultInstallPath` (must start with `/`), disabling HTTP while HTTPS is also off or not working (would make the dashboard unreachable), and HTTP/HTTPS ports colliding when both are enabled.
 
 ```bash
 curl -X GET https://server:8443/api/v1/server/settings -u admin:password
@@ -410,11 +422,43 @@ POST generates a new 64-character random token, persists it, and only then swaps
 curl -X POST https://server:8443/api/v1/server/ingestion-token/regenerate -u admin:password
 ```
 
+### GET /api/v1/server/ingestion-rejections
+
+Returns the server's log of rejected ingestion-token attempts, most-recent-first: `{"entries": [...]}` where each entry has `timestampUtc`, `sourceIp`, `hostname` (a best-effort reverse-DNS lookup of `sourceIp` - can be `null`; an attacker controls what PTR record their own IP resolves to, if any, so never treat it as a verified identity), `endpoint` (which ingestion route), `reason` (`"missing"` or `"mismatched"`), and `matchedClient` (the known client's name if matched by source IP, else `null`). `ingestionRejectionLogRetentionDays` and `ingestionRejectionLogMaxEntries` are targets the log is kept close to, not an exact real-time bound: both are re-checked on every new rejection and again at server startup (not on a timer), and the count cap is enforced in batches for write efficiency, so entry count can transiently run over `ingestionRejectionLogMaxEntries` by a small margin, or entries can briefly outlive `ingestionRejectionLogRetentionDays`, between prune passes.
+
+### POST /api/v1/server/login
+
+Establishes a server-side session with valid dashboard admin credentials. Request body: `{username, password}` (both required). Subject to the same cross-site request checks and `LoginLockoutThreshold` rate limiting as every other state-changing route (see "Cross-site request checks" and "Login lockout" under Conventions above) - unlike the three ingestion endpoints, this route is not exempt from either.
+
+Success response: `200` with `Set-Cookie: wil_session=...` in response headers and `Cache-Control: no-store`. The cookie carries `HttpOnly` and `SameSite=Strict` flags. Over HTTPS, it also carries the `Secure` flag; over plain HTTP, the flag is omitted and the cookie travels in cleartext, the same as Basic Auth credentials already do. Response body: `{"status": "ok"}`.
+
+Failure response: `401` with body `Unauthorized` (plain text, not JSON) - the same `SendUnauthorized` response every other unauthenticated request in this API gets, including the Basic Auth `401` case documented under Conventions above. Failed attempts are rate-limited per source IP using the same lockout mechanism as Basic Auth (see "Login lockout" under Conventions above). A malformed (non-JSON, or JSON that doesn't decode to an object) request body gets `400 {"error": "invalid request body"}` instead, the same shape used elsewhere in this API.
+
+Loopback-only mode: Always returns `401` when both `WebUsername` and `WebPassword` are unconfigured, even with correct credentials - a session cookie would bypass the IP-based loopback restriction, so the endpoint does not issue one until credentials are configured.
+
+```bash
+curl -X POST https://server:8443/api/v1/server/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin", "password":"password"}'
+```
+
+### POST /api/v1/server/logout
+
+Invalidates the server-side session and clears the session cookie. No request body required. Reachable the same way as every other management endpoint documented here - a valid session cookie or Basic Auth is required to reach the handler at all; unlike `/api/v1/server/login`, this route is dispatched after the `IsWebRequestAuthorized` check, with no unauthenticated carve-out.
+
+Response: always `200` with body `{"status": "ok"}`. Logout is idempotent - logging out an already-missing or expired session is a no-op success, not an error. The response includes a cookie-clearing `Set-Cookie: wil_session=` header.
+
+```bash
+curl -X POST https://server:8443/api/v1/server/logout \
+  -u admin:password \
+  -H "Content-Type: application/json"
+```
+
 ## AD computer import
 
 ### GET /api/v1/ad/computers
 
-Searches Active Directory for computer objects under the configured Organizational Units (`adComputerImportOUs`), for import into the dashboard. `400 {"error": "Check \"Configure AD User\" in Settings > General > Active Directory first."}` if `adSyncEnabled` is off. On success: `{"computers": [...], "warnings": [...]}`. If every configured OU lookup fails, returns `500 {"error": "<joined warning text>"}` instead of an empty result, so a total AD outage is distinguishable from "no computers found."
+Searches Active Directory for computer objects under the configured Organizational Units (`adComputerImportOUs`), for import into the dashboard. `400 {"error": "Check \"Configure AD User\" in Settings > Windows > Active Directory first."}` if `adSyncEnabled` is off. On success: `{"computers": [...], "warnings": [...]}`. If every configured OU lookup fails, returns `500 {"error": "<joined warning text>"}` instead of an empty result, so a total AD outage is distinguishable from "no computers found."
 
 ## Licenses
 

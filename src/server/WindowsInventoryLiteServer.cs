@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.40.2";
+        internal const string ProductVersion = "0.54.2";
 
         private static int Main(string[] args)
         {
@@ -109,7 +109,7 @@ namespace WindowsInventoryLite
         public string LinuxUpdateKeyPath;
         public string LinuxClientPackagePath;
         // CIDR block (e.g. "192.168.1.0/24") an admin can set in Settings >
-        // General when a Linux host reports several NICs and the "wrong"
+        // Linux when a Linux host reports several NICs and the "wrong"
         // one (a storage/cluster network, not the one reachable from this
         // server) would otherwise win GetLinuxClientUpdateTarget's plain
         // first-IPv4 heuristic. Empty by default - no filtering, unchanged
@@ -125,6 +125,26 @@ namespace WindowsInventoryLite
         public string Token;
         public string WebUsername;
         public string WebPassword;
+        // Dashboard-only (Settings > Admin password > Login lockout), no
+        // Install-Server.ps1 CLI flag - same reasoning as
+        // LinuxDefaultIntervalHours below. Threshold 0 disables the whole
+        // per-IP lockout mechanism (see IsBasicAuthLockedOut).
+        public int LoginLockoutThreshold;
+        public int LoginLockoutWindowMinutes;
+        public int LoginLockoutDurationMinutes;
+        // Dashboard-only (Settings > Admin password > Login lockout, same
+        // block), no Install-Server.ps1 CLI flag - same reasoning as
+        // LoginLockoutThreshold above. Governs how long a dashboard login
+        // session stays valid (sliding - see IsWebRequestAuthorized's
+        // session-cookie branch), not anything Basic-Auth-related.
+        public int SessionLifetimeHours;
+        // Dashboard-only (Settings > Server > Ingestion Token), no
+        // Install-Server.ps1 CLI flag - same reasoning as
+        // LoginLockoutThreshold above. Governs the rejected-ingestion-
+        // attempt log (see IngestionRejectionEntry/RecordIngestionRejection),
+        // not the token itself.
+        public int IngestionRejectionLogRetentionDays;
+        public int IngestionRejectionLogMaxEntries;
         public int InstallLogRetentionDays;
         public string ConfigPath;
         // The certificate is resolved from the LocalMachine\My store by thumbprint
@@ -132,6 +152,13 @@ namespace WindowsInventoryLite
         // import a PFX at install time; the dashboard "Certificate" tab can import
         // and switch to a new PFX later without a service restart.
         public bool UseHttps;
+        // Off by default - HSTS is only ever added to a response actually
+        // served over the HTTPS listener (see BuildHstsHeaderOrEmpty), but
+        // a browser that has cached the policy can still lock itself out of
+        // this server if HTTPS is later disabled while this was on - opt-in
+        // rather than tied automatically to UseHttps.
+        public bool HstsEnabled;
+        public int HstsMaxAgeHours;
         public string CertificateThumbprint;
         public int StaleHours;
         public bool ConsoleMode;
@@ -162,6 +189,14 @@ namespace WindowsInventoryLite
         // plain text, same as AdDomain. Dashboard-only, no Install-Server.ps1
         // CLI flag, same reasoning as ClientUpdateUsername below.
         public string AdComputerImportOUs;
+        // Dashboard-only (Settings > Linux > Install defaults), no
+        // Install-Server.ps1 CLI flag - same reasoning as
+        // AdComputerImportOUs above. Read by Auto-mode Deploy > Actions
+        // (a later phase) as the fallback when a target resolves to Linux
+        // and the install request itself supplies no override.
+        public int LinuxDefaultIntervalHours;
+        public int LinuxDefaultStatusIntervalMinutes;
+        public string LinuxDefaultInstallPath;
         // Off by default - a plain-text file capturing AD lookups,
         // inventory-report traffic, and unhandled server errors. See
         // DebugLogger.cs. Only meant for troubleshooting a specific
@@ -214,6 +249,16 @@ namespace WindowsInventoryLite
             options.LinuxUpdateScheduleOnceAtUtc = "";
             options.LinuxUpdateScheduleIntervalHours = 24;
             options.LinuxUpdateScheduleLastRunUtc = "";
+            options.LinuxDefaultIntervalHours = 6;
+            options.LinuxDefaultStatusIntervalMinutes = 30;
+            options.LinuxDefaultInstallPath = "/opt/windows-inventory-lite";
+            options.LoginLockoutThreshold = 10;
+            options.LoginLockoutWindowMinutes = 15;
+            options.LoginLockoutDurationMinutes = 15;
+            options.SessionLifetimeHours = 12;
+            options.HstsMaxAgeHours = 24;
+            options.IngestionRejectionLogRetentionDays = 30;
+            options.IngestionRejectionLogMaxEntries = 5000;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -418,6 +463,20 @@ namespace WindowsInventoryLite
                     string useHttps = GetConfigString(config, "UseHttps");
                     options.UseHttps = String.Equals(useHttps, "true", StringComparison.OrdinalIgnoreCase);
                 }
+                if (!options.HstsEnabled)
+                {
+                    string hstsEnabledText = GetConfigString(config, "HstsEnabled");
+                    options.HstsEnabled = String.Equals(hstsEnabledText, "true", StringComparison.OrdinalIgnoreCase);
+                }
+                if (options.HstsMaxAgeHours == 24)
+                {
+                    string hstsMaxAgeHoursText = GetConfigString(config, "HstsMaxAgeHours");
+                    int hstsMaxAgeHoursFromConfig;
+                    if (!String.IsNullOrEmpty(hstsMaxAgeHoursText) && Int32.TryParse(hstsMaxAgeHoursText, out hstsMaxAgeHoursFromConfig) && hstsMaxAgeHoursFromConfig >= 1 && hstsMaxAgeHoursFromConfig <= 8760)
+                    {
+                        options.HstsMaxAgeHours = hstsMaxAgeHoursFromConfig;
+                    }
+                }
                 if (String.IsNullOrEmpty(options.CertificateThumbprint))
                 {
                     options.CertificateThumbprint = GetConfigString(config, "CertificateThumbprint");
@@ -531,6 +590,86 @@ namespace WindowsInventoryLite
                 if (String.IsNullOrEmpty(options.PreferredLinuxSubnet))
                 {
                     options.PreferredLinuxSubnet = GetConfigString(config, "PreferredLinuxSubnet");
+                }
+                if (options.LinuxDefaultIntervalHours == 6)
+                {
+                    string linuxDefaultIntervalText = GetConfigString(config, "LinuxDefaultIntervalHours");
+                    int linuxDefaultIntervalFromConfig;
+                    if (!String.IsNullOrEmpty(linuxDefaultIntervalText) && Int32.TryParse(linuxDefaultIntervalText, out linuxDefaultIntervalFromConfig) && linuxDefaultIntervalFromConfig >= 1 && linuxDefaultIntervalFromConfig <= 24)
+                    {
+                        options.LinuxDefaultIntervalHours = linuxDefaultIntervalFromConfig;
+                    }
+                }
+                if (options.LinuxDefaultStatusIntervalMinutes == 30)
+                {
+                    string linuxDefaultStatusIntervalText = GetConfigString(config, "LinuxDefaultStatusIntervalMinutes");
+                    int linuxDefaultStatusIntervalFromConfig;
+                    if (!String.IsNullOrEmpty(linuxDefaultStatusIntervalText) && Int32.TryParse(linuxDefaultStatusIntervalText, out linuxDefaultStatusIntervalFromConfig) && linuxDefaultStatusIntervalFromConfig >= 1 && linuxDefaultStatusIntervalFromConfig <= 1440)
+                    {
+                        options.LinuxDefaultStatusIntervalMinutes = linuxDefaultStatusIntervalFromConfig;
+                    }
+                }
+                if (String.Equals(options.LinuxDefaultInstallPath, "/opt/windows-inventory-lite", StringComparison.Ordinal))
+                {
+                    string linuxDefaultInstallPathFromConfig = GetConfigString(config, "LinuxDefaultInstallPath");
+                    if (!String.IsNullOrEmpty(linuxDefaultInstallPathFromConfig))
+                    {
+                        options.LinuxDefaultInstallPath = linuxDefaultInstallPathFromConfig;
+                    }
+                }
+                if (options.LoginLockoutThreshold == 10)
+                {
+                    string loginLockoutThresholdText = GetConfigString(config, "LoginLockoutThreshold");
+                    int loginLockoutThresholdFromConfig;
+                    if (!String.IsNullOrEmpty(loginLockoutThresholdText) && Int32.TryParse(loginLockoutThresholdText, out loginLockoutThresholdFromConfig) && loginLockoutThresholdFromConfig >= 0 && loginLockoutThresholdFromConfig <= 1000)
+                    {
+                        options.LoginLockoutThreshold = loginLockoutThresholdFromConfig;
+                    }
+                }
+                if (options.LoginLockoutWindowMinutes == 15)
+                {
+                    string loginLockoutWindowText = GetConfigString(config, "LoginLockoutWindowMinutes");
+                    int loginLockoutWindowFromConfig;
+                    if (!String.IsNullOrEmpty(loginLockoutWindowText) && Int32.TryParse(loginLockoutWindowText, out loginLockoutWindowFromConfig) && loginLockoutWindowFromConfig >= 1 && loginLockoutWindowFromConfig <= 1440)
+                    {
+                        options.LoginLockoutWindowMinutes = loginLockoutWindowFromConfig;
+                    }
+                }
+                if (options.LoginLockoutDurationMinutes == 15)
+                {
+                    string loginLockoutDurationText = GetConfigString(config, "LoginLockoutDurationMinutes");
+                    int loginLockoutDurationFromConfig;
+                    if (!String.IsNullOrEmpty(loginLockoutDurationText) && Int32.TryParse(loginLockoutDurationText, out loginLockoutDurationFromConfig) && loginLockoutDurationFromConfig >= 1 && loginLockoutDurationFromConfig <= 1440)
+                    {
+                        options.LoginLockoutDurationMinutes = loginLockoutDurationFromConfig;
+                    }
+                }
+                if (options.SessionLifetimeHours == 12)
+                {
+                    string sessionLifetimeHoursText = GetConfigString(config, "SessionLifetimeHours");
+                    int sessionLifetimeHoursFromConfig;
+                    if (!String.IsNullOrEmpty(sessionLifetimeHoursText) && Int32.TryParse(sessionLifetimeHoursText, out sessionLifetimeHoursFromConfig) && sessionLifetimeHoursFromConfig >= 1 && sessionLifetimeHoursFromConfig <= 720)
+                    {
+                        options.SessionLifetimeHours = sessionLifetimeHoursFromConfig;
+                    }
+                }
+                if (options.IngestionRejectionLogRetentionDays == 30)
+                {
+                    string ingestionRejectionRetentionText = GetConfigString(config, "IngestionRejectionLogRetentionDays");
+                    int ingestionRejectionRetentionFromConfig;
+                    if (!String.IsNullOrEmpty(ingestionRejectionRetentionText) && Int32.TryParse(ingestionRejectionRetentionText, out ingestionRejectionRetentionFromConfig) && ingestionRejectionRetentionFromConfig >= 1 && ingestionRejectionRetentionFromConfig <= 3650)
+                    {
+                        options.IngestionRejectionLogRetentionDays = ingestionRejectionRetentionFromConfig;
+                    }
+                }
+                if (options.IngestionRejectionLogMaxEntries == 5000)
+                {
+                    string ingestionRejectionMaxEntriesText = GetConfigString(config, "IngestionRejectionLogMaxEntries");
+                    int ingestionRejectionMaxEntriesFromConfig;
+                    if (!String.IsNullOrEmpty(ingestionRejectionMaxEntriesText) && Int32.TryParse(ingestionRejectionMaxEntriesText, out ingestionRejectionMaxEntriesFromConfig) && ingestionRejectionMaxEntriesFromConfig >= 100 && ingestionRejectionMaxEntriesFromConfig <= 100000)
+                    {
+                        options.IngestionRejectionLogMaxEntries = ingestionRejectionMaxEntriesFromConfig;
+                    }
                 }
                 if (String.IsNullOrEmpty(options.ClientUpdateUsername))
                 {
@@ -687,8 +826,42 @@ namespace WindowsInventoryLite
         private readonly ServerOptions options;
         private readonly object installJobsLock = new object();
         private readonly Dictionary<string, InstallJob> installJobs = new Dictionary<string, InstallJob>();
-        private readonly object linuxInstallJobsLock = new object();
-        private readonly Dictionary<string, LinuxInstallJob> linuxInstallJobs = new Dictionary<string, LinuxInstallJob>();
+        // Per-source-IP Basic Auth failure tracking (see IsBasicAuthLockedOut/
+        // IsWebRequestAuthorized). In-memory only, does not survive a server
+        // restart - defense-in-depth on top of the documented "trusted
+        // management network" control, not the sole line of defense.
+        private readonly object loginLockoutLock = new object();
+        private readonly Dictionary<IPAddress, LoginLockoutRecord> loginLockoutState = new Dictionary<IPAddress, LoginLockoutRecord>();
+
+        // Not persisted to disk - a server restart naturally requires
+        // everyone to log in again, matching how loginLockoutState above
+        // already resets on restart. Keyed by the random token that is
+        // also the wil_session cookie's value (see GenerateRandomToken).
+        private readonly object sessionLock = new object();
+        private readonly Dictionary<string, SessionRecord> sessionStore = new Dictionary<string, SessionRecord>();
+
+        // Rejected-ingestion-token attempt log (see IngestionRejectionEntry/
+        // RecordIngestionRejection). Persisted to disk (see
+        // GetIngestionRejectionLogPath) and loaded into this list once at
+        // Start() - unlike loginLockoutState, this is meant to survive a
+        // restart, since it's a history an admin reviews, not a transient
+        // lockout counter.
+        private readonly object ingestionRejectionLogLock = new object();
+        private readonly List<IngestionRejectionEntry> ingestionRejectionLog = new List<IngestionRejectionEntry>();
+        // IP -> resolved PTR hostname, or null for "resolution attempted,
+        // no result" (still cached, so a non-resolving IP is never
+        // retried). Cleared entirely (not partially evicted) if it exceeds
+        // 1000 entries - see QueueReverseDnsLookup.
+        private readonly object reverseDnsCacheLock = new object();
+        private readonly Dictionary<IPAddress, string> reverseDnsCache = new Dictionary<IPAddress, string>();
+        // Caps how many reverse-DNS lookups can be in flight on the
+        // ThreadPool at once - the same pool HandleClient itself runs on.
+        // Without this, a burst of first-time-seen source IPs (trivial for
+        // an unauthenticated attacker to trigger) can tie up many pool
+        // threads at once, each blocked up to 2 seconds, and starve real
+        // request handling. See QueueReverseDnsLookup.
+        private const int MaxConcurrentReverseDnsLookups = 20;
+        private int reverseDnsLookupsInFlight;
         // Lets an open dashboard tab notice a server-initiated (scheduled)
         // push exists at all - a scheduled push never goes through any HTTP
         // request the browser makes, so without this the browser has no way
@@ -745,12 +918,10 @@ namespace WindowsInventoryLite
             {
                 Directory.CreateDirectory(GetInstallJobDirectory());
             }
-            if (!Directory.Exists(GetLinuxInstallJobDirectory()))
-            {
-                Directory.CreateDirectory(GetLinuxInstallJobDirectory());
-            }
             CleanupInstallJobLogs();
             MigrateLegacyLinuxSshKey();
+            PurgeOrphanedLinuxInstallJobDirectory();
+            LoadIngestionRejectionLogFromDisk();
 
             if (options.EnableHttp)
             {
@@ -1105,6 +1276,7 @@ namespace WindowsInventoryLite
             job.CreatedAtUtc = DateTime.UtcNow;
             job.Targets = targets;
             job.Results = new ArrayList();
+            job.Mode = "force-windows";
             job.ServerUrl = serverUrl;
             job.Token = options.Token;
             job.Username = username;
@@ -1347,6 +1519,7 @@ namespace WindowsInventoryLite
 
                 Stream stream = networkStream;
                 SslStream sslStream = null;
+                int loginLockoutRetryAfterSeconds;
                 try
                 {
                     if (clientState.IsHttps)
@@ -1376,9 +1549,25 @@ namespace WindowsInventoryLite
                     {
                         ReceiveLinuxServiceStatus(stream, request);
                     }
+                    else if (IsBasicAuthLockedOut(request, out loginLockoutRetryAfterSeconds))
+                    {
+                        SendTooManyRequests(stream, loginLockoutRetryAfterSeconds);
+                    }
+                    else if (IsCrossSiteRequestRejected(request))
+                    {
+                        SendText(stream, "{\"error\":\"Cross-site request rejected - Origin/Referer does not match this server.\"}", "application/json; charset=utf-8", 400);
+                    }
+                    else if (RequiresJsonContentType(request) && !HasJsonContentType(request))
+                    {
+                        SendText(stream, "{\"error\":\"Content-Type must be application/json.\"}", "application/json; charset=utf-8", 400);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/server/login")
+                    {
+                        SendLoginResult(stream, request);
+                    }
                     else if (!IsWebRequestAuthorized(request))
                     {
-                        SendUnauthorized(stream);
+                        SendUnauthorized(stream, request);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/clients")
                     {
@@ -1452,25 +1641,9 @@ namespace WindowsInventoryLite
                     {
                         DownloadClientPackage(stream);
                     }
-                    else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-install")
-                    {
-                        StartLinuxClientAction(stream, request, "install");
-                    }
-                    else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-uninstall")
-                    {
-                        StartLinuxClientAction(stream, request, "uninstall");
-                    }
                     else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-install/trust-host-key")
                     {
                         TrustLinuxHostKey(stream, request);
-                    }
-                    else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-install")
-                    {
-                        SendLinuxClientInstallJobs(stream);
-                    }
-                    else if (request.Method == "GET" && request.Path.StartsWith("/api/v1/linux-client-install/", StringComparison.OrdinalIgnoreCase))
-                    {
-                        SendLinuxClientInstallJob(stream, request);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-updates")
                     {
@@ -1556,6 +1729,10 @@ namespace WindowsInventoryLite
                     {
                         ChangeAdminPassword(stream, request);
                     }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/server/logout")
+                    {
+                        SendLogoutResult(stream, request);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/server/ingestion-token")
                     {
                         SendIngestionTokenStatus(stream);
@@ -1563,6 +1740,10 @@ namespace WindowsInventoryLite
                     else if (request.Method == "POST" && request.Path == "/api/v1/server/ingestion-token/regenerate")
                     {
                         RegenerateIngestionToken(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/server/ingestion-rejections")
+                    {
+                        SendIngestionRejectionLog(stream);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/licenses")
                     {
@@ -1595,6 +1776,10 @@ namespace WindowsInventoryLite
                     else if (request.Method == "GET" && request.Path == "/favicon.svg")
                     {
                         SendDashboardFile(stream, "favicon.svg", FaviconSvg, "image/svg+xml");
+                    }
+                    else if (request.Method == "GET" && request.Path == "/brand-mark.png")
+                    {
+                        SendDashboardImage(stream, "brand-mark.png", "image/png");
                     }
                     else
                     {
@@ -1646,6 +1831,7 @@ namespace WindowsInventoryLite
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
             if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
             {
+                RecordIngestionRejection(request, "windows-inventory", ResolveIngestionRejectionReason(token));
                 DebugLogger.Log(options, "Client", "Rejected inventory report: invalid or missing token");
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
                 return;
@@ -1699,6 +1885,7 @@ namespace WindowsInventoryLite
             lock (reportFileLock)
             {
                 ApplyAdSyncFields(inventory, adFields);
+                inventory["lastIngestSourceIp"] = request.RemoteAddress != null ? request.RemoteAddress.ToString() : null;
 
                 string json = serializer.Serialize(inventory);
                 File.WriteAllText(path, json, new UTF8Encoding(false));
@@ -2052,6 +2239,7 @@ namespace WindowsInventoryLite
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
             if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
             {
+                RecordIngestionRejection(request, "linux-inventory", ResolveIngestionRejectionReason(token));
                 DebugLogger.Log(options, "Client", "Rejected Linux inventory report: invalid or missing token");
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
                 return;
@@ -2103,6 +2291,7 @@ namespace WindowsInventoryLite
             lock (reportFileLock)
             {
                 ApplyAdSyncFields(inventory, adFields);
+                inventory["lastIngestSourceIp"] = request.RemoteAddress != null ? request.RemoteAddress.ToString() : null;
 
                 string json = serializer.Serialize(inventory);
                 File.WriteAllText(path, json, new UTF8Encoding(false));
@@ -2116,6 +2305,7 @@ namespace WindowsInventoryLite
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
             if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
             {
+                RecordIngestionRejection(request, "linux-service-status", ResolveIngestionRejectionReason(token));
                 DebugLogger.Log(options, "Client", "Rejected Linux service-status report: invalid or missing token");
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
                 return;
@@ -2622,32 +2812,33 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            LinuxInstallJob job = new LinuxInstallJob();
+            InstallJob job = new InstallJob();
             job.Id = Guid.NewGuid().ToString("N");
             job.Action = "install";
             job.Status = "queued";
             job.CreatedAtUtc = DateTime.UtcNow;
             job.Targets = targets;
             job.Results = new ArrayList();
-            job.AuthMode = authMode;
+            job.Mode = "force-linux";
             job.ServerUrl = serverUrl;
             job.Token = token;
             job.InstallPath = installPath;
             job.IntervalHours = intervalHours;
             job.StatusIntervalMinutes = statusIntervalMinutes;
-            job.Username = username;
-            job.Password = password;
-            job.KeyPath = keyPath;
+            job.SshAuthMode = authMode;
+            job.SshUsername = username;
+            job.SshPassword = password;
+            job.SshKeyPath = keyPath;
             job.RetentionDays = options.InstallLogRetentionDays;
 
-            lock (linuxInstallJobsLock)
+            lock (installJobsLock)
             {
-                linuxInstallJobs[job.Id] = job;
-                SaveLinuxInstallJob(job);
+                installJobs[job.Id] = job;
+                SaveInstallJob(job);
             }
             lastScheduledLinuxUpdateJobId = job.Id;
             DebugLogger.Log(options, "Schedule", "Scheduled Linux client update push started: job '" + job.Id + "', " + targets.Count + " target(s).");
-            ThreadPool.QueueUserWorkItem(RunLinuxClientActionJob, job);
+            ThreadPool.QueueUserWorkItem(RunClientActionJob, job);
         }
 
         private string BuildLinuxClientIndex()
@@ -2801,44 +2992,286 @@ namespace WindowsInventoryLite
                 SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
                 return;
             }
+
+            string mode = Convert.ToString(payload.ContainsKey("mode") ? payload["mode"] : "");
+            if (mode != "auto" && mode != "force-windows" && mode != "force-linux")
+            {
+                SendText(stream, "{\"error\":\"mode must be 'auto', 'force-windows', or 'force-linux'\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            bool needsWinRm = mode == "auto" || mode == "force-windows";
+            bool needsSsh = mode == "auto" || mode == "force-linux";
+
             string targetText = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "");
             string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
             // Blank means "use the server's current ingestion token", not
             // "install with no token" - same convention as the Linux
-            // install endpoint (see its own copy of this comment) and the
-            // Package tab's token fields. Lets an admin push a client
-            // pointed at a *different* server's token (e.g. a migration)
-            // without changing this server's own configured token first.
+            // install endpoint used to have its own copy of this comment,
+            // and the Package tab's token fields.
             string token = Convert.ToString(payload.ContainsKey("token") ? payload["token"] : "");
             if (String.IsNullOrEmpty(token))
             {
                 token = options.Token;
             }
-            string username = Convert.ToString(payload.ContainsKey("username") ? payload["username"] : "");
-            string password = Convert.ToString(payload.ContainsKey("password") ? payload["password"] : "");
-            bool useSavedCredentials = payload.ContainsKey("useSavedCredentials") && Convert.ToBoolean(payload["useSavedCredentials"]);
-            ResolveUpdateCredentials(ref username, ref password, useSavedCredentials, options.ClientUpdateUsername, options.ClientUpdatePassword);
-            bool useAdCredentials = payload.ContainsKey("useAdCredentials") && Convert.ToBoolean(payload["useAdCredentials"]);
-            string adCredentialError;
-            if (!TryResolveAdSyncCredentials(useAdCredentials, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref username, ref password, out adCredentialError))
+
+            string winRmUsername = "";
+            string winRmPassword = "";
+            bool force = false;
+            bool addToTrustedHosts = false;
+            if (needsWinRm)
             {
-                SendText(stream, "{\"error\":\"" + adCredentialError.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
-                return;
+                winRmUsername = Convert.ToString(payload.ContainsKey("username") ? payload["username"] : "");
+                winRmPassword = Convert.ToString(payload.ContainsKey("password") ? payload["password"] : "");
+                if (payload.ContainsKey("winRmAuthMode"))
+                {
+                    // New Deploy > Actions shape (2026-08-21): an explicit
+                    // credential-source dropdown, replacing the old "Use
+                    // global AD settings" checkbox. Global tries the
+                    // saved Client update account first, AD as a
+                    // fallback if nothing is saved - same priority chain
+                    // as SSH's own Global mode below. Manual keeps this
+                    // endpoint's existing behavior for typed fields
+                    // (used as given; blank means install as the
+                    // server's own service identity, not an error).
+                    string winRmAuthMode = Convert.ToString(payload["winRmAuthMode"]);
+                    if (winRmAuthMode != "global" && winRmAuthMode != "manual")
+                    {
+                        SendText(stream, "{\"error\":\"winRmAuthMode must be 'global' or 'manual'\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                    if (winRmAuthMode == "global")
+                    {
+                        winRmUsername = "";
+                        winRmPassword = "";
+                        ResolveUpdateCredentials(ref winRmUsername, ref winRmPassword, true, options.ClientUpdateUsername, options.ClientUpdatePassword);
+                        if (String.IsNullOrEmpty(winRmUsername) || String.IsNullOrEmpty(winRmPassword))
+                        {
+                            string adCredentialError;
+                            TryResolveAdSyncCredentials(true, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref winRmUsername, ref winRmPassword, out adCredentialError);
+                            // Ignore a false return here (AD disabled, or
+                            // no saved AD account) - TryResolveAdSyncCredentials
+                            // leaves username/password untouched on
+                            // failure, so this just means "nothing to
+                            // fall back to", which RunClientInstallTarget
+                            // already treats as "install as the
+                            // service's own identity", not an error.
+                        }
+                    }
+                    // "manual": winRmUsername/winRmPassword already hold
+                    // whatever was typed (or blank), used as-is.
+                }
+                else
+                {
+                    // Old shape. As of the Deploy > Updates unification,
+                    // no first-party caller sends this any more - the
+                    // dashboard's "Update selected" (startMergedUpdatesPush)
+                    // sends winRmAuthMode like Deploy > Actions does.
+                    // Kept for backward compatibility with anything that
+                    // scripted the old payload shape directly.
+                    bool useSavedCredentials = payload.ContainsKey("useSavedCredentials") && Convert.ToBoolean(payload["useSavedCredentials"]);
+                    ResolveUpdateCredentials(ref winRmUsername, ref winRmPassword, useSavedCredentials, options.ClientUpdateUsername, options.ClientUpdatePassword);
+                    bool useAdCredentials = payload.ContainsKey("useAdCredentials") && Convert.ToBoolean(payload["useAdCredentials"]);
+                    string adCredentialError;
+                    if (!TryResolveAdSyncCredentials(useAdCredentials, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref winRmUsername, ref winRmPassword, out adCredentialError))
+                    {
+                        SendText(stream, "{\"error\":\"" + adCredentialError.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+                force = payload.ContainsKey("force") && Convert.ToBoolean(payload["force"]);
+                addToTrustedHosts = payload.ContainsKey("addToTrustedHosts") && Convert.ToBoolean(payload["addToTrustedHosts"]);
             }
-            bool force = payload.ContainsKey("force") && Convert.ToBoolean(payload["force"]);
-            bool addToTrustedHosts = payload.ContainsKey("addToTrustedHosts") && Convert.ToBoolean(payload["addToTrustedHosts"]);
+
+            string sshAuthMode = "credentials";
+            string sshUsername = "";
+            string sshPassword = "";
+            string sshKeyPath = "";
+            bool trustNewHostKeys = false;
+            int intervalHours = options.LinuxDefaultIntervalHours;
+            int statusIntervalMinutes = options.LinuxDefaultStatusIntervalMinutes;
+            string installPath = Convert.ToString(payload.ContainsKey("installPath") ? payload["installPath"] : options.LinuxDefaultInstallPath);
+            if (needsSsh)
+            {
+                sshAuthMode = Convert.ToString(payload.ContainsKey("sshAuthMode") ? payload["sshAuthMode"] : "credentials");
+                sshUsername = Convert.ToString(payload.ContainsKey("sshUsername") ? payload["sshUsername"] : "");
+                sshPassword = Convert.ToString(payload.ContainsKey("sshPassword") ? payload["sshPassword"] : "");
+                sshKeyPath = GetLinuxSshKeyFilePath();
+
+                if (sshAuthMode == "global")
+                {
+                    // New Deploy > Actions shape (2026-08-21): no typed
+                    // fields shown - always tries the saved Linux
+                    // account first, AD as a fallback if nothing is
+                    // saved, same priority chain as WinRM's own Global
+                    // mode above. Unlike WinRM, SSH has no "service
+                    // identity" fallback (there is no anonymous SSH), so
+                    // this is a hard error rather than a silent
+                    // empty-credential fallback when nothing resolves.
+                    sshUsername = options.LinuxUpdateUsername;
+                    sshPassword = options.LinuxUpdatePassword;
+                    if (String.IsNullOrEmpty(sshUsername) || String.IsNullOrEmpty(sshPassword))
+                    {
+                        string adCredentialError;
+                        TryResolveAdSyncCredentials(true, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref sshUsername, ref sshPassword, out adCredentialError);
+                        // Ignore a false return - AD service-identity mode
+                        // resolves to blank username/password (no SSH
+                        // equivalent exists), which the check below
+                        // catches the same as "nothing configured at all".
+                    }
+                    if (String.IsNullOrEmpty(sshUsername) || String.IsNullOrEmpty(sshPassword))
+                    {
+                        SendText(stream, "{\"error\":\"No Linux credentials available for Global mode - save them in Settings > Linux > Linux Client update credentials, configure a non-service-identity AD account, or select Manual credentials/SSH key instead.\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+                else if (sshAuthMode == "manual" || sshAuthMode == "credentials")
+                {
+                    // "manual" (current dropdown value, sent by both
+                    // Deploy > Actions and, since the Deploy > Updates
+                    // unification, startMergedUpdatesPush too) and
+                    // "credentials" (legacy value - no first-party caller
+                    // sends it any more, kept for anything that scripted
+                    // the old payload shape directly) are the same
+                    // behavior: typed fields, falling back to the saved
+                    // account when left blank - unchanged leniency from
+                    // before.
+                    if (String.IsNullOrEmpty(sshUsername)) sshUsername = options.LinuxUpdateUsername;
+                    if (String.IsNullOrEmpty(sshPassword)) sshPassword = options.LinuxUpdatePassword;
+                    if (String.IsNullOrEmpty(sshUsername) || String.IsNullOrEmpty(sshPassword))
+                    {
+                        SendText(stream, "{\"error\":\"username/password are required (enter them, or save them in Settings > Linux > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+                else if (sshAuthMode == "key")
+                {
+                    if (String.IsNullOrEmpty(sshUsername)) sshUsername = options.LinuxUpdateUsername;
+                    if (String.IsNullOrEmpty(sshUsername))
+                    {
+                        SendText(stream, "{\"error\":\"username is required for 'key' auth mode (enter it, or save it in Settings > Linux > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                    if (!File.Exists(sshKeyPath))
+                    {
+                        SendText(stream, "{\"error\":\"No SSH key is configured - upload one in Settings > Linux > Linux Client update credentials.\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+                else if (sshAuthMode == "ad")
+                {
+                    // Legacy value, still sent by Deploy > Updates' Linux
+                    // "Update selected" push - unchanged from before.
+                    bool useAd = true;
+                    string adCredentialError;
+                    if (!TryResolveAdSyncCredentials(useAd, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref sshUsername, ref sshPassword, out adCredentialError))
+                    {
+                        SendText(stream, "{\"error\":\"" + adCredentialError.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                    if (String.IsNullOrEmpty(sshUsername) || String.IsNullOrEmpty(sshPassword))
+                    {
+                        SendText(stream, "{\"error\":\"AD service-identity mode is not usable for SSH pushes to Linux targets (there is no SSH equivalent of running as the service's own identity). Select 'Stored Linux credentials' or 'SSH key' instead, or configure an explicit AD account rather than service identity in Settings > Windows > Active Directory.\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+                else
+                {
+                    SendText(stream, "{\"error\":\"sshAuthMode must be 'global', 'manual', 'key', 'ad', or 'credentials'\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+
+                if (payload.ContainsKey("intervalHours"))
+                {
+                    Int32.TryParse(Convert.ToString(payload["intervalHours"]), out intervalHours);
+                }
+                if (intervalHours < 1 || intervalHours > 24)
+                {
+                    intervalHours = options.LinuxDefaultIntervalHours;
+                }
+                if (payload.ContainsKey("statusIntervalMinutes"))
+                {
+                    Int32.TryParse(Convert.ToString(payload["statusIntervalMinutes"]), out statusIntervalMinutes);
+                }
+                if (statusIntervalMinutes < 1 || statusIntervalMinutes > 1440)
+                {
+                    statusIntervalMinutes = options.LinuxDefaultStatusIntervalMinutes;
+                }
+            }
+
             int retentionDays = options.InstallLogRetentionDays;
             if (payload.ContainsKey("retentionDays"))
             {
                 Int32.TryParse(Convert.ToString(payload["retentionDays"]), out retentionDays);
             }
             retentionDays = NormalizeRetentionDays(retentionDays);
-            ArrayList targets = ExpandInstallTargets(targetText);
 
+            ArrayList targets = ExpandInstallTargets(targetText);
             if (targets.Count == 0)
             {
                 SendText(stream, "{\"error\":\"at least one target is required\"}", "application/json; charset=utf-8", 400);
                 return;
+            }
+
+            // Force Linux (and Auto, which may resolve a target to SSH)
+            // rejects any target with characters invalid in a
+            // hostname/IPv4 address up front, the all-or-nothing pre-check
+            // StartLinuxClientAction always applied. Force Windows skips
+            // this entirely - NetBIOS names can legally contain '_', which
+            // this check would wrongly reject.
+            if (mode != "force-windows")
+            {
+                foreach (string candidate in targets)
+                {
+                    if (!IsValidSshTarget(candidate))
+                    {
+                        SendText(stream, "{\"error\":\"one or more targets contain characters that are not valid in a hostname or IPv4 address (only letters, digits, '.' and '-' are allowed)\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+            }
+
+            // The Deploy > Updates "Update selected" push (both the Linux
+            // manual push and the Linux scheduled push) intentionally does
+            // not resend serverUrl/installPath/intervalHours/
+            // statusIntervalMinutes - it targets already-installed clients
+            // and expects the same values used for the original install.
+            // Fall back to linux-package-settings.json for whichever of
+            // these fields the caller did not explicitly supply, exactly
+            // as StartLinuxClientAction used to. Gated on needsSsh only -
+            // this file has no Windows equivalent, and a pure
+            // force-windows job has no use for it.
+            if (needsSsh && action == "install" && String.IsNullOrEmpty(serverUrl))
+            {
+                string packageSettingsPath = Path.Combine(options.LinuxClientPackagePath, "linux-package-settings.json");
+                if (File.Exists(packageSettingsPath))
+                {
+                    try
+                    {
+                        JavaScriptSerializer settingsSerializer = CreateJsonSerializer();
+                        Dictionary<string, object> savedSettings = settingsSerializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(packageSettingsPath, Encoding.UTF8));
+                        serverUrl = GetStringValue(savedSettings, "serverUrl");
+                        if (!payload.ContainsKey("installPath"))
+                        {
+                            string savedInstallPath = GetStringValue(savedSettings, "installPath");
+                            if (!String.IsNullOrEmpty(savedInstallPath))
+                            {
+                                installPath = savedInstallPath;
+                            }
+                        }
+                        if (!payload.ContainsKey("intervalHours"))
+                        {
+                            intervalHours = GetIntValue(savedSettings, "intervalHours", intervalHours);
+                        }
+                        if (!payload.ContainsKey("statusIntervalMinutes"))
+                        {
+                            statusIntervalMinutes = GetIntValue(savedSettings, "statusIntervalMinutes", statusIntervalMinutes);
+                        }
+                    }
+                    catch
+                    {
+                        serverUrl = null;
+                    }
+                }
             }
 
             if (action == "install" && String.IsNullOrEmpty(serverUrl))
@@ -2849,10 +3282,9 @@ namespace WindowsInventoryLite
 
             // serverUrl flows unmodified through Install-ClientWinRM.ps1 into
             // Deploy-ClientGpo.ps1's cmd.exe-based service-creation step on the
-            // TARGET machine (Invoke-ServiceCreate) - the same batch-metacharacter
-            // injection GenerateCmdLines already rejects for the GPO package path
-            // below is otherwise reachable here too, and this path can run as the
-            // service's own privileged identity when no credential is supplied.
+            // TARGET machine (Invoke-ServiceCreate) - validated for every mode,
+            // not just needsWinRm, since Auto mode may resolve any given target
+            // to WinRM even when the admin expected SSH.
             try
             {
                 ValidateBatchSafe(serverUrl, "serverUrl");
@@ -2862,10 +3294,44 @@ namespace WindowsInventoryLite
                 SendText(stream, "{\"error\":\"" + ex.Message.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
                 return;
             }
+            if (needsSsh)
+            {
+                string pushValidationError;
+                if (!TryValidateLinuxPushValues(serverUrl, token, installPath, out pushValidationError))
+                {
+                    SendText(stream, "{\"error\":\"" + pushValidationError.Replace("\\", "\\\\").Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+            }
 
-            if (!addToTrustedHosts && !String.IsNullOrEmpty(username) && !String.IsNullOrEmpty(password) && ContainsIpAddressTarget(targets))
+            if (needsWinRm && !addToTrustedHosts && !String.IsNullOrEmpty(winRmUsername) && !String.IsNullOrEmpty(winRmPassword) && ContainsIpAddressTarget(targets))
             {
                 addToTrustedHosts = true;
+            }
+
+            if (needsSsh && action == "install")
+            {
+                trustNewHostKeys = payload.ContainsKey("trustNewHostKeys") && Convert.ToBoolean(payload["trustNewHostKeys"]);
+                bool acknowledgeHostKeyRisk = payload.ContainsKey("acknowledgeHostKeyRisk") && Convert.ToBoolean(payload["acknowledgeHostKeyRisk"]);
+                if (trustNewHostKeys && !acknowledgeHostKeyRisk)
+                {
+                    SendText(stream, "{\"error\":\"acknowledgeHostKeyRisk must be true when trustNewHostKeys is enabled\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                // Auto mode can dispatch a target to SSH the operator never
+                // deliberately identified as a Linux host (it just happened
+                // to answer on port 22) - combined with bulk-auto-trust,
+                // that target's real SSH host key gets accepted sight
+                // unseen, and the SSH credential (saved/AD password) is
+                // sent to it in the same request. Force Linux carries the
+                // same risk but requires the operator to have chosen SSH
+                // explicitly for these targets first - keep the
+                // combination gated to that deliberate choice.
+                if (trustNewHostKeys && mode == "auto")
+                {
+                    SendText(stream, "{\"error\":\"Trust new host keys automatically is not available in Auto mode - select Force Linux to bulk-auto-trust SSH host keys for a target list you've deliberately identified as Linux hosts.\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
             }
 
             InstallJob job = new InstallJob();
@@ -2875,12 +3341,21 @@ namespace WindowsInventoryLite
             job.CreatedAtUtc = DateTime.UtcNow;
             job.Targets = targets;
             job.Results = new ArrayList();
+            job.Mode = mode;
             job.ServerUrl = serverUrl;
             job.Token = token;
-            job.Username = username;
-            job.Password = password;
+            job.Username = winRmUsername;
+            job.Password = winRmPassword;
             job.Force = force;
             job.AddToTrustedHosts = addToTrustedHosts;
+            job.SshAuthMode = sshAuthMode;
+            job.SshUsername = sshUsername;
+            job.SshPassword = sshPassword;
+            job.SshKeyPath = sshKeyPath;
+            job.IntervalHours = intervalHours;
+            job.StatusIntervalMinutes = statusIntervalMinutes;
+            job.InstallPath = installPath;
+            job.TrustNewHostKeys = trustNewHostKeys;
             job.RetentionDays = retentionDays;
 
             lock (installJobsLock)
@@ -2911,8 +3386,17 @@ namespace WindowsInventoryLite
                     summary["createdAt"] = GetStringValue(job, "createdAt");
                     summary["startedAt"] = GetStringValue(job, "startedAt");
                     summary["completedAt"] = GetStringValue(job, "completedAt");
+                    summary["mode"] = GetStringValue(job, "mode");
                     summary["serverUrl"] = GetStringValue(job, "serverUrl");
-                    summary["username"] = GetStringValue(job, "username");
+                    // A force-linux job has no WinRM username - fall back to
+                    // sshUsername so the merged "Saved client action logs"
+                    // table doesn't show a blank operator identity for
+                    // every Linux job (the old, now-deleted
+                    // SendLinuxClientInstallJobs exposed authMode/username
+                    // directly; this is the closest equivalent once both
+                    // credential sets live on one job).
+                    string winRmUsername = GetStringValue(job, "username");
+                    summary["username"] = String.IsNullOrEmpty(winRmUsername) ? GetStringValue(job, "sshUsername") : winRmUsername;
                     summary["retentionDays"] = GetIntValue(job, "retentionDays", options.InstallLogRetentionDays);
 
                     ArrayList targets = job.ContainsKey("targets") ? job["targets"] as ArrayList : null;
@@ -2945,11 +3429,24 @@ namespace WindowsInventoryLite
             }
 
             InstallJob job = null;
+            // InstallJob.ToDictionary() shares its Results ArrayList by
+            // reference rather than copying it, so serializing it after
+            // releasing the lock would let RunClientActionJob's own
+            // lock(installJobsLock) { job.Results.Add(result); ... }
+            // mutate that same list mid-enumeration on a running job's
+            // GET (ArrayList is not safe for concurrent read+write) - the
+            // fix has to hold the lock for the whole serialize, not just
+            // the dictionary lookup. Serializer.Serialize is CPU-only
+            // (no I/O), so this doesn't meaningfully extend how long the
+            // job-running thread might wait for the same lock.
+            string serializedJob = null;
             lock (installJobsLock)
             {
                 if (installJobs.ContainsKey(id))
                 {
                     job = installJobs[id];
+                    JavaScriptSerializer serializer = CreateJsonSerializer();
+                    serializedJob = serializer.Serialize(job.ToDictionary());
                 }
             }
 
@@ -2966,8 +3463,7 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            JavaScriptSerializer serializer = CreateJsonSerializer();
-            SendJson(stream, serializer.Serialize(job.ToDictionary()));
+            SendJson(stream, serializedJob);
         }
 
         private void RunClientActionJob(object state)
@@ -2981,8 +3477,11 @@ namespace WindowsInventoryLite
             }
 
             // Used only to patch a target's stored report after a
-            // successful install below (see PatchClientReportVersionAfterInstall) -
-            // computed once per job, not per-target.
+            // successful WinRM install below (see
+            // PatchClientReportVersionAfterInstall) - computed once per
+            // job, not per-target. Irrelevant to an SSH-installed target,
+            // which has no exe version in this sense; see the "protocol"
+            // check below.
             string net35Version = null;
             string net40Version = null;
             if (job.Action != "uninstall" && Directory.Exists(options.ClientPackagePath))
@@ -2995,16 +3494,20 @@ namespace WindowsInventoryLite
 
             foreach (string target in job.Targets)
             {
-                Dictionary<string, object> result = job.Action == "uninstall"
-                    ? RunClientUninstallTarget(target, job.Username, job.Password, job.AddToTrustedHosts)
-                    : RunClientInstallTarget(target, job.ServerUrl, job.Token, job.Username, job.Password, job.Force, job.AddToTrustedHosts);
+                Dictionary<string, object> result = RunUnifiedInstallTarget(
+                    target, job.Action, job.Mode,
+                    job.ServerUrl, job.Token,
+                    job.Username, job.Password, job.Force, job.AddToTrustedHosts,
+                    job.SshAuthMode, job.SshUsername, job.SshPassword, job.SshKeyPath, job.TrustNewHostKeys,
+                    job.IntervalHours, job.StatusIntervalMinutes, job.InstallPath,
+                    AutoDetectProbeTimeoutMs);
                 lock (installJobsLock)
                 {
                     job.Results.Add(result);
                     SaveInstallJob(job);
                 }
 
-                if (job.Action != "uninstall" && GetStringValue(result, "status") == "completed")
+                if (job.Action != "uninstall" && GetStringValue(result, "status") == "completed" && GetStringValue(result, "protocol") == "winrm")
                 {
                     PatchClientReportVersionAfterInstall(target, net35Version, net40Version);
                 }
@@ -3017,242 +3520,6 @@ namespace WindowsInventoryLite
                 SaveInstallJob(job);
             }
             CleanupInstallJobLogs();
-        }
-
-        private void StartLinuxClientAction(Stream stream, RequestContext request, string action)
-        {
-            JavaScriptSerializer serializer = CreateJsonSerializer();
-            Dictionary<string, object> payload;
-            try
-            {
-                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
-                if (payload == null)
-                {
-                    throw new ArgumentException("empty body");
-                }
-            }
-            catch
-            {
-                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-
-            string targetText = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "");
-            string authMode = Convert.ToString(payload.ContainsKey("authMode") ? payload["authMode"] : "credentials");
-            if (authMode != "ad" && authMode != "credentials" && authMode != "key")
-            {
-                SendText(stream, "{\"error\":\"authMode must be 'ad', 'credentials', or 'key'\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-
-            string username = Convert.ToString(payload.ContainsKey("username") ? payload["username"] : "");
-            string password = Convert.ToString(payload.ContainsKey("password") ? payload["password"] : "");
-            string keyPath = GetLinuxSshKeyFilePath();
-
-            if (authMode == "ad")
-            {
-                bool useAd = true;
-                string adCredentialError;
-                if (!TryResolveAdSyncCredentials(useAd, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref username, ref password, out adCredentialError))
-                {
-                    SendText(stream, "{\"error\":\"" + adCredentialError.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                if (String.IsNullOrEmpty(username) || String.IsNullOrEmpty(password))
-                {
-                    SendText(stream, "{\"error\":\"AD service-identity mode is not usable for SSH pushes to Linux targets (there is no SSH equivalent of running as the service's own identity). Select 'Stored Linux credentials' or 'SSH key' instead, or configure an explicit AD account rather than service identity in Settings > General > Active Directory.\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-            }
-            else if (authMode == "credentials")
-            {
-                if (String.IsNullOrEmpty(username)) username = options.LinuxUpdateUsername;
-                if (String.IsNullOrEmpty(password)) password = options.LinuxUpdatePassword;
-                if (String.IsNullOrEmpty(username) || String.IsNullOrEmpty(password))
-                {
-                    SendText(stream, "{\"error\":\"username/password are required for 'credentials' auth mode (enter them, or save them in Settings > General > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-            }
-            else
-            {
-                if (String.IsNullOrEmpty(username)) username = options.LinuxUpdateUsername;
-                if (String.IsNullOrEmpty(username))
-                {
-                    SendText(stream, "{\"error\":\"username is required for 'key' auth mode (enter it, or save it in Settings > General > Linux Client update credentials)\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                if (!File.Exists(keyPath))
-                {
-                    SendText(stream, "{\"error\":\"No SSH key is configured - upload one in Settings > General > Linux Client update credentials.\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-            }
-
-            string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
-            string token = Convert.ToString(payload.ContainsKey("token") ? payload["token"] : "");
-            // Blank means "use the server's current ingestion token", not
-            // "install with no token" - a form left at its default (the
-            // field's own placeholder used to say "leave empty if not
-            // used", which is actively wrong on a server that actually
-            // enforces a token) must not silently ship a client that can
-            // never authenticate its own inventory reports. Mirrors the
-            // fix already applied to the Windows WinRM push
-            // (BuildPowerShellInstallArguments) for the identical failure
-            // mode, reported live: "clients stopped connecting after
-            // regenerating the token, reinstalling via the UI doesn't
-            // help" - true here too, for the same reason.
-            if (String.IsNullOrEmpty(token))
-            {
-                token = options.Token;
-            }
-            string installPath = Convert.ToString(payload.ContainsKey("installPath") ? payload["installPath"] : "/opt/windows-inventory-lite");
-            int intervalHours = 6;
-            if (payload.ContainsKey("intervalHours"))
-            {
-                Int32.TryParse(Convert.ToString(payload["intervalHours"]), out intervalHours);
-            }
-            if (intervalHours < 1 || intervalHours > 24)
-            {
-                intervalHours = 6;
-            }
-            int statusIntervalMinutes = 30;
-            if (payload.ContainsKey("statusIntervalMinutes"))
-            {
-                Int32.TryParse(Convert.ToString(payload["statusIntervalMinutes"]), out statusIntervalMinutes);
-            }
-            if (statusIntervalMinutes < 1 || statusIntervalMinutes > 1440)
-            {
-                statusIntervalMinutes = 30;
-            }
-
-            ArrayList targets = ExpandInstallTargets(targetText);
-            if (targets.Count == 0)
-            {
-                SendText(stream, "{\"error\":\"at least one target is required\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-            // Reject before a job is created rather than letting each target fail
-            // individually later - a typo'd or hostile target list should be a
-            // clear 400, not a job full of per-target failures. ExpandInstallTargets
-            // itself is deliberately left alone: it is shared with the Windows WinRM
-            // push path, which is out of scope here.
-            foreach (string candidate in targets)
-            {
-                if (!IsValidSshTarget(candidate))
-                {
-                    SendText(stream, "{\"error\":\"one or more targets contain characters that are not valid in a hostname or IPv4 address (only letters, digits, '.' and '-' are allowed)\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-            }
-
-            if (action == "install" && String.IsNullOrEmpty(serverUrl))
-            {
-                // The dashboard's "Linux Client updates" push (Task 11's "Update
-                // selected" button) intentionally does not resend serverUrl/token/
-                // installPath/intervalHours - it targets already-installed clients
-                // and expects the same values used for the original install/package
-                // configuration. Fall back to linux-package-settings.json, the exact
-                // file StartScheduledLinuxClientUpdatePush already reads for the same
-                // reason. Only fields the caller did not explicitly supply are filled
-                // in, so the Task 9 manual push form (which always sends these fields)
-                // is never overridden by a stale saved value.
-                string packageSettingsPath = Path.Combine(options.LinuxClientPackagePath, "linux-package-settings.json");
-                if (File.Exists(packageSettingsPath))
-                {
-                    try
-                    {
-                        JavaScriptSerializer settingsSerializer = CreateJsonSerializer();
-                        Dictionary<string, object> savedSettings = settingsSerializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(packageSettingsPath, Encoding.UTF8));
-                        serverUrl = GetStringValue(savedSettings, "serverUrl");
-                        // token is deliberately NOT re-read from the saved
-                        // package settings here - it already defaulted to
-                        // the server's own live options.Token above, which
-                        // is always current; a token saved in this file
-                        // could be stale (e.g. from before a regenerate)
-                        // and would be a strictly worse value to fall back
-                        // to than the live one already resolved.
-                        if (!payload.ContainsKey("installPath"))
-                        {
-                            string savedInstallPath = GetStringValue(savedSettings, "installPath");
-                            if (!String.IsNullOrEmpty(savedInstallPath))
-                            {
-                                installPath = savedInstallPath;
-                            }
-                        }
-                        if (!payload.ContainsKey("intervalHours"))
-                        {
-                            intervalHours = GetIntValue(savedSettings, "intervalHours", intervalHours);
-                        }
-                        if (!payload.ContainsKey("statusIntervalMinutes"))
-                        {
-                            statusIntervalMinutes = GetIntValue(savedSettings, "statusIntervalMinutes", statusIntervalMinutes);
-                        }
-                    }
-                    catch
-                    {
-                        serverUrl = null;
-                    }
-                }
-            }
-
-            if (action == "install" && String.IsNullOrEmpty(serverUrl))
-            {
-                SendText(stream, "{\"error\":\"serverUrl is required\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-
-            // Validated HERE, not at the top of this method: the saved-settings
-            // fallback above can overwrite serverUrl and installPath with values
-            // read from linux-package-settings.json, so validating on entry would
-            // guard values that no longer exist by the time they reach the command
-            // line.
-            string pushValidationError;
-            if (!TryValidateLinuxPushValues(serverUrl, token, installPath, out pushValidationError))
-            {
-                SendText(stream, "{\"error\":\"" + pushValidationError.Replace("\\", "\\\\").Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-
-            bool trustNewHostKeys = false;
-            if (action == "install")
-            {
-                trustNewHostKeys = payload.ContainsKey("trustNewHostKeys") && Convert.ToBoolean(payload["trustNewHostKeys"]);
-                bool acknowledgeHostKeyRisk = payload.ContainsKey("acknowledgeHostKeyRisk") && Convert.ToBoolean(payload["acknowledgeHostKeyRisk"]);
-                if (trustNewHostKeys && !acknowledgeHostKeyRisk)
-                {
-                    SendText(stream, "{\"error\":\"acknowledgeHostKeyRisk must be true when trustNewHostKeys is enabled\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-            }
-
-            LinuxInstallJob job = new LinuxInstallJob();
-            job.Id = Guid.NewGuid().ToString("N");
-            job.Action = action;
-            job.Status = "queued";
-            job.CreatedAtUtc = DateTime.UtcNow;
-            job.Targets = targets;
-            job.Results = new ArrayList();
-            job.AuthMode = authMode;
-            job.Username = username;
-            job.Password = password;
-            job.KeyPath = keyPath;
-            job.ServerUrl = serverUrl;
-            job.Token = token;
-            job.IntervalHours = intervalHours;
-            job.StatusIntervalMinutes = statusIntervalMinutes;
-            job.InstallPath = installPath;
-            job.RetentionDays = options.InstallLogRetentionDays;
-            job.TrustNewHostKeys = trustNewHostKeys;
-
-            lock (linuxInstallJobsLock)
-            {
-                linuxInstallJobs[job.Id] = job;
-                SaveLinuxInstallJob(job);
-            }
-
-            ThreadPool.QueueUserWorkItem(RunLinuxClientActionJob, job);
-            SendJson(stream, "{\"jobId\":\"" + job.Id + "\",\"status\":\"queued\"}");
         }
 
         private void TrustLinuxHostKey(Stream stream, RequestContext request)
@@ -3318,37 +3585,6 @@ namespace WindowsInventoryLite
 
             Dictionary<string, object> record = UpsertLinuxKnownHost(host, port, keyType, fingerprint, "manual");
             SendJson(stream, serializer.Serialize(record));
-        }
-
-        private void RunLinuxClientActionJob(object state)
-        {
-            LinuxInstallJob job = (LinuxInstallJob)state;
-            job.Status = "running";
-            job.StartedAtUtc = DateTime.UtcNow;
-            lock (linuxInstallJobsLock)
-            {
-                SaveLinuxInstallJob(job);
-            }
-
-            foreach (string target in job.Targets)
-            {
-                Dictionary<string, object> result = job.Action == "uninstall"
-                    ? RunLinuxClientUninstallTarget(target, job.AuthMode, job.Username, job.Password, job.KeyPath, job.InstallPath)
-                    : RunLinuxClientInstallTarget(target, job.ServerUrl, job.Token, job.IntervalHours, job.StatusIntervalMinutes, job.InstallPath, job.AuthMode, job.Username, job.Password, job.KeyPath, job.TrustNewHostKeys);
-                lock (linuxInstallJobsLock)
-                {
-                    job.Results.Add(result);
-                    SaveLinuxInstallJob(job);
-                }
-            }
-
-            job.CompletedAtUtc = DateTime.UtcNow;
-            job.Status = "completed";
-            lock (linuxInstallJobsLock)
-            {
-                SaveLinuxInstallJob(job);
-            }
-            CleanupLinuxInstallJobLogs();
         }
 
         // Credentials/key path never appear on the child process's command
@@ -3739,83 +3975,6 @@ namespace WindowsInventoryLite
             return true;
         }
 
-        private void SendLinuxClientInstallJobs(Stream stream)
-        {
-            CleanupLinuxInstallJobLogs();
-            ArrayList jobs = new ArrayList();
-            JavaScriptSerializer serializer = CreateJsonSerializer();
-
-            foreach (string file in Directory.GetFiles(GetLinuxInstallJobDirectory(), "*.json"))
-            {
-                try
-                {
-                    Dictionary<string, object> job = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
-                    Dictionary<string, object> summary = new Dictionary<string, object>();
-                    summary["id"] = GetStringValue(job, "id");
-                    summary["action"] = GetStringValue(job, "action");
-                    summary["status"] = GetStringValue(job, "status");
-                    summary["createdAt"] = GetStringValue(job, "createdAt");
-                    summary["startedAt"] = GetStringValue(job, "startedAt");
-                    summary["completedAt"] = GetStringValue(job, "completedAt");
-                    summary["authMode"] = GetStringValue(job, "authMode");
-                    summary["username"] = GetStringValue(job, "username");
-                    summary["retentionDays"] = GetIntValue(job, "retentionDays", options.InstallLogRetentionDays);
-
-                    ArrayList targets = job.ContainsKey("targets") ? job["targets"] as ArrayList : null;
-                    ArrayList results = job.ContainsKey("results") ? job["results"] as ArrayList : null;
-                    summary["targetCount"] = targets == null ? 0 : targets.Count;
-                    summary["resultCount"] = results == null ? 0 : results.Count;
-                    summary["failedCount"] = CountInstallResults(results, "failed");
-                    jobs.Add(summary);
-                }
-                catch
-                {
-                }
-            }
-
-            ArrayList sorted = SortJobsByCreatedAtDescending(jobs);
-            Dictionary<string, object> response = new Dictionary<string, object>();
-            response["defaultRetentionDays"] = options.InstallLogRetentionDays;
-            response["jobs"] = sorted;
-            SendJson(stream, serializer.Serialize(response));
-        }
-
-        private void SendLinuxClientInstallJob(Stream stream, RequestContext request)
-        {
-            const string prefix = "/api/v1/linux-client-install/";
-            string id = request.Path.Substring(prefix.Length);
-            int queryStart = id.IndexOf('?');
-            if (queryStart >= 0)
-            {
-                id = id.Substring(0, queryStart);
-            }
-
-            LinuxInstallJob job = null;
-            lock (linuxInstallJobsLock)
-            {
-                if (linuxInstallJobs.ContainsKey(id))
-                {
-                    job = linuxInstallJobs[id];
-                }
-            }
-
-            if (job == null)
-            {
-                string persisted = ReadLinuxInstallJobJson(id);
-                if (persisted == null)
-                {
-                    SendText(stream, "{\"error\":\"job not found\"}", "application/json; charset=utf-8", 404);
-                    return;
-                }
-
-                SendJson(stream, persisted);
-                return;
-            }
-
-            JavaScriptSerializer serializer = CreateJsonSerializer();
-            SendJson(stream, serializer.Serialize(job.ToDictionary()));
-        }
-
         // A successful install push only becomes visible to
         // LoadClientReports() - and therefore to the outdated-clients list
         // both the dashboard and the update schedule read - once that
@@ -4008,6 +4167,288 @@ namespace WindowsInventoryLite
             return Path.Combine(options.DataPath, "_client-install-jobs");
         }
 
+        private string GetIngestionRejectionLogPath()
+        {
+            return Path.Combine(options.DataPath, "_logs", "ingestion-rejections.jsonl");
+        }
+
+        private void LoadIngestionRejectionLogFromDisk()
+        {
+            string path = GetIngestionRejectionLogPath();
+            if (!File.Exists(path))
+            {
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            lock (ingestionRejectionLogLock)
+            {
+                foreach (string line in File.ReadAllLines(path, Encoding.UTF8))
+                {
+                    if (String.IsNullOrEmpty(line))
+                    {
+                        continue;
+                    }
+                    try
+                    {
+                        Dictionary<string, object> raw = serializer.Deserialize<Dictionary<string, object>>(line);
+                        IngestionRejectionEntry entry = new IngestionRejectionEntry();
+                        // A corrupt/unparseable timestamp falls back to
+                        // DateTime.MinValue, not DateTime.UtcNow - the
+                        // latter would make a broken line look like the
+                        // NEWEST entry, immune to the age-based prune below
+                        // (it would never look "old enough" to remove).
+                        // MinValue instead makes it look maximally old, so
+                        // it gets pruned on the very next pass.
+                        entry.TimestampUtc = ParseUtcDate(GetStringValue(raw, "timestampUtc"), DateTime.MinValue);
+                        entry.SourceIp = GetStringValue(raw, "sourceIp");
+                        entry.Endpoint = GetStringValue(raw, "endpoint");
+                        entry.Reason = GetStringValue(raw, "reason");
+                        ingestionRejectionLog.Add(entry);
+                    }
+                    catch
+                    {
+                        // One corrupt line (e.g. a partial write from an
+                        // unclean shutdown) must not lose every other
+                        // entry - skip it and keep loading the rest.
+                    }
+                }
+
+                // Enforce retention/max-entries at startup too, not only
+                // when a new rejection arrives - otherwise a fleet with no
+                // rejections between restarts never actually ages out old
+                // entries, contradicting what docs/api-reference.md already
+                // claims about retention (see Important Fix 3 in the final
+                // review). Mirrors RecordIngestionRejection's own
+                // conditional-rewrite pattern: only touch the file if
+                // pruning actually removed something.
+                //
+                // This runs on the startup path (Start(), called unguarded
+                // from both Main() and OnStart(), with no try/catch anywhere
+                // above it) over what is only a diagnostic log - a disk-full
+                // condition, an ACL/permissions issue, or a backup/AV tool
+                // holding the file locked must not crash the whole server.
+                // Matches RecordIngestionRejection's own established
+                // try/catch pattern: log via DebugLogger.Log and swallow, so
+                // the server still starts with whatever was already loaded
+                // into memory - even if the rewrite below fails, memory has
+                // already been pruned (Clear()+AddRange() ran first); it's
+                // the on-disk file that's left stale in its pre-prune,
+                // over-retention state until some later write succeeds
+                // (RecordIngestionRejection's own batched prune+rewrite, or
+                // the next restart's reload).
+                try
+                {
+                    List<IngestionRejectionEntry> pruned = PruneIngestionRejectionEntries(ingestionRejectionLog, DateTime.UtcNow, options.IngestionRejectionLogRetentionDays, options.IngestionRejectionLogMaxEntries);
+                    if (pruned.Count != ingestionRejectionLog.Count)
+                    {
+                        ingestionRejectionLog.Clear();
+                        ingestionRejectionLog.AddRange(pruned);
+                        RewriteIngestionRejectionLogFileLocked();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DebugLogger.Log(options, "Error", "LoadIngestionRejectionLogFromDisk failed to prune/persist the loaded ingestion-rejection log at startup: " + ex.Message);
+                }
+            }
+        }
+
+        // Called from all three ingestion handlers immediately after
+        // IsIngestionTokenRejected returns true - never before it, and
+        // never after the request body has been touched (see the Global
+        // Constraints at the top of this plan / spec decision 1).
+        private void RecordIngestionRejection(RequestContext request, string endpoint, string reason)
+        {
+            // HandleClient never actually sets RemoteAddress to null for an
+            // unresolvable peer - it uses the IPAddress.None sentinel
+            // instead. The null check alone let an unresolvable peer's
+            // rejection through and get logged with sourceIp
+            // "255.255.255.255" rather than being skipped as intended; the
+            // null check is kept only as a safety net for direct callers
+            // (e.g. self-tests) that never set RemoteAddress at all.
+            if (request.RemoteAddress == null || request.RemoteAddress.Equals(IPAddress.None))
+            {
+                return;
+            }
+
+            IngestionRejectionEntry entry = new IngestionRejectionEntry();
+            entry.TimestampUtc = DateTime.UtcNow;
+            entry.SourceIp = request.RemoteAddress.ToString();
+            entry.Endpoint = endpoint;
+            entry.Reason = reason;
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> line = new Dictionary<string, object>();
+            line["timestampUtc"] = entry.TimestampUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+            line["sourceIp"] = entry.SourceIp;
+            line["endpoint"] = entry.Endpoint;
+            line["reason"] = entry.Reason;
+
+            try
+            {
+                lock (ingestionRejectionLogLock)
+                {
+                    ingestionRejectionLog.Add(entry);
+
+                    string path = GetIngestionRejectionLogPath();
+                    string directory = Path.GetDirectoryName(path);
+                    if (!String.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+                    {
+                        Directory.CreateDirectory(directory);
+                    }
+                    File.AppendAllText(path, serializer.Serialize(line) + Environment.NewLine, new UTF8Encoding(false));
+
+                    // Amortize the prune+rewrite cost. Once the log is at
+                    // maxEntries, pruning removes exactly one entry per
+                    // call, which would otherwise force a full
+                    // serialize-and-rewrite of the whole file on every
+                    // single rejection - an attacker sending one request
+                    // per rewrite gets up to maxEntries-times the write
+                    // cost for free (see Important Fix 1 in the final
+                    // review). Letting the in-memory list grow past
+                    // maxEntries by a slack margin before paying for the
+                    // expensive prune+rewrite path turns this into roughly
+                    // one full rewrite per slack-sized batch of new
+                    // rejections instead of one per rejection.
+                    //
+                    // Gating day-based retention behind that SAME count-based
+                    // check breaks continuous enforcement: a fleet whose
+                    // rejection volume never crosses maxEntries+slack would
+                    // then keep every entry indefinitely at runtime,
+                    // regardless of IngestionRejectionLogRetentionDays (see
+                    // Important Fix 1 in the re-review of the fix above).
+                    // ingestionRejectionLog is chronological, oldest-first
+                    // (see PruneIngestionRejectionEntries), so index 0 is
+                    // always the oldest entry - checking whether just that
+                    // one entry has aged out is an O(1) stand-in for what the
+                    // O(n) prune pass would otherwise have to discover. This
+                    // lets the prune+rewrite fire either when the count is
+                    // genuinely oversized OR the oldest entry is genuinely
+                    // too old, without reintroducing a rewrite-per-rejection.
+                    int slack = Math.Max(options.IngestionRejectionLogMaxEntries / 10, 50);
+                    bool oldestEntryAgedOut = ingestionRejectionLog.Count > 0
+                        && ingestionRejectionLog[0].TimestampUtc < DateTime.UtcNow.AddDays(-options.IngestionRejectionLogRetentionDays);
+                    if (ingestionRejectionLog.Count > options.IngestionRejectionLogMaxEntries + slack || oldestEntryAgedOut)
+                    {
+                        List<IngestionRejectionEntry> pruned = PruneIngestionRejectionEntries(ingestionRejectionLog, DateTime.UtcNow, options.IngestionRejectionLogRetentionDays, options.IngestionRejectionLogMaxEntries);
+                        if (pruned.Count != ingestionRejectionLog.Count)
+                        {
+                            ingestionRejectionLog.Clear();
+                            ingestionRejectionLog.AddRange(pruned);
+                            RewriteIngestionRejectionLogFileLocked();
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Every other diagnostic write in this file (and
+                // DebugLogger.Log itself, called right after this method at
+                // each of the 3 rejection call sites) never throws. Disk
+                // I/O here (full disk, ACL drift, a sharing violation) must
+                // not propagate out through ReceiveInventory/
+                // ReceiveLinuxInventory/the Linux service-status handler
+                // into HandleClient's catch block, which would turn an
+                // expected 401 into a 500 plus a stack trace written to the
+                // Windows Event Log - on an unauthenticated endpoint, so
+                // attacker-triggerable (see Important Fix 2 in the final
+                // review). Logging this failure must not itself risk
+                // changing the 401 response the caller already sent.
+                DebugLogger.Log(options, "Error", "RecordIngestionRejection failed to persist a rejected ingestion attempt: " + ex.Message);
+            }
+
+            QueueReverseDnsLookup(request.RemoteAddress);
+        }
+
+        // Caller must already hold ingestionRejectionLogLock. Only called
+        // when a prune pass actually removed something - the common case
+        // (no pruning needed) never rewrites the file, only appends.
+        private void RewriteIngestionRejectionLogFileLocked()
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            StringBuilder sb = new StringBuilder();
+            foreach (IngestionRejectionEntry entry in ingestionRejectionLog)
+            {
+                Dictionary<string, object> line = new Dictionary<string, object>();
+                line["timestampUtc"] = entry.TimestampUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                line["sourceIp"] = entry.SourceIp;
+                line["endpoint"] = entry.Endpoint;
+                line["reason"] = entry.Reason;
+                sb.Append(serializer.Serialize(line));
+                sb.Append(Environment.NewLine);
+            }
+            File.WriteAllText(GetIngestionRejectionLogPath(), sb.ToString(), new UTF8Encoding(false));
+        }
+
+        // Never runs on the request-handling path - queued to the thread
+        // pool so a slow/unresponsive resolver cannot delay the 401 already
+        // sent to the caller, and cannot be used to make this server do
+        // extra synchronous work per guess. Caches both a real hostname AND
+        // a failure/timeout (as null) so a repeat offender from the same IP
+        // is never re-resolved.
+        private void QueueReverseDnsLookup(IPAddress address)
+        {
+            lock (reverseDnsCacheLock)
+            {
+                if (reverseDnsCache.ContainsKey(address))
+                {
+                    return;
+                }
+            }
+
+            // Bounds how many lookups can be in flight on the ThreadPool at
+            // once (see Important Fix 5 in the final review, and
+            // MaxConcurrentReverseDnsLookups' declaration). Exceeding the
+            // cap fails closed: the lookup is silently skipped rather than
+            // queued, matching this feature's existing best-effort framing
+            // (no hostname is not a functional failure, just a missing
+            // hint). This also resolves the non-atomic check-then-enqueue
+            // race above on the cache lookup - a burst of redundant
+            // concurrent lookups for the same not-yet-cached IP is now a
+            // bounded, harmless occurrence rather than something needing
+            // separate dedup.
+            if (Interlocked.Increment(ref reverseDnsLookupsInFlight) > MaxConcurrentReverseDnsLookups)
+            {
+                Interlocked.Decrement(ref reverseDnsLookupsInFlight);
+                return;
+            }
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    string hostname = null;
+                    try
+                    {
+                        IAsyncResult asyncResult = Dns.BeginGetHostEntry(address, null, null);
+                        if (asyncResult.AsyncWaitHandle.WaitOne(2000))
+                        {
+                            IPHostEntry entry = Dns.EndGetHostEntry(asyncResult);
+                            hostname = entry.HostName;
+                        }
+                    }
+                    catch
+                    {
+                        hostname = null;
+                    }
+
+                    lock (reverseDnsCacheLock)
+                    {
+                        if (reverseDnsCache.Count > 1000)
+                        {
+                            reverseDnsCache.Clear();
+                        }
+                        reverseDnsCache[address] = hostname;
+                    }
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref reverseDnsLookupsInFlight);
+                }
+            });
+        }
+
         private string GetInstallJobPath(string id)
         {
             return Path.Combine(GetInstallJobDirectory(), SanitizeFileName(id) + ".json");
@@ -4161,7 +4602,7 @@ namespace WindowsInventoryLite
         // network reported that network's address BEFORE its real LAN
         // address, so a plain "first IPv4 wins" pick tried the unreachable
         // one and every scheduled update push to it failed. When
-        // preferredSubnetCidr is configured (Settings > General), an
+        // preferredSubnetCidr is configured (Settings > Linux), an
         // address inside it wins regardless of array position; otherwise -
         // or if nothing matches - falls back to the first IPv4 seen, same
         // as before this option existed. Falls back to the hostname only
@@ -4248,7 +4689,7 @@ namespace WindowsInventoryLite
             return ((uint)octets[0] << 24) | ((uint)octets[1] << 16) | ((uint)octets[2] << 8) | octets[3];
         }
 
-        // Save-time validation for the Settings > General "preferred Linux
+        // Save-time validation for the Settings > Linux "preferred Linux
         // subnet" field - blank clears the setting (always valid); a
         // non-blank value must be a well-formed IPv4 CIDR block so a typo
         // is rejected at save time with a clear error, rather than silently
@@ -4369,6 +4810,291 @@ namespace WindowsInventoryLite
             return result;
         }
 
+        // Each Auto-mode probe (WinRM 5985, then SSH 22) gets this long to
+        // connect before being treated as closed. Sequential target
+        // execution (see Out of scope in the design spec) means both
+        // probes' worst case adds directly to one target's total latency -
+        // kept short since a LAN target that's actually reachable answers
+        // a TCP handshake in single-digit milliseconds; a target that
+        // never responds should not stall the whole job for long.
+        private const int AutoDetectProbeTimeoutMs = 2000;
+
+        // Auto-detect mode's protocol probe - a short-timeout TCP connect
+        // attempt, used only to guess which install path is worth trying
+        // first (or at all). Never a substitute for the actual install
+        // attempt's own success/failure signal - a port answering doesn't
+        // guarantee the install itself will succeed, it's just a much
+        // cheaper and more reliable signal than trying an install and
+        // guessing from its failure text (which can't distinguish "wrong
+        // protocol" from "right protocol, wrong password" - see
+        // DecideAutoDetectProtocols below for the pure logic this feeds).
+        // Not self-tested: like every other network call in this file
+        // (the actual WinRM/SSH install attempts), a real connection
+        // attempt only means something against a real reachable or
+        // unreachable host.
+        internal static bool TryConnect(string host, int port, int timeoutMs)
+        {
+            try
+            {
+                using (TcpClient client = new TcpClient())
+                {
+                    IAsyncResult connectResult = client.BeginConnect(host, port, null, null);
+                    bool signaled = connectResult.AsyncWaitHandle.WaitOne(timeoutMs, false);
+                    if (!signaled)
+                    {
+                        return false;
+                    }
+                    client.EndConnect(connectResult);
+                    return client.Connected;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // Given Auto-detect's two TCP probe results (TryConnect against
+        // WinRM's port 5985 - HTTP only, see below - and SSH's port 22),
+        // decides which protocol(s) to attempt and in what order. Probe
+        // 5985 only, never 5986 (WinRM over HTTPS): Install-ClientWinRM.ps1
+        // calls New-PSSession -ComputerName with no -UseSSL/-Port override,
+        // so it can only ever connect over HTTP WinRM - a target with only
+        // 5986 open would probe as "reachable" and then fail when the
+        // installer tries 5985 instead, instead of cleanly falling through
+        // to SSH. Only one port open ->
+        // try only that protocol. Both open -> try WinRM first (this
+        // codebase's own working assumption: a box answering both is
+        // overwhelmingly likely a Windows host with OpenSSH also
+        // installed, not the reverse), with SSH as a fallback only if
+        // WinRM's actual install attempt fails. Neither open -> empty
+        // array, no attempt is worth making. Pure and self-tested,
+        // unlike TryConnect above.
+        internal static string[] DecideAutoDetectProtocols(bool winRmReachable, bool sshReachable)
+        {
+            if (winRmReachable && sshReachable)
+            {
+                return new string[] { "winrm", "ssh" };
+            }
+            if (winRmReachable)
+            {
+                return new string[] { "winrm" };
+            }
+            if (sshReachable)
+            {
+                return new string[] { "ssh" };
+            }
+            return new string[0];
+        }
+
+        // Given the unified job's Mode and (for Auto only) TryConnect's two
+        // probe results, decides which protocol(s) RunUnifiedInstallTarget
+        // should try and in what order. Force modes ignore the probe
+        // results entirely - force means force, no detection round-trip is
+        // spent reaching this decision. Auto mode delegates to
+        // DecideAutoDetectProtocols unchanged. Pure and self-tested, same
+        // convention as DecideAutoDetectProtocols itself.
+        internal static string[] ResolveAttemptOrder(string mode, bool winRmReachable, bool sshReachable)
+        {
+            if (mode == "force-windows")
+            {
+                return new string[] { "winrm" };
+            }
+            if (mode == "force-linux")
+            {
+                return new string[] { "ssh" };
+            }
+            if (mode == "auto")
+            {
+                return DecideAutoDetectProtocols(winRmReachable, sshReachable);
+            }
+            // Fail closed, not open: every caller today always sets a
+            // valid Mode ("auto"/"force-windows"/"force-linux"), so this
+            // is unreachable in practice - but a protocol-selection
+            // function silently defaulting an unrecognized value to
+            // "probe and try both protocols" is the wrong failure mode
+            // for a function a future caller could add without updating
+            // this check. No attempt is worth making against a mode this
+            // function doesn't recognize.
+            return new string[0];
+        }
+
+        // One entry in a per-target job result's future "attempts" array
+        // (see docs/superpowers/specs/2026-08-17-deploy-actions-updates-
+        // unification-design.md's Data model changes section) - one
+        // attempt is one try of one protocol against one target, whether
+        // or not Auto-detect chose it (a Force-mode result also uses this
+        // shape, just with exactly one entry, once Phase 3 wires this in).
+        // Kept as a loose Dictionary<string, object>, matching every
+        // other result-building convention in this file (e.g.
+        // RunClientInstallTarget's own result dict) rather than
+        // introducing a typed class this codebase doesn't otherwise use.
+        // Deliberately does not stamp startedAt/completedAt/exitCode here -
+        // Phase 3's real caller is expected to build an attempt by
+        // enriching the dict RunClientInstallTarget/RunLinuxClientInstallTarget
+        // already return (which already carry those fields) rather than
+        // constructing one from scratch and losing them.
+        internal static Dictionary<string, object> BuildAttemptResult(string protocol, string status, string message, string output, string error)
+        {
+            Dictionary<string, object> attempt = new Dictionary<string, object>();
+            attempt["protocol"] = protocol;
+            attempt["status"] = status;
+            attempt["message"] = message;
+            attempt["output"] = output;
+            attempt["error"] = error;
+            return attempt;
+        }
+
+        // The dashboard no longer lets an admin type a full ingestion URL
+        // for Deploy > Actions (Server URL field removed, 2026-08-21) - it
+        // always sends the Windows-shaped one (.../api/v1/inventory),
+        // computed from window.location.origin. Whenever a target
+        // actually dispatches over SSH, the Linux client's own ingestion
+        // route lives at a different path (.../api/v1/linux/inventory) -
+        // this swaps the suffix if present. Leaves anything else
+        // unchanged: an already Linux-shaped URL (e.g. from
+        // linux-package-settings.json's saved-settings fallback inside
+        // StartClientAction, which is a full URL already read from a
+        // Linux-specific config file, not this Windows-default value) or
+        // a fully custom one some future caller supplies. Pure and
+        // self-tested. Runs AFTER StartClientAction's two shell-safety
+        // validators (ValidateBatchSafe/TryValidateLinuxPushValues,
+        // which see the pre-transform value) - safe today only because
+        // this swaps one fixed, already-safe literal suffix for another.
+        // If this ever grows a transform that isn't a fixed literal
+        // swap, re-validate the result before it reaches a
+        // shell/PowerShell invocation.
+        internal static string ToLinuxServerUrl(string serverUrl)
+        {
+            if (String.IsNullOrEmpty(serverUrl))
+            {
+                return serverUrl;
+            }
+            const string windowsSuffix = "/api/v1/inventory";
+            if (serverUrl.EndsWith(windowsSuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                return serverUrl.Substring(0, serverUrl.Length - windowsSuffix.Length) + "/api/v1/linux/inventory";
+            }
+            return serverUrl;
+        }
+
+        // Runs one target through Mode's chosen protocol(s), producing the
+        // per-target result RunClientActionJob appends to job.Results.
+        // Force modes skip probing entirely and call straight into the one
+        // relevant existing per-target function. Auto mode probes both
+        // ports, asks ResolveAttemptOrder for a try-order, and walks it -
+        // stopping at the first protocol whose attempt reports "completed",
+        // recording every attempt tried either way. Not self-tested: like
+        // RunClientInstallTarget/RunLinuxClientInstallTarget, it makes real
+        // network calls (see the comment on TryConnect for why those stay
+        // integration-only in this codebase).
+        private Dictionary<string, object> RunUnifiedInstallTarget(
+            string target, string action, string mode,
+            string serverUrl, string token,
+            string winRmUsername, string winRmPassword, bool force, bool addToTrustedHosts,
+            string sshAuthMode, string sshUsername, string sshPassword, string sshKeyPath, bool trustNewHostKeys,
+            int intervalHours, int statusIntervalMinutes, string installPath,
+            int probeTimeoutMs)
+        {
+            bool winRmReachable = false;
+            bool sshReachable = false;
+            if (mode == "auto")
+            {
+                winRmReachable = TryConnect(target, 5985, probeTimeoutMs);
+                sshReachable = TryConnect(target, 22, probeTimeoutMs);
+            }
+            string[] attemptOrder = ResolveAttemptOrder(mode, winRmReachable, sshReachable);
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["target"] = target;
+            ArrayList attempts = new ArrayList();
+            result["attempts"] = attempts;
+
+            if (attemptOrder.Length == 0)
+            {
+                result["status"] = "failed";
+                result["message"] = "Target did not respond on WinRM (port 5985) or SSH (port 22).";
+                return result;
+            }
+
+            Dictionary<string, object> lastAttemptResult = null;
+            string lastProtocol = null;
+            foreach (string protocol in attemptOrder)
+            {
+                Dictionary<string, object> attemptResult;
+                if (protocol == "winrm")
+                {
+                    attemptResult = action == "uninstall"
+                        ? RunClientUninstallTarget(target, winRmUsername, winRmPassword, addToTrustedHosts)
+                        : RunClientInstallTarget(target, serverUrl, token, winRmUsername, winRmPassword, force, addToTrustedHosts);
+                }
+                else
+                {
+                    attemptResult = action == "uninstall"
+                        ? RunLinuxClientUninstallTarget(target, sshAuthMode, sshUsername, sshPassword, sshKeyPath, installPath)
+                        : RunLinuxClientInstallTarget(target, ToLinuxServerUrl(serverUrl), token, intervalHours, statusIntervalMinutes, installPath, sshAuthMode, sshUsername, sshPassword, sshKeyPath, trustNewHostKeys);
+                }
+
+                Dictionary<string, object> attempt = BuildAttemptResult(protocol, GetStringValue(attemptResult, "status"), GetStringValue(attemptResult, "message"), GetStringValue(attemptResult, "output"), GetStringValue(attemptResult, "error"));
+                // Enrich with the fields BuildAttemptResult's own comment
+                // says its real caller must preserve rather than lose -
+                // startedAt/completedAt/exitCode always; hostKey* only for
+                // an ssh attempt, where RunLinuxClientInstallTarget sets
+                // them conditionally.
+                if (attemptResult.ContainsKey("startedAt")) attempt["startedAt"] = attemptResult["startedAt"];
+                if (attemptResult.ContainsKey("completedAt")) attempt["completedAt"] = attemptResult["completedAt"];
+                if (attemptResult.ContainsKey("exitCode")) attempt["exitCode"] = attemptResult["exitCode"];
+                if (protocol == "ssh")
+                {
+                    if (attemptResult.ContainsKey("hostKeyTrust")) attempt["hostKeyTrust"] = attemptResult["hostKeyTrust"];
+                    if (attemptResult.ContainsKey("hostKeyStatus")) attempt["hostKeyStatus"] = attemptResult["hostKeyStatus"];
+                    if (attemptResult.ContainsKey("hostKeyFingerprint")) attempt["hostKeyFingerprint"] = attemptResult["hostKeyFingerprint"];
+                }
+                attempts.Add(attempt);
+
+                lastAttemptResult = attemptResult;
+                lastProtocol = protocol;
+
+                if (GetStringValue(attemptResult, "status") == "completed")
+                {
+                    break;
+                }
+            }
+
+            // The summary mirrors the last attempt tried (the winning one,
+            // or the final failure if every protocol in the try-order
+            // failed) - CountInstallResults and the job-list "Failed"
+            // column only ever read this top-level status, never attempts[].
+            result["protocol"] = lastProtocol;
+            result["status"] = GetStringValue(lastAttemptResult, "status");
+            result["message"] = attempts.Count > 1 && GetStringValue(result, "status") != "completed"
+                ? "Both WinRM and SSH attempts failed."
+                : GetStringValue(lastAttemptResult, "message");
+            // The dashboard's own per-target row (renderInstallJob) reads
+            // output/error straight off this top-level dict, not out of
+            // attempts[] - it only renders the attempts sub-table at all
+            // when there was more than one attempt (Auto mode trying both
+            // protocols). A Force-mode result always has exactly one
+            // attempt, so without copying these two fields here the real
+            // PowerShell/SSH output or error text was silently unreachable
+            // from the dashboard on every Force-mode job, regardless of
+            // success or failure - the Output column fell back to
+            // rendering the word "Unknown" (escapeHtml's own placeholder
+            // for a missing value) instead.
+            if (lastAttemptResult.ContainsKey("output")) result["output"] = lastAttemptResult["output"];
+            if (lastAttemptResult.ContainsKey("error")) result["error"] = lastAttemptResult["error"];
+            if (lastAttemptResult.ContainsKey("startedAt")) result["startedAt"] = lastAttemptResult["startedAt"];
+            if (lastAttemptResult.ContainsKey("completedAt")) result["completedAt"] = lastAttemptResult["completedAt"];
+            if (lastAttemptResult.ContainsKey("exitCode")) result["exitCode"] = lastAttemptResult["exitCode"];
+            if (lastProtocol == "ssh")
+            {
+                if (lastAttemptResult.ContainsKey("hostKeyTrust")) result["hostKeyTrust"] = lastAttemptResult["hostKeyTrust"];
+                if (lastAttemptResult.ContainsKey("hostKeyStatus")) result["hostKeyStatus"] = lastAttemptResult["hostKeyStatus"];
+                if (lastAttemptResult.ContainsKey("hostKeyFingerprint")) result["hostKeyFingerprint"] = lastAttemptResult["hostKeyFingerprint"];
+            }
+            return result;
+        }
+
         private static string QuoteArgument(string value)
         {
             return "\"" + value.Replace("\"", "\\\"") + "\"";
@@ -4450,6 +5176,22 @@ namespace WindowsInventoryLite
 
         private bool IsWebRequestAuthorized(RequestContext request)
         {
+            string cookieHeader = request.Headers.ContainsKey("cookie") ? request.Headers["cookie"] : null;
+            string sessionToken = GetCookieValue(cookieHeader, "wil_session");
+            if (!String.IsNullOrEmpty(sessionToken))
+            {
+                lock (sessionLock)
+                {
+                    SessionRecord record;
+                    sessionStore.TryGetValue(sessionToken, out record);
+                    if (IsSessionValid(record, DateTime.UtcNow))
+                    {
+                        record.ExpiresUtc = ComputeSessionExpiry(DateTime.UtcNow, options.SessionLifetimeHours);
+                        return true;
+                    }
+                }
+            }
+
             if (String.IsNullOrEmpty(options.WebUsername) && String.IsNullOrEmpty(options.WebPassword))
             {
                 // Every route reaching this check - dashboard, settings,
@@ -4488,12 +5230,431 @@ namespace WindowsInventoryLite
                 // closes that too.
                 bool usernameMatches = FixedTimeEquals(username, options.WebUsername);
                 bool passwordMatches = FixedTimeEquals(password, options.WebPassword);
-                return usernameMatches & passwordMatches;
+                bool authorized = usernameMatches & passwordMatches;
+                // Only a request that actually presented Basic Auth
+                // credentials and got this far counts toward the lockout -
+                // not the header-less first request every browser makes
+                // (see IsBasicAuthLockedOut's own comment) and not a
+                // malformed Authorization header (caught below).
+                RecordBasicAuthAttempt(request.RemoteAddress, authorized);
+                return authorized;
             }
             catch
             {
                 return false;
             }
+        }
+
+        // Pure read - does not itself record anything, so a locked-out IP
+        // hammering the server doesn't extend its own lockout (a sustained
+        // flood must not keep pushing the unlock time forward indefinitely)
+        // and doesn't cost a wasted FixedTimeEquals comparison. Called from
+        // HandleClient before IsWebRequestAuthorized is even reached.
+        private bool IsBasicAuthLockedOut(RequestContext request, out int retryAfterSeconds)
+        {
+            retryAfterSeconds = 0;
+            if (options.LoginLockoutThreshold <= 0)
+            {
+                // Mechanism disabled (e.g. a test bench doing rapid scripted
+                // auth checks) - never locked out.
+                return false;
+            }
+            if (String.IsNullOrEmpty(options.WebUsername) && String.IsNullOrEmpty(options.WebPassword))
+            {
+                // Loopback-only mode (Basic Auth unconfigured) never records
+                // attempts - nothing to check here.
+                return false;
+            }
+            if (request.RemoteAddress == null)
+            {
+                return false;
+            }
+
+            lock (loginLockoutLock)
+            {
+                LoginLockoutRecord existing;
+                loginLockoutState.TryGetValue(request.RemoteAddress, out existing);
+                return EvaluateLockoutState(existing, DateTime.UtcNow, out retryAfterSeconds);
+            }
+        }
+
+        // Pure - no I/O, no DateTime.UtcNow inside - takes "now" as an
+        // explicit parameter so self-tests can exercise lockout/expiry
+        // transitions without any real waiting.
+        private static bool EvaluateLockoutState(LoginLockoutRecord existing, DateTime nowUtc, out int retryAfterSeconds)
+        {
+            retryAfterSeconds = 0;
+            if (existing == null || !existing.LockedUntilUtc.HasValue || existing.LockedUntilUtc.Value <= nowUtc)
+            {
+                return false;
+            }
+            retryAfterSeconds = (int)Math.Ceiling((existing.LockedUntilUtc.Value - nowUtc).TotalSeconds);
+            return true;
+        }
+
+        // Pure - returns the updated record, or null to mean "remove this
+        // entry from the dictionary" (a successful attempt, or a counting
+        // window that had already fully expired with nothing worth keeping).
+        // An IP already locked out does NOT get its failure count bumped
+        // further by more attempts during the lockout - see EvaluateLockoutState's
+        // own comment on why the lockout must not self-extend.
+        private static LoginLockoutRecord RecordAttemptOutcome(LoginLockoutRecord existing, bool succeeded, DateTime nowUtc, int thresholdCount, TimeSpan window, TimeSpan lockoutDuration)
+        {
+            if (succeeded)
+            {
+                return null;
+            }
+
+            LoginLockoutRecord record = existing;
+            if (record == null || (nowUtc - record.WindowStartUtc) > window)
+            {
+                record = new LoginLockoutRecord();
+                record.WindowStartUtc = nowUtc;
+                record.FailedCount = 0;
+                record.LockedUntilUtc = null;
+            }
+
+            if (record.LockedUntilUtc.HasValue && record.LockedUntilUtc.Value > nowUtc)
+            {
+                return record;
+            }
+
+            record.FailedCount++;
+            if (thresholdCount > 0 && record.FailedCount >= thresholdCount)
+            {
+                record.LockedUntilUtc = nowUtc.Add(lockoutDuration);
+            }
+            return record;
+        }
+
+        private void RecordBasicAuthAttempt(IPAddress remoteAddress, bool succeeded)
+        {
+            if (options.LoginLockoutThreshold <= 0 || remoteAddress == null)
+            {
+                return;
+            }
+
+            lock (loginLockoutLock)
+            {
+                LoginLockoutRecord existing;
+                loginLockoutState.TryGetValue(remoteAddress, out existing);
+                LoginLockoutRecord updated = RecordAttemptOutcome(
+                    existing,
+                    succeeded,
+                    DateTime.UtcNow,
+                    options.LoginLockoutThreshold,
+                    TimeSpan.FromMinutes(options.LoginLockoutWindowMinutes),
+                    TimeSpan.FromMinutes(options.LoginLockoutDurationMinutes));
+
+                if (updated == null)
+                {
+                    loginLockoutState.Remove(remoteAddress);
+                }
+                else
+                {
+                    loginLockoutState[remoteAddress] = updated;
+                }
+
+                // Bounds memory under a sustained attack from many distinct
+                // IPs - piggybacks on the lock already held for this write
+                // rather than a dedicated timer/thread for what is a rare,
+                // self-limiting cleanup.
+                if (loginLockoutState.Count > 500)
+                {
+                    PruneExpiredLoginLockoutEntriesLocked(DateTime.UtcNow);
+                }
+            }
+        }
+
+        // Caller must already hold loginLockoutLock.
+        private void PruneExpiredLoginLockoutEntriesLocked(DateTime nowUtc)
+        {
+            TimeSpan window = TimeSpan.FromMinutes(options.LoginLockoutWindowMinutes);
+            List<IPAddress> expired = new List<IPAddress>();
+            foreach (KeyValuePair<IPAddress, LoginLockoutRecord> entry in loginLockoutState)
+            {
+                LoginLockoutRecord record = entry.Value;
+                bool stillLocked = record.LockedUntilUtc.HasValue && record.LockedUntilUtc.Value > nowUtc;
+                bool windowExpired = (nowUtc - record.WindowStartUtc) > window;
+                if (!stillLocked && windowExpired)
+                {
+                    expired.Add(entry.Key);
+                }
+            }
+            foreach (IPAddress ip in expired)
+            {
+                loginLockoutState.Remove(ip);
+            }
+        }
+
+        private static string ResolveIngestionRejectionReason(string suppliedToken)
+        {
+            return String.IsNullOrEmpty(suppliedToken) ? "missing" : "mismatched";
+        }
+
+        // Pure - no I/O, no DateTime.UtcNow inside. Applies whichever cap
+        // (age or count) is more restrictive - each is evaluated
+        // independently against the input, and the surviving set is their
+        // intersection (an entry must pass BOTH to survive).
+        private static List<IngestionRejectionEntry> PruneIngestionRejectionEntries(List<IngestionRejectionEntry> entries, DateTime nowUtc, int retentionDays, int maxEntries)
+        {
+            List<IngestionRejectionEntry> withinAge = new List<IngestionRejectionEntry>();
+            foreach (IngestionRejectionEntry entry in entries)
+            {
+                if ((nowUtc - entry.TimestampUtc).TotalDays <= retentionDays)
+                {
+                    withinAge.Add(entry);
+                }
+            }
+
+            // A bare `new ServerOptions()` (as opposed to one that has gone
+            // through Parse()) defaults IngestionRejectionLogMaxEntries to 0
+            // - without this guard that would silently discard everything
+            // that survived the age check above. Skip the max-entries trim
+            // entirely rather than trimming to a 0 or negative range.
+            if (maxEntries <= 0)
+            {
+                return withinAge;
+            }
+
+            if (withinAge.Count <= maxEntries)
+            {
+                return withinAge;
+            }
+
+            // entries arrive in chronological (oldest-first) order - keep
+            // only the newest maxEntries.
+            return withinAge.GetRange(withinAge.Count - maxEntries, maxEntries);
+        }
+
+        // Pure - no I/O. "Last successful report timestamp" is resolved by
+        // the caller (BuildClientIndex/LoadClientReports) using the same
+        // collectedAt-then-sourceUpdatedAt fallback the dashboard's own
+        // allClientSortValue already uses - this function just compares
+        // against whatever DateTime it's handed.
+        private static string ComputeClientTokenIssue(string lastIngestSourceIp, DateTime lastCollectedUtc, List<IngestionRejectionEntry> rejectionLog)
+        {
+            if (String.IsNullOrEmpty(lastIngestSourceIp) || rejectionLog == null)
+            {
+                return null;
+            }
+
+            IngestionRejectionEntry newestMatch = null;
+            foreach (IngestionRejectionEntry entry in rejectionLog)
+            {
+                if (!String.Equals(entry.SourceIp, lastIngestSourceIp, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                if (newestMatch == null || entry.TimestampUtc > newestMatch.TimestampUtc)
+                {
+                    newestMatch = entry;
+                }
+            }
+
+            if (newestMatch == null || newestMatch.TimestampUtc <= lastCollectedUtc)
+            {
+                return null;
+            }
+            return newestMatch.Reason;
+        }
+
+        // Secure only over HTTPS (stream is SslStream - the same test
+        // BuildHstsHeaderOrEmpty already uses): a Secure cookie is silently
+        // dropped by the browser entirely over plain HTTP, which this app
+        // still supports running under. HttpOnly always (never readable
+        // from JS). SameSite=Strict (no legitimate cross-site use, matches
+        // this app's CSRF-hardening posture). No Max-Age: this makes
+        // wil_session a browser-session-scoped cookie (cleared when the
+        // browser process closes) instead of pinned to a fixed lifetime
+        // from login time. A fixed Max-Age meant a continuously active
+        // admin still got logged out SessionLifetimeHours after first
+        // logging in, even though the server-side SessionRecord.ExpiresUtc
+        // already slides forward on every authorized request (see
+        // IsWebRequestAuthorized) - the browser's own copy of the cookie
+        // just never reflected that. Dropping Max-Age is safe rather than
+        // a privilege widening: IsSessionValid still checks ExpiresUtc
+        // server-side on every use, so a browser holding onto the cookie
+        // longer than the server considers it valid grants nothing extra.
+        // Re-issuing a fresh Set-Cookie on every request (to slide the
+        // browser-side lifetime too) would require threading a Set-Cookie
+        // header through this file's ~180 existing response call sites -
+        // out of scope; this is the simpler, equally safe alternative.
+        private static string BuildSessionCookieHeader(Stream stream, string token)
+        {
+            string secureFlag = stream is SslStream ? "; Secure" : "";
+            return "Set-Cookie: wil_session=" + token + "; Path=/; HttpOnly; SameSite=Strict" + secureFlag;
+        }
+
+        // Secure only over HTTPS, matching BuildSessionCookieHeader's own
+        // conditional above (a Secure cookie is silently dropped by the
+        // browser entirely over plain HTTP) - this was a bare const
+        // missing that flag until a whole-branch review caught the
+        // inconsistency.
+        private static string ClearSessionCookieHeader(Stream stream)
+        {
+            string secureFlag = stream is SslStream ? "; Secure" : "";
+            return "Set-Cookie: wil_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" + secureFlag;
+        }
+
+        // Dispatched from HandleClient BEFORE the IsWebRequestAuthorized
+        // gate (you are not authenticated yet when logging in), but AFTER
+        // IsBasicAuthLockedOut (a locked-out IP must not get unlimited
+        // login attempts here either), IsCrossSiteRequestRejected, and the
+        // JSON-Content-Type check - see HandleClient's dispatch chain.
+        // This endpoint was originally dispatched before those CSRF/
+        // Content-Type checks too, on the reasoning that a cross-site POST
+        // here can't exploit any pre-existing authenticated state and a
+        // forged cross-origin login could never read back or reuse the
+        // resulting cookie (HttpOnly/SameSite=Strict). That reasoning held
+        // for cookie theft, but missed a different attack: a plain,
+        // JavaScript-free HTML form can still auto-submit cross-origin
+        // here regardless of any of that, and doing so repeatedly drove
+        // the victim's own source IP into the shared Basic-Auth lockout
+        // counter (RecordBasicAuthAttempt) - a cross-origin lockout
+        // denial-of-service found in a whole-branch review. Fixed by
+        // requiring the same CSRF/Content-Type checks every other
+        // state-changing route (other than the three ingestion endpoints)
+        // already requires, while still not requiring prior authorization
+        // (see above).
+        private void SendLoginResult(Stream stream, RequestContext request)
+        {
+            if (String.IsNullOrEmpty(options.WebUsername) && String.IsNullOrEmpty(options.WebPassword))
+            {
+                // Loopback-only mode: no admin credential is configured to
+                // check against. Login must never succeed here - unlike
+                // the loopback check itself, a session cookie is not
+                // IP-scoped, so a session minted in this mode would let a
+                // request bypass the loopback restriction from anywhere.
+                SendUnauthorized(stream, request);
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string username = payload.ContainsKey("username") ? Convert.ToString(payload["username"]) : "";
+            string password = payload.ContainsKey("password") ? Convert.ToString(payload["password"]) : "";
+            bool usernameMatches = FixedTimeEquals(username, options.WebUsername);
+            bool passwordMatches = FixedTimeEquals(password, options.WebPassword);
+            bool authorized = usernameMatches & passwordMatches;
+            RecordBasicAuthAttempt(request.RemoteAddress, authorized);
+
+            if (!authorized)
+            {
+                SendUnauthorized(stream, request);
+                return;
+            }
+
+            string token = GenerateRandomToken();
+            SessionRecord record = new SessionRecord();
+            record.ExpiresUtc = ComputeSessionExpiry(DateTime.UtcNow, options.SessionLifetimeHours);
+            lock (sessionLock)
+            {
+                sessionStore[token] = record;
+                // Opportunistic - piggybacks on the lock already held for
+                // this insert rather than a dedicated timer/thread, same
+                // reasoning as PruneExpiredLoginLockoutEntriesLocked above.
+                // Also means a repeat login without an intervening logout
+                // no longer orphans the previous session forever - once it
+                // expires, the next login sweeps it out.
+                PruneExpiredSessionsLocked(DateTime.UtcNow);
+            }
+
+            string setCookie = BuildSessionCookieHeader(stream, token);
+            SendText(stream, "{\"status\":\"ok\"}", "application/json; charset=utf-8", 200, "no-store", setCookie);
+        }
+
+        // Caller must already hold sessionLock.
+        private void PruneExpiredSessionsLocked(DateTime nowUtc)
+        {
+            List<string> expired = new List<string>();
+            foreach (KeyValuePair<string, SessionRecord> entry in sessionStore)
+            {
+                if (entry.Value.ExpiresUtc <= nowUtc)
+                {
+                    expired.Add(entry.Key);
+                }
+            }
+            foreach (string expiredToken in expired)
+            {
+                sessionStore.Remove(expiredToken);
+            }
+        }
+
+        // Always 200 - logging out a missing/already-expired session is a
+        // no-op success, not an error (the caller's goal - "I should no
+        // longer be logged in" - is already satisfied).
+        private void SendLogoutResult(Stream stream, RequestContext request)
+        {
+            string cookieHeader = request.Headers.ContainsKey("cookie") ? request.Headers["cookie"] : null;
+            string sessionToken = GetCookieValue(cookieHeader, "wil_session");
+            if (!String.IsNullOrEmpty(sessionToken))
+            {
+                lock (sessionLock)
+                {
+                    sessionStore.Remove(sessionToken);
+                }
+            }
+            SendText(stream, "{\"status\":\"ok\"}", "application/json; charset=utf-8", 200, null, ClearSessionCookieHeader(stream));
+        }
+
+        // Cookie header is "name1=value1; name2=value2" - no quoting or
+        // escaping to worry about here, since this app's own cookie value
+        // is always a fixed-format hex token from GenerateRandomToken,
+        // never something a user typed. Returns null if the header is
+        // absent/empty or the named cookie isn't present.
+        private static string GetCookieValue(string cookieHeader, string name)
+        {
+            if (String.IsNullOrEmpty(cookieHeader))
+            {
+                return null;
+            }
+            string[] pairs = cookieHeader.Split(';');
+            foreach (string pair in pairs)
+            {
+                string trimmed = pair.Trim();
+                int separator = trimmed.IndexOf('=');
+                if (separator < 0)
+                {
+                    continue;
+                }
+                string cookieName = trimmed.Substring(0, separator);
+                if (String.Equals(cookieName, name, StringComparison.Ordinal))
+                {
+                    return trimmed.Substring(separator + 1);
+                }
+            }
+            return null;
+        }
+
+        // Pure - no I/O, no DateTime.UtcNow inside. Strict ">" (not ">="):
+        // a record expiring at exactly nowUtc is already invalid, matching
+        // EvaluateLockoutState's own strict-comparison convention.
+        private static bool IsSessionValid(SessionRecord record, DateTime nowUtc)
+        {
+            return record != null && record.ExpiresUtc > nowUtc;
+        }
+
+        // Pure - the trivial arithmetic is its own function (rather than
+        // inlined at both the login and sliding-refresh call sites) so a
+        // self-test can pin the exact "hours -> DateTime" behavior once.
+        private static DateTime ComputeSessionExpiry(DateTime nowUtc, int sessionLifetimeHours)
+        {
+            return nowUtc.AddHours(sessionLifetimeHours);
         }
 
         // Ordinary == (or String.Equals) fails fast at the first mismatched
@@ -4539,13 +5700,114 @@ namespace WindowsInventoryLite
             return !FixedTimeEquals(suppliedToken, configuredToken);
         }
 
+        private static bool IsStateChangingMethod(string method)
+        {
+            return method == "POST" || method == "PUT" || method == "DELETE";
+        }
+
+        // CSRF defense #1: Basic Auth has no equivalent of a SameSite cookie -
+        // once a browser has the admin's credentials cached for this origin,
+        // it attaches them automatically to ANY request to this server,
+        // including one a hostile page triggers via a cross-site form
+        // submission or fetch(). Origin/Referer are checked only when
+        // present, never required: every browser this project targets has
+        // sent Origin on state-changing requests for years, so a real
+        // browser being tricked into a cross-site request always gives us
+        // something to check - but a non-browser caller (curl, Postman, an
+        // automation script hitting the endpoints docs/api-reference.md
+        // documents directly) typically sends neither header at all, and is
+        // the intentional, authorized caller, not a tricked victim. Requiring
+        // one would break that documented, supported usage for no real
+        // security gain (there is no "victim" to trick when the same person
+        // who holds the credentials is also the one making the request).
+        // GET/HEAD are never checked - they're expected to be side-effect-
+        // free (see CleanupInstallJobLogs' own retention-only cleanup for
+        // the one narrow, attacker-uncontrolled exception, tracked
+        // separately in the backlog rather than folded in here).
+        private static bool IsCrossSiteRequestRejected(RequestContext request)
+        {
+            if (!IsStateChangingMethod(request.Method))
+            {
+                return false;
+            }
+
+            string host = request.Headers.ContainsKey("host") ? request.Headers["host"] : null;
+            if (String.IsNullOrEmpty(host))
+            {
+                return true;
+            }
+
+            string origin = request.Headers.ContainsKey("origin") ? request.Headers["origin"] : null;
+            if (!String.IsNullOrEmpty(origin))
+            {
+                // The literal string "null" is a real value browsers send for
+                // an opaque origin (a sandboxed iframe, some redirect chains,
+                // a data: URL) - it can never be verified to match this
+                // server, so it's treated as a mismatch, not as absent. Some
+                // CSRF checks elsewhere have been bypassed by treating "null"
+                // as a wildcard; this deliberately does not.
+                return !RequestHostMatches(origin, host);
+            }
+
+            string referer = request.Headers.ContainsKey("referer") ? request.Headers["referer"] : null;
+            if (!String.IsNullOrEmpty(referer))
+            {
+                return !RequestHostMatches(referer, host);
+            }
+
+            return false;
+        }
+
+        private static bool RequestHostMatches(string originOrReferer, string host)
+        {
+            try
+            {
+                Uri parsed = new Uri(originOrReferer);
+                return String.Equals(parsed.Authority, host, StringComparison.OrdinalIgnoreCase);
+            }
+            catch (UriFormatException)
+            {
+                return false;
+            }
+        }
+
+        // CSRF defense #2: a plain HTML <form> can only submit
+        // application/x-www-form-urlencoded, multipart/form-data, or
+        // text/plain - a browser refuses to let a cross-origin form set an
+        // arbitrary Content-Type like application/json. Without this check,
+        // that restriction wouldn't actually stop an attacker: a form using
+        // enctype="text/plain" with a single cleverly-named field can be made
+        // to submit a body that is ALSO syntactically valid JSON (a known,
+        // documented technique), so relying on "the body must parse as JSON"
+        // alone is not enough - the Content-Type header itself must be
+        // checked. Every route that reads a body already requires JSON
+        // (JavaScriptSerializer.Deserialize), so this loses no legitimate
+        // functionality; routes with no body (DELETE, RegenerateIngestionToken)
+        // are unaffected since RequiresJsonContentType is false for them.
+        private static bool RequiresJsonContentType(RequestContext request)
+        {
+            return IsStateChangingMethod(request.Method) && !String.IsNullOrEmpty(request.Body);
+        }
+
+        private static bool HasJsonContentType(RequestContext request)
+        {
+            string contentType = request.Headers.ContainsKey("content-type") ? request.Headers["content-type"] : null;
+            if (String.IsNullOrEmpty(contentType))
+            {
+                return false;
+            }
+            int semicolon = contentType.IndexOf(';');
+            string mediaType = (semicolon >= 0 ? contentType.Substring(0, semicolon) : contentType).Trim();
+            return String.Equals(mediaType, "application/json", StringComparison.OrdinalIgnoreCase);
+        }
+
         // Shared by the two Client Package generator endpoints below
         // (ConfigureClientPackage, ConfigureLinuxClientPackage), which had
-        // no token fallback at all before this fix. StartClientAction and
-        // StartLinuxClientAction have their own equivalent inline fallback
-        // logic, added earlier and deliberately left as-is here (same
-        // behavior, different call sites, not worth the churn of
-        // consolidating four already-working call sites into one).
+        // no token fallback at all before this fix. StartClientAction has
+        // its own equivalent inline fallback logic, added earlier and
+        // deliberately left as-is here (same behavior, different call
+        // sites, not worth the churn of consolidating already-working call
+        // sites into one).
         private static string ResolveEffectiveToken(string requestedToken, string liveToken)
         {
             return String.IsNullOrEmpty(requestedToken) ? liveToken : requestedToken;
@@ -4584,10 +5846,49 @@ namespace WindowsInventoryLite
             SendText(stream, fallback, contentType, 200, "no-cache");
         }
 
-        private ArrayList LoadClientReports()
+        // Binary counterpart to SendDashboardFile - reads raw bytes instead of
+        // File.ReadAllText, since a text-mode read/re-encode would corrupt a
+        // PNG's arbitrary byte content. No fallback constant (unlike the text
+        // assets above): this is a decorative brand icon, not a load-bearing
+        // page - a missing file degrades to a broken image, not a blank
+        // dashboard, so embedding a base64 fallback isn't worth the size.
+        private void SendDashboardImage(Stream stream, string fileName, string contentType)
+        {
+            string path = Path.Combine(options.ContentPath, fileName);
+            if (!File.Exists(path))
+            {
+                SendText(stream, "Not found", "text/plain; charset=utf-8", 404);
+                return;
+            }
+
+            byte[] data = File.ReadAllBytes(path);
+            string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Length: " + data.Length + "\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + BuildHstsHeaderOrEmpty(stream) + "\r\nConnection: close\r\n\r\n";
+            byte[] headerBytes = Encoding.ASCII.GetBytes(header);
+            stream.Write(headerBytes, 0, headerBytes.Length);
+            stream.Write(data, 0, data.Length);
+        }
+
+        internal ArrayList LoadClientReports()
         {
             ArrayList clients = new ArrayList();
             JavaScriptSerializer serializer = CreateJsonSerializer();
+
+            List<IngestionRejectionEntry> rejectionLogSnapshot;
+            lock (ingestionRejectionLogLock)
+            {
+                rejectionLogSnapshot = new List<IngestionRejectionEntry>(ingestionRejectionLog);
+            }
+            // One pass over the whole rejection log up front instead of one
+            // full linear scan per client inside the loop below. Before this,
+            // ComputeClientTokenIssue(ip, ..., rejectionLogSnapshot) ran once
+            // per client and each call re-scanned the entire snapshot, making
+            // this O(clients x logEntries) - real cost at the max
+            // configurable IngestionRejectionLogMaxEntries (100000), on a
+            // method called from 4 places, 3 of which never even use the
+            // resulting tokenIssue (see Important Fix 4 in the final
+            // review). Building this map costs O(logEntries) once, and each
+            // client's lookup below is then O(1).
+            Dictionary<string, IngestionRejectionEntry> newestRejectionByIp = BuildNewestRejectionByIp(rejectionLogSnapshot);
 
             foreach (string file in Directory.GetFiles(options.DataPath, "*.json"))
             {
@@ -4596,7 +5897,32 @@ namespace WindowsInventoryLite
                     string raw = File.ReadAllText(file, Encoding.UTF8);
                     Dictionary<string, object> client = serializer.Deserialize<Dictionary<string, object>>(raw);
                     client["sourceFile"] = Path.GetFileName(file);
-                    client["sourceUpdatedAt"] = File.GetLastWriteTimeUtc(file).ToString("yyyy-MM-ddTHH:mm:ssZ");
+                    DateTime sourceUpdatedAtUtc = File.GetLastWriteTimeUtc(file);
+                    client["sourceUpdatedAt"] = sourceUpdatedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+                    string lastIngestSourceIp = GetStringValue(client, "lastIngestSourceIp");
+                    if (!String.IsNullOrEmpty(lastIngestSourceIp))
+                    {
+                        DateTime lastCollectedUtc = ParseUtcDate(GetStringValue(client, "collectedAt"), sourceUpdatedAtUtc);
+                        // ComputeClientTokenIssue's own signature and self-tests
+                        // are unchanged - it still takes a list and scans it,
+                        // but that list now has at most one element (the
+                        // newest rejection already resolved for this IP), so
+                        // its internal scan is trivial regardless of how many
+                        // entries the real log holds.
+                        IngestionRejectionEntry newestMatch;
+                        List<IngestionRejectionEntry> newestMatchAsList = new List<IngestionRejectionEntry>();
+                        if (newestRejectionByIp.TryGetValue(lastIngestSourceIp, out newestMatch))
+                        {
+                            newestMatchAsList.Add(newestMatch);
+                        }
+                        string tokenIssue = ComputeClientTokenIssue(lastIngestSourceIp, lastCollectedUtc, newestMatchAsList);
+                        if (tokenIssue != null)
+                        {
+                            client["tokenIssue"] = tokenIssue;
+                        }
+                    }
+
                     clients.Add(client);
                 }
                 catch
@@ -4605,6 +5931,32 @@ namespace WindowsInventoryLite
             }
 
             return clients;
+        }
+
+        // Pure - no I/O. One pass over the rejection log, keeping only the
+        // newest entry per sourceIp. See LoadClientReports, the only caller.
+        private static Dictionary<string, IngestionRejectionEntry> BuildNewestRejectionByIp(List<IngestionRejectionEntry> rejectionLog)
+        {
+            Dictionary<string, IngestionRejectionEntry> newestByIp = new Dictionary<string, IngestionRejectionEntry>(StringComparer.Ordinal);
+            foreach (IngestionRejectionEntry entry in rejectionLog)
+            {
+                // TryGetValue/index-assignment below throw on a null key.
+                // Not reachable today (RecordIngestionRejection always sets
+                // SourceIp from a non-null RemoteAddress, and the disk loader
+                // falls back to "" rather than null), but this file is
+                // otherwise null-tolerant throughout its dictionary-keying
+                // loops - skip defensively rather than crash this endpoint.
+                if (String.IsNullOrEmpty(entry.SourceIp))
+                {
+                    continue;
+                }
+                IngestionRejectionEntry existing;
+                if (!newestByIp.TryGetValue(entry.SourceIp, out existing) || entry.TimestampUtc > existing.TimestampUtc)
+                {
+                    newestByIp[entry.SourceIp] = entry;
+                }
+            }
+            return newestByIp;
         }
 
         private string BuildClientIndex()
@@ -4728,9 +6080,27 @@ namespace WindowsInventoryLite
             return -1;
         }
 
-        private static void SendJson(Stream stream, string json)
+        private void SendJson(Stream stream, string json)
         {
             SendText(stream, json, "application/json; charset=utf-8", 200);
+        }
+
+        // HSTS is opt-in (off by default, see ServerOptions.HstsEnabled) and
+        // only ever added to a response actually served over the HTTPS
+        // listener - "stream is SslStream" is exactly how HandleClient
+        // itself already distinguishes the two (see AuthenticateServerStream/
+        // sslStream there), so this needs no extra plumbing through
+        // RequestContext. A browser that has cached the policy can still
+        // lock itself out of this server if HTTPS is later disabled while
+        // this was on, so max-age is admin-configured rather than the
+        // textbook one-year default, and the toggle itself defaults off.
+        private string BuildHstsHeaderOrEmpty(Stream stream)
+        {
+            if (!options.HstsEnabled || !(stream is SslStream))
+            {
+                return "";
+            }
+            return "\r\nStrict-Transport-Security: max-age=" + (options.HstsMaxAgeHours * 3600);
         }
 
         private static JavaScriptSerializer CreateJsonSerializer()
@@ -4740,10 +6110,117 @@ namespace WindowsInventoryLite
             return serializer;
         }
 
-        private static void SendUnauthorized(Stream stream)
+        // Self-contained on purpose - no dependency on styles.css/app.js,
+        // since those themselves are only reachable once authenticated
+        // (see SendDashboardFile, gated the same as every other route).
+        // Inline colors are a light echo of this app's real dark theme
+        // (see styles.css's Ocean Blue tokens), not a pixel-accurate copy.
+        private const string LoginPageHtml =
+@"<!doctype html>
+<html>
+<head>
+<meta charset=""utf-8"">
+<meta name=""viewport"" content=""width=device-width, initial-scale=1"">
+<title>Windows Inventory Lite - Sign in</title>
+<style>
+body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #0c2340; font-family: system-ui, sans-serif; }
+.login-card { background: #153a63; border-radius: 14px; padding: 32px; width: 340px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+.login-logo { display: block; margin: 0 auto 20px; max-width: 260px; width: 100%; height: auto; background: #fff; border-radius: 12px; padding: 14px; }
+.login-card label { display: block; color: #cfe3f5; font-size: 0.85rem; margin-bottom: 4px; }
+.login-card input { width: 100%; box-sizing: border-box; padding: 8px 10px; margin-bottom: 14px; border-radius: 6px; border: 1px solid #2a4d75; background: #0c2340; color: #fff; }
+.login-card button { width: 100%; padding: 10px; border: none; border-radius: 6px; background: #126f8f; color: #fff; font-weight: 600; cursor: pointer; }
+.login-error { color: #ff8080; font-size: 0.85rem; min-height: 1.2em; margin-top: 10px; }
+</style>
+</head>
+<body>
+<form class=""login-card"" id=""loginForm"">
+<img class=""login-logo"" src=""data:image/jpeg;base64,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"" alt=""Windows Inventory Lite"">
+<label for=""loginUsername"">Username</label>
+<input id=""loginUsername"" name=""username"" type=""text"" autocomplete=""username"" required autofocus>
+<label for=""loginPassword"">Password</label>
+<input id=""loginPassword"" name=""password"" type=""password"" autocomplete=""current-password"" required>
+<button type=""submit"">Sign in</button>
+<div class=""login-error"" id=""loginError""></div>
+</form>
+<script>
+document.getElementById('loginForm').addEventListener('submit', function (event) {
+  event.preventDefault();
+  var errorEl = document.getElementById('loginError');
+  errorEl.textContent = '';
+  fetch('/api/v1/server/login', {
+    method: 'POST',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: document.getElementById('loginUsername').value,
+      password: document.getElementById('loginPassword').value
+    })
+  }).then(function (response) {
+    if (response.ok) {
+      window.location.reload();
+      return;
+    }
+    if (response.status === 429) {
+      errorEl.textContent = 'Too many failed login attempts. Try again later.';
+      return;
+    }
+    errorEl.textContent = 'Incorrect username or password.';
+  }).catch(function () {
+    errorEl.textContent = 'Sign-in failed - check the connection and try again.';
+  });
+});
+</script>
+</body>
+</html>";
+
+        private void SendUnauthorized(Stream stream, RequestContext request)
         {
-            byte[] body = Encoding.UTF8.GetBytes("Unauthorized");
-            string header = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Windows Inventory Lite\"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + body.Length + "\r\nConnection: close\r\n\r\n";
+            // WWW-Authenticate: Basic is deliberately NOT sent (removed as
+            // part of the session-based logout feature) - that header is
+            // exactly what makes a browser pop its native Basic Auth
+            // dialog and cache whatever gets typed into it at the HTTP
+            // stack level, with no JS-reachable way to evict it later.
+            // curl -u user:pass does not depend on this header - it sends
+            // Basic Auth preemptively on the first request regardless of
+            // any challenge - so this is safe for existing automation.
+            //
+            // A real browser navigating to / or /index.html (Accept
+            // contains text/html) gets the embedded login page instead of
+            // a bare 401 body, since there is otherwise nothing for it to
+            // show a human. Every other case - any API route, any non-GET
+            // method, app.js's own fetch() calls (which don't send an
+            // HTML-navigation Accept header) - keeps the original
+            // plain-text 401 body unchanged, so existing error handling
+            // that expects a non-HTML response is unaffected.
+            bool isHtmlNavigationToRoot = request.Method == "GET"
+                && (request.Path == "/" || request.Path == "/index.html")
+                && request.Headers.ContainsKey("accept")
+                && request.Headers["accept"].IndexOf("text/html", StringComparison.OrdinalIgnoreCase) >= 0;
+
+            byte[] body = Encoding.UTF8.GetBytes(isHtmlNavigationToRoot ? LoginPageHtml : "Unauthorized");
+            string contentType = isHtmlNavigationToRoot ? "text/html; charset=utf-8" : "text/plain; charset=utf-8";
+            // Picked up during a security-headers audit: this response
+            // bypasses SendText (its own status line doesn't fit that
+            // helper's signature), so it had never carried ANY of the
+            // headers below - not just the two new ones, the pre-existing
+            // CSP/X-Frame-Options/nosniff too. A 401 is a response like
+            // any other and deserves the same baseline.
+            string header = "HTTP/1.1 401 Unauthorized\r\nContent-Type: " + contentType + "\r\nContent-Length: " + body.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + BuildHstsHeaderOrEmpty(stream) + "\r\nConnection: close\r\n\r\n";
+            byte[] headerBytes = Encoding.ASCII.GetBytes(header);
+            stream.Write(headerBytes, 0, headerBytes.Length);
+            stream.Write(body, 0, body.Length);
+        }
+
+        // Distinct from SendUnauthorized so a legitimate admin who tripped
+        // the lockout by mistyping sees why (and how long to wait) instead
+        // of it looking like an ordinary wrong-password rejection.
+        // Deliberately omits WWW-Authenticate - re-prompting the browser for
+        // credentials while the IP is locked out would just produce a
+        // confusing repeated login dialog that can't succeed yet.
+        private void SendTooManyRequests(Stream stream, int retryAfterSeconds)
+        {
+            byte[] body = Encoding.UTF8.GetBytes("{\"error\":\"Too many failed login attempts. Try again later.\"}");
+            string header = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: " + retryAfterSeconds + "\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: " + body.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + BuildHstsHeaderOrEmpty(stream) + "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
             stream.Write(body, 0, body.Length);
@@ -4754,23 +6231,57 @@ namespace WindowsInventoryLite
         // in app.js), so this is a backstop against a future unescaped sink,
         // not the primary defense. style-src needs 'unsafe-inline' for the
         // one legitimate case (bar-chart width) that sets a real inline
-        // style="..." attribute through innerHTML. The one sha256 source
-        // allows index.html's inline theme-restore <script> (reads
-        // localStorage before styles.css loads, so a saved dark preference
-        // doesn't flash light first) - it was silently CSP-blocked without
-        // this, breaking theme persistence across reloads. If that inline
-        // script's content ever changes, this hash must be recomputed to
-        // match (the browser's own CSP-violation console message reports
-        // the exact hash it expected - the fastest way to get a fresh one).
+        // style="..." attribute through innerHTML. Two sha256 sources are
+        // allow-listed: the first is index.html's inline theme-restore
+        // <script> (reads localStorage before styles.css loads, so a saved
+        // dark preference doesn't flash light first); the second is
+        // LoginPageHtml's inline <script> (wires the login form's submit to
+        // a fetch() POST instead of falling through to the form's native
+        // GET submission, which would otherwise put the password in the
+        // URL - found live: without this hash the script was silently
+        // CSP-blocked, and the login form degraded to exactly that GET). If
+        // either inline script's content ever changes, its hash must be
+        // recomputed to match (the browser's own CSP-violation console
+        // message reports the exact hash it expected - the fastest way to
+        // get a fresh one).
         private const string ContentSecurityPolicy =
-            "default-src 'self'; script-src 'self' 'sha256-rqltRpQDffCU3nbpQC/zdbFn0/Eb4PSGrbmQ8EbS3q4='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+            "default-src 'self'; script-src 'self' 'sha256-rqltRpQDffCU3nbpQC/zdbFn0/Eb4PSGrbmQ8EbS3q4=' 'sha256-307+P/nzCy66y2Q8MR0B+9BDei02iFWi+rMImlh6/C0='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 
-        private static void SendText(Stream stream, string text, string contentType, int statusCode)
+        // same-origin (not the stricter no-referrer) deliberately: this
+        // dashboard's own pages never navigate cross-origin, so a leak to
+        // another site was never actually possible - the meaningful choice
+        // here is that Referer keeps flowing for genuine same-origin
+        // requests, which IsCrossSiteRequestRejected's own fallback path
+        // reads when Origin happens to be absent (see that function's
+        // comment). A stricter policy would silently narrow that fallback's
+        // coverage for zero real privacy benefit, since there's no cross-
+        // origin navigation to protect against here in the first place.
+        private const string ReferrerPolicy = "same-origin";
+
+        // This dashboard never uses any of these browser APIs - disabling
+        // them removes an otherwise-unused attack surface (e.g. a future
+        // XSS gaining camera/microphone access) at zero functional cost.
+        private const string PermissionsPolicy = "geolocation=(), camera=(), microphone=(), payment=(), usb=()";
+
+        private void SendText(Stream stream, string text, string contentType, int statusCode)
         {
             SendText(stream, text, contentType, statusCode, null);
         }
 
-        private static void SendText(Stream stream, string text, string contentType, int statusCode, string cacheControl)
+        private void SendText(Stream stream, string text, string contentType, int statusCode, string cacheControl)
+        {
+            SendText(stream, text, contentType, statusCode, cacheControl, null);
+        }
+
+        // extraHeaders, when non-null, is one or more already-formatted
+        // "Name: value" lines (no leading/trailing \r\n) to splice into the
+        // response - currently only used for Set-Cookie (see
+        // BuildSessionCookieHeader/ClearSessionCookieHeader). Existing
+        // 4-arg/5-arg SendText callers are unaffected - see the delegation
+        // above, matching this file's established "add an overload, don't
+        // touch existing call sites" convention (compare BuildHstsHeaderOrEmpty's
+        // own introduction).
+        private void SendText(Stream stream, string text, string contentType, int statusCode, string cacheControl, string extraHeaders)
         {
             byte[] body = Encoding.UTF8.GetBytes(text);
             string status = statusCode == 200 ? "OK" : (statusCode == 400 ? "Bad Request" : (statusCode == 401 ? "Unauthorized" : (statusCode == 404 ? "Not Found" : "Error")));
@@ -4780,7 +6291,11 @@ namespace WindowsInventoryLite
                 "\r\nX-Content-Type-Options: nosniff" +
                 "\r\nX-Frame-Options: DENY" +
                 "\r\nContent-Security-Policy: " + ContentSecurityPolicy +
+                "\r\nReferrer-Policy: " + ReferrerPolicy +
+                "\r\nPermissions-Policy: " + PermissionsPolicy +
+                BuildHstsHeaderOrEmpty(stream) +
                 (String.IsNullOrEmpty(cacheControl) ? "" : "\r\nCache-Control: " + cacheControl) +
+                (String.IsNullOrEmpty(extraHeaders) ? "" : "\r\n" + extraHeaders) +
                 "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
@@ -4840,6 +6355,41 @@ namespace WindowsInventoryLite
             public IPAddress RemoteAddress;
         }
 
+        // Reference type deliberately, not a struct - "no record yet for
+        // this IP" is a plain null rather than a Nullable<T>. See
+        // EvaluateLockoutState/RecordAttemptOutcome.
+        private sealed class LoginLockoutRecord
+        {
+            public int FailedCount;
+            public DateTime WindowStartUtc;
+            public DateTime? LockedUntilUtc;
+        }
+
+        // One active dashboard login session, created by SendLoginResult
+        // and removed by SendLogoutResult - see IsWebRequestAuthorized's
+        // session-cookie branch. Sliding expiration: ExpiresUtc is pushed
+        // forward by SessionLifetimeHours on every authorized request that
+        // used this session, not fixed from creation time.
+        private sealed class SessionRecord
+        {
+            public DateTime ExpiresUtc;
+        }
+
+        // One rejected ingestion-token attempt. Persisted as one JSON-lines
+        // record (see RecordIngestionRejection) and kept in memory in
+        // ingestionRejectionLog for fast correlation/serving without
+        // re-reading the file. Endpoint is one of "windows-inventory",
+        // "linux-inventory", "linux-service-status"; Reason is one of
+        // "missing" (no token header at all) or "mismatched" (a token was
+        // supplied but did not match).
+        private sealed class IngestionRejectionEntry
+        {
+            public DateTime TimestampUtc;
+            public string SourceIp;
+            public string Endpoint;
+            public string Reason;
+        }
+
         private sealed class InstallJob
         {
             public string Id;
@@ -4850,12 +6400,21 @@ namespace WindowsInventoryLite
             public DateTime CompletedAtUtc;
             public ArrayList Targets;
             public ArrayList Results;
+            public string Mode;
             public string ServerUrl;
             public string Token;
             public string Username;
             public string Password;
             public bool Force;
             public bool AddToTrustedHosts;
+            public string SshAuthMode;
+            public string SshUsername;
+            public string SshPassword;
+            public string SshKeyPath;
+            public int IntervalHours;
+            public int StatusIntervalMinutes;
+            public string InstallPath;
+            public bool TrustNewHostKeys;
             public int RetentionDays;
 
             public Dictionary<string, object> ToDictionary()
@@ -4869,124 +6428,17 @@ namespace WindowsInventoryLite
                 result["completedAt"] = CompletedAtUtc == DateTime.MinValue ? null : CompletedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
                 result["targets"] = Targets;
                 result["results"] = Results;
+                result["mode"] = Mode;
                 result["serverUrl"] = ServerUrl;
                 result["username"] = Username;
                 result["force"] = Force;
                 result["addToTrustedHosts"] = AddToTrustedHosts;
-                result["retentionDays"] = RetentionDays;
-                return result;
-            }
-        }
-
-        private sealed class LinuxInstallJob
-        {
-            public string Id;
-            public string Action;
-            public string Status;
-            public DateTime CreatedAtUtc;
-            public DateTime StartedAtUtc;
-            public DateTime CompletedAtUtc;
-            public ArrayList Targets;
-            public ArrayList Results;
-            public string AuthMode;
-            public string Username;
-            public string Password;
-            public string KeyPath;
-            public string ServerUrl;
-            public string Token;
-            public int IntervalHours;
-            public int StatusIntervalMinutes;
-            public string InstallPath;
-            public int RetentionDays;
-            public bool TrustNewHostKeys;
-
-            public Dictionary<string, object> ToDictionary()
-            {
-                Dictionary<string, object> result = new Dictionary<string, object>();
-                result["id"] = Id;
-                result["action"] = String.IsNullOrEmpty(Action) ? "install" : Action;
-                result["status"] = Status;
-                result["createdAt"] = CreatedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                result["startedAt"] = StartedAtUtc == DateTime.MinValue ? null : StartedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                result["completedAt"] = CompletedAtUtc == DateTime.MinValue ? null : CompletedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                result["targets"] = Targets;
-                result["results"] = Results;
-                result["authMode"] = AuthMode;
-                result["username"] = Username;
-                result["serverUrl"] = ServerUrl;
+                result["sshAuthMode"] = SshAuthMode;
+                result["sshUsername"] = SshUsername;
                 result["installPath"] = InstallPath;
-                result["retentionDays"] = RetentionDays;
                 result["trustNewHostKeys"] = TrustNewHostKeys;
+                result["retentionDays"] = RetentionDays;
                 return result;
-            }
-        }
-
-        private string GetLinuxInstallJobDirectory()
-        {
-            return Path.Combine(options.LinuxDataPath, "_linux-client-install-jobs");
-        }
-
-        private string GetLinuxInstallJobPath(string id)
-        {
-            return Path.Combine(GetLinuxInstallJobDirectory(), SanitizeFileName(id) + ".json");
-        }
-
-        private void SaveLinuxInstallJob(LinuxInstallJob job)
-        {
-            if (!Directory.Exists(GetLinuxInstallJobDirectory()))
-            {
-                Directory.CreateDirectory(GetLinuxInstallJobDirectory());
-            }
-
-            JavaScriptSerializer serializer = CreateJsonSerializer();
-            File.WriteAllText(GetLinuxInstallJobPath(job.Id), serializer.Serialize(job.ToDictionary()), new UTF8Encoding(false));
-        }
-
-        private string ReadLinuxInstallJobJson(string id)
-        {
-            string safeId = SanitizeFileName(id);
-            if (String.IsNullOrEmpty(safeId) || safeId != id)
-            {
-                return null;
-            }
-
-            string path = GetLinuxInstallJobPath(safeId);
-            if (!File.Exists(path))
-            {
-                return null;
-            }
-
-            return File.ReadAllText(path, Encoding.UTF8);
-        }
-
-        private void CleanupLinuxInstallJobLogs()
-        {
-            string directory = GetLinuxInstallJobDirectory();
-            if (!Directory.Exists(directory))
-            {
-                return;
-            }
-
-            JavaScriptSerializer serializer = CreateJsonSerializer();
-            foreach (string file in Directory.GetFiles(directory, "*.json"))
-            {
-                try
-                {
-                    Dictionary<string, object> job = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
-                    DateTime createdAt = ParseUtcDate(GetStringValue(job, "createdAt"), File.GetCreationTimeUtc(file));
-                    int retentionDays = NormalizeRetentionDays(GetIntValue(job, "retentionDays", options.InstallLogRetentionDays));
-                    if (createdAt.AddDays(retentionDays) < DateTime.UtcNow)
-                    {
-                        File.Delete(file);
-                    }
-                }
-                catch
-                {
-                    if (File.GetLastWriteTimeUtc(file).AddDays(options.InstallLogRetentionDays) < DateTime.UtcNow)
-                    {
-                        File.Delete(file);
-                    }
-                }
             }
         }
 
@@ -5452,6 +6904,8 @@ namespace WindowsInventoryLite
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["useHttps"] = options.UseHttps;
+            result["hstsEnabled"] = options.HstsEnabled;
+            result["hstsMaxAgeHours"] = options.HstsMaxAgeHours;
             result["thumbprint"] = options.CertificateThumbprint;
 
             X509Certificate2 certificate = serverCertificate;
@@ -5655,11 +7109,11 @@ namespace WindowsInventoryLite
         // Stores the uploaded certificate as the configured one and, if HTTPS is
         // already active AND the certificate has no known risks, hot-swaps the
         // serving certificate immediately. It does NOT turn HTTPS on by itself -
-        // that is a separate decision made from Settings > General, so an operator
+        // that is a separate decision made from Settings > Server, so an operator
         // can stage a certificate without risking the current connection. A risky
         // certificate is never hot-swapped in: the live listener keeps serving
         // whatever it was already serving until the operator explicitly
-        // acknowledges the risk from Settings > General, the same gate that
+        // acknowledges the risk from Settings > Server, the same gate that
         // applies to turning HTTPS on for the first time.
         private void StoreUploadedCertificate(X509Certificate2 certificate, List<string> risks)
         {
@@ -5919,7 +7373,7 @@ namespace WindowsInventoryLite
             // compared side by side.
             if (!options.AdSyncEnabled)
             {
-                SendText(stream, "{\"error\":\"Check \\\"Configure AD User\\\" in Settings > General > Active Directory first.\"}", "application/json; charset=utf-8", 400);
+                SendText(stream, "{\"error\":\"Check \\\"Configure AD User\\\" in Settings > Windows > Active Directory first.\"}", "application/json; charset=utf-8", 400);
                 return;
             }
 
@@ -5968,6 +7422,15 @@ namespace WindowsInventoryLite
             result["adPasswordConfigured"] = !String.IsNullOrEmpty(options.AdPassword);
             result["adComputerImportOUs"] = options.AdComputerImportOUs;
             result["preferredLinuxSubnet"] = options.PreferredLinuxSubnet;
+            result["linuxDefaultIntervalHours"] = options.LinuxDefaultIntervalHours;
+            result["linuxDefaultStatusIntervalMinutes"] = options.LinuxDefaultStatusIntervalMinutes;
+            result["linuxDefaultInstallPath"] = options.LinuxDefaultInstallPath;
+            result["loginLockoutThreshold"] = options.LoginLockoutThreshold;
+            result["loginLockoutWindowMinutes"] = options.LoginLockoutWindowMinutes;
+            result["loginLockoutDurationMinutes"] = options.LoginLockoutDurationMinutes;
+            result["sessionLifetimeHours"] = options.SessionLifetimeHours;
+            result["ingestionRejectionLogRetentionDays"] = options.IngestionRejectionLogRetentionDays;
+            result["ingestionRejectionLogMaxEntries"] = options.IngestionRejectionLogMaxEntries;
             result["installLogRetentionDays"] = options.InstallLogRetentionDays;
             result["debugLogEnabled"] = options.DebugLogEnabled;
             result["debugLogPath"] = DebugLogger.ResolvePath(options);
@@ -6126,7 +7589,7 @@ namespace WindowsInventoryLite
 
             // HTTPS is applied before HTTP, not just validated before HTTP -
             // deliberately, and in this order for a reason: the dashboard's
-            // General Settings form always submits port/enableHttp/useHttps/
+            // Server Settings form always submits port/enableHttp/useHttps/
             // httpsPort together in one request, so "turn HTTPS on and turn
             // HTTP off" is a single call with both blocks active. ApplySlotState
             // never touches a slot's old listener when a new bind fails, so
@@ -6181,6 +7644,24 @@ namespace WindowsInventoryLite
                 // of reverting to whatever was baked in at install time.
                 updates["ListenPrefix"] = "http://+:" + options.Port + "/";
                 updates["EnableHttp"] = options.EnableHttp ? "true" : "false";
+            }
+
+            if (payload.ContainsKey("hstsEnabled"))
+            {
+                options.HstsEnabled = Convert.ToBoolean(payload["hstsEnabled"]);
+                updates["HstsEnabled"] = options.HstsEnabled ? "true" : "false";
+            }
+
+            if (payload.ContainsKey("hstsMaxAgeHours"))
+            {
+                int hstsMaxAgeHours;
+                if (!Int32.TryParse(Convert.ToString(payload["hstsMaxAgeHours"]), out hstsMaxAgeHours) || hstsMaxAgeHours < 1 || hstsMaxAgeHours > 8760)
+                {
+                    SendText(stream, "{\"error\":\"hstsMaxAgeHours must be between 1 and 8760\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.HstsMaxAgeHours = hstsMaxAgeHours;
+                updates["HstsMaxAgeHours"] = hstsMaxAgeHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
             }
 
             if (payload.ContainsKey("adSyncEnabled") || payload.ContainsKey("adDescriptionSyncEnabled") || payload.ContainsKey("adSyncMode") || payload.ContainsKey("adSyncIntervalHours")
@@ -6259,6 +7740,114 @@ namespace WindowsInventoryLite
                 updates["PreferredLinuxSubnet"] = options.PreferredLinuxSubnet;
             }
 
+            if (payload.ContainsKey("linuxDefaultIntervalHours"))
+            {
+                int linuxDefaultIntervalHours;
+                if (!Int32.TryParse(Convert.ToString(payload["linuxDefaultIntervalHours"]), out linuxDefaultIntervalHours) || linuxDefaultIntervalHours < 1 || linuxDefaultIntervalHours > 24)
+                {
+                    SendText(stream, "{\"error\":\"linuxDefaultIntervalHours must be between 1 and 24\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.LinuxDefaultIntervalHours = linuxDefaultIntervalHours;
+                updates["LinuxDefaultIntervalHours"] = linuxDefaultIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("linuxDefaultStatusIntervalMinutes"))
+            {
+                int linuxDefaultStatusIntervalMinutes;
+                if (!Int32.TryParse(Convert.ToString(payload["linuxDefaultStatusIntervalMinutes"]), out linuxDefaultStatusIntervalMinutes) || linuxDefaultStatusIntervalMinutes < 1 || linuxDefaultStatusIntervalMinutes > 1440)
+                {
+                    SendText(stream, "{\"error\":\"linuxDefaultStatusIntervalMinutes must be between 1 and 1440\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.LinuxDefaultStatusIntervalMinutes = linuxDefaultStatusIntervalMinutes;
+                updates["LinuxDefaultStatusIntervalMinutes"] = linuxDefaultStatusIntervalMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("linuxDefaultInstallPath"))
+            {
+                string linuxDefaultInstallPath = Convert.ToString(payload["linuxDefaultInstallPath"]).Trim();
+                if (String.IsNullOrEmpty(linuxDefaultInstallPath) || !linuxDefaultInstallPath.StartsWith("/"))
+                {
+                    SendText(stream, "{\"error\":\"linuxDefaultInstallPath must be a non-empty absolute Linux path (starting with /)\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.LinuxDefaultInstallPath = linuxDefaultInstallPath;
+                updates["LinuxDefaultInstallPath"] = linuxDefaultInstallPath;
+            }
+
+            if (payload.ContainsKey("loginLockoutThreshold"))
+            {
+                int loginLockoutThreshold;
+                if (!Int32.TryParse(Convert.ToString(payload["loginLockoutThreshold"]), out loginLockoutThreshold) || loginLockoutThreshold < 0 || loginLockoutThreshold > 1000)
+                {
+                    SendText(stream, "{\"error\":\"loginLockoutThreshold must be between 0 and 1000 (0 disables lockout)\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.LoginLockoutThreshold = loginLockoutThreshold;
+                updates["LoginLockoutThreshold"] = loginLockoutThreshold.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("loginLockoutWindowMinutes"))
+            {
+                int loginLockoutWindowMinutes;
+                if (!Int32.TryParse(Convert.ToString(payload["loginLockoutWindowMinutes"]), out loginLockoutWindowMinutes) || loginLockoutWindowMinutes < 1 || loginLockoutWindowMinutes > 1440)
+                {
+                    SendText(stream, "{\"error\":\"loginLockoutWindowMinutes must be between 1 and 1440\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.LoginLockoutWindowMinutes = loginLockoutWindowMinutes;
+                updates["LoginLockoutWindowMinutes"] = loginLockoutWindowMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("loginLockoutDurationMinutes"))
+            {
+                int loginLockoutDurationMinutes;
+                if (!Int32.TryParse(Convert.ToString(payload["loginLockoutDurationMinutes"]), out loginLockoutDurationMinutes) || loginLockoutDurationMinutes < 1 || loginLockoutDurationMinutes > 1440)
+                {
+                    SendText(stream, "{\"error\":\"loginLockoutDurationMinutes must be between 1 and 1440\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.LoginLockoutDurationMinutes = loginLockoutDurationMinutes;
+                updates["LoginLockoutDurationMinutes"] = loginLockoutDurationMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("sessionLifetimeHours"))
+            {
+                int sessionLifetimeHours;
+                if (!Int32.TryParse(Convert.ToString(payload["sessionLifetimeHours"]), out sessionLifetimeHours) || sessionLifetimeHours < 1 || sessionLifetimeHours > 720)
+                {
+                    SendText(stream, "{\"error\":\"sessionLifetimeHours must be between 1 and 720\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.SessionLifetimeHours = sessionLifetimeHours;
+                updates["SessionLifetimeHours"] = sessionLifetimeHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("ingestionRejectionLogRetentionDays"))
+            {
+                int ingestionRejectionLogRetentionDays;
+                if (!Int32.TryParse(Convert.ToString(payload["ingestionRejectionLogRetentionDays"]), out ingestionRejectionLogRetentionDays) || ingestionRejectionLogRetentionDays < 1 || ingestionRejectionLogRetentionDays > 3650)
+                {
+                    SendText(stream, "{\"error\":\"ingestionRejectionLogRetentionDays must be between 1 and 3650\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.IngestionRejectionLogRetentionDays = ingestionRejectionLogRetentionDays;
+                updates["IngestionRejectionLogRetentionDays"] = ingestionRejectionLogRetentionDays.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("ingestionRejectionLogMaxEntries"))
+            {
+                int ingestionRejectionLogMaxEntries;
+                if (!Int32.TryParse(Convert.ToString(payload["ingestionRejectionLogMaxEntries"]), out ingestionRejectionLogMaxEntries) || ingestionRejectionLogMaxEntries < 100 || ingestionRejectionLogMaxEntries > 100000)
+                {
+                    SendText(stream, "{\"error\":\"ingestionRejectionLogMaxEntries must be between 100 and 100000\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.IngestionRejectionLogMaxEntries = ingestionRejectionLogMaxEntries;
+                updates["IngestionRejectionLogMaxEntries"] = ingestionRejectionLogMaxEntries.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
             if (payload.ContainsKey("debugLogEnabled"))
             {
                 // The log path is deliberately not settable from here - it
@@ -6307,6 +7896,77 @@ namespace WindowsInventoryLite
             result["configured"] = !String.IsNullOrEmpty(options.Token);
             result["token"] = options.Token;
             result["requireIngestionToken"] = options.RequireIngestionToken;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void SendIngestionRejectionLog(Stream stream)
+        {
+            List<IngestionRejectionEntry> snapshot;
+            lock (ingestionRejectionLogLock)
+            {
+                snapshot = new List<IngestionRejectionEntry>(ingestionRejectionLog);
+            }
+
+            // Source IP -> client display name, built once for this
+            // request rather than once per log entry - see spec's
+            // SendIngestionRejectionLog description for why.
+            Dictionary<string, string> clientsByIp = new Dictionary<string, string>();
+            Dictionary<string, DateTime> lastCollectedByIp = new Dictionary<string, DateTime>();
+            foreach (Dictionary<string, object> client in LoadClientReports())
+            {
+                string ip = GetStringValue(client, "lastIngestSourceIp");
+                if (String.IsNullOrEmpty(ip))
+                {
+                    continue;
+                }
+                string name = GetStringValue(client, "computerName");
+                if (String.IsNullOrEmpty(name))
+                {
+                    name = GetStringValue(client, "hostname");
+                }
+                DateTime lastCollectedUtc = ParseUtcDate(GetStringValue(client, "collectedAt"), ParseUtcDate(GetStringValue(client, "sourceUpdatedAt"), DateTime.MinValue));
+                clientsByIp[ip] = name;
+                lastCollectedByIp[ip] = lastCollectedUtc;
+            }
+
+            ArrayList entries = new ArrayList();
+            for (int i = snapshot.Count - 1; i >= 0; i--)
+            {
+                IngestionRejectionEntry entry = snapshot[i];
+                Dictionary<string, object> row = new Dictionary<string, object>();
+                row["timestampUtc"] = entry.TimestampUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                row["sourceIp"] = entry.SourceIp;
+                row["endpoint"] = entry.Endpoint;
+                row["reason"] = entry.Reason;
+
+                string hostname = null;
+                IPAddress parsedSourceIp;
+                if (IPAddress.TryParse(entry.SourceIp, out parsedSourceIp))
+                {
+                    lock (reverseDnsCacheLock)
+                    {
+                        reverseDnsCache.TryGetValue(parsedSourceIp, out hostname);
+                    }
+                }
+                row["hostname"] = hostname;
+
+                string matchedClient = null;
+                DateTime lastCollectedUtc;
+                if (clientsByIp.TryGetValue(entry.SourceIp, out matchedClient) && lastCollectedByIp.TryGetValue(entry.SourceIp, out lastCollectedUtc) && entry.TimestampUtc > lastCollectedUtc)
+                {
+                    row["matchedClient"] = matchedClient;
+                }
+                else
+                {
+                    row["matchedClient"] = null;
+                }
+
+                entries.Add(row);
+            }
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["entries"] = entries;
             JavaScriptSerializer serializer = CreateJsonSerializer();
             SendJson(stream, serializer.Serialize(result));
         }
@@ -6373,12 +8033,21 @@ namespace WindowsInventoryLite
 
         private void SendAdminPasswordStatus(Stream stream)
         {
+            SendAdminPasswordStatus(stream, null);
+        }
+
+        // extraHeaders lets ChangeAdminPassword attach the caller's fresh
+        // session cookie to this same response after a password rotation
+        // (see ChangeAdminPassword) - the plain 1-arg overload above covers
+        // every other caller, which has nothing extra to send.
+        private void SendAdminPasswordStatus(Stream stream, string extraHeaders)
+        {
             bool configured = !String.IsNullOrEmpty(options.WebUsername) && !String.IsNullOrEmpty(options.WebPassword);
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["configured"] = configured;
             result["username"] = configured ? options.WebUsername : null;
             JavaScriptSerializer serializer = CreateJsonSerializer();
-            SendJson(stream, serializer.Serialize(result));
+            SendText(stream, serializer.Serialize(result), "application/json; charset=utf-8", 200, null, extraHeaders);
         }
 
         private void SendClientUpdateCredentialsStatus(Stream stream)
@@ -6599,11 +8268,32 @@ namespace WindowsInventoryLite
             }
             catch { }
 
+            // A rotated password must not leave any existing session
+            // valid - before this fix, a session cookie survived a
+            // password rotation indefinitely (subject only to its own
+            // expiry), unlike Basic Auth, which has always locked out
+            // stale credentials on their very next request. Clear every
+            // session, then mint a fresh one for the admin performing the
+            // rotation so they are not logged out mid-action themselves.
+            lock (sessionLock)
+            {
+                sessionStore.Clear();
+            }
+            string freshSessionToken = GenerateRandomToken();
+            SessionRecord freshSession = new SessionRecord();
+            freshSession.ExpiresUtc = ComputeSessionExpiry(DateTime.UtcNow, options.SessionLifetimeHours);
+            lock (sessionLock)
+            {
+                sessionStore[freshSessionToken] = freshSession;
+            }
+            string freshSessionCookie = BuildSessionCookieHeader(stream, freshSessionToken);
+
             // Echoes the fresh GET-shaped status, matching every other
             // config POST on this API (settings, certificate, client-update
             // credentials/schedule) - a bare {"status":"ok"} was the one
-            // outlier.
-            SendAdminPasswordStatus(stream);
+            // outlier. Also carries the caller's fresh session cookie from
+            // above.
+            SendAdminPasswordStatus(stream, freshSessionCookie);
         }
 
         // AdPassword, WebPassword, and Token are encrypted at rest (DPAPI,
@@ -7196,6 +8886,35 @@ namespace WindowsInventoryLite
             }
         }
 
+        // The Deploy > Actions unification (Phase 3, 2026-08-21) merged the
+        // separate Windows/Linux install job classes and storage into one -
+        // _linux-client-install-jobs (under LinuxDataPath) stopped being
+        // created, read, or pruned at that point, since job history now
+        // lives entirely under DataPath's _client-install-jobs instead.
+        // Any files left over from before that merge would otherwise
+        // persist forever, invisible in the dashboard and never subject to
+        // their own configured retention window. One-shot: the directory
+        // won't exist on a fresh install, and once deleted here it stays
+        // gone since nothing recreates it. Never blocks startup - logged
+        // and swallowed on failure, same as MigrateLegacyLinuxSshKey above.
+        private void PurgeOrphanedLinuxInstallJobDirectory()
+        {
+            try
+            {
+                string directory = Path.Combine(options.LinuxDataPath, "_linux-client-install-jobs");
+                if (!Directory.Exists(directory))
+                {
+                    return;
+                }
+                Directory.Delete(directory, true);
+                DebugLogger.Log(options, "Startup", "Removed the orphaned _linux-client-install-jobs directory (superseded by the unified install job storage under DataPath since v0.42.0).");
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Startup", "Could not remove the orphaned _linux-client-install-jobs directory: " + DebugLogger.SanitizeForLog(ex.Message));
+            }
+        }
+
         // Deliberately does NOT swallow read/parse errors into an empty list:
         // concurrent Linux install jobs (each dispatched via
         // ThreadPool.QueueUserWorkItem) and the manual trust-host-key
@@ -7658,7 +9377,7 @@ namespace WindowsInventoryLite
         }
 
         // "Use global AD settings" on Client actions: substitutes the AD sync
-        // credentials already configured in Settings > General > Active
+        // credentials already configured in Settings > Windows > Active
         // Directory (the same ones AdLookupService uses) for this push -
         // either the server's own service identity (blank username/password,
         // the same as leaving both fields empty already means to
@@ -7678,7 +9397,7 @@ namespace WindowsInventoryLite
             }
             if (!adSyncEnabled)
             {
-                errorMessage = "Check \"Configure AD User\" in Settings > General > Active Directory first.";
+                errorMessage = "Check \"Configure AD User\" in Settings > Windows > Active Directory first.";
                 return false;
             }
             if (adUseServiceIdentity)
@@ -7689,7 +9408,7 @@ namespace WindowsInventoryLite
             }
             if (String.IsNullOrEmpty(adUsername) || String.IsNullOrEmpty(adPassword))
             {
-                errorMessage = "No AD username/password is saved in Settings > General > Active Directory.";
+                errorMessage = "No AD username/password is saved in Settings > Windows > Active Directory.";
                 return false;
             }
             username = adUsername;
@@ -7780,7 +9499,7 @@ namespace WindowsInventoryLite
         // The three values that get interpolated into the remote shell command
         // built for a Linux push. Grouped into one helper because they must be
         // validated at the point they are USED, not at the top of the request
-        // handler: StartLinuxClientAction overwrites serverUrl/installPath from
+        // handler: StartClientAction overwrites serverUrl/installPath from
         // linux-package-settings.json AFTER its original validation ran, and
         // StartScheduledLinuxClientUpdatePush reads all three straight from that
         // file and never validated them at all.
@@ -8283,9 +10002,9 @@ namespace WindowsInventoryLite
             ms.Write(BitConverter.GetBytes(value), 0, 4);
         }
 
-        private static void SendBytes(Stream stream, byte[] data, string contentType, string filename)
+        private void SendBytes(Stream stream, byte[] data, string contentType, string filename)
         {
-            string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Disposition: attachment; filename=\"" + filename + "\"\r\nContent-Length: " + data.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nConnection: close\r\n\r\n";
+            string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Disposition: attachment; filename=\"" + filename + "\"\r\nContent-Length: " + data.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + BuildHstsHeaderOrEmpty(stream) + "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
             stream.Write(data, 0, data.Length);
@@ -8325,6 +10044,18 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ExpandInstallTarget expands a full IPv4 range", TestExpandInstallTargetFullRange);
             allPassed &= SelfTestCheck(output, "ExpandInstallTarget passes through a single hostname", TestExpandInstallTargetHostname);
             allPassed &= SelfTestCheck(output, "ExpandInstallTargets de-duplicates and splits on separators", TestExpandInstallTargetsDedup);
+            allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries WinRM first when both ports are open", TestDecideAutoDetectProtocolsBothOpen);
+            allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries only WinRM when just that port is open", TestDecideAutoDetectProtocolsWinRmOnly);
+            allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries only SSH when just that port is open", TestDecideAutoDetectProtocolsSshOnly);
+            allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols returns no attempts when neither port is open", TestDecideAutoDetectProtocolsNeitherOpen);
+            allPassed &= SelfTestCheck(output, "BuildAttemptResult produces the expected dictionary shape", TestBuildAttemptResultShape);
+            allPassed &= SelfTestCheck(output, "ResolveAttemptOrder tries only WinRM for force-windows regardless of probe results", TestResolveAttemptOrderForceWindowsIgnoresProbes);
+            allPassed &= SelfTestCheck(output, "ResolveAttemptOrder tries only SSH for force-linux regardless of probe results", TestResolveAttemptOrderForceLinuxIgnoresProbes);
+            allPassed &= SelfTestCheck(output, "ResolveAttemptOrder delegates to DecideAutoDetectProtocols for auto mode", TestResolveAttemptOrderAutoDelegatesToDecideAutoDetectProtocols);
+            allPassed &= SelfTestCheck(output, "ResolveAttemptOrder fails closed (empty array) on an unrecognized mode", TestResolveAttemptOrderFailsClosedOnUnrecognizedMode);
+            allPassed &= SelfTestCheck(output, "ToLinuxServerUrl swaps the Windows ingestion suffix for the Linux one", TestToLinuxServerUrlSwapsWindowsSuffix);
+            allPassed &= SelfTestCheck(output, "ToLinuxServerUrl leaves an already Linux-shaped URL unchanged", TestToLinuxServerUrlLeavesAlreadyLinuxShapedUrlUnchanged);
+            allPassed &= SelfTestCheck(output, "ToLinuxServerUrl leaves blank and unrecognized-shape values unchanged", TestToLinuxServerUrlLeavesBlankAndCustomValuesUnchanged);
             allPassed &= SelfTestCheck(output, "ParseAdComputerImportOUs splits on newlines only, not commas", TestParseAdComputerImportOUsSplitsOnNewlinesOnly);
             allPassed &= SelfTestCheck(output, "ParseAdComputerImportOUs treats blank input as an empty OU list", TestParseAdComputerImportOUsEmptyMeansWholeDomain);
             allPassed &= SelfTestCheck(output, "BuildZip produces a structurally valid archive", TestBuildZipStructure);
@@ -8336,6 +10067,20 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "SanitizeFileName leaves a normal computer name untouched", TestSanitizeFileNameNormalName);
             allPassed &= SelfTestCheck(output, "FixedTimeEquals matches identical strings and rejects everything else", TestFixedTimeEquals);
             allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized restricts to loopback while Basic Auth is unconfigured", TestIsWebRequestAuthorizedRestrictsToLoopbackWhenUnconfigured);
+            allPassed &= SelfTestCheck(output, "GetCookieValue parses a named cookie out of a raw Cookie header", TestGetCookieValueParsesNamedCookie);
+            allPassed &= SelfTestCheck(output, "IsSessionValid checks expiry with a strict (not inclusive) comparison", TestIsSessionValidChecksExpiry);
+            allPassed &= SelfTestCheck(output, "ComputeSessionExpiry adds the given number of hours to now", TestComputeSessionExpiryAddsHours);
+            allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized accepts a valid session cookie with no Authorization header", TestIsWebRequestAuthorizedAcceptsValidSessionCookieWithNoAuthorizationHeader);
+            allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized rejects an expired session cookie and falls through to Basic Auth", TestIsWebRequestAuthorizedRejectsExpiredSessionCookie);
+            allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized refreshes a session's expiry on successful use (sliding expiration)", TestIsWebRequestAuthorizedRefreshesSessionExpiryOnUse);
+            allPassed &= SelfTestCheck(output, "SendLoginResult creates a session and sets a cookie on correct credentials", TestSendLoginResultCreatesSessionOnCorrectCredentials);
+            allPassed &= SelfTestCheck(output, "SendLoginResult rejects wrong credentials without creating a session", TestSendLoginResultRejectsWrongCredentials);
+            allPassed &= SelfTestCheck(output, "SendLoginResult refuses to create a session while Basic Auth is unconfigured", TestSendLoginResultRejectsWhenBasicAuthUnconfigured);
+            allPassed &= SelfTestCheck(output, "SendLogoutResult removes the session from the server-side store", TestSendLogoutResultRemovesSessionFromStore);
+            allPassed &= SelfTestCheck(output, "SendLogoutResult is idempotent when no session cookie is present", TestSendLogoutResultIsIdempotentWithNoSessionCookie);
+            allPassed &= SelfTestCheck(output, "ConfigureServerSettings validates sessionLifetimeHours is between 1 and 720", TestConfigureServerSettingsValidatesSessionLifetimeHours);
+            allPassed &= SelfTestCheck(output, "SendUnauthorized serves the embedded login page for a browser navigation to /, with no WWW-Authenticate", TestSendUnauthorizedServesLoginPageForBrowserNavigation);
+            allPassed &= SelfTestCheck(output, "SendUnauthorized keeps the plain-text 401 body for API routes", TestSendUnauthorizedServesPlainTextForApiRequests);
             allPassed &= SelfTestCheck(output, "TryParsePortFromPrefix extracts the port from a ListenPrefix URL", TestTryParsePortFromPrefix);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper escapes RFC 4515 special characters", TestLdapFilterEscapeSpecialChars);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper leaves a normal computer name untouched", TestLdapFilterEscapeNormalName);
@@ -8398,6 +10143,39 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected requires a matching token when enforcement is on", TestIsIngestionTokenRejectedRequiresMatchWhenEnforced);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected always accepts when enforcement is off, regardless of the supplied token", TestIsIngestionTokenRejectedAlwaysAcceptsWhenNotEnforced);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected fails closed when enforcement is on but no token is configured", TestIsIngestionTokenRejectedFailsClosedWhenEnforcedButNoTokenConfigured);
+            allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected ignores non-state-changing methods", TestIsCrossSiteRequestRejectedIgnoresNonStateChangingMethods);
+            allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected allows a state-changing request with neither Origin nor Referer", TestIsCrossSiteRequestRejectedAllowsMissingOriginAndReferer);
+            allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected requires a Host header", TestIsCrossSiteRequestRejectedRequiresHostHeader);
+            allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected accepts an Origin matching the Host header", TestIsCrossSiteRequestRejectedAcceptsMatchingOrigin);
+            allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected rejects an Origin that doesn't match the Host header", TestIsCrossSiteRequestRejectedRejectsMismatchedOrigin);
+            allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected treats the literal Origin 'null' as a mismatch, not as absent", TestIsCrossSiteRequestRejectedTreatsNullOriginAsMismatch);
+            allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected falls back to Referer when Origin is absent", TestIsCrossSiteRequestRejectedFallsBackToRefererWhenOriginAbsent);
+            allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected fails closed on a malformed Origin header", TestIsCrossSiteRequestRejectedFailsClosedOnMalformedOrigin);
+            allPassed &= SelfTestCheck(output, "RequiresJsonContentType is true only for a state-changing request with a non-empty body", TestRequiresJsonContentTypeOnlyForStateChangingRequestsWithABody);
+            allPassed &= SelfTestCheck(output, "HasJsonContentType accepts application/json with or without a charset suffix, case-insensitively", TestHasJsonContentTypeAcceptsJsonWithOrWithoutCharsetSuffix);
+            allPassed &= SelfTestCheck(output, "HasJsonContentType rejects form-encoded, text/plain, and missing Content-Type", TestHasJsonContentTypeRejectsFormAndTextPlainAndMissing);
+            allPassed &= SelfTestCheck(output, "EvaluateLockoutState reports not-locked-out with no record or an elapsed lockout", TestEvaluateLockoutStateNotLockedOutCases);
+            allPassed &= SelfTestCheck(output, "EvaluateLockoutState reports locked-out with the correct Retry-After seconds while active", TestEvaluateLockoutStateLockedOutReportsRetryAfter);
+            allPassed &= SelfTestCheck(output, "RecordAttemptOutcome locks out once the threshold is reached within the window", TestRecordAttemptOutcomeLocksOutAtThreshold);
+            allPassed &= SelfTestCheck(output, "RecordAttemptOutcome does not extend an active lockout on further failed attempts", TestRecordAttemptOutcomeDoesNotExtendActiveLockout);
+            allPassed &= SelfTestCheck(output, "RecordAttemptOutcome clears the record entirely on a successful attempt", TestRecordAttemptOutcomeClearsRecordOnSuccess);
+            allPassed &= SelfTestCheck(output, "RecordAttemptOutcome resets the count once the counting window has elapsed", TestRecordAttemptOutcomeResetsAfterWindowElapses);
+            allPassed &= SelfTestCheck(output, "RecordAttemptOutcome never locks out when the threshold is 0 (disabled)", TestRecordAttemptOutcomeNeverLocksOutWhenThresholdIsZero);
+            allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized's recorded failures and IsBasicAuthLockedOut's read are wired together and scoped per-IP", TestIsWebRequestAuthorizedLocksOutAfterRepeatedFailures);
+            allPassed &= SelfTestCheck(output, "BuildHstsHeaderOrEmpty only adds Strict-Transport-Security when enabled AND the stream is TLS", TestBuildHstsHeaderOrEmpty);
+            allPassed &= SelfTestCheck(output, "ResolveIngestionRejectionReason distinguishes a missing token from a wrong one", TestResolveIngestionRejectionReason);
+            allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries keeps everything under both caps", TestPruneIngestionRejectionEntriesUnderBothCaps);
+            allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries trims oldest-first over the count cap", TestPruneIngestionRejectionEntriesOverCountCap);
+            allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries removes entries older than the retention-days cap", TestPruneIngestionRejectionEntriesOverAgeCap);
+            allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries applies whichever cap is more restrictive", TestPruneIngestionRejectionEntriesBothCapsEngaged);
+            allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries skips the max-entries trim (rather than discarding everything) when maxEntries is 0 or negative", TestPruneIngestionRejectionEntriesZeroMaxEntriesKeepsWithinAge);
+            allPassed &= SelfTestCheck(output, "RecordIngestionRejection batches its prune+rewrite instead of rewriting the whole log on every call once at cap", TestRecordIngestionRejectionBatchesRewrites);
+            allPassed &= SelfTestCheck(output, "RecordIngestionRejection still enforces day-based retention continuously even when the count-based batch gate never trips", TestRecordIngestionRejectionEnforcesRetentionContinuously);
+            allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue returns null when no log entry matches the client's IP", TestComputeClientTokenIssueNoMatch);
+            allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue ignores a matching-IP rejection older than the client's last report", TestComputeClientTokenIssueStaleRejectionIgnored);
+            allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue flags a matching-IP rejection newer than the client's last report", TestComputeClientTokenIssueRecentRejectionFlagged);
+            allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue picks the newest matching-IP entry's reason when several match", TestComputeClientTokenIssueNewestWins);
+            allPassed &= SelfTestCheck(output, "LoadClientReports sets tokenIssue on a client whose IP has a newer rejected attempt", TestLoadClientReportsSetsTokenIssueFromRejectionLog);
             allPassed &= SelfTestCheck(output, "ResolveEffectiveToken falls back to the live server token when the request supplies none", TestResolveEffectiveTokenFallsBackToLiveTokenWhenBlank);
             allPassed &= SelfTestCheck(output, "RequiresIngestionTokenRiskAcknowledgment only fires on an actual on-to-off transition without prior acknowledgment", TestRequiresIngestionTokenRiskAcknowledgmentOnlyWhenTurningEnforcementOff);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
@@ -8439,6 +10217,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "GenerateSystemdUnitLines omits EnvironmentFile entirely when there is no token", TestGenerateSystemdUnitLinesOmitsEnvironmentFileWhenNoToken);
             allPassed &= SelfTestCheck(output, "GenerateSystemdStatusUnitLines passes the token via EnvironmentFile, never on the command line", TestGenerateSystemdStatusUnitLinesUsesEnvironmentFileNotCommandLineToken);
             allPassed &= SelfTestCheck(output, "GenerateSystemdEnvFileLines matches the PowerShell New-SystemdEnvFile format", TestGenerateSystemdEnvFileLinesMatchesPowerShellFormat);
+            allPassed &= SelfTestCheck(output, "Full session lifecycle: a cookie value produced by SendLoginResult authorizes IsWebRequestAuthorized, then SendLogoutResult makes that same cookie stop authorizing it", TestSessionLifecycleEndToEndLoginAuthorizeLogout);
             return allPassed;
         }
 
@@ -8533,6 +10312,136 @@ namespace WindowsInventoryLite
             ArrayList result = ExpandInstallTargets("host1, host1;host2\nhost1");
             string[] expected = new string[] { "host1", "host2" };
             return CompareStringLists(expected, result);
+        }
+
+        private static string TestDecideAutoDetectProtocolsBothOpen()
+        {
+            string[] result = DecideAutoDetectProtocols(true, true);
+            if (result.Length != 2 || result[0] != "winrm" || result[1] != "ssh")
+            {
+                return "expected [\"winrm\", \"ssh\"] (WinRM first) but got [" + String.Join(", ", result) + "]";
+            }
+            return null;
+        }
+
+        private static string TestDecideAutoDetectProtocolsWinRmOnly()
+        {
+            string[] result = DecideAutoDetectProtocols(true, false);
+            if (result.Length != 1 || result[0] != "winrm")
+            {
+                return "expected [\"winrm\"] but got [" + String.Join(", ", result) + "]";
+            }
+            return null;
+        }
+
+        private static string TestDecideAutoDetectProtocolsSshOnly()
+        {
+            string[] result = DecideAutoDetectProtocols(false, true);
+            if (result.Length != 1 || result[0] != "ssh")
+            {
+                return "expected [\"ssh\"] but got [" + String.Join(", ", result) + "]";
+            }
+            return null;
+        }
+
+        private static string TestDecideAutoDetectProtocolsNeitherOpen()
+        {
+            string[] result = DecideAutoDetectProtocols(false, false);
+            if (result.Length != 0)
+            {
+                return "expected an empty array (no attempt worth making) but got [" + String.Join(", ", result) + "]";
+            }
+            return null;
+        }
+
+        private static string TestBuildAttemptResultShape()
+        {
+            Dictionary<string, object> attempt = BuildAttemptResult("winrm", "failed", "Client install command failed.", "some output", "some error");
+            if (GetStringValue(attempt, "protocol") != "winrm") return "expected protocol 'winrm', got '" + GetStringValue(attempt, "protocol") + "'";
+            if (GetStringValue(attempt, "status") != "failed") return "expected status 'failed', got '" + GetStringValue(attempt, "status") + "'";
+            if (GetStringValue(attempt, "message") != "Client install command failed.") return "expected the given message, got '" + GetStringValue(attempt, "message") + "'";
+            if (GetStringValue(attempt, "output") != "some output") return "expected the given output, got '" + GetStringValue(attempt, "output") + "'";
+            if (GetStringValue(attempt, "error") != "some error") return "expected the given error, got '" + GetStringValue(attempt, "error") + "'";
+            return null;
+        }
+
+        private static string TestResolveAttemptOrderForceWindowsIgnoresProbes()
+        {
+            string[] result = ResolveAttemptOrder("force-windows", false, false);
+            if (result.Length != 1 || result[0] != "winrm")
+            {
+                return "expected [\"winrm\"] regardless of probe results but got [" + String.Join(", ", result) + "]";
+            }
+            return null;
+        }
+
+        private static string TestResolveAttemptOrderForceLinuxIgnoresProbes()
+        {
+            string[] result = ResolveAttemptOrder("force-linux", false, false);
+            if (result.Length != 1 || result[0] != "ssh")
+            {
+                return "expected [\"ssh\"] regardless of probe results but got [" + String.Join(", ", result) + "]";
+            }
+            return null;
+        }
+
+        private static string TestResolveAttemptOrderAutoDelegatesToDecideAutoDetectProtocols()
+        {
+            string[] bothOpen = ResolveAttemptOrder("auto", true, true);
+            if (bothOpen.Length != 2 || bothOpen[0] != "winrm" || bothOpen[1] != "ssh")
+            {
+                return "expected auto mode with both ports open to match DecideAutoDetectProtocols(true, true) but got [" + String.Join(", ", bothOpen) + "]";
+            }
+            string[] neitherOpen = ResolveAttemptOrder("auto", false, false);
+            if (neitherOpen.Length != 0)
+            {
+                return "expected auto mode with neither port open to return an empty array but got [" + String.Join(", ", neitherOpen) + "]";
+            }
+            return null;
+        }
+
+        private static string TestResolveAttemptOrderFailsClosedOnUnrecognizedMode()
+        {
+            string[] result = ResolveAttemptOrder("not-a-real-mode", true, true);
+            if (result.Length != 0)
+            {
+                return "expected an unrecognized mode to return an empty array (no attempt worth making) even with both ports open, but got [" + String.Join(", ", result) + "]";
+            }
+            return null;
+        }
+
+        private static string TestToLinuxServerUrlSwapsWindowsSuffix()
+        {
+            string result = ToLinuxServerUrl("https://server:8443/api/v1/inventory");
+            if (result != "https://server:8443/api/v1/linux/inventory")
+            {
+                return "expected the /api/v1/inventory suffix swapped for /api/v1/linux/inventory but got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestToLinuxServerUrlLeavesAlreadyLinuxShapedUrlUnchanged()
+        {
+            string result = ToLinuxServerUrl("https://server:8443/api/v1/linux/inventory");
+            if (result != "https://server:8443/api/v1/linux/inventory")
+            {
+                return "expected an already Linux-shaped URL to pass through unchanged but got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestToLinuxServerUrlLeavesBlankAndCustomValuesUnchanged()
+        {
+            if (ToLinuxServerUrl("") != "")
+            {
+                return "expected a blank serverUrl to stay blank";
+            }
+            string custom = "https://migration-target.example.com/some/other/path";
+            if (ToLinuxServerUrl(custom) != custom)
+            {
+                return "expected a URL with no recognized Windows suffix to pass through unchanged, got '" + ToLinuxServerUrl(custom) + "'";
+            }
+            return null;
         }
 
         private static string TestParseAdComputerImportOUsSplitsOnNewlinesOnly()
@@ -8758,6 +10667,1067 @@ namespace WindowsInventoryLite
             if (!server.IsWebRequestAuthorized(remoteWithAuth))
             {
                 return "expected a non-loopback request with correct Basic Auth credentials to be authorized once Basic Auth is configured";
+            }
+
+            return null;
+        }
+
+        private static string TestGetCookieValueParsesNamedCookie()
+        {
+            if (GetCookieValue(null, "wil_session") != null)
+            {
+                return "expected a null cookie header to yield null";
+            }
+            if (GetCookieValue("", "wil_session") != null)
+            {
+                return "expected an empty cookie header to yield null";
+            }
+            if (GetCookieValue("foo=bar", "wil_session") != null)
+            {
+                return "expected a cookie header with no matching name to yield null";
+            }
+            if (GetCookieValue("wil_session=abc123", "wil_session") != "abc123")
+            {
+                return "expected a single-cookie header to parse its value";
+            }
+            if (GetCookieValue("foo=bar; wil_session=abc123; baz=qux", "wil_session") != "abc123")
+            {
+                return "expected the named cookie to parse correctly among several";
+            }
+            return null;
+        }
+
+        private static string TestIsSessionValidChecksExpiry()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+
+            if (IsSessionValid(null, now))
+            {
+                return "expected a null record to be invalid";
+            }
+
+            SessionRecord expired = new SessionRecord();
+            expired.ExpiresUtc = now.AddSeconds(-1);
+            if (IsSessionValid(expired, now))
+            {
+                return "expected a record that expired one second ago to be invalid";
+            }
+
+            SessionRecord exactlyAtExpiry = new SessionRecord();
+            exactlyAtExpiry.ExpiresUtc = now;
+            if (IsSessionValid(exactlyAtExpiry, now))
+            {
+                return "expected a record expiring exactly now to be invalid (strict comparison)";
+            }
+
+            SessionRecord stillValid = new SessionRecord();
+            stillValid.ExpiresUtc = now.AddMinutes(1);
+            if (!IsSessionValid(stillValid, now))
+            {
+                return "expected a record expiring one minute from now to be valid";
+            }
+
+            return null;
+        }
+
+        private static string TestComputeSessionExpiryAddsHours()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            DateTime expiry = ComputeSessionExpiry(now, 12);
+            if (expiry != now.AddHours(12))
+            {
+                return "expected ComputeSessionExpiry to add exactly the given number of hours to now";
+            }
+            return null;
+        }
+
+        private static string TestIsWebRequestAuthorizedAcceptsValidSessionCookieWithNoAuthorizationHeader()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.SessionLifetimeHours = 12;
+            InventoryServer server = new InventoryServer(options);
+
+            string token = "test-session-token";
+            SessionRecord record = new SessionRecord();
+            record.ExpiresUtc = DateTime.UtcNow.AddHours(1);
+            server.sessionStore[token] = record;
+
+            RequestContext request = new RequestContext();
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["cookie"] = "wil_session=" + token;
+            request.RemoteAddress = IPAddress.Parse("192.168.1.50");
+
+            if (!server.IsWebRequestAuthorized(request))
+            {
+                return "expected a valid session cookie to authorize the request with no Authorization header present";
+            }
+
+            return null;
+        }
+
+        private static string TestIsWebRequestAuthorizedRejectsExpiredSessionCookie()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            InventoryServer server = new InventoryServer(options);
+
+            string token = "expired-session-token";
+            SessionRecord record = new SessionRecord();
+            record.ExpiresUtc = DateTime.UtcNow.AddMinutes(-1);
+            server.sessionStore[token] = record;
+
+            RequestContext request = new RequestContext();
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["cookie"] = "wil_session=" + token;
+            request.RemoteAddress = IPAddress.Parse("192.168.1.50");
+
+            if (server.IsWebRequestAuthorized(request))
+            {
+                return "expected an expired session cookie to fall through to (and fail) Basic Auth, not authorize the request";
+            }
+
+            return null;
+        }
+
+        private static string TestIsWebRequestAuthorizedRefreshesSessionExpiryOnUse()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.SessionLifetimeHours = 12;
+            InventoryServer server = new InventoryServer(options);
+
+            string token = "sliding-session-token";
+            SessionRecord record = new SessionRecord();
+            DateTime almostExpired = DateTime.UtcNow.AddMinutes(1);
+            record.ExpiresUtc = almostExpired;
+            server.sessionStore[token] = record;
+
+            RequestContext request = new RequestContext();
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["cookie"] = "wil_session=" + token;
+            request.RemoteAddress = IPAddress.Parse("192.168.1.50");
+
+            server.IsWebRequestAuthorized(request);
+
+            SessionRecord refreshed;
+            server.sessionStore.TryGetValue(token, out refreshed);
+            if (refreshed == null || refreshed.ExpiresUtc <= almostExpired.AddHours(1))
+            {
+                return "expected a successful session-cookie authorization to push ExpiresUtc forward by SessionLifetimeHours (sliding expiration)";
+            }
+
+            return null;
+        }
+
+        private static string TestSendLoginResultCreatesSessionOnCorrectCredentials()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.SessionLifetimeHours = 12;
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Path = "/api/v1/server/login";
+            request.Headers = new Dictionary<string, string>();
+            request.RemoteAddress = IPAddress.Parse("192.168.1.50");
+            request.Body = "{\"username\":\"admin\",\"password\":\"secret\"}";
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.SendLoginResult(stream, request);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("200 OK"))
+                {
+                    return "expected correct credentials to return 200 OK, got: " + response;
+                }
+                if (!response.Contains("Set-Cookie: wil_session="))
+                {
+                    return "expected a successful login to set the wil_session cookie";
+                }
+                if (!response.Contains("HttpOnly") || !response.Contains("SameSite=Strict"))
+                {
+                    return "expected the session cookie to carry HttpOnly and SameSite=Strict";
+                }
+            }
+
+            if (server.sessionStore.Count != 1)
+            {
+                return "expected exactly one session to be created in the store";
+            }
+
+            return null;
+        }
+
+        private static string TestSendLoginResultRejectsWrongCredentials()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Path = "/api/v1/server/login";
+            request.Headers = new Dictionary<string, string>();
+            request.RemoteAddress = IPAddress.Parse("192.168.1.50");
+            request.Body = "{\"username\":\"admin\",\"password\":\"wrong\"}";
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.SendLoginResult(stream, request);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("401"))
+                {
+                    return "expected wrong credentials to return 401, got: " + response;
+                }
+                if (response.Contains("Set-Cookie: wil_session="))
+                {
+                    return "expected wrong credentials to never set a session cookie";
+                }
+            }
+
+            if (server.sessionStore.Count != 0)
+            {
+                return "expected no session to be created on failed login";
+            }
+
+            return null;
+        }
+
+        private static string TestSendLoginResultRejectsWhenBasicAuthUnconfigured()
+        {
+            ServerOptions options = new ServerOptions();
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Path = "/api/v1/server/login";
+            request.Headers = new Dictionary<string, string>();
+            request.RemoteAddress = IPAddress.Parse("192.168.1.50");
+            request.Body = "{\"username\":\"\",\"password\":\"\"}";
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.SendLoginResult(stream, request);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("401"))
+                {
+                    return "expected login to be rejected outright when WebUsername/WebPassword are both unconfigured (loopback-only mode), got: " + response;
+                }
+            }
+
+            if (server.sessionStore.Count != 0)
+            {
+                return "expected no session to ever be created while Basic Auth is unconfigured - a session cookie would bypass the loopback-only IP restriction";
+            }
+
+            return null;
+        }
+
+        private static string TestSendLogoutResultRemovesSessionFromStore()
+        {
+            ServerOptions options = new ServerOptions();
+            InventoryServer server = new InventoryServer(options);
+
+            string token = "logout-test-token";
+            SessionRecord record = new SessionRecord();
+            record.ExpiresUtc = DateTime.UtcNow.AddHours(1);
+            server.sessionStore[token] = record;
+
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Path = "/api/v1/server/logout";
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["cookie"] = "wil_session=" + token;
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.SendLogoutResult(stream, request);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("200 OK"))
+                {
+                    return "expected logout to return 200 OK, got: " + response;
+                }
+                if (!response.Contains("Max-Age=0"))
+                {
+                    return "expected logout to send a cookie-clearing Set-Cookie with Max-Age=0";
+                }
+            }
+
+            if (server.sessionStore.ContainsKey(token))
+            {
+                return "expected the session to be removed from the store, not just cleared client-side";
+            }
+
+            return null;
+        }
+
+        private static string TestSendLogoutResultIsIdempotentWithNoSessionCookie()
+        {
+            ServerOptions options = new ServerOptions();
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Path = "/api/v1/server/logout";
+            request.Headers = new Dictionary<string, string>();
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.SendLogoutResult(stream, request);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("200 OK"))
+                {
+                    return "expected logout with no session cookie present to still succeed (idempotent no-op), got: " + response;
+                }
+            }
+
+            return null;
+        }
+
+        private static string TestConfigureServerSettingsValidatesSessionLifetimeHours()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.EnableHttp = true;
+            // SendServerSettings (called at the end of a successful
+            // ConfigureServerSettings) resolves DebugLogger.ResolvePath(options)
+            // for display, which falls back to Path.Combine(options.DataPath, ...)
+            // when DebugLogPath is unset - DataPath must be non-null for that
+            // call to succeed, even though this test never enables debug
+            // logging or touches disk.
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-sessionlifetimehours-" + Guid.NewGuid().ToString("N"));
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext outOfRange = new RequestContext();
+            outOfRange.Method = "POST";
+            outOfRange.Path = "/api/v1/server/settings";
+            outOfRange.Headers = new Dictionary<string, string>();
+            outOfRange.Body = "{\"sessionLifetimeHours\":0}";
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.ConfigureServerSettings(stream, outOfRange);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("400"))
+                {
+                    return "expected sessionLifetimeHours of 0 to be rejected as out of range (1-720), got: " + response;
+                }
+            }
+
+            RequestContext valid = new RequestContext();
+            valid.Method = "POST";
+            valid.Path = "/api/v1/server/settings";
+            valid.Headers = new Dictionary<string, string>();
+            valid.Body = "{\"sessionLifetimeHours\":24}";
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.ConfigureServerSettings(stream, valid);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("200 OK"))
+                {
+                    return "expected sessionLifetimeHours of 24 to be accepted, got: " + response;
+                }
+            }
+
+            if (options.SessionLifetimeHours != 24)
+            {
+                return "expected options.SessionLifetimeHours to be updated to 24";
+            }
+
+            return null;
+        }
+
+        private static string TestSendUnauthorizedServesLoginPageForBrowserNavigation()
+        {
+            ServerOptions options = new ServerOptions();
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext request = new RequestContext();
+            request.Method = "GET";
+            request.Path = "/";
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.SendUnauthorized(stream, request);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("401 Unauthorized"))
+                {
+                    return "expected a 401 status even when serving the login page";
+                }
+                if (response.Contains("WWW-Authenticate"))
+                {
+                    return "expected WWW-Authenticate to never be sent, on any 401 response";
+                }
+                if (!response.Contains("id=\"loginForm\""))
+                {
+                    return "expected a browser navigation to / to receive the embedded login page";
+                }
+                if (!response.Contains("Content-Type: text/html"))
+                {
+                    return "expected the login page response to declare text/html";
+                }
+            }
+
+            return null;
+        }
+
+        private static string TestSendUnauthorizedServesPlainTextForApiRequests()
+        {
+            ServerOptions options = new ServerOptions();
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext request = new RequestContext();
+            request.Method = "GET";
+            request.Path = "/api/v1/clients";
+            request.Headers = new Dictionary<string, string>();
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.SendUnauthorized(stream, request);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (response.Contains("id=\"loginForm\""))
+                {
+                    return "expected an API route's 401 to stay plain text, not the HTML login page";
+                }
+                if (!response.Contains("Content-Type: text/plain"))
+                {
+                    return "expected the API route's 401 to keep declaring text/plain";
+                }
+            }
+
+            return null;
+        }
+
+        private static string TestEvaluateLockoutStateNotLockedOutCases()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            int retryAfterSeconds;
+
+            if (EvaluateLockoutState(null, now, out retryAfterSeconds))
+            {
+                return "expected no record at all to mean not locked out";
+            }
+
+            LoginLockoutRecord noLockoutSet = new LoginLockoutRecord();
+            noLockoutSet.FailedCount = 2;
+            noLockoutSet.WindowStartUtc = now;
+            noLockoutSet.LockedUntilUtc = null;
+            if (EvaluateLockoutState(noLockoutSet, now, out retryAfterSeconds))
+            {
+                return "expected a record with no LockedUntilUtc to mean not locked out";
+            }
+
+            LoginLockoutRecord expiredLockout = new LoginLockoutRecord();
+            expiredLockout.FailedCount = 5;
+            expiredLockout.WindowStartUtc = now.AddMinutes(-30);
+            expiredLockout.LockedUntilUtc = now.AddSeconds(-1);
+            if (EvaluateLockoutState(expiredLockout, now, out retryAfterSeconds))
+            {
+                return "expected a lockout whose LockedUntilUtc is in the past to mean not locked out";
+            }
+            return null;
+        }
+
+        private static string TestEvaluateLockoutStateLockedOutReportsRetryAfter()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            LoginLockoutRecord record = new LoginLockoutRecord();
+            record.FailedCount = 10;
+            record.WindowStartUtc = now.AddMinutes(-5);
+            record.LockedUntilUtc = now.AddSeconds(42);
+
+            int retryAfterSeconds;
+            if (!EvaluateLockoutState(record, now, out retryAfterSeconds))
+            {
+                return "expected a future LockedUntilUtc to mean locked out";
+            }
+            if (retryAfterSeconds != 42)
+            {
+                return "expected Retry-After to be 42 seconds, got " + retryAfterSeconds;
+            }
+            return null;
+        }
+
+        private static string TestRecordAttemptOutcomeLocksOutAtThreshold()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            TimeSpan window = TimeSpan.FromMinutes(15);
+            TimeSpan lockoutDuration = TimeSpan.FromMinutes(15);
+
+            LoginLockoutRecord record = null;
+            record = RecordAttemptOutcome(record, false, now, 3, window, lockoutDuration);
+            if (record.LockedUntilUtc.HasValue)
+            {
+                return "expected no lockout after 1 of 3 failures";
+            }
+            record = RecordAttemptOutcome(record, false, now, 3, window, lockoutDuration);
+            if (record.LockedUntilUtc.HasValue)
+            {
+                return "expected no lockout after 2 of 3 failures";
+            }
+            record = RecordAttemptOutcome(record, false, now, 3, window, lockoutDuration);
+            if (!record.LockedUntilUtc.HasValue)
+            {
+                return "expected a lockout to trigger on the 3rd failure against a threshold of 3";
+            }
+            if (record.LockedUntilUtc.Value != now.Add(lockoutDuration))
+            {
+                return "expected LockedUntilUtc to be exactly now + lockoutDuration";
+            }
+            return null;
+        }
+
+        private static string TestRecordAttemptOutcomeDoesNotExtendActiveLockout()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            TimeSpan window = TimeSpan.FromMinutes(15);
+            TimeSpan lockoutDuration = TimeSpan.FromMinutes(15);
+
+            LoginLockoutRecord record = null;
+            for (int i = 0; i < 3; i++)
+            {
+                record = RecordAttemptOutcome(record, false, now, 3, window, lockoutDuration);
+            }
+            DateTime firstLockedUntil = record.LockedUntilUtc.Value;
+
+            // A further failure 5 minutes later, still inside the active
+            // lockout, must not push the unlock time forward - a sustained
+            // flood must not keep the IP locked out indefinitely.
+            DateTime later = now.AddMinutes(5);
+            record = RecordAttemptOutcome(record, false, later, 3, window, lockoutDuration);
+            if (record.LockedUntilUtc.Value != firstLockedUntil)
+            {
+                return "expected further failures during an active lockout to not extend it";
+            }
+            return null;
+        }
+
+        private static string TestRecordAttemptOutcomeClearsRecordOnSuccess()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            TimeSpan window = TimeSpan.FromMinutes(15);
+            TimeSpan lockoutDuration = TimeSpan.FromMinutes(15);
+
+            LoginLockoutRecord record = null;
+            record = RecordAttemptOutcome(record, false, now, 10, window, lockoutDuration);
+            record = RecordAttemptOutcome(record, false, now, 10, window, lockoutDuration);
+            if (record == null || record.FailedCount != 2)
+            {
+                return "expected 2 recorded failures before the successful attempt";
+            }
+
+            LoginLockoutRecord afterSuccess = RecordAttemptOutcome(record, true, now, 10, window, lockoutDuration);
+            if (afterSuccess != null)
+            {
+                return "expected a successful attempt to clear the record entirely";
+            }
+            return null;
+        }
+
+        private static string TestRecordAttemptOutcomeResetsAfterWindowElapses()
+        {
+            DateTime windowStart = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            TimeSpan window = TimeSpan.FromMinutes(15);
+            TimeSpan lockoutDuration = TimeSpan.FromMinutes(15);
+
+            LoginLockoutRecord record = null;
+            record = RecordAttemptOutcome(record, false, windowStart, 10, window, lockoutDuration);
+            record = RecordAttemptOutcome(record, false, windowStart, 10, window, lockoutDuration);
+            if (record.FailedCount != 2)
+            {
+                return "expected 2 failures within the same window";
+            }
+
+            DateTime afterWindow = windowStart.AddMinutes(20);
+            record = RecordAttemptOutcome(record, false, afterWindow, 10, window, lockoutDuration);
+            if (record.FailedCount != 1)
+            {
+                return "expected the count to reset to 1 for a failure after the counting window elapsed, got " + record.FailedCount;
+            }
+            if (record.WindowStartUtc != afterWindow)
+            {
+                return "expected a fresh window to start at the new failure's timestamp";
+            }
+            return null;
+        }
+
+        private static string TestRecordAttemptOutcomeNeverLocksOutWhenThresholdIsZero()
+        {
+            DateTime now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            TimeSpan window = TimeSpan.FromMinutes(15);
+            TimeSpan lockoutDuration = TimeSpan.FromMinutes(15);
+
+            LoginLockoutRecord record = null;
+            for (int i = 0; i < 20; i++)
+            {
+                record = RecordAttemptOutcome(record, false, now, 0, window, lockoutDuration);
+                if (record.LockedUntilUtc.HasValue)
+                {
+                    return "expected threshold 0 to never trigger a lockout, failed after attempt " + (i + 1);
+                }
+            }
+            return null;
+        }
+
+        private static string TestIsWebRequestAuthorizedLocksOutAfterRepeatedFailures()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.LoginLockoutThreshold = 3;
+            options.LoginLockoutWindowMinutes = 15;
+            options.LoginLockoutDurationMinutes = 15;
+            InventoryServer server = new InventoryServer(options);
+            IPAddress attackerIp = IPAddress.Parse("203.0.113.7");
+
+            for (int i = 0; i < 3; i++)
+            {
+                RequestContext wrongAuth = new RequestContext();
+                wrongAuth.Headers = new Dictionary<string, string>();
+                wrongAuth.Headers["authorization"] = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("admin:wrong-password"));
+                wrongAuth.RemoteAddress = attackerIp;
+                if (server.IsWebRequestAuthorized(wrongAuth))
+                {
+                    return "expected a wrong-password attempt to be rejected";
+                }
+            }
+
+            RequestContext lockoutCheck = new RequestContext();
+            lockoutCheck.Headers = new Dictionary<string, string>();
+            lockoutCheck.RemoteAddress = attackerIp;
+            int retryAfterSeconds;
+            if (!server.IsBasicAuthLockedOut(lockoutCheck, out retryAfterSeconds))
+            {
+                return "expected the IP to be locked out after 3 failed attempts against a threshold of 3";
+            }
+            if (retryAfterSeconds <= 0)
+            {
+                return "expected a positive Retry-After value while locked out, got " + retryAfterSeconds;
+            }
+
+            RequestContext otherIp = new RequestContext();
+            otherIp.Headers = new Dictionary<string, string>();
+            otherIp.RemoteAddress = IPAddress.Parse("198.51.100.9");
+            int otherRetryAfterSeconds;
+            if (server.IsBasicAuthLockedOut(otherIp, out otherRetryAfterSeconds))
+            {
+                return "expected a different IP to be unaffected by another IP's lockout";
+            }
+
+            return null;
+        }
+
+        private static string TestResolveIngestionRejectionReason()
+        {
+            if (ResolveIngestionRejectionReason(null) != "missing")
+            {
+                return "expected a null token to resolve to 'missing'";
+            }
+            if (ResolveIngestionRejectionReason("") != "missing")
+            {
+                return "expected an empty token to resolve to 'missing'";
+            }
+            if (ResolveIngestionRejectionReason("wrong-token") != "mismatched")
+            {
+                return "expected a non-empty (wrong) token to resolve to 'mismatched'";
+            }
+            return null;
+        }
+
+        // Test-only construction helper - avoids object-initializer syntax
+        // (`new Foo { A = 1 }`), which compiles fine under this project's
+        // C# 3.0/.NET 3.5 toolchain but isn't used anywhere else in this
+        // file; every other type here is built field-by-field instead.
+        private static IngestionRejectionEntry MakeIngestionRejectionEntry(DateTime timestampUtc, string sourceIp, string endpoint, string reason)
+        {
+            IngestionRejectionEntry entry = new IngestionRejectionEntry();
+            entry.TimestampUtc = timestampUtc;
+            entry.SourceIp = sourceIp;
+            entry.Endpoint = endpoint;
+            entry.Reason = reason;
+            return entry;
+        }
+
+        private static string TestPruneIngestionRejectionEntriesUnderBothCaps()
+        {
+            DateTime now = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> entries = new List<IngestionRejectionEntry>();
+            entries.Add(MakeIngestionRejectionEntry(now.AddDays(-1), "10.0.0.1", "windows-inventory", "missing"));
+            entries.Add(MakeIngestionRejectionEntry(now, "10.0.0.2", "linux-inventory", "mismatched"));
+
+            List<IngestionRejectionEntry> result = PruneIngestionRejectionEntries(entries, now, 30, 5000);
+            if (result.Count != 2)
+            {
+                return "expected both entries to survive when under both caps, got " + result.Count;
+            }
+            return null;
+        }
+
+        private static string TestPruneIngestionRejectionEntriesOverCountCap()
+        {
+            DateTime now = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> entries = new List<IngestionRejectionEntry>();
+            for (int i = 0; i < 5; i++)
+            {
+                entries.Add(MakeIngestionRejectionEntry(now.AddMinutes(i), "10.0.0." + i, "windows-inventory", "missing"));
+            }
+
+            List<IngestionRejectionEntry> result = PruneIngestionRejectionEntries(entries, now, 30, 3);
+            if (result.Count != 3)
+            {
+                return "expected exactly 3 entries to survive a max-entries cap of 3, got " + result.Count;
+            }
+            if (result[0].SourceIp != "10.0.0.2" || result[2].SourceIp != "10.0.0.4")
+            {
+                return "expected the oldest entries to be trimmed first (newest 3 survive, oldest-to-newest order preserved)";
+            }
+            return null;
+        }
+
+        private static string TestPruneIngestionRejectionEntriesOverAgeCap()
+        {
+            DateTime now = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> entries = new List<IngestionRejectionEntry>();
+            entries.Add(MakeIngestionRejectionEntry(now.AddDays(-40), "10.0.0.1", "windows-inventory", "missing"));
+            entries.Add(MakeIngestionRejectionEntry(now.AddDays(-1), "10.0.0.2", "linux-inventory", "mismatched"));
+
+            List<IngestionRejectionEntry> result = PruneIngestionRejectionEntries(entries, now, 30, 5000);
+            if (result.Count != 1 || result[0].SourceIp != "10.0.0.2")
+            {
+                return "expected the 40-day-old entry to be pruned by a 30-day retention cap regardless of the count cap";
+            }
+            return null;
+        }
+
+        private static string TestPruneIngestionRejectionEntriesBothCapsEngaged()
+        {
+            DateTime now = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> entries = new List<IngestionRejectionEntry>();
+            entries.Add(MakeIngestionRejectionEntry(now.AddDays(-40), "10.0.0.1", "windows-inventory", "missing"));
+            for (int i = 0; i < 5; i++)
+            {
+                entries.Add(MakeIngestionRejectionEntry(now.AddMinutes(i), "10.0.0." + (i + 2), "windows-inventory", "missing"));
+            }
+
+            // Age cap removes the 1 old entry (6 -> 5); count cap of 2 then
+            // trims further (5 -> 2) - the more restrictive result (2) wins.
+            List<IngestionRejectionEntry> result = PruneIngestionRejectionEntries(entries, now, 30, 2);
+            if (result.Count != 2)
+            {
+                return "expected the more restrictive cap (count=2) to win when both caps would otherwise remove different entries, got " + result.Count;
+            }
+            return null;
+        }
+
+        private static string TestPruneIngestionRejectionEntriesZeroMaxEntriesKeepsWithinAge()
+        {
+            // A bare `new ServerOptions()` defaults both
+            // IngestionRejectionLogRetentionDays and
+            // IngestionRejectionLogMaxEntries to 0 - before the maxEntries
+            // <= 0 guard, that silently discarded every entry that had
+            // otherwise survived the age check, a footgun that already cost
+            // one implementer debugging time this session (see Minor H in
+            // the final review).
+            DateTime now = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> entries = new List<IngestionRejectionEntry>();
+            entries.Add(MakeIngestionRejectionEntry(now.AddMinutes(-5), "10.0.0.1", "windows-inventory", "missing"));
+            entries.Add(MakeIngestionRejectionEntry(now, "10.0.0.2", "linux-inventory", "mismatched"));
+
+            List<IngestionRejectionEntry> resultWithZero = PruneIngestionRejectionEntries(entries, now, 3650, 0);
+            if (resultWithZero.Count != 2)
+            {
+                return "expected maxEntries=0 to skip the max-entries trim entirely (both entries survive the age check), got " + resultWithZero.Count;
+            }
+
+            List<IngestionRejectionEntry> resultWithNegative = PruneIngestionRejectionEntries(entries, now, 3650, -1);
+            if (resultWithNegative.Count != 2)
+            {
+                return "expected a negative maxEntries to also skip the max-entries trim entirely, got " + resultWithNegative.Count;
+            }
+            return null;
+        }
+
+        private static string TestRecordIngestionRejectionBatchesRewrites()
+        {
+            ServerOptions options = new ServerOptions();
+            // Deliberately small maxEntries so the slack floor (50, see
+            // RecordIngestionRejection's amortization in Important Fix 1)
+            // dominates and this test can exercise a full batch without
+            // needing thousands of calls. retentionDays is generous so only
+            // the max-entries trim - not age - is what fires here.
+            options.IngestionRejectionLogRetentionDays = 30;
+            options.IngestionRejectionLogMaxEntries = 10;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-rejectionbatch-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo recordMethod = typeof(InventoryServer)
+                    .GetMethod("RecordIngestionRejection", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                string logPath = Path.Combine(options.DataPath, "_logs", "ingestion-rejections.jsonl");
+                IPAddress sourceAddress = IPAddress.Parse("203.0.113.50");
+
+                int slack = Math.Max(options.IngestionRejectionLogMaxEntries / 10, 50);
+                int justOverMaxEntries = options.IngestionRejectionLogMaxEntries + 1;
+                int totalToRecord = options.IngestionRejectionLogMaxEntries + slack + 1;
+
+                for (int i = 0; i < justOverMaxEntries; i++)
+                {
+                    RequestContext request = new RequestContext();
+                    request.Headers = new Dictionary<string, string>();
+                    request.RemoteAddress = sourceAddress;
+                    recordMethod.Invoke(server, new object[] { request, "windows-inventory", "mismatched" });
+                }
+
+                int linesBeforeSlackThreshold = File.ReadAllLines(logPath).Length;
+                if (linesBeforeSlackThreshold != justOverMaxEntries)
+                {
+                    return "expected " + justOverMaxEntries + " lines on disk before the slack threshold is crossed (no rewrite yet), got " + linesBeforeSlackThreshold;
+                }
+
+                for (int i = justOverMaxEntries; i < totalToRecord; i++)
+                {
+                    RequestContext request = new RequestContext();
+                    request.Headers = new Dictionary<string, string>();
+                    request.RemoteAddress = sourceAddress;
+                    recordMethod.Invoke(server, new object[] { request, "windows-inventory", "mismatched" });
+                }
+
+                int linesAfterBatch = File.ReadAllLines(logPath).Length;
+                if (linesAfterBatch != options.IngestionRejectionLogMaxEntries)
+                {
+                    return "expected exactly " + options.IngestionRejectionLogMaxEntries + " lines on disk once the batch prune+rewrite fires, got " + linesAfterBatch;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        // Covers the re-review's Important Fix 1: batching the prune+rewrite
+        // behind the count-based slack gate (see
+        // TestRecordIngestionRejectionBatchesRewrites above) must not disable
+        // day-based retention for a fleet whose rejection volume never
+        // approaches maxEntries+slack. maxEntries here is set high enough
+        // that the count-based gate can never trip within this test, so only
+        // the added oldest-entry-age check can be what prunes the backdated
+        // entry.
+        private static string TestRecordIngestionRejectionEnforcesRetentionContinuously()
+        {
+            ServerOptions options = new ServerOptions();
+            options.IngestionRejectionLogRetentionDays = 30;
+            options.IngestionRejectionLogMaxEntries = 5000;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-rejectionretention-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                // RecordIngestionRejection always stamps DateTime.UtcNow, so
+                // an aged entry can't be produced through the public call
+                // path - seed one directly into the in-memory log instead,
+                // as index 0 (oldest), matching the chronological ordering
+                // RecordIngestionRejection itself always appends in.
+                System.Reflection.FieldInfo logField = typeof(InventoryServer)
+                    .GetField("ingestionRejectionLog", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                List<IngestionRejectionEntry> log = (List<IngestionRejectionEntry>)logField.GetValue(server);
+                log.Add(MakeIngestionRejectionEntry(DateTime.UtcNow.AddDays(-31), "203.0.113.90", "windows-inventory", "missing"));
+
+                System.Reflection.MethodInfo recordMethod = typeof(InventoryServer)
+                    .GetMethod("RecordIngestionRejection", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                string logPath = Path.Combine(options.DataPath, "_logs", "ingestion-rejections.jsonl");
+
+                // A handful of in-range rejections - nowhere near
+                // maxEntries+slack (5000 + 500), so the count-based half of
+                // the gate can never be what fires here.
+                for (int i = 0; i < 3; i++)
+                {
+                    RequestContext request = new RequestContext();
+                    request.Headers = new Dictionary<string, string>();
+                    request.RemoteAddress = IPAddress.Parse("203.0.113." + (91 + i));
+                    recordMethod.Invoke(server, new object[] { request, "windows-inventory", "mismatched" });
+                }
+
+                if (log.Count != 3)
+                {
+                    return "expected the backdated entry to be pruned by age on the first subsequent call (count-based gate never trips here), got " + log.Count + " entries in memory";
+                }
+                foreach (IngestionRejectionEntry entry in log)
+                {
+                    if (entry.SourceIp == "203.0.113.90")
+                    {
+                        return "expected the 31-day-old backdated entry to be pruned by the 30-day retention cap, but it is still present";
+                    }
+                }
+
+                int linesOnDisk = File.ReadAllLines(logPath).Length;
+                if (linesOnDisk != log.Count)
+                {
+                    return "expected the log file to be rewritten to match the pruned in-memory log (" + log.Count + " lines), got " + linesOnDisk;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestComputeClientTokenIssueNoMatch()
+        {
+            DateTime lastCollected = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> log = new List<IngestionRejectionEntry>();
+            log.Add(MakeIngestionRejectionEntry(lastCollected.AddMinutes(5), "10.0.0.99", "windows-inventory", "missing"));
+
+            string result = ComputeClientTokenIssue("10.0.0.1", lastCollected, log);
+            if (result != null)
+            {
+                return "expected no indicator when no log entry matches the client's source IP, got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestComputeClientTokenIssueStaleRejectionIgnored()
+        {
+            DateTime lastCollected = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> log = new List<IngestionRejectionEntry>();
+            log.Add(MakeIngestionRejectionEntry(lastCollected.AddMinutes(-5), "10.0.0.1", "windows-inventory", "mismatched"));
+
+            string result = ComputeClientTokenIssue("10.0.0.1", lastCollected, log);
+            if (result != null)
+            {
+                return "expected a matching-IP rejection OLDER than the client's last report to be ignored (client has since reported fine), got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestComputeClientTokenIssueRecentRejectionFlagged()
+        {
+            DateTime lastCollected = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> log = new List<IngestionRejectionEntry>();
+            log.Add(MakeIngestionRejectionEntry(lastCollected.AddMinutes(5), "10.0.0.1", "windows-inventory", "mismatched"));
+
+            string result = ComputeClientTokenIssue("10.0.0.1", lastCollected, log);
+            if (result != "mismatched")
+            {
+                return "expected 'mismatched' for a matching-IP rejection newer than the client's last report, got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestComputeClientTokenIssueNewestWins()
+        {
+            DateTime lastCollected = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+            List<IngestionRejectionEntry> log = new List<IngestionRejectionEntry>();
+            log.Add(MakeIngestionRejectionEntry(lastCollected.AddMinutes(5), "10.0.0.1", "windows-inventory", "missing"));
+            log.Add(MakeIngestionRejectionEntry(lastCollected.AddMinutes(10), "10.0.0.1", "windows-inventory", "mismatched"));
+
+            string result = ComputeClientTokenIssue("10.0.0.1", lastCollected, log);
+            if (result != "mismatched")
+            {
+                return "expected the NEWEST matching-IP entry's reason to win ('mismatched'), got '" + result + "'";
+            }
+            return null;
+        }
+
+        private static string TestLoadClientReportsSetsTokenIssueFromRejectionLog()
+        {
+            ServerOptions options = new ServerOptions();
+            // A bare `new ServerOptions()` does NOT run Parse()'s defaults -
+            // these two default to 0 otherwise, which would make
+            // RecordIngestionRejection's own prune pass (retentionDays=0)
+            // immediately discard the very entry this test just recorded,
+            // before LoadClientReports ever sees it.
+            options.IngestionRejectionLogRetentionDays = 30;
+            options.IngestionRejectionLogMaxEntries = 5000;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-tokenissue-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                DateTime collectedAt = new DateTime(2026, 1, 10, 12, 0, 0, DateTimeKind.Utc);
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                report["computerName"] = "PC-TEST";
+                report["collectedAt"] = collectedAt.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                report["lastIngestSourceIp"] = "203.0.113.9";
+                File.WriteAllText(Path.Combine(options.DataPath, "PC-TEST.json"), serializer.Serialize(report), Encoding.UTF8);
+
+                RequestContext rejectedRequest = new RequestContext();
+                rejectedRequest.Headers = new Dictionary<string, string>();
+                rejectedRequest.RemoteAddress = IPAddress.Parse("203.0.113.9");
+                typeof(InventoryServer)
+                    .GetMethod("RecordIngestionRejection", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                    .Invoke(server, new object[] { rejectedRequest, "windows-inventory", "mismatched" });
+
+                ArrayList clients = server.LoadClientReports();
+
+                if (clients.Count != 1)
+                {
+                    return "expected exactly one loaded client report, got " + clients.Count;
+                }
+                Dictionary<string, object> loaded = (Dictionary<string, object>)clients[0];
+                if (!loaded.ContainsKey("tokenIssue") || Convert.ToString(loaded["tokenIssue"]) != "mismatched")
+                {
+                    return "expected LoadClientReports to set tokenIssue='mismatched' after a matching rejected attempt newer than collectedAt";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestBuildHstsHeaderOrEmpty()
+        {
+            ServerOptions options = new ServerOptions();
+            options.HstsEnabled = true;
+            options.HstsMaxAgeHours = 2;
+            InventoryServer server = new InventoryServer(options);
+
+            using (MemoryStream plainStream = new MemoryStream())
+            {
+                string plainResult = server.BuildHstsHeaderOrEmpty(plainStream);
+                if (plainResult != "")
+                {
+                    return "expected no HSTS header for a plain (non-TLS) stream, got '" + plainResult + "'";
+                }
+            }
+
+            using (MemoryStream inner = new MemoryStream())
+            using (SslStream sslStream = new SslStream(inner))
+            {
+                string tlsResult = server.BuildHstsHeaderOrEmpty(sslStream);
+                if (tlsResult != "\r\nStrict-Transport-Security: max-age=7200")
+                {
+                    return "expected an HSTS header with max-age=7200 (2 hours) for a TLS stream, got '" + tlsResult + "'";
+                }
+            }
+
+            options.HstsEnabled = false;
+            using (MemoryStream inner2 = new MemoryStream())
+            using (SslStream sslStream2 = new SslStream(inner2))
+            {
+                string disabledResult = server.BuildHstsHeaderOrEmpty(sslStream2);
+                if (disabledResult != "")
+                {
+                    return "expected no HSTS header when HstsEnabled is false, even over a TLS stream, got '" + disabledResult + "'";
+                }
             }
 
             return null;
@@ -9731,6 +12701,208 @@ namespace WindowsInventoryLite
             return null;
         }
 
+        private static string TestIsCrossSiteRequestRejectedIgnoresNonStateChangingMethods()
+        {
+            RequestContext get = new RequestContext();
+            get.Method = "GET";
+            get.Headers = new Dictionary<string, string>();
+            get.Headers["host"] = "server.example.com";
+            get.Headers["origin"] = "https://evil.example.com";
+            if (InventoryServer.IsCrossSiteRequestRejected(get))
+            {
+                return "expected a GET request to never be rejected, regardless of a mismatched Origin";
+            }
+            return null;
+        }
+
+        private static string TestIsCrossSiteRequestRejectedAllowsMissingOriginAndReferer()
+        {
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["host"] = "server.example.com";
+            if (InventoryServer.IsCrossSiteRequestRejected(request))
+            {
+                return "expected a POST with neither Origin nor Referer to be allowed - this is the documented curl/automation case, not a browser being tricked";
+            }
+            return null;
+        }
+
+        private static string TestIsCrossSiteRequestRejectedRequiresHostHeader()
+        {
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Headers = new Dictionary<string, string>();
+            if (!InventoryServer.IsCrossSiteRequestRejected(request))
+            {
+                return "expected a state-changing request with no Host header at all to be rejected (malformed HTTP/1.1, fail closed)";
+            }
+            return null;
+        }
+
+        private static string TestIsCrossSiteRequestRejectedAcceptsMatchingOrigin()
+        {
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["host"] = "server.example.com:8443";
+            request.Headers["origin"] = "https://server.example.com:8443";
+            if (InventoryServer.IsCrossSiteRequestRejected(request))
+            {
+                return "expected an Origin whose host:port matches the Host header to be accepted";
+            }
+            return null;
+        }
+
+        private static string TestIsCrossSiteRequestRejectedRejectsMismatchedOrigin()
+        {
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["host"] = "server.example.com";
+            request.Headers["origin"] = "https://evil.example.com";
+            if (!InventoryServer.IsCrossSiteRequestRejected(request))
+            {
+                return "expected an Origin that doesn't match the Host header to be rejected";
+            }
+            return null;
+        }
+
+        private static string TestIsCrossSiteRequestRejectedTreatsNullOriginAsMismatch()
+        {
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["host"] = "server.example.com";
+            request.Headers["origin"] = "null";
+            if (!InventoryServer.IsCrossSiteRequestRejected(request))
+            {
+                return "expected the literal Origin value 'null' (an opaque origin) to be treated as a mismatch, not as absent";
+            }
+            return null;
+        }
+
+        private static string TestIsCrossSiteRequestRejectedFallsBackToRefererWhenOriginAbsent()
+        {
+            RequestContext accepted = new RequestContext();
+            accepted.Method = "POST";
+            accepted.Headers = new Dictionary<string, string>();
+            accepted.Headers["host"] = "server.example.com";
+            accepted.Headers["referer"] = "https://server.example.com/deploy-actions";
+            if (InventoryServer.IsCrossSiteRequestRejected(accepted))
+            {
+                return "expected a matching Referer to be accepted when Origin is absent";
+            }
+
+            RequestContext rejected = new RequestContext();
+            rejected.Method = "POST";
+            rejected.Headers = new Dictionary<string, string>();
+            rejected.Headers["host"] = "server.example.com";
+            rejected.Headers["referer"] = "https://evil.example.com/attack.html";
+            if (!InventoryServer.IsCrossSiteRequestRejected(rejected))
+            {
+                return "expected a mismatched Referer to be rejected when Origin is absent";
+            }
+            return null;
+        }
+
+        private static string TestIsCrossSiteRequestRejectedFailsClosedOnMalformedOrigin()
+        {
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["host"] = "server.example.com";
+            request.Headers["origin"] = "not a valid uri at all";
+            if (!InventoryServer.IsCrossSiteRequestRejected(request))
+            {
+                return "expected a malformed Origin header to be rejected (fail closed), not silently accepted";
+            }
+            return null;
+        }
+
+        private static string TestRequiresJsonContentTypeOnlyForStateChangingRequestsWithABody()
+        {
+            RequestContext getWithBody = new RequestContext();
+            getWithBody.Method = "GET";
+            getWithBody.Body = "{}";
+            if (InventoryServer.RequiresJsonContentType(getWithBody))
+            {
+                return "expected a GET request to never require a JSON Content-Type, even with a body";
+            }
+
+            RequestContext postNoBody = new RequestContext();
+            postNoBody.Method = "POST";
+            postNoBody.Body = "";
+            if (InventoryServer.RequiresJsonContentType(postNoBody))
+            {
+                return "expected a POST with an empty body (e.g. a DELETE-shaped no-body route) to not require a Content-Type";
+            }
+
+            RequestContext postWithBody = new RequestContext();
+            postWithBody.Method = "POST";
+            postWithBody.Body = "{\"targets\":\"PC-001\"}";
+            if (!InventoryServer.RequiresJsonContentType(postWithBody))
+            {
+                return "expected a POST with a non-empty body to require a JSON Content-Type";
+            }
+            return null;
+        }
+
+        private static string TestHasJsonContentTypeAcceptsJsonWithOrWithoutCharsetSuffix()
+        {
+            RequestContext plain = new RequestContext();
+            plain.Headers = new Dictionary<string, string>();
+            plain.Headers["content-type"] = "application/json";
+            if (!InventoryServer.HasJsonContentType(plain))
+            {
+                return "expected bare 'application/json' to be accepted";
+            }
+
+            RequestContext withCharset = new RequestContext();
+            withCharset.Headers = new Dictionary<string, string>();
+            withCharset.Headers["content-type"] = "application/json; charset=utf-8";
+            if (!InventoryServer.HasJsonContentType(withCharset))
+            {
+                return "expected 'application/json; charset=utf-8' to be accepted";
+            }
+
+            RequestContext mixedCase = new RequestContext();
+            mixedCase.Headers = new Dictionary<string, string>();
+            mixedCase.Headers["content-type"] = "Application/JSON";
+            if (!InventoryServer.HasJsonContentType(mixedCase))
+            {
+                return "expected a differently-cased media type to still be accepted";
+            }
+            return null;
+        }
+
+        private static string TestHasJsonContentTypeRejectsFormAndTextPlainAndMissing()
+        {
+            RequestContext formEncoded = new RequestContext();
+            formEncoded.Headers = new Dictionary<string, string>();
+            formEncoded.Headers["content-type"] = "application/x-www-form-urlencoded";
+            if (InventoryServer.HasJsonContentType(formEncoded))
+            {
+                return "expected 'application/x-www-form-urlencoded' to be rejected";
+            }
+
+            RequestContext textPlain = new RequestContext();
+            textPlain.Headers = new Dictionary<string, string>();
+            textPlain.Headers["content-type"] = "text/plain";
+            if (InventoryServer.HasJsonContentType(textPlain))
+            {
+                return "expected 'text/plain' to be rejected - this is exactly the enctype a form-based JSON-body CSRF attempt would use";
+            }
+
+            RequestContext missing = new RequestContext();
+            missing.Headers = new Dictionary<string, string>();
+            if (InventoryServer.HasJsonContentType(missing))
+            {
+                return "expected a missing Content-Type header to be rejected";
+            }
+            return null;
+        }
+
         private static string TestResolveEffectiveTokenFallsBackToLiveTokenWhenBlank()
         {
             string result = ResolveEffectiveToken("", "live-token-value");
@@ -10687,6 +13859,88 @@ namespace WindowsInventoryLite
             {
                 File.Delete(path);
             }
+        }
+
+        // Every other session/login/logout self-test either hand-seeds
+        // sessionStore directly or asserts on one function's output in
+        // isolation - none of them chain the real functions together with
+        // a cookie value actually produced by one and consumed by the
+        // next, which is the seam a whole-branch review flagged as
+        // untested. This composes SendLoginResult -> IsWebRequestAuthorized
+        // -> SendLogoutResult -> IsWebRequestAuthorized end to end.
+        private static string TestSessionLifecycleEndToEndLoginAuthorizeLogout()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.SessionLifetimeHours = 12;
+            InventoryServer server = new InventoryServer(options);
+            IPAddress remoteAddress = IPAddress.Parse("192.168.1.50");
+
+            RequestContext loginRequest = new RequestContext();
+            loginRequest.Method = "POST";
+            loginRequest.Path = "/api/v1/server/login";
+            loginRequest.Headers = new Dictionary<string, string>();
+            loginRequest.RemoteAddress = remoteAddress;
+            loginRequest.Body = "{\"username\":\"admin\",\"password\":\"secret\"}";
+
+            string cookieValue;
+            using (MemoryStream loginStream = new MemoryStream())
+            {
+                server.SendLoginResult(loginStream, loginRequest);
+                string loginResponse = Encoding.UTF8.GetString(loginStream.ToArray());
+                string cookiePrefix = "Set-Cookie: ";
+                int cookieHeaderStart = loginResponse.IndexOf(cookiePrefix + "wil_session=", StringComparison.Ordinal);
+                if (cookieHeaderStart < 0)
+                {
+                    return "expected the login response to contain a Set-Cookie: wil_session=... header, got: " + loginResponse;
+                }
+                int valueStart = cookieHeaderStart + cookiePrefix.Length;
+                int valueEnd = loginResponse.IndexOf(';', valueStart);
+                if (valueEnd < 0)
+                {
+                    return "expected the Set-Cookie header to have at least one ';'-delimited attribute after the cookie value";
+                }
+                cookieValue = loginResponse.Substring(valueStart, valueEnd - valueStart);
+            }
+
+            RequestContext authorizedRequest = new RequestContext();
+            authorizedRequest.Headers = new Dictionary<string, string>();
+            authorizedRequest.Headers["cookie"] = cookieValue;
+            authorizedRequest.RemoteAddress = remoteAddress;
+
+            if (!server.IsWebRequestAuthorized(authorizedRequest))
+            {
+                return "expected the exact cookie value extracted from SendLoginResult's own response to authorize a request via IsWebRequestAuthorized";
+            }
+
+            RequestContext logoutRequest = new RequestContext();
+            logoutRequest.Method = "POST";
+            logoutRequest.Path = "/api/v1/server/logout";
+            logoutRequest.Headers = new Dictionary<string, string>();
+            logoutRequest.Headers["cookie"] = cookieValue;
+
+            using (MemoryStream logoutStream = new MemoryStream())
+            {
+                server.SendLogoutResult(logoutStream, logoutRequest);
+                string logoutResponse = Encoding.UTF8.GetString(logoutStream.ToArray());
+                if (!logoutResponse.Contains("200 OK"))
+                {
+                    return "expected SendLogoutResult to return 200 OK, got: " + logoutResponse;
+                }
+            }
+
+            RequestContext postLogoutRequest = new RequestContext();
+            postLogoutRequest.Headers = new Dictionary<string, string>();
+            postLogoutRequest.Headers["cookie"] = cookieValue;
+            postLogoutRequest.RemoteAddress = remoteAddress;
+
+            if (server.IsWebRequestAuthorized(postLogoutRequest))
+            {
+                return "expected the same cookie value to no longer authorize a request after SendLogoutResult - it should fall through to (and fail) Basic Auth, since postLogoutRequest carries no Authorization header";
+            }
+
+            return null;
         }
 
         private static bool ContainsSignature(byte[] data, byte thirdByte, byte fourthByte)

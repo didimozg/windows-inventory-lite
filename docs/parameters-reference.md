@@ -175,13 +175,24 @@ Password-based pushes additionally require `plink.exe`/`pscp.exe` (PuTTY) in `de
 - `DataPath`: server folder for received JSON files.
 - `ContentPath`: server folder for dashboard HTML, CSS, and JavaScript.
 - `ConfigPath`: server configuration file. Default: `C:\ProgramData\WindowsInventoryLite\server-config.json`.
-- `InstallLogRetentionDays`: default retention period for WinRM client action logs. Default: `30`.
-- `StaleHours`: hours after which a report counts as stale. Default: `48`. Adjustable on the dashboard Settings > General page.
+- `InstallLogRetentionDays`: default retention period for WinRM client action logs. Default: `30`, range 1-3650.
+- `StaleHours`: hours after which a report counts as stale. Default: `48`. Adjustable on the dashboard Settings > Server page (Inventory section).
 - `Token`: optional shared token sent in `X-Inventory-Token`.
+- `RequireIngestionToken`: whether the ingestion endpoints reject requests without a matching token. Default: `true` once a `Token` is configured, unless explicitly overridden.
 - `WebUsername` and `WebPassword`: optional Basic Auth credentials for dashboard and web API access.
+- `LoginLockoutThreshold`, `LoginLockoutWindowMinutes`, `LoginLockoutDurationMinutes`: per-IP Basic Auth lockout after repeated failures. Defaults: `10` (0 disables), `15`, `15`; ranges 0-1000, 1-1440, 1-1440. Adjustable on Settings > Admin password > Login lockout.
 - `UseHttps` and `CertificateThumbprint`: optional HTTPS settings. The certificate itself lives in `LocalMachine\My`, not in this file.
 - `HttpsPort`: HTTPS listener port, independent of `ListenPrefix`. Default: `8443`.
 - `EnableHttp`: whether the plain HTTP listener runs at all. Default: `true`.
+- `HstsEnabled` and `HstsMaxAgeHours`: opt-in `Strict-Transport-Security` header on HTTPS responses. Defaults: `false`, `24` (range 1-8760). Adjustable on Settings > Server > HTTPS.
+- `IngestionRejectionLogRetentionDays` and `IngestionRejectionLogMaxEntries`: retention for the log of rejected ingestion-token attempts. Defaults: `30` (range 1-3650), `5000` (range 100-100000). Adjustable on Settings > Server > Ingestion Token.
+- `AdDescriptionSyncEnabled`: whether AD sync also updates each client's description field. Default mirrors `AdSyncEnabled` unless explicitly set.
+- `AdUseServiceIdentity`: whether AD sync runs as the service account instead of `AdUsername`/`AdPassword`. Default: `true`.
+- `AdComputerImportOUs`: newline-separated Organizational Unit DNs to search when importing computers from AD.
+- `PreferredLinuxSubnet`: optional IPv4 CIDR (for example `192.168.1.0/24`) restricting which subnet Linux client targeting considers. Default: empty (no filtering).
+- `LinuxDefaultIntervalHours`: default collection interval offered when installing a Linux client. Default: `6`, range 1-24.
+- `LinuxDefaultStatusIntervalMinutes`: default service-status poll interval for a Linux client. Default: `30`, range 1-1440.
+- `LinuxDefaultInstallPath`: default installation directory offered when installing a Linux client. Default: `/opt/windows-inventory-lite`, must start with `/`.
 
 ## Uninstall commands
 

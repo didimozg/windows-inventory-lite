@@ -6,6 +6,281 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.54.2]
+
+### Fixed
+
+- The dashboard login page still embedded the old (second-generation) logo - a separate base64 copy baked directly into the server's `LoginPageHtml`, not read from `docs/images/logo.png`. Regenerated from the current corrected logo, re-encoded as JPEG instead of PNG (this artwork's chip-texture/gradient detail made an equivalent-quality PNG embed ~10x larger) to keep the unauthenticated login page's response size in the same range as before (13.5KB -> 26KB, not the 140KB+ a naive PNG re-embed would have cost every unauthenticated request).
+
+## [0.54.1]
+
+### Fixed
+
+- Removed the All/Windows/Linux OS filter pill from Deploy > Updates (added in v0.44.0). It lives in the shared global topbar, which sits above Deploy's own Actions/Updates/Package subtab strip - several sections above the merged updates table it actually filtered - and was reported as a visually disconnected artifact. Deploy > Updates now always shows every outdated client from both platforms, unfiltered; the same filter pill is unaffected on Clients/Hardware, where it sits directly above the one table it governs.
+
+## [0.54.0]
+
+### Changed
+
+- Replaced the project logo (`docs/images/logo.png`, and a new cropped `server/dashboard/brand-mark.png`) with a corrected transparent-background version; the dashboard header icon is now that image instead of a hand-drawn inline SVG.
+- Restructured Deploy > Actions: WinRM and SSH credential sources are now stacked in a single column, with their Manual-mode fields appearing directly beneath the matching dropdown instead of scattered across the grid; Interval/Status check interval/Preferred subnet are grouped together; Force reinstall/Add to TrustedHosts/host-key checkboxes moved to the bottom of the form. The previously chaotic layout was caused by hidden conditional fields being fully removed from a flat 2-column CSS grid, which shifted every later field whenever a dropdown toggled.
+- Removed the "Install path" field from Deploy > Actions - the server already falls back to the configured default install path when the field is omitted from the request, so the client-side override served no purpose there (the separate Settings > Linux and Package-tab install-path fields are unaffected).
+
+## [0.53.0]
+
+### Added
+
+- Session-based dashboard login: the browser's native Basic Auth prompt (which cached credentials unreliably across browsers, making "Log out" work inconsistently) is replaced by a small embedded login page and a real server-side session (`wil_session` cookie, configurable lifetime under Settings > Admin password, default 12 hours). Logging out now genuinely invalidates the session on the server, not just this browser's copy. Classic Basic Auth (`curl -u user:pass`) continues to work unchanged for scripts and automation - only the dashboard's own sign-in experience changed.
+
+### Security
+
+- Rotating the admin password now also invalidates every active session - previously only Basic Auth credentials were affected, so a stolen session cookie would have survived a password rotation. The new login endpoint shares the same per-IP lockout as Basic Auth and is gated by the same CSRF/Content-Type checks as every other state-changing endpoint.
+
+## [0.52.3]
+
+### Changed
+
+- Replaced the project logo again with a version that has a transparent background, and enlarged it on the dashboard login page (previously too small, sat on an opaque white background patch).
+
+## [0.52.2]
+
+### Changed
+
+- Replaced the project logo (`docs/images/logo.png`, previously `logo.svg`) used by both READMEs.
+
+## [0.52.1]
+
+### Fixed
+
+- Docs drift: `docs/parameters-reference.md` was missing 12 real server-config.json settings (HSTS, login lockout, ingestion-rejection log retention, several AD/Linux fields), and `docs/api-reference.md` was missing 4 Linux install-default fields from its settings endpoint documentation. Fixed 4 stale "Settings > General" references and 2 stale "Client updates page" references across `docs/threat-model.md`/`docs/parameters-reference.md`/`docs/api-reference.md` (the Settings tab was split into Server/Windows/Linux sub-tabs a while back; these were never updated), including one quoted API error string that no longer matched the actual runtime text. Also corrected a stale code comment (wrong Settings sub-tab named) and an overstated "enforced continuously" claim about the ingestion-rejection log's retention. No behavior change.
+
+## [0.52.0]
+
+### Added
+
+- Ingestion Token indicator: when a client's last-known source IP shows up in a recently rejected (missing- or wrong-token) request, the Clients table now shows a "TOKEN MISSING"/"TOKEN MISMATCH" badge next to that client's version. Correlation is by source IP against the client's most recent successful report - a best-effort heuristic, not a guarantee (a client behind a shared NAT/VPN egress, or one whose IP just changed, may not correlate correctly in either direction). A new top-level "Logging" section lists every rejected ingestion attempt (time, source IP, best-effort reverse-DNS hostname, endpoint, reason, matched client), backed by a new `GET /api/v1/server/ingestion-rejections` endpoint and a disk-persisted, dual-capped (age + entry count) log, configurable under Settings > Server > Ingestion Token.
+
+### Security
+
+- The rejection log's write cost is amortized rather than rewriting the full file on every single rejection once at capacity, and its disk I/O (both on write and at server startup) is wrapped so a failure there degrades gracefully instead of turning an expected 401 into a 500 or aborting startup. Background reverse-DNS lookups on rejected requests' source IPs are capped in-flight so a burst of first-seen addresses cannot starve the server's request-handling thread pool.
+
+## Client 0.2.2
+
+Client-only fix, no server/dashboard change - see the versioning note above for why this has its own version line instead of a `[X.Y.Z]` heading.
+
+### Fixed
+
+- Windows client: Office 2010 activation was still never detected despite the v0.40.3/client-0.2.1 fix - that fix queried the wrong WMI location entirely (`root\Microsoft\OfficeSoftwareProtectionPlatform`, a namespace that does not exist on a real Office 2010 install) and silently swallowed the resulting exception, always falling through to "not activated." Live-diagnosed against a real Office 2010 (VOLUME_KMSCLIENT) host: the `OfficeSoftwareProtectionProduct` class actually lives directly in `root\cimv2`, the same namespace already used for the Windows/Office 2013+ query - confirmed via `Get-CimClass`/`Get-CimInstance` showing the real class and its populated `PartialProductKey`/`LicenseStatus` fields. Now queries the correct namespace.
+
+## [0.51.2]
+
+### Fixed
+
+- Clients table's Office/OS columns sorted by product name only, completely ignoring the version - rows with the same name but different versions landed in an arbitrary (pre-sort) order relative to each other, and different-year Office editions (e.g. 2010 "профессиональный плюс" vs "стандартный") didn't sort adjacently since their localized names diverge alphabetically. Both columns now sort by version first (numerically, not lexicographically - a naive string comparison would put "16.0.14334.20570" before "16.0.4266.1001"), then by name as a tie-breaker.
+
+## [0.51.1]
+
+### Fixed
+
+- Deploy > Updates' "WinRM credential source" dropdown sat outside the field grid that its own "Client update username"/"Client update password" siblings live in (a bare `.pkg-token-field` label with no `.pkg-grid` ancestor never gets `display: grid` - the same root cause already fixed elsewhere on this page for the credential fields themselves, just missed for this one dropdown), overlapping the fields next to it in Manual mode. Moved into the existing grid alongside its siblings.
+- The two "Trust new host keys automatically"/"I understand this accepts..." checkboxes on the same page (SSH credentials) had the identical root cause on `.check-label` (rendered at 20px instead of the intended 40px, un-centered) - found during a holistic sweep for every other instance of this bug pattern on the page, not reported directly. Fixed the same way.
+
+## [0.51.0]
+
+Closes the "no HSTS header" finding logged during the v0.48.0 security audit.
+
+### Security
+
+- `Strict-Transport-Security` (HSTS) is now available, off by default (`HstsEnabled`). When enabled via Settings > Server > HTTPS, it's added only to responses actually served over the HTTPS listener - never plain HTTP, and never unconditionally regardless of the setting. `HstsMaxAgeHours` (default 24, configurable 1-8760) deliberately does not default to the commonly-recommended one-year value: a browser that has cached the policy will refuse plain HTTP to this host for the full max-age even if HTTPS is later disabled (e.g. a certificate emergency), so operators should start with a short value and only extend it once HTTPS has proven stable.
+
+## [0.50.0]
+
+Closes the "no rate limiting on Basic Auth" finding logged during the v0.48.0 security audit.
+
+### Security
+
+- Failed Basic Auth attempts are now rate-limited per source IP: after `LoginLockoutThreshold` (default 10) wrong-credential attempts from the same IP within `LoginLockoutWindowMinutes` (default 15), that IP gets `429 Too Many Requests` with `Retry-After: <seconds>` for `LoginLockoutDurationMinutes` (default 15) - including on a subsequent *correct*-password attempt. A request with no `Authorization` header at all (a browser's normal first request) never counts as a failed attempt. Tracked per source IP, not account-wide, so one attacker cannot lock out the legitimate admin. Configurable via Settings > Admin password > Login lockout, or disabled entirely with a threshold of `0`.
+
+## [0.49.0]
+
+### Added
+
+- The Dashboard's Windows activated, Office activated, and Stale tiles are now clickable (and keyboard-activatable). Clicking one jumps to Clients pre-filtered/pre-sorted so whatever the tile promised is what's on top: Stale sorts all clients by Last collected ascending; the two activation tiles filter to Windows only and sort by their respective activation state, not-activated first.
+- Windows activated and Office activated turn green once their count equals the total Windows client count (and the fleet isn't empty).
+
+## [0.48.0]
+
+Closes the CSRF finding left open since Phase 3's security review, plus a follow-up security sweep.
+
+### Security
+
+- Every state-changing route (POST/PUT/DELETE, except the two device-ingestion endpoints) now rejects a request whose `Origin`/`Referer` header is present but doesn't match the server's own `Host`, and rejects any request with a body unless `Content-Type: application/json` is set. Closes both the classic HTML-form CSRF vector and the `enctype="text/plain"` JSON-smuggling variant. Both checks are skipped when the corresponding header is absent, so direct API automation (curl, the `docs/api-reference.md` examples) is unaffected.
+- Added `Referrer-Policy: same-origin` and a restrictive `Permissions-Policy` to every response, including the `401 Unauthorized` response, which previously carried no security headers at all.
+
+### Fixed
+
+- `SendUnauthorized` (the 401 response) never sent `X-Content-Type-Options`, `X-Frame-Options`, or the Content-Security-Policy either, pre-dating this change - now consistent with every other response.
+
+## [0.47.0]
+
+### Changed
+
+- Every paginated table (Clients, Software, Hardware's CPU/Disk/RAM breakdowns, Linux Services, Deploy > Updates) now shows clickable page-number buttons instead of a plain "Page N of M" label, letting you jump straight to any page instead of clicking Prev/Next repeatedly. Large page counts collapse to a windowed view (e.g. `1 … 9 10 11 … 20`) instead of listing every page.
+
+## [0.46.0]
+
+### Changed
+
+- The top nav's "Manage" dropdown is gone. Settings is now a standalone top-level button, matching Dashboard. Deploy's own button moved out of "Manage" alongside it and is now labeled "Install" - the underlying view/route/id are unchanged (`state.view === 'deploy'`, `#deploy-*` hashes, `deployTab`), this is a visible label change only.
+
+## [0.45.1]
+
+### Fixed
+
+- Three live-reported layout overlaps from `[0.45.0]`'s new HTML: Settings > Windows' page-level Save button touched the new "Windows Client update credentials" heading with zero gap (same crowding bug already fixed once for the Linux equivalent, not yet extended to the new Windows sibling); Deploy > Updates' "Windows push status"/"Linux push status" headings sat flush against the button/status box above them, since they're the only `.settings-block-title` headings in the app not wrapped in their own `.settings-block` (the usual source of that spacing).
+
+## [0.45.0]
+
+Follow-up from live troubleshooting of a real WinRM push failure right after `[0.44.0]` shipped.
+
+### Changed
+
+- "Windows Client update credentials" moved from an embedded Save/Delete pair on Deploy > Updates to a new dedicated block in Settings > Windows, mirroring the existing "Linux Client update credentials" block in Settings > Linux. Deploy > Updates' WinRM credential fields are now purely for choosing Global vs typing a genuine one-off Manual override - the fields are no longer dual-purpose, and there's no save action on that page any more (matching Deploy > Actions, which never had one). This closes a real UX trap: Save cleared the fields it had just read, so clicking "Update selected" right after "Save" without retyping anything silently sent blank credentials for that push.
+- The Manual-mode WinRM password field on Deploy > Updates no longer shows "leave blank to keep the current one" - that placeholder was never true for a one-off override (it sends exactly what's typed, blank included, with no fallback to any saved value).
+
+### Fixed
+
+- Every Force Windows/Force Linux client install or update job's Output column showed the literal word "Unknown" instead of the real PowerShell/SSH output or error text, regardless of whether the job succeeded or failed - `RunUnifiedInstallTarget` copied status/message/exitCode onto the per-target result but never copied `output`/`error`, and the dashboard only renders those two fields from the top-level result (the attempts sub-table where they were present is hidden unless a target had more than one attempt, which Force modes never do). Pre-existing since `[0.42.0]`, only noticed now while live-troubleshooting a real push failure.
+
+## [0.44.0]
+
+Phase 4 of the Deploy > Actions/Updates unification effort (see `docs/superpowers/specs/2026-08-17-deploy-actions-updates-unification-design.md`) - the spec's rollout plan is now fully shipped end to end. Deploy > Updates' separate Windows and Linux tabs are now one cross-platform table.
+
+### Changed
+
+- Deploy > Updates is now a single table for both platforms (Computer, Domain - `—` for Linux, Current version, Available version, Last collected), with the same All/Windows/Linux OS filter pill and pagination already used by Clients/Hardware, plus sorting on every column except Available version (a Windows row can show two version numbers at once, so it has no single comparable value).
+- WinRM/SSH credential-source selection on Deploy > Updates now uses the same Global/Manual(/SSH key) dropdowns Deploy > Actions already uses, replacing the old checkbox (WinRM) and differently-shaped 3-way select (SSH). The WinRM "Save" button is now only reachable in Manual mode - previously it stayed visible next to hidden, blank fields in Global mode, and clicking it would silently overwrite the saved account with a blank username. "Delete saved credentials" stays available in either mode, since it never sends the field values.
+- A single "Update selected" button now covers both platforms. Checking a mix of Windows and Linux rows and clicking it automatically fires two independent pushes against the existing `/api/v1/client-install` endpoint - no new server route, no client/platform detection, since each row's platform is already known from which list it came from.
+- The two Schedule panels (Windows/Linux) were deliberately kept separate, side by side - their backend timers, config, and credential-fallback behavior are genuinely independent, not merely a UI split.
+- Server-side, the two comments in `StartClientAction` claiming the legacy `useSavedCredentials`/`useAdCredentials`/`sshAuthMode: "ad"|"credentials"` shapes were "still sent by Deploy > Updates' push" no longer describe reality - Updates' own push now sends `winRmAuthMode`/`sshAuthMode` like Deploy > Actions does. Both shapes still work unchanged, now purely for backward compatibility with anything that scripted the old payload directly. `docs/api-reference.md` updated to match.
+
+### Fixed
+
+- A batch push completing every outdated row on the currently-visible page, while a later page still had outdated entries, previously showed a false "every reporting client is up to date" - the incremental-prune logic only ever checked the current page's DOM. It now removes completed targets from the underlying data and re-renders through the normal table pipeline, so pagination, sorting, the OS filter, and the outdated count all stay correct.
+
+## [0.43.1]
+
+Closed 6 findings from Phase 3's final and dedicated security reviews before starting Phase 4.
+
+### Fixed
+
+- A running install/uninstall job's `GET /api/v1/client-install/{jobId}` could occasionally throw or return corrupted JSON, since the response was serialized after releasing the lock that guards the same job's `Results` list against concurrent writes from the still-running job. Now serialized entirely under the lock.
+- The orphaned `_linux-client-install-jobs` directory (superseded by unified job storage in `[0.42.0]`, but never cleaned up) is now removed once at server startup, instead of persisting indefinitely past its own configured retention.
+
+### Security
+
+- **Auto mode no longer accepts "Trust new host keys automatically."** Combined with Auto's per-target protocol detection, this could bulk-auto-trust an SSH host key for a target the operator never deliberately identified as a Linux host - it just happened to answer on port 22 - widening the exposure of the saved/AD Linux credential versus explicitly selecting Force Linux first. The combination is now rejected with a clear error pointing at Force Linux instead.
+- `ResolveAttemptOrder` now fails closed (no attempt) on an unrecognized `mode` value instead of silently defaulting to Auto-style dual-protocol probing.
+- Deploy > Actions' submit no longer sends a typed WinRM/SSH credential left over from an earlier mode or credential-source selection when the current mode makes it irrelevant - the server already discarded it, but there was no reason to put it on the wire.
+
+## [0.43.0]
+
+Deploy > Actions credential UX refinement, requested after live use of the merged form shipped in `[0.42.0]`.
+
+### Changed
+
+- Deploy > Actions' WinRM and SSH credential-source fields now use matching Global/Manual dropdowns, replacing the old Windows-only "Use global AD settings" checkbox and the differently-shaped Linux 3-way select. **Global** tries the saved account (Settings > Windows/Linux > Client update credentials) first, then AD (service identity or a saved AD account) as a fallback; WinRM's Global degrades to the server's own identity if nothing resolves (not an error), SSH's Global has no such fallback (no anonymous SSH) and returns a clear error instead. **Manual** shows typed username/password fields as before.
+- The Server URL and Ingestion Token fields are gone from Deploy > Actions - both are now filled automatically and silently (the browser's own origin for the URL, the server's live token) rather than shown as editable inputs that in practice never needed to change.
+- Server-side, `/api/v1/client-install`/`/api/v1/client-uninstall` accept new `winRmAuthMode` (`"global"`/`"manual"`) and extended `sshAuthMode` (`"global"`/`"manual"`, alongside the existing `"key"`) values. The older `useSavedCredentials`/`useAdCredentials` and `sshAuthMode: "ad"|"credentials"` shapes still work unchanged - Deploy > Updates' own two "Update selected" push buttons still use them and were not touched by this change.
+
+### Fixed
+
+- A target that resolves to SSH (Force Linux, or Auto mode falling back to SSH) now gets the correct Linux-shaped ingestion URL (`.../api/v1/linux/inventory`) automatically - previously, since the Server URL field always defaulted to the Windows shape and an admin had no reason to notice or edit it for a mixed-mode push, an SSH install could silently point the new client at the wrong endpoint unless the admin happened to type the Linux URL by hand.
+- `docs/api-reference.md`'s client-install/uninstall documentation, left describing only the old payload shape after `[0.42.0]`, now documents the new fields and the SSH URL rewrite above.
+
+## [0.42.0]
+
+Phase 3 of the Deploy > Actions/Updates unification effort (see `docs/superpowers/specs/2026-08-17-deploy-actions-updates-unification-design.md`) - Deploy > Actions' separate Windows and Linux install/uninstall forms are now one mode-aware form, and Phase 2's Auto-detect building blocks are wired in for the first time.
+
+### Changed
+
+- Deploy > Actions is now a single form for both platforms, with a Detection mode selector: **Auto** (probes WinRM port 5985 and SSH port 22, tries WinRM first if both respond, falls back to SSH only if the WinRM attempt itself fails), **Force Windows** (WinRM only, no probing), **Force Linux** (SSH only, no probing). Credential fields show contextually per mode. A per-target result can now show more than one protocol attempt, displayed as a collapsible row when it does.
+- "Load all PC from AD" / "Load PC without client from AD" are no longer Windows-only - available in every mode, since a domain-joined Linux host can also be an AD computer object. This also fixed a real bug: the "missing" filter previously only ever checked Windows clients, so a Linux host that already had a reporting client could still show up as "missing."
+- The server-side `InstallJob`/`StartClientAction`/`RunClientActionJob` (Windows) and `LinuxInstallJob`/`StartLinuxClientAction`/`RunLinuxClientActionJob` (Linux) are unified into one job class, one dispatcher, and one endpoint pair.
+
+### Removed
+
+- **Breaking API change:** `POST /api/v1/linux-client-install` and `POST /api/v1/linux-client-uninstall` no longer exist. `POST /api/v1/client-install`/`POST /api/v1/client-uninstall` now serve both platforms and require a new `mode` field (`"auto"` / `"force-windows"` / `"force-linux"`). Any external automation calling the old Linux endpoints, or the Windows endpoints without a `mode` field, needs updating. `docs/api-reference.md` still describes the old shape pending a docs pass.
+
+### Fixed
+
+- Deploy > Actions' mobile (sub-480px) layout never actually collapsed its right-hand field column to a single line, despite the media query text reading correctly - a CSS specificity tie the intended reset rule could never win.
+- The merged "Saved client action logs" table's operator-identity column was blank for every Linux job (only ever read the WinRM username field).
+- A pre-existing UI defect surfaced by this merge: two independent field-visibility functions (one for Install/Uninstall, one for the new Detection mode) wrote to overlapping element sets, so whichever ran last silently clobbered the other's decision - visible as the SSH host-key-risk checkbox showing on a fresh page load, and one combination could leave the submit button permanently disabled. Consolidated into one function.
+- The "Trust and retry" host-key control could render on Deploy > Updates' Linux panel too (after the HTML merge collapsed two status boxes into one shared ID) - clicking it there would have resubmitted Deploy > Actions' own field values instead of the credentials the Updates push actually used. Re-scoped to the Actions panel only.
+
+### Known characteristic
+
+- Auto mode requires valid WinRM **and** SSH credentials to be resolvable before a job starts, even if every target in the batch turns out to be one platform only. A deployment with no Linux credentials saved (Settings > Linux) will get a validation error on Auto mode until Linux credentials or an SSH key are configured, or Force Windows is selected instead.
+
+## [0.41.1]
+
+Phase 2 of the Deploy > Actions/Updates unification effort (see `docs/superpowers/specs/2026-08-17-deploy-actions-updates-unification-design.md`) - internal-only, no reachable behavior change.
+
+### Added
+
+- Server-side building blocks for a future Auto-detect install mode (`TryConnect`, `DecideAutoDetectProtocols`, `BuildAttemptResult`) - not wired into any endpoint yet, nothing in the dashboard calls this code. Phase 3 will connect it to a unified Deploy > Actions form.
+
+## [0.41.0]
+
+Phase 1 of a larger Deploy > Actions/Updates unification effort (see `docs/superpowers/specs/2026-08-17-deploy-actions-updates-unification-design.md`) - later phases will add auto-detected mixed Windows/Linux install targets and a unified Updates table; this phase lays the Settings groundwork they need.
+
+### Changed
+
+- Settings' "General" tab (9 sections crammed onto one page, one shared Save button covering all of them) is now three separate tabs - **Server** (Inventory, Network, HTTPS, Ingestion Token, Diagnostics), **Windows** (Active Directory), **Linux** (Linux client targeting, Linux Client update credentials, SSH key, plus the new Install defaults section below) - each with its own independent Save. Settings' tab strip is now Server / Windows / Linux / Certificate / Admin password (was General / Certificate / Admin password). Old `#settings`/`#general` links still land on the Server tab.
+
+### Added
+
+- New Settings > Linux > Install defaults section: Interval (hours), Status check interval (minutes), and Install path are now configurable server settings, replacing hardcoded values in the Linux install code path. Deploy > Actions' Linux install form still always sends its own values today, so these currently apply only to a request that omits them - a future automated install flow (part of a later phase) is what will actually exercise this.
+
+### Fixed
+
+- Every "Settings > General" reference left over from the tab split - across the dashboard, the server's own error messages, and the install wizard/installer - now names the tab that actually holds the field, instead of a retired tab name (some previously pointed at the wrong tab entirely, e.g. an Active Directory error directing an admin to "General" when the field moved to "Windows").
+
+## [0.40.5]
+
+### Changed
+
+- Fleet's tables (Clients, Software, Services, Hardware, Licenses, install-job results) now use the same rounded-corner glow-shadow card treatment as the rest of the redesigned dashboard, replacing the old flat 1px border - the one remaining piece of pre-redesign chrome on Fleet's list pages. Table row/header styling itself is unchanged.
+
+### Fixed
+
+- Raised dark-mode divider contrast on `.topnav` (the top navigation bar) from ~1.5:1 to ~3.3:1, same fix as 0.40.3's `.settings-block`/`.subtab-strip` and 0.40.4's `.updates-top-row` - this divider was missed in both earlier passes.
+- The manual host-key fingerprint field (Linux Client Actions, shown when a host key needs trusting) lost its typed value and cursor position if a poll tick fired while a user was mid-typing - same root cause as 0.40.3's install-job-log scroll reset (the status box is fully re-rendered every 3s), now fixed the same way: captured before the re-render, restored after.
+
+## [0.40.4]
+
+### Fixed
+
+- Deploy > Package's Linux Server URL field (added in 0.40.3) was being silently blanked back to empty every time the Package page loaded, because the page's own status loader unconditionally overwrote it with the server's saved value or `''` if nothing was saved yet - undoing the auto-fill for exactly the fresh-install case it exists for. Now only overwrites the field when a saved value actually exists, matching the equivalent Windows field's existing guard.
+- The dark-mode divider contrast fix from 0.40.3 (`.settings-block`/`.subtab-strip`) missed the actual divider on both Client updates pages: pairing "WinRM credentials"/"Schedule" (Windows) and "Authentication"/"Linux client targeting"/"Schedule" (Linux) side by side moves each page's only section divider onto their shared `.updates-top-row` wrapper, which was still using the low-contrast `--line` token. Now uses the same `--divider-strong` token as the two rules it was meant to match.
+
+## [0.40.3]
+
+### Added
+
+- The software list inside a client's expanded detail row (Clients table) can now be sorted by Name, Version, Publisher, or Install date, matching the click-header-to-sort convention already used everywhere else in the dashboard.
+
+### Fixed
+
+- Windows client: activation detection never recognized Office 2010 - it only queried the WMI namespace Windows itself and Office 2013+/365 use (`SoftwareLicensingProduct`), not the separate, older namespace Office 2010 registers its activation state in (`root\Microsoft\OfficeSoftwareProtectionPlatform`). Now checks both. Client version bumped to `0.2.1` for this detection change. **Not yet verified against a real Office 2010 host** - the legacy WMI class's exact column set is assumed to match `SoftwareLicensingProduct`'s (`PartialProductKey`, `LicenseStatus`); if that assumption is wrong the query fails silently (caught, treated as "not activated," same symptom as the bug this is meant to fix) rather than erroring visibly.
+- The live install-job log (Deploy > Actions/Updates, while a job is running) kept jumping back to the top every 3 seconds, making it unreadable with many targets - the underlying status box is fully re-rendered on every poll tick, which was silently resetting its scroll position. The current scroll position is now preserved across re-renders.
+- Windows Client updates now pairs "WinRM credentials" and "Schedule" side by side, matching the layout Linux Client updates already used for its equivalent fields.
+- Deploy > Package's Server URL fields (Windows and Linux) now auto-fill from the server's own current URL, matching Deploy > Actions - previously they showed only placeholder example text.
+- Raised dark-mode divider contrast on `.settings-block` and `.subtab-strip` (Deploy/Settings section dividers, the Deploy/Manage tab strip) from ~1.5-2:1 to 3.3-4.5:1, clearing the WCAG 1.4.11 floor for UI-component contrast - both were nearly invisible against the Ocean Blue dark background.
+- Removed the Dashboard's "Top software" chart - the "OS versions" chart on the same card already covers the cross-platform breakdown this was meant to show, so the two were redundant.
+- Fleet's Software and Services pages now show a one-line subtitle clarifying what they contain (installed packages / running systemd services) and that, unlike Clients and Hardware, they're single-platform views with no OS filter.
+
 ## [0.40.2]
 
 ### Fixed

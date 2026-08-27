@@ -21,27 +21,7 @@
   <div class="app-shell">
     <nav class="topnav" aria-label="Dashboard navigation">
       <div class="brand" role="img" aria-label="Windows Inventory Lite">
-        <svg class="brand-mark" viewBox="0 0 120 90" aria-hidden="true">
-          <rect x="10" y="8" width="100" height="62" rx="4" fill="none" stroke="var(--accent)" stroke-width="5"/>
-          <path d="M55 70 L55 76 L50 82 L70 82 L65 76 L65 70" fill="none" stroke="var(--accent)" stroke-width="4" stroke-linejoin="round"/>
-          <line x1="40" y1="83" x2="80" y2="83" stroke="var(--accent)" stroke-width="4" stroke-linecap="round"/>
-          <line x1="36" y1="27" x2="44" y2="27" stroke="var(--accent)" stroke-width="3"/>
-          <line x1="50" y1="32" x2="57" y2="38" stroke="var(--accent)" stroke-width="3"/>
-          <line x1="78" y1="31" x2="71" y2="38" stroke="var(--accent)" stroke-width="3"/>
-          <line x1="82" y1="27" x2="88" y2="27" stroke="var(--accent)" stroke-width="3"/>
-          <line x1="56" y1="48" x2="35" y2="55" stroke="var(--accent)" stroke-width="3"/>
-          <line x1="61" y1="52" x2="55" y2="58" stroke="var(--accent)" stroke-width="3"/>
-          <line x1="68" y1="48" x2="78" y2="55" stroke="var(--accent)" stroke-width="3"/>
-          <rect x="24" y="22" width="12" height="10" rx="1.5" fill="var(--accent)"/>
-          <rect x="44" y="22" width="12" height="10" rx="1.5" fill="var(--accent)"/>
-          <circle cx="78" cy="27" r="4" fill="var(--accent)"/>
-          <rect x="88" y="22" width="12" height="10" rx="1.5" fill="var(--accent)"/>
-          <rect x="22" y="52" width="11" height="9" rx="1.5" fill="var(--accent)"/>
-          <rect x="50" y="55" width="11" height="9" rx="1.5" fill="var(--accent)"/>
-          <circle cx="82" cy="58" r="4" fill="var(--accent)"/>
-          <rect x="51" y="36" width="21" height="17" rx="3" fill="var(--accent)"/>
-          <path d="M56 44.5 L60 48.5 L68 39.5" fill="none" stroke="var(--accent-text)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
+        <img class="brand-mark" src="brand-mark.png" alt="" aria-hidden="true">
         <span class="brand-word">
           <span class="brand-word-main">Windows Inventory</span>
           <span class="brand-word-sub">Lite</span>
@@ -58,13 +38,9 @@
           <button id="licensesTab" class="topnav-dropdown-item" type="button" role="menuitem">Licenses</button>
         </div>
       </div>
-      <div class="topnav-dropdown">
-        <button id="manageDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Manage <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
-        <div id="manageDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
-          <button id="deployTab" class="topnav-dropdown-item" type="button" role="menuitem">Deploy <span id="updatesBadge" class="nav-badge hidden">0</span><span id="linuxUpdatesBadge" class="nav-badge hidden">0</span></button>
-          <button id="settingsTab" class="topnav-dropdown-item" type="button" role="menuitem">Settings</button>
-        </div>
-      </div>
+      <button id="deployTab" class="topnav-item" type="button">Install <span id="updatesBadge" class="nav-badge hidden">0</span><span id="linuxUpdatesBadge" class="nav-badge hidden">0</span></button>
+      <button id="settingsTab" class="topnav-item" type="button">Settings</button>
+      <button id="loggingTab" class="topnav-item" type="button">Logging</button>
       <div class="topnav-spacer"></div>
       <span id="generatedAt" class="nav-status-text hidden">Waiting for inventory data.</span>
       <span id="serverVersionBadge" class="nav-status-text">Server: unknown</span>
@@ -86,9 +62,9 @@
         <section id="dashboardView" aria-label="Dashboard">
           <div id="dashboardTiles" class="summary dashboard-tiles">
             <div class="card-hero"><span class="icon-chip" aria-hidden="true">#</span><span id="dashClientCount">0</span><small>Clients</small></div>
-            <div class="card-glow"><span class="icon-chip" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M5 10.5 L8.5 14 L15 6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span id="dashWindowsActivated">0</span><small>Windows activated</small></div>
-            <div class="card-glow"><span class="icon-chip" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M5 10.5 L8.5 14 L15 6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span id="dashOfficeActivated">0</span><small>Office activated</small></div>
-            <div id="dashStaleTile" class="card-glow"><span class="icon-chip" aria-hidden="true">!</span><span id="dashStaleCount">0</span><small id="dashStaleLabel">Stale &gt;48h</small></div>
+            <div id="dashWindowsActivatedTile" class="card-glow tile-clickable" role="button" tabindex="0"><span class="icon-chip" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M5 10.5 L8.5 14 L15 6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span id="dashWindowsActivated">0</span><small>Windows activated</small></div>
+            <div id="dashOfficeActivatedTile" class="card-glow tile-clickable" role="button" tabindex="0"><span class="icon-chip" aria-hidden="true"><svg viewBox="0 0 20 20"><path d="M5 10.5 L8.5 14 L15 6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span id="dashOfficeActivated">0</span><small>Office activated</small></div>
+            <div id="dashStaleTile" class="card-glow tile-clickable" role="button" tabindex="0"><span class="icon-chip" aria-hidden="true">!</span><span id="dashStaleCount">0</span><small id="dashStaleLabel">Stale &gt;48h</small></div>
           </div>
 
           <div class="dashboard-card card-glow">
@@ -97,10 +73,6 @@
               <div class="card-glow"><span id="dashLicenseCount">0</span><small>Licenses</small></div>
             </div>
             <div class="dash-chart-grid">
-              <div class="dash-chart">
-                <h3>Top software</h3>
-                <div id="dashSoftwareChart" class="bar-chart"></div>
-              </div>
               <div class="dash-chart">
                 <h3>OS versions</h3>
                 <div id="dashOsChart" class="bar-chart"></div>
@@ -131,12 +103,14 @@
         </section>
 
         <div id="settingsSubtabs" class="subtab-strip hidden" role="tablist" aria-label="Settings sections">
-          <button id="settingsSubtabGeneral" class="subtab-item" role="tab" type="button">General</button>
+          <button id="settingsSubtabServer" class="subtab-item" role="tab" type="button">Server</button>
+          <button id="settingsSubtabWindows" class="subtab-item" role="tab" type="button">Windows</button>
+          <button id="settingsSubtabLinux" class="subtab-item" role="tab" type="button">Linux</button>
           <button id="settingsSubtabCertificate" class="subtab-item" role="tab" type="button">Certificate</button>
           <button id="settingsSubtabAdminPassword" class="subtab-item" role="tab" type="button">Admin password</button>
         </div>
 
-        <section id="generalView" class="install-panel card-glow hidden" aria-label="General settings">
+        <section id="serverSettingsView" class="install-panel card-glow hidden" aria-label="Server settings">
           <div class="settings-block">
             <h2 class="settings-block-title">Inventory</h2>
             <div class="pkg-grid general-grid">
@@ -178,7 +152,79 @@
               </label>
             </div>
             <p id="generalCertHint" class="cert-hint hidden"></p>
+            <div class="pkg-grid general-grid">
+              <label class="pkg-token-field">
+                HSTS max-age (hours)
+                <input id="generalHstsMaxAgeHours" type="number" min="1" max="8760" value="24">
+              </label>
+              <label class="check-label">
+                <input id="generalHstsEnabled" type="checkbox">
+                Enable HSTS (Strict-Transport-Security, HTTPS responses only)
+              </label>
+            </div>
+            <p class="cert-hint">HSTS tells browsers to only ever use HTTPS for this server, for the max-age duration - only sent on responses actually served over HTTPS. Off by default: a browser that has cached this can lock itself out of the dashboard for the full max-age if HTTPS is later disabled (e.g. during a certificate emergency). Start with a short max-age and only enable once HTTPS is stable.</p>
           </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Ingestion Token</h2>
+            <p id="ingestionTokenStatusText" class="pkg-status">Loading status...</p>
+            <label class="token-value-field">
+              Current token
+              <input id="ingestionTokenValue" type="text" class="mono" readonly value="">
+            </label>
+            <label class="check-label ingestion-require-token-field">
+              <input id="generalRequireIngestionToken" type="checkbox" checked>
+              Require ingestion token
+            </label>
+            <div class="pkg-buttons">
+              <button id="ingestionTokenRegenerateButton" class="danger-button" type="button">Regenerate</button>
+            </div>
+            <div id="ingestionTokenMessage" class="pkg-message hidden"></div>
+            <div class="pkg-grid general-grid">
+              <label class="pkg-token-field">
+                Rejection log retention (days)
+                <input id="generalIngestionRejectionLogRetentionDays" type="number" min="1" max="3650" value="30">
+              </label>
+              <label class="pkg-token-field">
+                Rejection log max entries
+                <input id="generalIngestionRejectionLogMaxEntries" type="number" min="100" max="100000" value="5000">
+              </label>
+            </div>
+          </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Diagnostics</h2>
+            <div class="pkg-grid general-grid">
+              <label class="check-label">
+                <input id="generalDebugLogEnabled" type="checkbox">
+                Enable debug log
+              </label>
+            </div>
+            <p class="cert-hint">Writes a plain-text log of AD lookups, inventory-report traffic, and server errors to <code id="generalDebugLogPath" class="mono">-</code>. Off by default; only meant to be left on for the duration of a troubleshooting session.</p>
+          </div>
+          <div class="pkg-buttons">
+            <button id="generalSaveButton" class="primary-button" type="button">Save</button>
+          </div>
+          <div id="generalMessage" class="pkg-message hidden"></div>
+        </section>
+
+        <section id="generalStatusView" class="dashboard-card card-glow hidden" aria-label="Connection status">
+          <h2 class="settings-block-title">Connection status</h2>
+          <div class="status-grid">
+            <div class="status-row">
+              <span id="statusHttpDot" class="status-dot status-dot-off" aria-hidden="true"></span>
+              <span>HTTP<small id="statusHttpDetail" class="mono">-</small></span>
+            </div>
+            <div class="status-row">
+              <span id="statusHttpsDot" class="status-dot status-dot-off" aria-hidden="true"></span>
+              <span>HTTPS<small id="statusHttpsDetail" class="mono">-</small></span>
+            </div>
+            <div class="status-row">
+              <span id="statusCertDot" class="status-dot status-dot-off" aria-hidden="true"></span>
+              <span>Certificate<small id="statusCertDetail">-</small></span>
+            </div>
+          </div>
+        </section>
+
+        <section id="windowsSettingsView" class="install-panel card-glow hidden" aria-label="Windows client settings">
           <div class="settings-block">
             <h2 class="settings-block-title">Active Directory</h2>
             <div class="pkg-grid ad-sync-panel">
@@ -228,8 +274,35 @@
             </div>
             <p class="cert-hint">"Configure AD User" makes the domain/credentials below available to Client actions, Client updates, and AD Computer Import. "Sync Description from AD" additionally writes each computer's Active Directory description into its inventory record, read-only in the Clients table while it's on. Turn it off to edit Description manually instead - re-enabling it later overwrites any manual edits on the next sync. Reading the description attribute is allowed to any authenticated domain user by default AD ACLs, so the service account identity usually needs no special AD delegation.</p>
           </div>
+          <div class="pkg-buttons">
+            <button id="windowsSettingsSaveButton" class="primary-button" type="button">Save</button>
+          </div>
+          <div id="windowsSettingsMessage" class="pkg-message hidden"></div>
           <div class="settings-block">
-            <h2 class="settings-block-title">Linux client targeting</h2>
+            <h2 class="settings-block-title">Windows Client update credentials</h2>
+            <p class="cert-hint">Used by Windows Client actions/updates pushes when "Global" WinRM credential source is selected on those pages. Leave password blank to keep the currently saved value.</p>
+            <div class="pkg-grid client-update-grid">
+              <label class="pkg-token-field">
+                Client update username
+                <input id="windowsCredsUsername" type="text" autocomplete="username" placeholder="DOMAIN\svc-account">
+              </label>
+              <label class="pkg-token-field">
+                Client update password
+                <input id="windowsCredsPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current one">
+              </label>
+              <div class="pkg-buttons">
+                <button id="windowsCredsSaveButton" class="primary-button" type="button">Save</button>
+                <button id="windowsCredsClearButton" class="danger-button-ghost" type="button">Delete saved credentials</button>
+              </div>
+            </div>
+            <div id="windowsCredsMessage" class="pkg-message hidden"></div>
+          </div>
+        </section>
+
+        <section id="linuxSettingsView" class="install-panel card-glow hidden" aria-label="Linux client settings">
+          <div class="updates-top-row">
+          <div class="settings-block">
+            <h3 class="settings-block-title">Linux client targeting</h3>
             <p class="cert-hint">When a Linux host reports several network interfaces, Client updates/actions picks the first IPv4 address it sees by default - not necessarily the one reachable from this server (e.g. a dedicated storage/cluster network reported ahead of the real LAN address). Set a preferred subnet to make that address win instead, regardless of its position in the report. Leave blank to keep the plain first-address behavior.</p>
             <div class="pkg-grid client-update-grid">
               <label class="pkg-token-field">
@@ -238,6 +311,29 @@
               </label>
             </div>
           </div>
+          <div class="settings-block">
+            <h3 class="settings-block-title">Install defaults</h3>
+            <p class="cert-hint">Used by a Linux client install request that doesn't specify its own interval, status interval, or install path. Deploy &gt; Actions' Linux form currently always sends its own values, so these apply only to requests that omit them (e.g. a future automated install flow).</p>
+            <div class="pkg-grid linux-defaults-grid">
+              <label class="pkg-token-field">
+                Interval (hours)
+                <input id="linuxDefaultIntervalHours" type="number" min="1" max="24" value="6">
+              </label>
+              <label class="pkg-token-field">
+                Status check interval (minutes)
+                <input id="linuxDefaultStatusIntervalMinutes" type="number" min="1" max="1440" value="30">
+              </label>
+              <label class="pkg-token-field">
+                Install path
+                <input id="linuxDefaultInstallPath" type="text" value="/opt/windows-inventory-lite">
+              </label>
+            </div>
+          </div>
+          </div>
+          <div class="pkg-buttons">
+            <button id="linuxSettingsSaveButton" class="primary-button" type="button">Save</button>
+          </div>
+          <div id="linuxSettingsMessage" class="pkg-message hidden"></div>
           <div class="settings-block">
             <h2 class="settings-block-title">Linux Client update credentials</h2>
             <p class="cert-hint">Used by Linux Client actions/updates pushes when "Stored Linux credentials" or "SSH key" auth mode is selected on those pages. Leave password blank to keep the currently saved value.</p>
@@ -271,54 +367,6 @@
             </div>
             <div id="linuxSshKeyMessage" class="pkg-message hidden"></div>
           </div>
-          <div class="settings-block">
-            <h2 class="settings-block-title">Ingestion Token</h2>
-            <p id="ingestionTokenStatusText" class="pkg-status">Loading status...</p>
-            <label class="token-value-field">
-              Current token
-              <input id="ingestionTokenValue" type="text" class="mono" readonly value="">
-            </label>
-            <label class="check-label ingestion-require-token-field">
-              <input id="generalRequireIngestionToken" type="checkbox" checked>
-              Require ingestion token
-            </label>
-            <div class="pkg-buttons">
-              <button id="ingestionTokenRegenerateButton" class="danger-button" type="button">Regenerate</button>
-            </div>
-            <div id="ingestionTokenMessage" class="pkg-message hidden"></div>
-          </div>
-          <div class="settings-block">
-            <h2 class="settings-block-title">Diagnostics</h2>
-            <div class="pkg-grid general-grid">
-              <label class="check-label">
-                <input id="generalDebugLogEnabled" type="checkbox">
-                Enable debug log
-              </label>
-            </div>
-            <p class="cert-hint">Writes a plain-text log of AD lookups, inventory-report traffic, and server errors to <code id="generalDebugLogPath" class="mono">-</code>. Off by default; only meant to be left on for the duration of a troubleshooting session.</p>
-          </div>
-          <div class="pkg-buttons">
-            <button id="generalSaveButton" class="primary-button" type="button">Save</button>
-          </div>
-          <div id="generalMessage" class="pkg-message hidden"></div>
-        </section>
-
-        <section id="generalStatusView" class="dashboard-card card-glow hidden" aria-label="Connection status">
-          <h2 class="settings-block-title">Connection status</h2>
-          <div class="status-grid">
-            <div class="status-row">
-              <span id="statusHttpDot" class="status-dot status-dot-off" aria-hidden="true"></span>
-              <span>HTTP<small id="statusHttpDetail" class="mono">-</small></span>
-            </div>
-            <div class="status-row">
-              <span id="statusHttpsDot" class="status-dot status-dot-off" aria-hidden="true"></span>
-              <span>HTTPS<small id="statusHttpsDetail" class="mono">-</small></span>
-            </div>
-            <div class="status-row">
-              <span id="statusCertDot" class="status-dot status-dot-off" aria-hidden="true"></span>
-              <span>Certificate<small id="statusCertDetail">-</small></span>
-            </div>
-          </div>
         </section>
 
         <section id="certificateView" class="install-panel card-glow hidden" aria-label="Server certificate">
@@ -339,7 +387,7 @@
               <button id="certUploadButton" class="primary-button" type="button">Upload</button>
             </div>
           </div>
-          <p class="cert-hint">Uploading only stages the certificate. Turn HTTPS on or off from Settings &gt; General. The first upload travels over whatever transport is currently active - if the server is still plain HTTP, do this from a trusted network or the server console.</p>
+          <p class="cert-hint">Uploading only stages the certificate. Turn HTTPS on or off from Settings &gt; Server. The first upload travels over whatever transport is currently active - if the server is still plain HTTP, do this from a trusted network or the server console.</p>
           <div id="certMessage" class="pkg-message hidden"></div>
           <h2 class="cert-history-heading">Certificate history</h2>
           <div class="table-wrap">
@@ -384,6 +432,32 @@
           </div>
           <p class="cert-hint">Your browser may prompt for the new credentials on the next request after saving.</p>
           <div id="adminPasswordMessage" class="pkg-message hidden"></div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Login lockout</h2>
+            <p class="cert-hint">After this many failed Basic Auth attempts from the same source IP within the counting window, that IP is blocked for the lockout duration - including correct-password attempts. Set threshold to 0 to disable.</p>
+            <div class="pkg-grid login-lockout-grid">
+              <label class="pkg-token-field">
+                Failed attempts before lockout
+                <input id="loginLockoutThreshold" type="number" min="0" max="1000" value="10">
+              </label>
+              <label class="pkg-token-field">
+                Counting window (minutes)
+                <input id="loginLockoutWindowMinutes" type="number" min="1" max="1440" value="15">
+              </label>
+              <label class="pkg-token-field">
+                Lockout duration (minutes)
+                <input id="loginLockoutDurationMinutes" type="number" min="1" max="1440" value="15">
+              </label>
+              <label class="pkg-token-field">
+                Session lifetime (hours)
+                <input id="sessionLifetimeHours" type="number" min="1" max="720" value="12">
+              </label>
+              <div class="pkg-buttons">
+                <button id="loginLockoutSaveButton" class="primary-button" type="button">Save</button>
+              </div>
+            </div>
+            <div id="loginLockoutMessage" class="pkg-message hidden"></div>
+          </div>
         </section>
 
         <section id="licensesView" class="hidden" aria-label="License inventory">
@@ -446,10 +520,31 @@
           </div>
         </section>
 
+        <section id="loggingView" class="hidden" aria-label="Ingestion rejection log">
+          <p class="cert-hint">Requests to the inventory-ingestion endpoints rejected for a missing or wrong token. Correlated to a known client by source IP when that IP matches the client's most recent successful report - a best-effort heuristic, not a guarantee (see Settings &gt; Server &gt; Ingestion Token for retention settings).</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th data-sort-table="ingestionRejections" data-sort-key="timestampUtc" class="sortable">Time</th>
+                  <th data-sort-table="ingestionRejections" data-sort-key="sourceIp" class="sortable">Source IP</th>
+                  <th>Hostname</th>
+                  <th data-sort-table="ingestionRejections" data-sort-key="endpoint" class="sortable">Endpoint</th>
+                  <th data-sort-table="ingestionRejections" data-sort-key="reason" class="sortable">Reason</th>
+                  <th>Matched client</th>
+                </tr>
+              </thead>
+              <tbody id="ingestionRejectionsBody"></tbody>
+            </table>
+          </div>
+          <div id="ingestionRejectionsPager" class="pager"></div>
+        </section>
+
         <section id="linuxServicesView" class="hidden" aria-label="Linux services inventory">
           <div class="view-toolbar">
             <button id="exportLinuxServicesBtn" class="export-button" type="button">Export CSV</button>
           </div>
+          <p class="cert-hint">Running systemd services (Linux clients).</p>
           <div class="table-wrap">
             <table>
               <thead>
@@ -536,86 +631,153 @@
         </section>
 
         <section id="updatesView" class="install-panel card-glow hidden" aria-label="Client updates">
-          <h2 class="settings-block-title platform-section-title">Windows Client updates</h2>
+          <h2 class="settings-block-title platform-section-title">Client updates</h2>
           <div class="settings-block">
             <h3 class="settings-block-title">WinRM credentials</h3>
-            <p class="cert-hint">Leave both fields blank when pushing an update to use the saved account below, or the server service's own identity if nothing is saved (the same account WinRM client actions already require). Fill them in to override with a different account for this push only.</p>
+            <p class="cert-hint">Global uses the saved account (Settings &gt; Windows &gt; Client update credentials), or AD as a fallback if nothing is saved. Manual lets you type a different account for this push only - typed here, never saved.</p>
             <p id="updatesSavedAccountHint" class="cert-hint hidden"></p>
-            <label class="check-label updates-use-ad-field">
-              <input id="updatesUseAdCredentials" type="checkbox">
-              Use global AD settings (Settings &gt; General &gt; Active Directory)
-            </label>
             <div class="pkg-grid client-update-grid">
               <label class="pkg-token-field">
+                WinRM credential source
+                <select id="updatesWinRmAuthMode">
+                  <option value="global">Global (saved account, AD fallback)</option>
+                  <option value="manual">Manual credentials</option>
+                </select>
+              </label>
+              <label id="updatesWinRmUsernameField" class="pkg-token-field hidden">
                 Client update username
                 <input id="updatesUsername" type="text" autocomplete="username" placeholder="DOMAIN\svc-account">
               </label>
-              <label class="pkg-token-field">
+              <label id="updatesWinRmPasswordField" class="pkg-token-field hidden">
                 Client update password
-                <input id="updatesPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current one">
+                <input id="updatesPassword" type="password" autocomplete="new-password">
               </label>
-              <div class="pkg-buttons">
-                <button id="updatesSaveCredentialsButton" class="primary-button" type="button">Save</button>
-                <button id="updatesClearCredentialsButton" class="danger-button-ghost" type="button">Delete saved credentials</button>
-              </div>
             </div>
-            <div id="updatesCredentialsMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block">
-            <h3 class="settings-block-title">Schedule</h3>
-            <p class="cert-hint">Automatically pushes to whichever clients are outdated when the schedule fires - the same targets "Update selected" would reach if every outdated row were checked. Uses the saved WinRM account above, or the server's own service identity if nothing is saved.</p>
-            <p id="updatesScheduleCredentialWarning" class="cert-hint hidden">No saved WinRM account above - scheduled pushes will use the server's own service identity.</p>
-            <div class="pkg-grid client-update-schedule-panel">
-              <label class="pkg-token-field">
-                Schedule
-                <select id="updatesScheduleMode">
-                  <option value="off">Off</option>
-                  <option value="once">Run once</option>
-                  <option value="interval">Every N hours</option>
-                </select>
-              </label>
-              <label id="updatesScheduleOnceField" class="pkg-token-field hidden">
-                Run at
-                <input id="updatesScheduleOnceAt" type="datetime-local">
-              </label>
-              <label id="updatesScheduleIntervalField" class="pkg-token-field hidden">
-                Every (hours)
-                <input id="updatesScheduleIntervalHours" type="number" min="1" max="8760" value="24">
+            <h3 class="settings-block-title">SSH credentials</h3>
+            <label class="linux-updates-credential-field">
+              SSH credential source
+              <select id="linuxUpdatesAuthMode">
+                <option value="global">Global (saved account, AD fallback)</option>
+                <option value="manual">Manual credentials</option>
+                <option value="key">SSH key</option>
+              </select>
+            </label>
+            <label id="linuxUpdatesCredentialsField" class="linux-updates-credential-field hidden">
+              Linux user
+              <input id="linuxUpdatesUsername" type="text" autocomplete="username" placeholder="root">
+            </label>
+            <label id="linuxUpdatesPasswordField" class="linux-updates-credential-field hidden">
+              Linux password
+              <input id="linuxUpdatesPassword" type="password" autocomplete="current-password">
+            </label>
+            <label class="check-label linux-updates-trust-field">
+              <input id="linuxUpdatesTrustNewHostKeys" type="checkbox">
+              Trust new host keys automatically (skip verification)
+            </label>
+            <label id="linuxUpdatesAcknowledgeHostKeyRiskField" class="check-label linux-updates-trust-field hidden">
+              <input id="linuxUpdatesAcknowledgeHostKeyRisk" type="checkbox">
+              I understand this accepts an unverified SSH host key on first connection
+            </label>
+          </div>
+          <div class="updates-top-row">
+            <div class="settings-block">
+              <h3 class="settings-block-title">Windows schedule</h3>
+              <p class="cert-hint">Auto-pushes outdated Windows clients using the WinRM credentials above.</p>
+              <p id="updatesScheduleCredentialWarning" class="cert-hint hidden">No saved WinRM account above - scheduled pushes will use the server's own service identity.</p>
+              <div class="pkg-grid client-update-schedule-panel">
+                <label class="pkg-token-field">
+                  Schedule
+                  <select id="updatesScheduleMode">
+                    <option value="off">Off</option>
+                    <option value="once">Run once</option>
+                    <option value="interval">Every N hours</option>
+                  </select>
+                </label>
+                <label id="updatesScheduleOnceField" class="pkg-token-field hidden">
+                  Run at
+                  <input id="updatesScheduleOnceAt" type="datetime-local">
+                </label>
+                <label id="updatesScheduleIntervalField" class="pkg-token-field hidden">
+                  Every (hours)
+                  <input id="updatesScheduleIntervalHours" type="number" min="1" max="8760" value="24">
+                </label>
+                <div class="pkg-buttons">
+                  <button id="updatesScheduleSaveButton" class="primary-button" type="button">Save</button>
+                </div>
+              </div>
+              <div id="updatesScheduleMessage" class="pkg-message hidden"></div>
+            </div>
+            <div class="settings-block">
+              <h3 class="settings-block-title">Linux schedule</h3>
+              <p class="cert-hint">Auto-pushes outdated Linux clients using the SSH credentials above (no AD reuse for scheduled pushes).</p>
+              <div class="pkg-grid client-update-schedule-panel">
+                <label class="pkg-token-field">
+                  Schedule
+                  <select id="linuxUpdatesScheduleMode">
+                    <option value="off">Off</option>
+                    <option value="once">Run once</option>
+                    <option value="interval">Every N hours</option>
+                  </select>
+                </label>
+                <label id="linuxUpdatesScheduleOnceField" class="pkg-token-field hidden">
+                  Run at
+                  <input id="linuxUpdatesScheduleOnceAt" type="datetime-local">
+                </label>
+                <label id="linuxUpdatesScheduleIntervalField" class="pkg-token-field hidden">
+                  Every (hours)
+                  <input id="linuxUpdatesScheduleIntervalHours" type="number" min="1" max="8760" value="24">
+                </label>
+                <div class="pkg-buttons">
+                  <button id="linuxUpdatesScheduleSaveButton" class="primary-button" type="button">Save</button>
+                </div>
+              </div>
+              <div id="linuxUpdatesScheduleMessage" class="pkg-message hidden"></div>
+            </div>
+            <div class="settings-block">
+              <h3 class="settings-block-title">Linux client targeting</h3>
+              <label class="linux-updates-credential-field">
+                Preferred subnet (CIDR)
+                <input id="linuxUpdatesPreferredSubnet" type="text" placeholder="192.168.1.0/24">
               </label>
               <div class="pkg-buttons">
-                <button id="updatesScheduleSaveButton" class="primary-button" type="button">Save</button>
+                <button id="linuxUpdatesPreferredSubnetSaveButton" class="primary-button" type="button">Save</button>
               </div>
+              <div id="linuxUpdatesPreferredSubnetMessage" class="pkg-message hidden"></div>
             </div>
-            <div id="updatesScheduleMessage" class="pkg-message hidden"></div>
           </div>
           <p id="updatesPackageStatus" class="pkg-status">Loading client update status...</p>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Computer</th>
-                  <th>Domain</th>
-                  <th>Current version</th>
+                  <th data-sort-table="updates" data-sort-key="computerName">Computer</th>
+                  <th data-sort-table="updates" data-sort-key="domain">Domain</th>
+                  <th data-sort-table="updates" data-sort-key="clientVersion">Current version</th>
                   <th>Available version</th>
-                  <th>Last collected</th>
+                  <th data-sort-table="updates" data-sort-key="collectedAt">Last collected</th>
                   <th><input id="updatesSelectAll" type="checkbox" title="Select all"></th>
                 </tr>
               </thead>
               <tbody id="updatesBody"></tbody>
             </table>
           </div>
+          <div id="updatesPager" class="pager"></div>
           <button id="updatesPushButton" class="primary-button" type="button" disabled>Update selected</button>
+          <h3 class="settings-block-title push-status-heading">Windows push status</h3>
           <div id="updatesStatus" class="install-status empty">No update job started.</div>
+          <h3 class="settings-block-title push-status-heading">Linux push status</h3>
+          <div id="linuxUpdatesStatus" class="install-status empty">No update job started.</div>
         </section>
 
         <section id="installView" class="install-panel card-glow hidden" aria-label="Remote client actions">
-          <h2 class="settings-block-title platform-section-title">Windows Client actions</h2>
+          <h2 class="settings-block-title platform-section-title">Client actions</h2>
           <div class="install-grid">
             <div class="install-targets-field">
               <div class="install-targets-textarea-wrap">
-                <label>
-                  Targets
-                  <textarea id="installTargets" rows="4" placeholder="PC-001&#10;PC-002&#10;192.0.2.10&#10;192.0.2.20-192.0.2.30"></textarea>
+                <label>Targets
+                  <textarea id="installTargets" rows="4" placeholder="PC-001&#10;192.0.2.10&#10;192.0.2.20-192.0.2.30"></textarea>
                 </label>
               </div>
               <div class="pkg-buttons">
@@ -625,212 +787,74 @@
               <div id="installAdMessage" class="pkg-message hidden"></div>
             </div>
             <div class="install-right-fields">
-              <label>
-                Action
+              <label>Action
                 <select id="clientAction">
                   <option value="install">Install client</option>
                   <option value="uninstall">Uninstall client</option>
                 </select>
               </label>
-              <label class="install-only">
-                Server URL
-                <input id="installServerUrl" type="text" value="">
+              <label>Detection mode
+                <select id="clientActionMode">
+                  <option value="auto">Auto (try WinRM, then SSH)</option>
+                  <option value="force-windows">Force Windows (WinRM only)</option>
+                  <option value="force-linux">Force Linux (SSH only)</option>
+                </select>
               </label>
-              <label class="install-only">
-                Ingestion token
-                <input id="installToken" type="text" autocomplete="off" placeholder="leave empty to use the server's current token">
-              </label>
-              <label>
-                WinRM user
-                <input id="installUsername" type="text" autocomplete="username" placeholder="DOMAIN\User">
-              </label>
-              <label>
-                WinRM password
-                <input id="installPassword" type="password" autocomplete="current-password">
-              </label>
-              <label class="check-label">
-                <input id="installUseAdCredentials" type="checkbox">
-                Use global AD settings (Settings &gt; General &gt; Active Directory)
-              </label>
-              <label class="check-label install-only">
-                <input id="installForce" type="checkbox">
-                Force reinstall
-              </label>
-              <label class="check-label">
-                <input id="installTrustedHosts" type="checkbox">
-                Add to TrustedHosts
-              </label>
+              <div class="install-credentials-column">
+                <label class="mode-windows-field">WinRM credential source
+                  <select id="installWinRmAuthMode">
+                    <option value="global">Global (saved account, AD fallback)</option>
+                    <option value="manual">Manual credentials</option>
+                  </select>
+                </label>
+                <label id="installWinRmUsernameField" class="mode-windows-field hidden">WinRM user
+                  <input id="installUsername" type="text" autocomplete="username" placeholder="DOMAIN\User">
+                </label>
+                <label id="installWinRmPasswordField" class="mode-windows-field hidden">WinRM password
+                  <input id="installPassword" type="password" autocomplete="current-password">
+                </label>
+                <label class="mode-linux-field">SSH credential source
+                  <select id="installSshAuthMode">
+                    <option value="global">Global (saved account, AD fallback)</option>
+                    <option value="manual">Manual credentials</option>
+                    <option value="key">SSH key</option>
+                  </select>
+                </label>
+                <label id="installSshCredentialsField" class="mode-linux-field hidden">Linux user
+                  <input id="installSshUsername" type="text" autocomplete="username" placeholder="root">
+                </label>
+                <label id="installSshPasswordField" class="mode-linux-field hidden">Linux password
+                  <input id="installSshPassword" type="password" autocomplete="current-password">
+                </label>
+              </div>
+              <div class="install-settings-column">
+                <label class="install-only mode-linux-field">Interval (hours)
+                  <input id="installIntervalHours" type="number" min="1" max="24" value="6">
+                </label>
+                <label class="install-only mode-linux-field">Status check interval (minutes)
+                  <input id="installStatusIntervalMinutes" type="number" min="1" max="1440" value="30">
+                </label>
+                <label id="installPreferredSubnetField" class="pkg-token-field mode-linux-field">Preferred subnet (CIDR)
+                  <div class="install-inline-field-row">
+                    <input id="installPreferredSubnet" type="text" placeholder="192.168.1.0/24">
+                    <button id="installPreferredSubnetSaveButton" class="edit-button" type="button">Save</button>
+                  </div>
+                </label>
+              </div>
+              <div class="install-checkboxes-row">
+                <label class="check-label install-only mode-windows-field"><input id="installForce" type="checkbox"> Force reinstall</label>
+                <label class="check-label mode-windows-field"><input id="installTrustedHosts" type="checkbox"> Add to TrustedHosts</label>
+                <label id="installTrustNewHostKeysField" class="check-label install-only mode-linux-field"><input id="installTrustNewHostKeys" type="checkbox"> Trust new host keys automatically (skip verification)</label>
+                <label id="installAcknowledgeHostKeyRiskField" class="check-label install-only mode-linux-field hidden"><input id="installAcknowledgeHostKeyRisk" type="checkbox"> I understand this accepts an unverified SSH host key on first connection</label>
+              </div>
               <button id="installButton" class="primary-button install-submit-field" type="button">Install client</button>
             </div>
           </div>
           <div id="installStatus" class="install-status empty">No install job started.</div>
         </section>
 
-        <section id="linuxInstallView" class="install-panel card-glow hidden" aria-label="Linux client actions">
-          <h2 class="settings-block-title platform-section-title">Linux Client actions</h2>
-          <div class="install-grid">
-            <div class="install-targets-field">
-              <div class="install-targets-textarea-wrap">
-                <label>
-                  Targets (hostnames or IPs)
-                  <textarea id="linuxInstallTargets" rows="4" placeholder="192.0.2.10&#10;192.0.2.11&#10;192.0.2.20-192.0.2.30"></textarea>
-                </label>
-              </div>
-            </div>
-            <div class="linux-install-right-fields">
-              <label>
-                Action
-                <select id="linuxClientAction">
-                  <option value="install">Install client</option>
-                  <option value="uninstall">Uninstall client</option>
-                </select>
-              </label>
-              <label class="install-only">
-                Server URL
-                <input id="linuxInstallServerUrl" type="text" placeholder="http://192.168.1.1:8080/api/v1/linux/inventory">
-              </label>
-              <label class="install-only">
-                Ingestion token
-                <input id="linuxInstallToken" type="text" autocomplete="off" placeholder="leave empty to use the server's current token">
-              </label>
-              <label>
-                Authentication
-                <select id="linuxInstallAuthMode">
-                  <option value="credentials">Stored Linux credentials</option>
-                  <option value="key">SSH key</option>
-                  <option value="ad">Use global AD settings</option>
-                </select>
-              </label>
-              <label class="install-only">
-                Interval (hours)
-                <input id="linuxInstallIntervalHours" type="number" min="1" max="24" value="6">
-              </label>
-              <label class="install-only">
-                Status check interval (minutes)
-                <input id="linuxInstallStatusIntervalMinutes" type="number" min="1" max="1440" value="30">
-              </label>
-              <label>
-                Install path
-                <input id="linuxInstallPath" type="text" value="/opt/windows-inventory-lite">
-              </label>
-              <label class="pkg-token-field">
-                Preferred subnet (CIDR)
-                <div class="install-inline-field-row">
-                  <input id="linuxInstallPreferredSubnet" type="text" placeholder="192.168.1.0/24">
-                  <button id="linuxInstallPreferredSubnetSaveButton" class="edit-button" type="button">Save</button>
-                </div>
-              </label>
-              <label id="linuxInstallCredentialsField" class="hidden">
-                Linux user
-                <input id="linuxInstallUsername" type="text" autocomplete="username" placeholder="root">
-              </label>
-              <label id="linuxInstallPasswordField" class="hidden">
-                Linux password
-                <input id="linuxInstallPassword" type="password" autocomplete="current-password">
-              </label>
-              <label id="linuxTrustNewHostKeysField" class="check-label install-only">
-                <input id="linuxTrustNewHostKeys" type="checkbox">
-                Trust new host keys automatically (skip verification)
-              </label>
-              <label id="linuxAcknowledgeHostKeyRiskField" class="check-label install-only hidden">
-                <input id="linuxAcknowledgeHostKeyRisk" type="checkbox">
-                I understand this accepts an unverified SSH host key on first connection
-              </label>
-              <button id="linuxInstallButton" class="primary-button install-submit-field" type="button">Install client</button>
-            </div>
-          </div>
-          <div id="linuxInstallStatus" class="install-status empty">No install job started.</div>
-        </section>
-
         <section id="installHistoryView" class="install-panel card-glow hidden" aria-label="Saved client action logs">
           <div id="installHistory" class="install-history empty">No saved client action logs.</div>
-        </section>
-
-        <section id="linuxUpdatesView" class="install-panel card-glow hidden" aria-label="Linux client updates">
-          <h2 class="settings-block-title platform-section-title">Linux Client updates</h2>
-          <div class="linux-updates-top-row">
-          <div class="settings-block">
-            <h3 class="settings-block-title">Authentication</h3>
-            <label class="linux-updates-credential-field">
-              Authentication
-              <select id="linuxUpdatesAuthMode">
-                <option value="credentials">Stored Linux credentials</option>
-                <option value="key">SSH key</option>
-                <option value="ad">Use global AD settings</option>
-              </select>
-            </label>
-            <label id="linuxUpdatesCredentialsField" class="linux-updates-credential-field hidden">
-              Linux user (leave blank to use the saved Settings account)
-              <input id="linuxUpdatesUsername" type="text" autocomplete="username" placeholder="root">
-            </label>
-            <label id="linuxUpdatesPasswordField" class="linux-updates-credential-field hidden">
-              Linux password (leave blank to use the saved Settings password)
-              <input id="linuxUpdatesPassword" type="password" autocomplete="current-password">
-            </label>
-            <label class="check-label">
-              <input id="linuxUpdatesTrustNewHostKeys" type="checkbox">
-              Trust new host keys automatically (skip verification)
-            </label>
-            <label id="linuxUpdatesAcknowledgeHostKeyRiskField" class="check-label hidden">
-              <input id="linuxUpdatesAcknowledgeHostKeyRisk" type="checkbox">
-              I understand this accepts an unverified SSH host key on first connection
-            </label>
-          </div>
-          <div class="settings-block">
-            <h3 class="settings-block-title">Linux client targeting</h3>
-            <label class="linux-updates-credential-field">
-              Preferred subnet (CIDR)
-              <input id="linuxUpdatesPreferredSubnet" type="text" placeholder="192.168.1.0/24">
-            </label>
-            <div class="pkg-buttons">
-              <button id="linuxUpdatesPreferredSubnetSaveButton" class="primary-button" type="button">Save</button>
-            </div>
-            <div id="linuxUpdatesPreferredSubnetMessage" class="pkg-message hidden"></div>
-          </div>
-          <div class="settings-block">
-            <h3 class="settings-block-title">Schedule</h3>
-            <p class="cert-hint">Auto-pushes outdated clients using the credentials above (no AD reuse for scheduled pushes).</p>
-            <div class="pkg-grid client-update-schedule-panel">
-              <label class="pkg-token-field">
-                Schedule
-                <select id="linuxUpdatesScheduleMode">
-                  <option value="off">Off</option>
-                  <option value="once">Run once</option>
-                  <option value="interval">Every N hours</option>
-                </select>
-              </label>
-              <label id="linuxUpdatesScheduleOnceField" class="pkg-token-field hidden">
-                Run at
-                <input id="linuxUpdatesScheduleOnceAt" type="datetime-local">
-              </label>
-              <label id="linuxUpdatesScheduleIntervalField" class="pkg-token-field hidden">
-                Every (hours)
-                <input id="linuxUpdatesScheduleIntervalHours" type="number" min="1" max="8760" value="24">
-              </label>
-              <div class="pkg-buttons">
-                <button id="linuxUpdatesScheduleSaveButton" class="primary-button" type="button">Save</button>
-              </div>
-            </div>
-            <div id="linuxUpdatesScheduleMessage" class="pkg-message hidden"></div>
-          </div>
-          </div>
-          <p id="linuxUpdatesPackageStatus" class="pkg-status">Loading client update status...</p>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Hostname</th>
-                  <th>Current version</th>
-                  <th>Available version</th>
-                  <th>Last collected</th>
-                  <th><input id="linuxUpdatesSelectAll" type="checkbox" title="Select all"></th>
-                </tr>
-              </thead>
-              <tbody id="linuxUpdatesBody"></tbody>
-            </table>
-          </div>
-          <button id="linuxUpdatesPushButton" class="primary-button" type="button" disabled>Update selected</button>
-          <div id="linuxUpdatesStatus" class="install-status empty">No update job started.</div>
         </section>
 
         <section id="clientsView" aria-label="Client inventory">
@@ -862,6 +886,7 @@
           <div class="view-toolbar">
             <button id="exportSoftwareBtn" class="export-button" type="button">Export CSV</button>
           </div>
+          <p class="cert-hint">Installed packages (Windows clients).</p>
           <div class="table-wrap">
             <table>
               <thead>
@@ -944,7 +969,7 @@
   <div id="logoutOverlay" class="logout-overlay hidden" role="alertdialog" aria-label="Logged out">
     <div class="logout-overlay-card">
       <h2>Logged out</h2>
-      <p>Your saved sign-in for this tab has been cleared where the browser allows it. Some browsers keep it cached until every tab using this site is closed - for full security on a shared computer, close this browser tab or window.</p>
+      <p>Your session has been ended.</p>
       <button id="logoutReloadButton" class="primary-button" type="button">Log back in</button>
     </div>
   </div>

@@ -83,6 +83,20 @@
        longer needs its own hardcode either - it can go back to var(--line)
        like the light-theme block already does. */
     --line: #285484;
+    /* .settings-block/.subtab-strip border-bottom dividers used --line
+       like every other border here, but on this palette --line (#285484)
+       only clears ~1.5:1 against --panel (#153a63) and ~2.0:1 against
+       --bg (#0c2340) - short of WCAG 1.4.11's 3:1 floor for UI-component
+       (non-text) contrast, not the 4.5:1 text threshold used elsewhere in
+       this file. --line itself is left alone: ~30 other rules lean on it
+       for a deliberately subtle card-border/glow-ring look that already
+       reads fine at that contrast, and brightening it broadly would make
+       every one of those rings loud instead. --divider-strong is a
+       dedicated, lighter tint at the same H~211deg hue, consumed only by
+       those two rules via var(--divider-strong, var(--line)) so light
+       mode (whose --line already clears 3:1) needs no change. #538dca
+       measures ~3.3:1 against --panel and ~4.5:1 against --bg. */
+    --divider-strong: #538dca;
     --accent: #1c93bc;
     --accent-text: #04141a;
     --danger: #ff7a6e;
@@ -131,6 +145,7 @@
      why every token below this point is blue-hue-tuned, not left at the
      pre-redesign neutral-gray values. */
   --line: #285484;
+  --divider-strong: #538dca;
   --accent: #1c93bc;
   --accent-text: #04141a;
   --danger: #ff7a6e;
@@ -288,7 +303,10 @@ body {
   display: flex;
   gap: var(--space-xs);
   padding: var(--space-md) 0 0;
-  border-bottom: 1px solid var(--line);
+  /* --divider-strong falls back to --line where it isn't defined (light
+     mode) - see the dark-mode --divider-strong comment for why this
+     divider needs a stronger value than --line's other consumers. */
+  border-bottom: 1px solid var(--divider-strong, var(--line));
   margin-bottom: var(--space-lg);
 }
 
@@ -336,7 +354,10 @@ body {
   gap: var(--space-xs);
   padding: var(--space-sm) var(--space-2xl);
   background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  /* Same low-contrast-on-Ocean-Blue issue as .settings-block/.subtab-strip/
+     .updates-top-row had (see the dark-mode --divider-strong comment) -
+     this divider sits on --panel too, so the same fix applies. */
+  border-bottom: 1px solid var(--divider-strong, var(--line));
   position: sticky;
   top: 0;
   z-index: 10;
@@ -354,6 +375,7 @@ body {
   flex-shrink: 0;
   width: 26px;
   height: 26px;
+  object-fit: contain;
 }
 
 .brand-word {
@@ -812,11 +834,46 @@ main {
   color: var(--usb-text);
 }
 
+/* Same reasoning and declaration-order requirement as .tile-alert just
+   above (must win at equal specificity against .summary span/div,
+   declared later in source order to do so) - reuses the existing success
+   palette (already used for .pkg-message's saved-successfully state)
+   rather than inventing a new green. */
+.tile-success {
+  border-left: 3px solid var(--success-border);
+  background: var(--success-bg);
+}
+
+.tile-success span {
+  color: var(--success-text);
+}
+
+.tile-clickable {
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+/* --card-glow-hero, not a hand-picked rgba: it's already the theme-aware
+   "stronger glow" token (used for the hero tile), correctly tuned for
+   both light and dark --accent values - a hardcoded rgba here would only
+   be right in one theme. */
+.tile-clickable:hover,
+.tile-clickable:focus-visible {
+  box-shadow: 0 0 0 1px var(--accent), var(--card-glow-hero);
+  transform: translateY(-2px);
+}
+
+/* Same radius/glow treatment as .card-glow (Bold Card System) - table row/
+   header styling itself is still out of scope (never mocked up), but the
+   flat 8px/1px-border chrome around every table was the one piece of
+   pre-redesign chrome left on Fleet's list pages, and .card-glow's
+   properties are a direct drop-in here (overflow-x:auto is the only thing
+   .card-glow doesn't already need, since it's not on a scrolling table). */
 .table-wrap {
   overflow-x: auto;
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-glow);
 }
 
 table {
@@ -1080,7 +1137,6 @@ input[type="number"] {
    just takes the next of 2 columns in DOM order, so it can't collide or
    get orphaned regardless of field count, and a .hidden field is removed
    from grid flow entirely, leaving no gap. */
-.linux-install-right-fields,
 .install-right-fields {
   grid-column: 3 / span 2;
   grid-row: 1 / span 2;
@@ -1090,12 +1146,36 @@ input[type="number"] {
   align-self: start;
 }
 
-.linux-install-right-fields .install-submit-field,
 .install-right-fields .install-submit-field {
   grid-column: 1 / span 2;
   grid-row: auto;
   justify-self: end;
   margin-top: 8px;
+}
+
+/* WinRM and SSH credential source stacked in one column, each with its
+   own Manual-mode fields directly beneath it - fixes them landing in
+   whichever of the parent grid's two auto-flow cells happened to be next
+   in DOM order, which shifted unpredictably every time a conditional
+   field (Manual username/password) appeared or disappeared. */
+.install-credentials-column,
+.install-settings-column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+/* Deliberately last in DOM order and full-width (not interleaved with
+   the credential/settings fields above) - these checkboxes are
+   independent toggles, not part of either column's own field flow, and
+   grouping them together at the bottom keeps the two columns above a
+   predictable one-field-per-row list regardless of which checkboxes are
+   currently visible for the selected mode. */
+.install-checkboxes-row {
+  grid-column: 1 / span 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
 }
 
 .check-label {
@@ -1450,9 +1530,43 @@ th.sort-desc::after {
   opacity: 0.5;
 }
 
-.pager-status {
+.pager-pages {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.pager-page-button {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
   font-size: var(--font-size-sm);
+}
+
+.pager-page-button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Matches .os-filter-option.active's gradient-fill convention - both are
+   a small pill selecting one option among visible peers. */
+.pager-page-button.active {
+  background: var(--accent-gradient);
+  color: var(--accent-text);
+  border-color: transparent;
+  cursor: default;
+}
+
+.pager-ellipsis {
   color: var(--muted);
+  font-size: var(--font-size-sm);
+  padding: 0 2px;
 }
 
 .hw-section-header {
@@ -1518,6 +1632,17 @@ th.sort-desc::after {
   max-width: 420px;
 }
 
+/* The two "Trust new host keys"/"I understand..." checkboxes right below
+   the credential fields above share the exact same root cause but were
+   missed when .linux-updates-credential-field was added: .check-label's
+   own min-height/grid-template-columns/align-items (styles.css, further
+   down) never apply without something setting display:grid first, same
+   as .ingestion-require-token-field's fix elsewhere on this page. */
+.linux-updates-trust-field {
+  display: grid;
+  margin-bottom: var(--space-md);
+}
+
 .pkg-grid {
   display: grid;
   grid-template-columns: minmax(240px, 2fr) minmax(160px, 1fr) 110px auto;
@@ -1576,12 +1701,39 @@ th.sort-desc::after {
 }
 
 /* Every other .pkg-buttons sits at the END of its form (Save/Upload/
-   Download), so it never needs bottom spacing of its own. The Certificate
-   view's Delete button is the one place a .pkg-buttons block sits BEFORE a
-   field grid instead - without a gap it read as crowding the Certificate
-   file field right below it. */
-#certificateView > .pkg-buttons {
+   Download), so it never needs bottom spacing of its own. Three places
+   have a .pkg-buttons block sitting BEFORE the next block instead of at
+   the end of its own: the Certificate view's Delete button (before the
+   certificate file field), Settings > Linux's page-level Save button for
+   "Linux client targeting"/"Install defaults" (before the separate
+   "Linux Client update credentials" block below it), and Settings >
+   Windows' page-level Save button for "Active Directory" (before the
+   separate "Windows Client update credentials" block added alongside it -
+   same crowding bug, reported live a second time on the Windows side
+   after already being fixed once for Linux) - without a gap, all three
+   read as belonging to the wrong section. */
+#certificateView > .pkg-buttons,
+#linuxSettingsView > .pkg-buttons,
+#windowsSettingsView > .pkg-buttons {
   margin-bottom: 16px;
+}
+
+/* "Windows push status"/"Linux push status" on the merged Deploy > Updates
+   page are the only .settings-block-title headings in the app that sit
+   bare, not as the first child of their own .settings-block - there's
+   nothing above them contributing the usual 12-18px separation a
+   .settings-block's own margin-bottom/border-bottom would give the
+   heading that follows it, so the button right above touched the heading
+   with zero gap (reported live). Scoped to this one class rather than
+   widening .settings-block-title's own margin, which every other
+   instance already gets correctly from its wrapping .settings-block.
+   h3.push-status-heading, not bare .push-status-heading: same specificity
+   (0,1,0) as .settings-block-title's own margin shorthand, which is
+   defined later in this file and would otherwise win on source order and
+   reset margin-top back to 0 - this project's own recurring specificity-
+   tie failure mode, caught here before shipping instead of after. */
+h3.push-status-heading {
+  margin-top: 18px;
 }
 
 .pkg-message {
@@ -1661,6 +1813,14 @@ th.sort-desc::after {
   grid-template-columns: minmax(200px, 420px) minmax(200px, 420px) auto;
 }
 
+/* Four short numeric fields (threshold/window/duration/session lifetime) -
+   narrower tracks than .client-update-grid's credential-shaped fields,
+   matching this block's actual content instead of stretching digits-only
+   inputs wide. */
+.login-lockout-grid {
+  grid-template-columns: repeat(4, minmax(160px, 220px)) auto;
+}
+
 /* Same narrow single-column treatment as .ad-sync-panel/.ad-identity-panel -
    the schedule's mode dropdown and its one conditional field read as a
    small deliberate group, not stretched across the page. */
@@ -1669,32 +1829,62 @@ th.sort-desc::after {
   max-width: 420px;
 }
 
+/* Settings > Linux's "Install defaults" sits inside .updates-top-row next
+   to "Linux client targeting" (Task 2), where each column is as narrow as
+   280px - .general-grid's minmax(180px,1fr)/minmax(280px,2fr) tracks alone
+   demand ~460px+ and overflow that column (the sibling "Linux Client
+   update credentials" block hit the same problem with .client-update-grid,
+   which is why it was pulled out of this row entirely instead). Same
+   narrow single-column treatment as .ad-identity-panel/
+   .client-update-schedule-panel above fixes it here without a fixed
+   grid-column/grid-row placement. */
+.linux-defaults-grid {
+  grid-template-columns: 1fr;
+  max-width: 420px;
+}
+
 .settings-block {
   padding-bottom: var(--space-lg);
   margin-bottom: 18px;
-  border-bottom: 1px solid var(--line);
+  /* --divider-strong falls back to --line where it isn't defined (light
+     mode) - see the dark-mode --divider-strong comment for why this
+     divider needs a stronger value than --line's other consumers. */
+  border-bottom: 1px solid var(--divider-strong, var(--line));
 }
 
-/* Authentication/Linux client targeting/Schedule side by side instead of
-   stacked - each is a narrow, max-420px block (see
-   .linux-updates-credential-field/.client-update-schedule-panel), so
-   three of them fit one row on any normal desktop width without
-   crowding, and stacking them pushed the actual outdated-clients table
-   below the fold. Wraps to stacked automatically on a narrow viewport
-   via flex-wrap, no separate breakpoint needed. The row-dividing border
-   moves to the wrapper; the three .settings-block children lose their
-   own (which would otherwise draw a divider under each column instead
-   of under the row). */
-.linux-updates-top-row {
+/* Authentication/Linux client targeting/Schedule (Linux Client updates), or
+   Linux client targeting/Install defaults (Settings > Linux) side by side
+   instead of stacked - each is a narrow, max-420px block, so they fit one
+   row on any normal desktop width without crowding. Wraps to stacked
+   automatically on a narrow viewport via flex-wrap, no separate breakpoint
+   needed. The row-dividing border moves to the wrapper; the children lose
+   their own (which would otherwise draw a divider under each column
+   instead of under the row).
+   Windows Client updates' WinRM credentials block used to pair with
+   Schedule here too, but it uses .client-update-grid (a wide 2-field +
+   button-row layout, not a narrow single-column one) - reported live as
+   overlapping/overflowing its half-width column, same failure the
+   analogous "Linux Client update credentials" block (Settings > Linux)
+   already hit and was fixed for by moving it out of a row entirely. WinRM
+   credentials got the same fix - it's now a standalone full-width block
+   above this row, not a row member. */
+.updates-top-row {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-lg);
   margin-bottom: 18px;
   padding-bottom: var(--space-lg);
-  border-bottom: 1px solid var(--line);
+  /* This wrapper carries the ONLY section divider across all three pages
+     that use it (Windows Client updates, Linux Client updates, and
+     Settings > Linux) - .settings-block below sets border-bottom: none
+     once nested here - so it needs the same --divider-strong contrast fix
+     as .settings-block/.subtab-strip themselves (see the dark-mode
+     --divider-strong comment), not the plain --line every other border on
+     the page uses. */
+  border-bottom: 1px solid var(--divider-strong, var(--line));
 }
 
-.linux-updates-top-row .settings-block {
+.updates-top-row .settings-block {
   flex: 1 1 280px;
   min-width: 280px;
   border-bottom: none;
@@ -1839,6 +2029,7 @@ th.sort-desc::after {
   .license-grid,
   .admin-password-grid,
   .general-grid,
+  .login-lockout-grid,
   .ad-sync-mode-row {
     grid-template-columns: 1fr;
   }
@@ -1859,5 +2050,15 @@ th.sort-desc::after {
   .install-right-fields > * {
     grid-column: auto;
     grid-row: auto;
+  }
+
+  /* .install-right-fields .install-submit-field's own unconditional
+     grid-column: 1 / span 2 (needed for the 2-column desktop/tablet
+     layout) has the same (0,2,0) specificity as the reset above, which
+     only has (0,1,0) via the universal child combinator and can never
+     win regardless of source order. Match its specificity here instead -
+     appearing later in source order then correctly wins the tie. */
+  .install-right-fields .install-submit-field {
+    grid-column: 1;
   }
 }

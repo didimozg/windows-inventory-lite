@@ -120,7 +120,7 @@ param(
     [ValidateRange(1, 65535)]
     [int]$HttpsPort,
 
-    # Refused at install time (and again from the dashboard Settings > General
+    # Refused at install time (and again from the dashboard Settings > Server
     # page - see ConfigureServerSettings) unless HTTPS is enabled and working,
     # since disabling HTTP with no working HTTPS would leave the dashboard
     # completely unreachable with no way back in except editing
@@ -1058,7 +1058,7 @@ function Set-RestrictedFileAcl {
 
 # --prefix is deliberately NOT included here, unlike --data/--content/etc.
 # The HTTP and HTTPS ports can both be changed later from the dashboard
-# Settings > General page (InventoryServer.ApplySlotState, driven by
+# Settings > Server page (InventoryServer.ApplySlotState, driven by
 # ConfigureServerSettings); that only rewrites ListenPrefix/HttpsPort/
 # EnableHttp in server-config.json, not this service's start command. If
 # --prefix were baked in here too, a plain service restart or reboot would
@@ -1087,7 +1087,7 @@ $serviceCommand += ' --config "' + (ConvertTo-ServiceArgValue $ConfigPath) + '"'
 
 # Start from whatever is already on disk instead of a fresh hashtable, so
 # settings this script does not know about (e.g. StaleHours, which is only
-# ever set from the dashboard Settings > General page) survive a reinstall.
+# ever set from the dashboard Settings > Server page) survive a reinstall.
 # Write-ServerConfig replaces the whole file rather than merging, so anything
 # left out here would otherwise be silently deleted on every rerun.
 $config = @{}

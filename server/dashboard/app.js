@@ -27,6 +27,11 @@
       // computerName or Linux' hostname. See allClientSortValue.
       clients: { key: 'name', dir: 1 },
       software: { key: 'name', dir: 1 },
+      // Sorts the software list inside a Windows client's expanded detail
+      // row (see nestedTable in renderClientsTable). Single shared key, not
+      // per-client - same convention as software/licenses above (one sort
+      // order for the whole logical table, not one per row/group).
+      clientSoftware: { key: 'name', dir: 1 },
       // hwCpu/hwDisk/hwRam drive the single cross-platform Hardware view -
       // these were always per-table, never per-platform, so the merged view
       // reuses them and the former linuxHw* keys are gone.
@@ -34,16 +39,21 @@
       hwDisk: { key: 'model', dir: 1 },
       hwRam: { key: 'totalMb', dir: -1 },
       licenses: { key: 'name', dir: 1 },
-      linuxServices: { key: 'name', dir: 1 }
+      linuxServices: { key: 'name', dir: 1 },
+      ingestionRejections: { key: 'timestampUtc', dir: -1 },
+      // Sorts the merged Deploy > Updates table (Windows + Linux outdated
+      // clients combined) - same per-view-key convention as every other
+      // table above.
+      updates: { key: 'computerName', dir: 1 }
     },
-    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxServices: 1 },
+    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxServices: 1, updates: 1, ingestionRejections: 1 },
     // clients/software start at a reasonable fallback and are corrected to
     // the real viewport-fitting value the first time their table becomes
     // visible (see computeLiveRowsPerPage/recalculateActivePagination).
     // hwCpu/hwDisk/hwRam are fixed (see HW_PAGE_SIZE) - the three Hardware
     // sub-tables render stacked in one view and are rarely large enough to
     // need viewport-adaptive sizing.
-    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20, linuxServices: 20 },
+    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20, linuxServices: 20, updates: 20, ingestionRejections: 20 },
     // Prefixed keys ('client:'/'software:'/'hw:' + id) so the three
     // separate data-*-details attribute namespaces can't collide in one
     // Set. Drives each render function's initial hidden/visible class for
@@ -52,6 +62,7 @@
     // live-resize page-size correction, or a background data poll), not
     // just the one that happened to be showing when the row was expanded.
     expandedDetails: new Set(),
+    ingestionRejectionEntries: [],
     // Keyed per consuming view, same convention as state.sort/state.page/
     // state.pageSize. 'all' | 'windows' | 'linux'. The keys are literally
     // view names, so renderOsFilterActive can repaint the one shared pill
@@ -106,18 +117,15 @@
     updateThemeToggle();
   }
 
-  // Basic Auth has no server-side session to invalidate, so this is a
-  // best-effort client-side clear: an explicit, deliberately-wrong
-  // Authorization header gives the browser a chance to drop the real
-  // cached credentials, but not every browser honors it. The overlay text
-  // says so - closing the tab/window is the only guaranteed way out.
+  // The session is now a real server-side record (see POST
+  // /api/v1/server/logout) that gets removed immediately - no more
+  // reliance on tricking the browser into dropping cached Basic Auth
+  // credentials, and no more residual risk requiring a "close the tab"
+  // hedge.
   function handleLogout() {
-    if (!window.confirm('Log out of Windows Inventory Lite? On some browsers you may need to close this tab to fully clear your saved sign-in.')) return;
+    if (!window.confirm('Log out of Windows Inventory Lite?')) return;
     stopPolling();
-    fetch('/api/v1/clients', {
-      cache: 'no-store',
-      headers: { Authorization: 'Basic ' + btoa('logout:' + Math.random().toString(36).slice(2)) }
-    }).catch(() => {}).then(() => {
+    fetch('/api/v1/server/logout', { method: 'POST', cache: 'no-store' }).catch(() => {}).then(() => {
       byId('logoutOverlay').classList.remove('hidden');
     });
   }
@@ -136,6 +144,7 @@
     if (hash === 'software') return { view: 'software', subview: null };
     if (hash === 'hardware' || hash === 'linux-hardware') return { view: 'hardware', subview: null };
     if (hash === 'licenses') return { view: 'licenses', subview: null };
+    if (hash === 'logging') return { view: 'logging', subview: null };
     // #linux-clients / #linux are kept as aliases of the merged Clients
     // page (same backward-compat pattern as #linux-hardware above and
     // #certificate below) - old bookmarks land on Clients, unfiltered.
@@ -144,7 +153,12 @@
     if (hash === 'deploy' || hash === 'deploy-actions' || hash === 'client-actions' || hash === 'actions' || hash === 'install' || hash === 'linux-client-actions') return { view: 'deploy', subview: 'actions' };
     if (hash === 'deploy-updates' || hash === 'client-updates' || hash === 'updates' || hash === 'linux-client-updates') return { view: 'deploy', subview: 'updates' };
     if (hash === 'deploy-package' || hash === 'client-package' || hash === 'package') return { view: 'deploy', subview: 'package' };
-    if (hash === 'settings' || hash === 'settings-general' || hash === 'general') return { view: 'settings', subview: 'general' };
+    // Old #settings/#settings-general/#general hashes land on Server (the
+    // new first tab) rather than disappearing - same backward-compat
+    // convention as every other retired hash in this function.
+    if (hash === 'settings' || hash === 'settings-general' || hash === 'general' || hash === 'settings-server') return { view: 'settings', subview: 'server' };
+    if (hash === 'settings-windows') return { view: 'settings', subview: 'windows' };
+    if (hash === 'settings-linux') return { view: 'settings', subview: 'linux' };
     if (hash === 'settings-certificate' || hash === 'certificate') return { view: 'settings', subview: 'certificate' };
     if (hash === 'settings-admin-password' || hash === 'admin-password' || hash === 'admin') return { view: 'settings', subview: 'adminPassword' };
     return { view: 'dashboard', subview: null };
@@ -156,26 +170,30 @@
   // through to the default and produces 'clients').
   function computeHashForView(view, subview) {
     if (view === 'deploy') return subview === 'updates' ? 'deploy-updates' : subview === 'package' ? 'deploy-package' : 'deploy-actions';
-    if (view === 'settings') return subview === 'certificate' ? 'settings-certificate' : subview === 'adminPassword' ? 'settings-admin-password' : 'settings-general';
+    if (view === 'settings') {
+      if (subview === 'certificate') return 'settings-certificate';
+      if (subview === 'adminPassword') return 'settings-admin-password';
+      if (subview === 'windows') return 'settings-windows';
+      if (subview === 'linux') return 'settings-linux';
+      return 'settings-server';
+    }
     if (view === 'linuxServices') return 'linux-services';
     return view;
   }
 
   function loadDeploySubviewData(subview) {
-    if (subview === 'actions') loadInstallHistory();
+    if (subview === 'actions') { loadInstallHistory(); loadInstallPreferredSubnet(); }
     if (subview === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
     if (subview === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
-    // Both platforms' Actions/Updates content is stacked on one subview now
-    // (see the design spec's Phase 2 scope note - no OS filter yet), so a
-    // single subview load must trigger both platforms' own loaders.
-    if (subview === 'actions') { loadLinuxInstallHistory(); loadLinuxInstallPreferredSubnet(); }
     if (subview === 'updates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
   }
 
   function loadSettingsSubviewData(subview) {
-    if (subview === 'general') { loadGeneralSettings(); loadIngestionTokenStatus(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
+    if (subview === 'server') { loadServerSettings(); loadIngestionTokenStatus(); }
+    if (subview === 'windows') { loadWindowsSettings(); loadClientUpdateCredentials(); }
+    if (subview === 'linux') { loadLinuxSettings(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (subview === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
-    if (subview === 'adminPassword') loadAdminPasswordStatus();
+    if (subview === 'adminPassword') { loadAdminPasswordStatus(); loadLoginLockoutSettings(); }
   }
 
   function setView(view, subview) {
@@ -190,6 +208,7 @@
     if (view === 'deploy') loadDeploySubviewData(state.subview);
     if (view === 'settings') loadSettingsSubviewData(state.subview);
     if (view === 'licenses') loadLicenses();
+    if (view === 'logging') loadIngestionRejectionLog();
     // 'clients' and 'hardware' are in this list because both merged views
     // read Linux data too - opening either tab re-fetches it rather than
     // waiting up to 30s for the next poll tick.
@@ -205,8 +224,12 @@
     byId('deploySubtabUpdates').setAttribute('aria-selected', String(state.view === 'deploy' && state.subview === 'updates'));
     byId('deploySubtabPackage').classList.toggle('active', state.view === 'deploy' && state.subview === 'package');
     byId('deploySubtabPackage').setAttribute('aria-selected', String(state.view === 'deploy' && state.subview === 'package'));
-    byId('settingsSubtabGeneral').classList.toggle('active', state.view === 'settings' && state.subview === 'general');
-    byId('settingsSubtabGeneral').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'general'));
+    byId('settingsSubtabServer').classList.toggle('active', state.view === 'settings' && state.subview === 'server');
+    byId('settingsSubtabServer').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'server'));
+    byId('settingsSubtabWindows').classList.toggle('active', state.view === 'settings' && state.subview === 'windows');
+    byId('settingsSubtabWindows').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'windows'));
+    byId('settingsSubtabLinux').classList.toggle('active', state.view === 'settings' && state.subview === 'linux');
+    byId('settingsSubtabLinux').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'linux'));
     byId('settingsSubtabCertificate').classList.toggle('active', state.view === 'settings' && state.subview === 'certificate');
     byId('settingsSubtabCertificate').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'certificate'));
     byId('settingsSubtabAdminPassword').classList.toggle('active', state.view === 'settings' && state.subview === 'adminPassword');
@@ -476,6 +499,19 @@
     return `id-${Math.abs(hash)}`;
   }
 
+  // Pads each dot-separated numeric segment of a version string to a fixed
+  // width so a plain lexicographic (string) comparison - all applySort
+  // supports - sorts it the same way a true numeric comparison would.
+  // Without this, "16.0.14334.20570" sorts BEFORE "16.0.4266.1001" (Office
+  // 2021 before Office 2016) because '1' < '4' as the first differing
+  // character, even though 14334 > 4266 numerically.
+  function versionSortKey(version) {
+    return String(version || '')
+      .split('.')
+      .map(part => /^\d+$/.test(part) ? part.padStart(8, '0') : part)
+      .join('.');
+  }
+
   function softwareKey(item) {
     return [item.name || '', item.version || '', item.publisher || ''].join('\u001f').toLowerCase();
   }
@@ -504,10 +540,34 @@
     return { items: arr.slice(start, start + pageSize), page: clampedPage, totalPages };
   }
 
-  // Renders a "Prev  Page N of M  Next" control into containerId, wiring
-  // click handlers that update state.page[tableKey] and invoke onChange
-  // (the calling table's own render function) to redraw with the new
-  // page. Renders nothing when there's only one page, so small result
+  // Windowed page-number list with '…' gap markers: always keeps page 1,
+  // the last page, the current page, and one neighbor on each side of it -
+  // everything else collapses into a single '…' per gap so a table with
+  // e.g. 40 pages renders a handful of buttons, not 40. Small totals (the
+  // common case for most of this app's tables) come back with no gaps at
+  // all, e.g. [1,2,3,4,5].
+  function buildPagerPageNumbers(current, total) {
+    const delta = 1;
+    const kept = [];
+    for (let i = 1; i <= total; i += 1) {
+      if (i === 1 || i === total || (i >= current - delta && i <= current + delta)) {
+        kept.push(i);
+      }
+    }
+    const result = [];
+    let previous = null;
+    kept.forEach(i => {
+      if (previous !== null && i - previous > 1) result.push('…');
+      result.push(i);
+      previous = i;
+    });
+    return result;
+  }
+
+  // Renders a "Prev  1 … 9 10 11 … 20  Next" control into containerId,
+  // wiring click handlers that update state.page[tableKey] and invoke
+  // onChange (the calling table's own render function) to redraw with the
+  // new page. Renders nothing when there's only one page, so small result
   // sets (e.g. a handful of distinct CPU models) don't show a pager that
   // can never do anything.
   function renderPager(containerId, tableKey, page, totalPages, onChange) {
@@ -517,15 +577,22 @@
       container.innerHTML = '';
       return;
     }
+    const pagesHtml = buildPagerPageNumbers(page, totalPages).map(entry => entry === '…'
+      ? '<span class="pager-ellipsis">…</span>'
+      : `<button class="pager-page-button${entry === page ? ' active' : ''}" type="button" data-pager-page="${entry}"${entry === page ? ' disabled aria-current="page"' : ''} aria-label="Page ${entry}">${entry}</button>`
+    ).join('');
     container.innerHTML = `
       <button class="export-button pager-button" type="button" data-pager-prev${page <= 1 ? ' disabled' : ''}>Prev</button>
-      <span class="pager-status">Page ${page} of ${totalPages}</span>
+      <div class="pager-pages">${pagesHtml}</div>
       <button class="export-button pager-button" type="button" data-pager-next${page >= totalPages ? ' disabled' : ''}>Next</button>
     `;
     const prevBtn = container.querySelector('[data-pager-prev]');
     const nextBtn = container.querySelector('[data-pager-next]');
     if (prevBtn) prevBtn.addEventListener('click', () => { state.page[tableKey] = page - 1; onChange(); });
     if (nextBtn) nextBtn.addEventListener('click', () => { state.page[tableKey] = page + 1; onChange(); });
+    container.querySelectorAll('[data-pager-page]').forEach(button => {
+      button.addEventListener('click', () => { state.page[tableKey] = Number(button.dataset.pagerPage); onChange(); });
+    });
   }
 
   // Measures how many rows of the table rooted at tbodyId fit between its
@@ -549,8 +616,8 @@
     switch (key) {
       case 'computerName': return (client.computerName || '').toLowerCase();
       case 'clientVersion': return client.clientVersion || '';
-      case 'os': return ((client.os && client.os.caption) || '').toLowerCase();
-      case 'office': return ((client.office && client.office.name) || '').toLowerCase();
+      case 'os': return versionSortKey(client.os && client.os.version) + '\u001f' + ((client.os && client.os.caption) || '').toLowerCase();
+      case 'office': return versionSortKey(client.office && client.office.version) + '\u001f' + ((client.office && client.office.name) || '').toLowerCase();
       case 'windowsActivated': return (client.activation && client.activation.windows && client.activation.windows.activated) ? 1 : 0;
       case 'officeActivated': return (client.activation && client.activation.office && client.activation.office.activated) ? 1 : 0;
       case 'softwareCount': return (client.software || []).length;
@@ -586,6 +653,12 @@
       case 'os': return isWindows ? clientSortValue(client, 'os') : linuxClientSortValue(client, 'os');
       case 'office': return isWindows ? clientSortValue(client, 'office') : null;
       case 'activation': return isWindows ? clientSortValue(client, 'windowsActivated') : null;
+      // Not exposed as its own clickable column header (the Activation
+      // column shows both Windows and Office dots together, and splitting
+      // it into two sortable columns is a bigger table-layout change than
+      // this needs) - reachable only via the Dashboard's "Office activated"
+      // tile setting state.sort.clients directly.
+      case 'officeActivation': return isWindows ? clientSortValue(client, 'officeActivated') : null;
       case 'items': return isWindows ? clientSortValue(client, 'softwareCount') : linuxClientSortValue(client, 'softwareCount');
       case 'collectedAt': return new Date(client.collectedAt || client.sourceUpdatedAt || 0).getTime();
       default: return '';
@@ -647,6 +720,19 @@
       case 'version': return (license.version || '').toLowerCase();
       case 'license': return (license.license || '').toLowerCase();
       case 'comment': return (license.comment || '').toLowerCase();
+      default: return '';
+    }
+  }
+
+  // installDate is raw YYYYMMDD (see formatInstallDate) - zero-padded and
+  // already chronologically sortable as a plain string, no Date parsing
+  // needed.
+  function clientSoftwareSortValue(item, key) {
+    switch (key) {
+      case 'name': return (item.name || '').toLowerCase();
+      case 'version': return item.version || '';
+      case 'publisher': return (item.publisher || '').toLowerCase();
+      case 'installDate': return item.installDate || '';
       default: return '';
     }
   }
@@ -852,39 +938,103 @@
       });
   }
 
+  function renderAttemptRows(jobId, index, attempts) {
+    if (!attempts || attempts.length === 0) return '';
+    const key = 'attempt:' + jobId + ':' + index;
+    const isHidden = state.expandedDetails.has(key) ? '' : 'hidden';
+    const rows = attempts.map(attempt => `<tr>
+        <td>${escapeHtml(attempt.protocol)}</td>
+        <td>${escapeHtml(attempt.status)}</td>
+        <td>${escapeHtml(attempt.message)}</td>
+        <td><pre class="install-output">${escapeHtml((attempt.error || attempt.output || '').trim())}</pre></td>
+      </tr>`).join('');
+    return `<tr class="details-row ${isHidden}" data-attempt-details="${index}" data-attempt-job="${escapeHtml(jobId)}">
+        <td colspan="4">
+          <div class="details">
+            <table class="nested-table install-results-table">
+              <thead><tr><th>Protocol</th><th>Status</th><th>Message</th><th>Output</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        </td>
+      </tr>`;
+  }
+
   function renderInstallJob(job, statusElementId = 'installStatus') {
     const results = job.results || [];
-    const rows = results.map(result => {
-      // Trust-and-retry only makes sense on the Linux Client Actions panel:
-      // it submits the Actions tab's own install-form fields (server URL,
-      // token, path, auth mode), which don't exist/apply on the Updates
-      // panel's already-installed-clients flow. The Updates panel still
-      // shows the hostKeyBadge below so the operator sees why it failed.
+    const rows = results.map((result, index) => {
+      // Trust-and-retry reads the ssh attempt's host-key fields, which
+      // mirror onto the summary result when ssh is the last attempt tried
+      // (see RunUnifiedInstallTarget) - unchanged shape from before the
+      // Windows/Linux merge, just now reachable from any mode. Gated to
+      // the merged Actions status box specifically: it submits Deploy >
+      // Actions' own form fields (installSshAuthMode/installSshUsername/
+      // installSshPassword/etc via trustHostKeyAndRetry),
+      // which don't match whatever credentials Deploy > Updates' Linux
+      // push actually used - rendering it there would silently resubmit
+      // the wrong account. Same restriction the pre-merge code had
+      // (previously gated on statusElementId === 'linuxInstallStatus'),
+      // just re-pointed at the one surviving Actions status element id.
       let trustControl = '';
-      if (statusElementId === 'linuxInstallStatus') {
+      if (statusElementId === 'installStatus') {
         if (result.hostKeyStatus && result.hostKeyFingerprint) {
           trustControl = `<button class="link-button trust-host-key-button" type="button"
-               data-trust-host="${escapeHtml(result.target)}"
-               data-trust-fingerprint="${escapeHtml(result.hostKeyFingerprint)}">Trust and retry</button>`;
+             data-trust-host="${escapeHtml(result.target)}"
+             data-trust-fingerprint="${escapeHtml(result.hostKeyFingerprint)}">Trust and retry</button>`;
         } else if (result.hostKeyStatus) {
           trustControl = `<span class="trust-host-key-manual">
-               <input type="text" class="trust-fingerprint-input" placeholder="SHA256:..." data-trust-host-input="${escapeHtml(result.target)}">
-               <button class="link-button trust-host-key-button" type="button" data-trust-host-manual="${escapeHtml(result.target)}">Trust and retry</button>
-             </span>`;
+             <input type="text" class="trust-fingerprint-input" placeholder="SHA256:..." data-trust-host-input="${escapeHtml(result.target)}">
+             <button class="link-button trust-host-key-button" type="button" data-trust-host-manual="${escapeHtml(result.target)}">Trust and retry</button>
+           </span>`;
         }
       }
       const hostKeyBadge = result.hostKeyStatus === 'changed'
         ? '<span class="usb-badge">HOST KEY CHANGED</span>'
         : (result.hostKeyStatus === 'unknown' ? '<span class="usb-badge">HOST KEY UNKNOWN</span>' : '');
+      const attempts = result.attempts || [];
+      const hasMultipleAttempts = attempts.length > 1;
+      const targetCell = hasMultipleAttempts
+        ? `<button class="link-button" type="button" data-attempt-toggle="${index}" data-attempt-job="${escapeHtml(job.id)}">${escapeHtml(result.target)}</button>`
+        : escapeHtml(result.target);
+      const protocolNote = result.protocol ? ` (${escapeHtml(result.protocol)})` : '';
       return `<tr>
-      <td>${escapeHtml(result.target)}</td>
-      <td>${escapeHtml(result.status)}${hostKeyBadge}</td>
+      <td>${targetCell}</td>
+      <td>${escapeHtml(result.status)}${protocolNote}${hostKeyBadge}</td>
       <td>${escapeHtml(result.message)}</td>
       <td><pre class="install-output">${escapeHtml((result.error || result.output || '').trim())}</pre>${trustControl}</td>
-    </tr>`;
+    </tr>${renderAttemptRows(job.id, index, hasMultipleAttempts ? attempts : null)}`;
     }).join('');
 
     const statusElement = byId(statusElementId);
+    // innerHTML replacement below recreates .install-results from scratch,
+    // which would silently reset its scroll position to the top on every
+    // poll tick (every 3s while a job runs) - capture it first and restore
+    // it after so a user reading further down a long target list doesn't
+    // keep getting yanked back to the top.
+    const previousResults = statusElement.querySelector('.install-results');
+    const previousScrollTop = previousResults ? previousResults.scrollTop : 0;
+
+    // Same innerHTML-replacement problem hits the manual host-key
+    // fingerprint inputs (one per target still needing a host key trusted -
+    // see trustControl above): a user mid-typing a SHA256 fingerprint when
+    // a poll tick fires would otherwise have it silently wiped, and lose
+    // focus/cursor position too. Capture every input's value keyed by its
+    // target (there can be more than one), plus which one had focus and
+    // where the cursor was, before the replacement destroys them all.
+    const previousFingerprintValues = new Map();
+    let focusedFingerprintTarget = null;
+    let focusedSelectionStart = null;
+    let focusedSelectionEnd = null;
+    statusElement.querySelectorAll('.trust-fingerprint-input').forEach(input => {
+      const target = input.dataset.trustHostInput;
+      previousFingerprintValues.set(target, input.value);
+      if (input === document.activeElement) {
+        focusedFingerprintTarget = target;
+        focusedSelectionStart = input.selectionStart;
+        focusedSelectionEnd = input.selectionEnd;
+      }
+    });
+
     statusElement.classList.remove('empty');
     statusElement.innerHTML = `<div class="job-header">
         <strong>Job ${escapeHtml(job.id)}</strong>
@@ -897,6 +1047,20 @@
           <tbody>${rows || '<tr><td colspan="4" class="empty">Waiting for results.</td></tr>'}</tbody>
         </table>
       </div>`;
+
+    const newResults = statusElement.querySelector('.install-results');
+    if (newResults) newResults.scrollTop = previousScrollTop;
+
+    statusElement.querySelectorAll('.trust-fingerprint-input').forEach(input => {
+      const target = input.dataset.trustHostInput;
+      if (previousFingerprintValues.has(target)) {
+        input.value = previousFingerprintValues.get(target);
+      }
+      if (target === focusedFingerprintTarget) {
+        input.focus();
+        input.setSelectionRange(focusedSelectionStart, focusedSelectionEnd);
+      }
+    });
 
     statusElement.querySelectorAll('[data-trust-host]').forEach(button => {
       button.addEventListener('click', () => trustHostKeyAndRetry(button.dataset.trustHost, button.dataset.trustFingerprint, statusElementId));
@@ -915,45 +1079,36 @@
     });
   }
 
-  // The single cross-platform "Saved client action logs" card at the
-  // bottom of Deploy > Actions, replacing the former renderInstallHistory
-  // (Windows) / renderLinuxInstallHistory (Linux) pair. Each platform's
-  // own job list (state.installJobs / state.linuxInstallJobs, populated
-  // independently by loadInstallHistory/loadLinuxInstallHistory) is tagged
-  // with its platform and merged into one table, newest job first
-  // regardless of which platform it came from. Per-job detail viewing is
-  // unchanged - a row's Job button still calls the same
-  // pollInstallJob/pollLinuxInstallJob as before, which still write into
-  // that platform's own installStatus/linuxInstallStatus box in its own
-  // card above, not into this one.
+  // The single "Saved client action logs" card at the bottom of Deploy >
+  // Actions. Every job (Windows, Linux, or mixed "auto" targets) now comes
+  // from one list (state.installJobs, populated by loadInstallHistory) -
+  // each job's own `mode` field labels its row, newest job first.
   function renderMergedInstallHistory() {
-    const entries = (state.installJobs || []).map(job => ({ job, platform: 'Windows' }))
-      .concat((state.linuxInstallJobs || []).map(job => ({ job, platform: 'Linux' })))
+    // A job file saved before this phase shipped has no "mode" key at
+    // all (GetStringValue returns "" for a missing key) - this directory
+    // only ever held Windows/WinRM job files pre-merge, so a blank mode
+    // unambiguously means a legacy Windows job, not "Auto".
+    const platformLabel = job => job.mode === 'force-linux' ? 'Linux' : (job.mode === 'auto' ? 'Auto' : 'Windows');
+    const entries = (state.installJobs || []).map(job => ({ job, platform: platformLabel(job) }))
       .sort((a, b) => new Date(b.job.createdAt) - new Date(a.job.createdAt));
 
-    const windowsError = state.installJobsError;
-    const linuxError = state.linuxInstallJobsError;
+    const loadError = state.installJobsError;
 
     if (entries.length === 0) {
       byId('installHistory').classList.add('empty');
-      byId('installHistory').textContent = (windowsError || linuxError)
-        ? `Saved client action logs are not available: ${windowsError || linuxError}`
+      byId('installHistory').textContent = loadError
+        ? `Saved client action logs are not available: ${loadError}`
         : 'No saved client action logs.';
       return;
     }
 
-    // A load failure on one platform doesn't hide the other platform's
-    // working data - it did before this merge (each table clobbered its
-    // own content with an error string on failure) but that behavior only
-    // made sense when each platform had its own card. Surfaced as a note
-    // above the table instead.
-    const errorNotice = (windowsError || linuxError)
-      ? `<p class="cert-hint">${windowsError ? `Windows action logs unavailable: ${escapeHtml(windowsError)}` : ''}${windowsError && linuxError ? ' ' : ''}${linuxError ? `Linux action logs unavailable: ${escapeHtml(linuxError)}` : ''}</p>`
+    const errorNotice = loadError
+      ? `<p class="cert-hint">Client action logs unavailable: ${escapeHtml(loadError)}</p>`
       : '';
 
     const rows = entries.map(({ job, platform }) => `<tr>
       <td><small class="platform-tag">${escapeHtml(platform)}</small></td>
-      <td><button class="link-button" type="button" data-action-job="${escapeHtml(job.id)}" data-action-platform="${platform === 'Windows' ? 'windows' : 'linux'}">${escapeHtml(job.id)}</button></td>
+      <td><button class="link-button" type="button" data-action-job="${escapeHtml(job.id)}">${escapeHtml(job.id)}</button></td>
       <td>${escapeHtml(job.action || 'install')}</td>
       <td>${escapeHtml(job.status)}</td>
       <td>${escapeHtml(formatDateTime(job.createdAt))}</td>
@@ -968,21 +1123,15 @@
       ${errorNotice}
       <div class="install-history-results">
         <table class="nested-table install-history-table">
-          <thead><tr><th>Platform</th><th>Job</th><th>Action</th><th>Status</th><th>Started</th><th>Completed</th><th>Targets</th><th>Failed</th><th>Retention</th></tr></thead>
+          <thead><tr><th>Mode</th><th>Job</th><th>Action</th><th>Status</th><th>Started</th><th>Completed</th><th>Targets</th><th>Failed</th><th>Retention</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>`;
 
     document.querySelectorAll('[data-action-job]').forEach(button => {
       button.addEventListener('click', () => {
-        const jobId = button.dataset.actionJob;
-        if (button.dataset.actionPlatform === 'linux') {
-          state.linuxInstallJobId = jobId;
-          pollLinuxInstallJob(jobId);
-        } else {
-          state.installJobId = jobId;
-          pollInstallJob(jobId);
-        }
+        state.installJobId = button.dataset.actionJob;
+        pollInstallJob(state.installJobId);
       });
     });
   }
@@ -1024,96 +1173,44 @@
       });
   }
 
-  function pollLinuxInstallJob(jobId, statusElementId = 'linuxInstallStatus', onComplete = loadLinuxInstallHistory, timerKey = 'linuxInstallPollTimer') {
-    fetch(`/api/v1/linux-client-install/${encodeURIComponent(jobId)}`, { cache: 'no-store' })
-      .then(response => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json();
-      })
-      .then(job => {
-        renderInstallJob(job, statusElementId);
-        if (job.status === 'completed' && state[timerKey]) {
-          window.clearInterval(state[timerKey]);
-          state[timerKey] = null;
-          onComplete();
-        }
-      })
-      .catch(error => {
-        byId(statusElementId).textContent = `Install job status is not available: ${error.message}`;
-      });
+  // SSH credential source for Deploy > Updates - global hides both fields
+  // (saved account, AD fallback), manual shows both, key shows only the
+  // username. Same value set/behavior as Deploy > Actions' installSshAuthMode.
+  function updateLinuxUpdatesAuthModeFieldsUi() {
+    const mode = byId('linuxUpdatesAuthMode').value;
+    byId('linuxUpdatesCredentialsField').classList.toggle('hidden', mode === 'global');
+    byId('linuxUpdatesPasswordField').classList.toggle('hidden', mode !== 'manual');
   }
 
-  // Parameterized (not hardcoded to the Linux Client actions page's own
-  // element ids) so the Linux Client updates page's own auth-mode selector
-  // (Task 10) can reuse this instead of duplicating it - the established
-  // pattern this project uses for this exact 3-way-select shape (see
-  // updateScheduleFieldVisibility).
-  function updateLinuxAuthModeFieldsUi(selectElementId, credentialsUserFieldId, passwordFieldId) {
-    const mode = byId(selectElementId).value;
-    byId(credentialsUserFieldId).classList.toggle('hidden', mode === 'ad');
-    byId(passwordFieldId).classList.toggle('hidden', mode !== 'credentials');
-  }
-
-  function updateLinuxClientActionUi() {
-    const action = byId('linuxClientAction').value;
-    const isInstall = action === 'install';
-    document.querySelectorAll('#linuxInstallView .install-only').forEach(element => {
-      element.classList.toggle('hidden', !isInstall);
-    });
-    byId('linuxInstallButton').textContent = isInstall ? 'Install client' : 'Uninstall client';
-    if (!isInstall) {
-      byId('linuxTrustNewHostKeys').checked = false;
-      byId('linuxAcknowledgeHostKeyRisk').checked = false;
-    }
-    updateLinuxTrustNewHostKeysUi();
-  }
-
-  function updateLinuxTrustNewHostKeysUi() {
-    const trustChecked = byId('linuxTrustNewHostKeys').checked;
-    byId('linuxAcknowledgeHostKeyRiskField').classList.toggle('hidden', !trustChecked);
+  function updateInstallTrustNewHostKeysUi() {
+    const trustChecked = byId('installTrustNewHostKeys').checked;
+    byId('installAcknowledgeHostKeyRiskField').classList.toggle('hidden', !trustChecked);
     if (!trustChecked) {
-      byId('linuxAcknowledgeHostKeyRisk').checked = false;
+      byId('installAcknowledgeHostKeyRisk').checked = false;
     }
-    const acknowledgeChecked = byId('linuxAcknowledgeHostKeyRisk').checked;
-    byId('linuxInstallButton').disabled = trustChecked && !acknowledgeChecked;
-  }
-
-  function loadLinuxInstallHistory() {
-    fetch('/api/v1/linux-client-install', { cache: 'no-store' })
-      .then(response => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json();
-      })
-      .then(data => {
-        state.linuxInstallJobs = data.jobs || [];
-        state.linuxInstallJobsError = null;
-        renderMergedInstallHistory();
-      })
-      .catch(error => {
-        state.linuxInstallJobsError = error.message;
-        renderMergedInstallHistory();
-      });
+    const acknowledgeChecked = byId('installAcknowledgeHostKeyRisk').checked;
+    byId('installButton').disabled = trustChecked && !acknowledgeChecked;
   }
 
   // The Preferred subnet field on this page and on Client updates both edit
-  // the SAME saved server setting (see Settings > General > Linux client
+  // the SAME saved server setting (see Settings > Linux > Linux client
   // targeting) - this only pre-fills the current value; saving goes through
-  // saveLinuxInstallPreferredSubnet below.
-  function loadLinuxInstallPreferredSubnet() {
+  // saveInstallPreferredSubnet below.
+  function loadInstallPreferredSubnet() {
     fetch('/api/v1/server/settings', { cache: 'no-store' })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
       })
       .then(data => {
-        byId('linuxInstallPreferredSubnet').value = data.preferredLinuxSubnet || '';
+        byId('installPreferredSubnet').value = data.preferredLinuxSubnet || '';
       })
       .catch(() => {});
   }
 
-  function saveLinuxInstallPreferredSubnet() {
-    const preferredLinuxSubnet = byId('linuxInstallPreferredSubnet').value.trim();
-    byId('linuxInstallPreferredSubnetSaveButton').disabled = true;
+  function saveInstallPreferredSubnet() {
+    const preferredLinuxSubnet = byId('installPreferredSubnet').value.trim();
+    byId('installPreferredSubnetSaveButton').disabled = true;
     fetch('/api/v1/server/settings', {
       method: 'POST',
       cache: 'no-store',
@@ -1128,64 +1225,7 @@
         window.alert(`Failed to save preferred subnet: ${error.message}`);
       })
       .finally(() => {
-        byId('linuxInstallPreferredSubnetSaveButton').disabled = false;
-      });
-  }
-
-  function startLinuxClientActionJob() {
-    const action = byId('linuxClientAction').value;
-    const targets = byId('linuxInstallTargets').value.trim();
-    const serverUrl = byId('linuxInstallServerUrl').value.trim();
-    const token = byId('linuxInstallToken').value.trim();
-    const intervalHours = Number(byId('linuxInstallIntervalHours').value) || 6;
-    const statusIntervalMinutes = Number(byId('linuxInstallStatusIntervalMinutes').value) || 30;
-    const installPath = byId('linuxInstallPath').value.trim() || '/opt/windows-inventory-lite';
-    const authMode = byId('linuxInstallAuthMode').value;
-    const username = authMode === 'ad' ? '' : byId('linuxInstallUsername').value.trim();
-    const password = authMode === 'credentials' ? byId('linuxInstallPassword').value : '';
-    const trustNewHostKeys = action === 'install' && byId('linuxTrustNewHostKeys').checked;
-    const acknowledgeHostKeyRisk = action === 'install' && byId('linuxAcknowledgeHostKeyRisk').checked;
-
-    if (!targets) {
-      window.alert('Enter at least one target.');
-      return;
-    }
-    if (action === 'install' && !serverUrl) {
-      window.alert('Enter server URL.');
-      return;
-    }
-
-    if (action === 'uninstall') {
-      const confirmed = window.confirm('Uninstall the client service from the selected Linux targets?');
-      if (!confirmed) return;
-    }
-
-    byId('linuxInstallButton').disabled = true;
-    byId('linuxInstallStatus').classList.add('empty');
-    byId('linuxInstallStatus').textContent = `Starting ${action} job...`;
-
-    fetch(action === 'uninstall' ? '/api/v1/linux-client-uninstall' : '/api/v1/linux-client-install', {
-      method: 'POST',
-      cache: 'no-store',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, authMode, username, password, trustNewHostKeys, acknowledgeHostKeyRisk })
-    })
-      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
-      .then(({ ok, status, data }) => {
-        if (!ok) throw new Error(data.error || `HTTP ${status}`);
-        return data;
-      })
-      .then(data => {
-        state.linuxInstallJobId = data.jobId;
-        if (state.linuxInstallPollTimer) window.clearInterval(state.linuxInstallPollTimer);
-        pollLinuxInstallJob(state.linuxInstallJobId);
-        state.linuxInstallPollTimer = window.setInterval(() => pollLinuxInstallJob(state.linuxInstallJobId), 3000);
-      })
-      .catch(error => {
-        byId('linuxInstallStatus').textContent = `Failed to start ${action} job: ${error.message}`;
-      })
-      .finally(() => {
-        updateLinuxTrustNewHostKeysUi();
+        byId('installPreferredSubnetSaveButton').disabled = false;
       });
   }
 
@@ -1200,61 +1240,105 @@
       .then(({ ok, status, data }) => {
         if (!ok) throw new Error(data.error || `HTTP ${status}`);
 
-        const serverUrl = byId('linuxInstallServerUrl').value.trim();
-        const token = byId('linuxInstallToken').value.trim();
-        const intervalHours = Number(byId('linuxInstallIntervalHours').value) || 6;
-        const statusIntervalMinutes = Number(byId('linuxInstallStatusIntervalMinutes').value) || 30;
-        const installPath = byId('linuxInstallPath').value.trim() || '/opt/windows-inventory-lite';
-        const authMode = byId('linuxInstallAuthMode').value;
-        const username = authMode === 'ad' ? '' : byId('linuxInstallUsername').value.trim();
-        const password = authMode === 'credentials' ? byId('linuxInstallPassword').value : '';
+        const serverUrl = `${window.location.origin}/api/v1/inventory`;
+        const intervalHours = Number(byId('installIntervalHours').value) || 6;
+        const statusIntervalMinutes = Number(byId('installStatusIntervalMinutes').value) || 30;
+        const sshAuthMode = byId('installSshAuthMode').value;
+        const sshUsername = sshAuthMode === 'global' ? '' : byId('installSshUsername').value.trim();
+        const sshPassword = sshAuthMode === 'manual' ? byId('installSshPassword').value : '';
 
-        return fetch('/api/v1/linux-client-install', {
+        return fetch('/api/v1/client-install', {
           method: 'POST',
           cache: 'no-store',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ targets: host, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, authMode, username, password, trustNewHostKeys: false, acknowledgeHostKeyRisk: false })
+          body: JSON.stringify({ targets: host, mode: 'force-linux', serverUrl, intervalHours, statusIntervalMinutes, sshAuthMode, sshUsername, sshPassword, trustNewHostKeys: false, acknowledgeHostKeyRisk: false })
         });
       })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
         if (!ok) throw new Error(data.error || `HTTP ${status}`);
-        state.linuxInstallJobId = data.jobId;
-        if (state.linuxInstallPollTimer) window.clearInterval(state.linuxInstallPollTimer);
-        pollLinuxInstallJob(state.linuxInstallJobId);
-        state.linuxInstallPollTimer = window.setInterval(() => pollLinuxInstallJob(state.linuxInstallJobId), 3000);
+        state.installJobId = data.jobId;
+        if (state.installPollTimer) window.clearInterval(state.installPollTimer);
+        pollInstallJob(state.installJobId);
+        state.installPollTimer = window.setInterval(() => pollInstallJob(state.installJobId), 3000);
       })
       .catch(error => {
         byId(statusElementId).textContent = `Trust and retry failed: ${error.message}`;
       });
   }
 
-  function updateClientActionUi() {
-    const action = byId('clientAction').value;
-    const isInstall = action === 'install';
-    document.querySelectorAll('#installView .install-only').forEach(element => {
-      element.classList.toggle('hidden', !isInstall);
+  // Single source of truth for Deploy > Actions' field visibility - it
+  // used to be two independent functions (one for the Install/Uninstall
+  // action, one for the Auto/Force Windows/Force Linux mode), but 5
+  // fields carry BOTH an .install-only class and a .mode-*-field class,
+  // so whichever function ran last silently clobbered the other's
+  // decision (found live during Phase 3's final review: the SSH
+  // host-key-risk acknowledgement checkbox was visible on a fresh page
+  // load, and toggling Action after picking Force Windows could resurrect
+  // Linux-only fields and even leave the submit button permanently
+  // disabled). One function, one pass, always both inputs.
+  function updateInstallFieldVisibility() {
+    const isInstall = byId('clientAction').value === 'install';
+    const mode = byId('clientActionMode').value;
+    document.querySelectorAll('#installView .install-only, #installView .mode-windows-field, #installView .mode-linux-field').forEach(element => {
+      const hideByAction = element.classList.contains('install-only') && !isInstall;
+      const hideByMode = (element.classList.contains('mode-windows-field') && mode === 'force-linux')
+        || (element.classList.contains('mode-linux-field') && mode === 'force-windows');
+      element.classList.toggle('hidden', hideByAction || hideByMode);
     });
     byId('installButton').textContent = isInstall ? 'Install client' : 'Uninstall client';
+    // "Trust new host keys automatically" is Force Linux only, not Auto -
+    // the server rejects the combination outright (bulk-auto-trusting an
+    // SSH host key the operator never deliberately identified as Linux,
+    // just because it happened to answer on port 22, is a real exposure
+    // widening - see StartClientAction's own check). Hidden here on top
+    // of the .mode-linux-field pass above, which only ever hides it for
+    // Force Windows.
+    byId('installTrustNewHostKeysField').classList.toggle('hidden', mode !== 'force-linux');
+    // Also reset whenever the field above just got hidden (leaving
+    // Install, or leaving Force Linux specifically - not just Force
+    // Windows): these two checkboxes have no meaning once hidden, and
+    // their .checked state otherwise survives a mode switch invisibly
+    // (the checkbox itself being hidden doesn't uncheck it), which is
+    // exactly what let a stale "trust new host keys" from a prior Force
+    // Linux selection disable the submit button after switching away.
+    if (!isInstall || mode !== 'force-linux') {
+      byId('installTrustNewHostKeys').checked = false;
+      byId('installAcknowledgeHostKeyRisk').checked = false;
+    }
+    // installWinRmUsernameField/installWinRmPasswordField carry their own
+    // credential-source-based visibility rule on top of .mode-windows-field -
+    // only re-derive it when the mode pass above didn't already hide them,
+    // or a Force Linux selection would get silently re-shown regardless of
+    // the (irrelevant) credential source.
+    if (mode !== 'force-linux') {
+      const winRmManual = byId('installWinRmAuthMode').value === 'manual';
+      byId('installWinRmUsernameField').classList.toggle('hidden', !winRmManual);
+      byId('installWinRmPasswordField').classList.toggle('hidden', !winRmManual);
+    }
+    // Same idea for installSshCredentialsField/installSshPasswordField,
+    // now driven by the three-way Global/Manual/SSH key dropdown instead
+    // of the old ad/credentials/key one - Global shows neither field,
+    // Manual shows both, SSH key shows only the username.
+    if (mode !== 'force-windows') {
+      const sshMode = byId('installSshAuthMode').value;
+      byId('installSshCredentialsField').classList.toggle('hidden', sshMode === 'global');
+      byId('installSshPasswordField').classList.toggle('hidden', sshMode !== 'manual');
+    }
+    updateInstallTrustNewHostKeysUi();
   }
 
-  // "Use global AD settings" substitutes the typed WinRM user/password
-  // with the AD sync credentials already configured in Settings > General
-  // (server identity, or the saved AD account) - the fields are disabled
-  // while it's checked since whatever's typed in them would be ignored.
-  function updateInstallCredentialFieldsUi() {
-    const useAd = byId('installUseAdCredentials').checked;
-    byId('installUsername').disabled = useAd;
-    byId('installPassword').disabled = useAd;
-  }
-
-  // Mirrors updateInstallCredentialFieldsUi (Client actions) exactly: "Use
-  // global AD settings" substitutes the typed/saved Client Update account
-  // with the AD sync credentials already configured in Settings > General.
-  function updateUpdatesCredentialFieldsUi() {
-    const useAd = byId('updatesUseAdCredentials').checked;
-    byId('updatesUsername').disabled = useAd;
-    byId('updatesPassword').disabled = useAd;
+  // Global uses the saved Client Update account (or AD as a fallback);
+  // Manual shows the username/password fields for a one-off override -
+  // same show/hide convention Deploy > Actions' installWinRmAuthMode uses.
+  // No Save/Delete here any more (moved to Settings > Windows > Client
+  // update credentials, mirroring Deploy > Actions' own credential block,
+  // which never had an in-page save either) - Manual mode's fields are
+  // purely "what to send for this one push," never persisted from here.
+  function updateUpdatesCredentialFieldVisibility() {
+    const manual = byId('updatesWinRmAuthMode').value === 'manual';
+    byId('updatesWinRmUsernameField').classList.toggle('hidden', !manual);
+    byId('updatesWinRmPasswordField').classList.toggle('hidden', !manual);
   }
 
   function loadLinuxUpdateCredentials() {
@@ -1434,7 +1518,7 @@
         const totalFound = computers.length;
 
         if (onlyMissing) {
-          const known = new Set((state.clients || []).map(c => (c.computerName || '').toLowerCase()));
+          const known = new Set(getAllClients().map(c => (clientDisplayName(c) || '').toLowerCase()));
           computers = computers.filter(name => !known.has(name.toLowerCase()));
         }
 
@@ -1465,20 +1549,36 @@
 
   function startClientActionJob() {
     const action = byId('clientAction').value;
+    const mode = byId('clientActionMode').value;
     const targets = byId('installTargets').value.trim();
-    const serverUrl = byId('installServerUrl').value.trim();
-    const token = byId('installToken').value.trim();
-    const useAdCredentials = byId('installUseAdCredentials').checked;
-    const username = useAdCredentials ? '' : byId('installUsername').value.trim();
-    const password = useAdCredentials ? '' : byId('installPassword').value;
+    // Server URL and Ingestion token are no longer editable fields (removed
+    // 2026-08-21) - always the server's own live values. serverUrl is
+    // computed the same way the old auto-fill init code always did; token
+    // is simply omitted from the payload, and the server already treats a
+    // missing/blank token as "use the current live one".
+    const serverUrl = `${window.location.origin}/api/v1/inventory`;
+    const winRmAuthMode = byId('installWinRmAuthMode').value;
+    // Blank whenever the field is hidden too (mode === 'force-linux'),
+    // not just when the credential-source dropdown itself says not to use
+    // it - a typed value from an earlier mode/dropdown selection survives
+    // a mode switch invisibly (the field being hidden doesn't clear it),
+    // and would otherwise still ride along on the wire on a submit the
+    // server discards it for anyway. Nothing is stored/logged server-side
+    // either way, but there's no reason to send it.
+    const username = (mode !== 'force-linux' && winRmAuthMode === 'manual') ? byId('installUsername').value.trim() : '';
+    const password = (mode !== 'force-linux' && winRmAuthMode === 'manual') ? byId('installPassword').value : '';
     const force = byId('installForce').checked;
     const addToTrustedHosts = byId('installTrustedHosts').checked;
+    const sshAuthMode = byId('installSshAuthMode').value;
+    const sshUsername = (mode !== 'force-windows' && sshAuthMode !== 'global') ? byId('installSshUsername').value.trim() : '';
+    const sshPassword = (mode !== 'force-windows' && sshAuthMode === 'manual') ? byId('installSshPassword').value : '';
+    const intervalHours = Number(byId('installIntervalHours').value) || 6;
+    const statusIntervalMinutes = Number(byId('installStatusIntervalMinutes').value) || 30;
+    const trustNewHostKeys = action === 'install' && byId('installTrustNewHostKeys').checked;
+    const acknowledgeHostKeyRisk = action === 'install' && byId('installAcknowledgeHostKeyRisk').checked;
+
     if (!targets) {
       window.alert('Enter at least one target.');
-      return;
-    }
-    if (action === 'install' && !serverUrl) {
-      window.alert('Enter server URL.');
       return;
     }
 
@@ -1495,7 +1595,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets, serverUrl, token, username, password, force, addToTrustedHosts, useAdCredentials })
+      body: JSON.stringify({ targets, mode, serverUrl, winRmAuthMode, username, password, force, addToTrustedHosts, sshAuthMode, sshUsername, sshPassword, intervalHours, statusIntervalMinutes, trustNewHostKeys, acknowledgeHostKeyRisk })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
@@ -1513,6 +1613,7 @@
       })
       .finally(() => {
         byId('installButton').disabled = false;
+        updateInstallTrustNewHostKeysUi();
       });
   }
 
@@ -1524,7 +1625,8 @@
       })
       .then(data => {
         state.clientUpdates = data;
-        renderClientUpdates(data);
+        renderMergedUpdatesTable();
+        updateUpdatesBadge(data.packageAvailable ? data.outdatedCount : 0);
       })
       .catch(error => {
         byId('updatesPackageStatus').textContent = `Client update status unavailable: ${error.message}`;
@@ -1539,34 +1641,82 @@
     return version ? `v${escapeHtml(version)}` : 'unknown';
   }
 
-  function renderClientUpdates(data) {
-    if (!data.packageAvailable) {
-      byId('updatesPackageStatus').textContent = 'No client package is available yet - build or deploy one on Deploy > Package first.';
-      byId('updatesBody').innerHTML = '';
-      updateUpdatesBadge(0);
+  // Merges state.clientUpdates (Windows) and state.linuxClientUpdates
+  // (Linux) into one row set, each entry stamped with .platform the same
+  // way stampClientPlatform does for state.clients/state.linuxClients -
+  // the merged "Update selected" push (Task 3) reads this stamp to decide
+  // which protocol/credentials a checked row needs, never inferring it
+  // from row content (see clientPlatformLabel's own doc comment on why).
+  function stampUpdatePlatform(entries, platform) {
+    entries.forEach(entry => { entry.platform = platform; });
+    return entries;
+  }
+
+  function updateSortValue(entry, key) {
+    switch (key) {
+      case 'computerName': return (entry.computerName || entry.hostname || '').toLowerCase();
+      case 'domain': return (entry.domain || '').toLowerCase();
+      case 'clientVersion': return (entry.clientVersion || '').toLowerCase();
+      case 'collectedAt': return entry.collectedAt || entry.sourceUpdatedAt || '';
+      default: return '';
+    }
+  }
+
+  function renderMergedUpdatesTable() {
+    renderSortHeaders();
+
+    const windowsData = state.clientUpdates;
+    const linuxData = state.linuxClientUpdates;
+    const windowsAvailable = windowsData && windowsData.packageAvailable;
+    const linuxAvailable = linuxData && linuxData.packageAvailable;
+
+    if (!windowsData || !linuxData) {
+      byId('updatesPackageStatus').textContent = 'Loading client update status...';
       return;
     }
 
-    const updates = data.updates || [];
-    byId('updatesPackageStatus').textContent = `Current client package: ${formatAvailableVersion(data)}. ${data.outdatedCount} outdated.`;
+    const statusParts = [];
+    statusParts.push(windowsAvailable
+      ? `Windows package: ${formatAvailableVersion(windowsData)} (${windowsData.outdatedCount} outdated)`
+      : 'No Windows client package uploaded yet - build or deploy one on Deploy > Package.');
+    statusParts.push(linuxAvailable
+      ? `Linux package: v${escapeHtml(linuxData.currentVersion)} (${linuxData.outdatedCount} outdated)`
+      : 'No Linux client package uploaded yet - build one on Deploy > Package.');
+    byId('updatesPackageStatus').textContent = statusParts.join('. ') + '.';
 
-    if (updates.length === 0) {
+    const entries = []
+      .concat(windowsAvailable ? stampUpdatePlatform(windowsData.updates || [], 'windows') : [])
+      .concat(linuxAvailable ? stampUpdatePlatform(linuxData.updates || [], 'linux') : []);
+
+    if (entries.length === 0) {
       byId('updatesBody').innerHTML = '<tr><td colspan="6" class="empty">Every reporting client is up to date.</td></tr>';
-      updateUpdatesBadge(0);
+      byId('updatesPager').innerHTML = '';
+      updateUpdatesSelectionState();
       return;
     }
 
-    const rows = updates.map(update => `<tr>
-        <td>${escapeHtml(update.computerName)}</td>
-        <td>${escapeHtml(update.domain)}</td>
-        <td>${escapeHtml(update.clientVersion || 'Unknown')}</td>
-        <td>${formatAvailableVersion(data)}</td>
-        <td>${escapeHtml(formatDateTime(update.collectedAt))}</td>
-        <td><input type="checkbox" class="updates-row-checkbox" data-computer-name="${escapeHtml(update.computerName)}"></td>
-      </tr>`);
+    const { key: sortKey, dir: sortDir } = state.sort.updates;
+    const sorted = applySort(entries, e => updateSortValue(e, sortKey), sortDir);
+    const { items: pageItems, page, totalPages } = paginate(sorted, state.page.updates, state.pageSize.updates);
+    state.page.updates = page;
 
-    byId('updatesBody').innerHTML = rows.join('');
-    updateUpdatesBadge(data.outdatedCount);
+    byId('updatesBody').innerHTML = pageItems.map(entry => {
+      const isWindows = entry.platform === 'windows';
+      const target = isWindows ? entry.computerName : (entry.target || entry.hostname);
+      const availableVersion = isWindows ? formatAvailableVersion(windowsData) : `v${escapeHtml(linuxData.currentVersion)}`;
+      const collectedAt = isWindows ? entry.collectedAt : entry.sourceUpdatedAt;
+      return `<tr>
+        <td>${escapeHtml(entry.computerName || entry.hostname)}</td>
+        <td>${isWindows ? escapeHtml(entry.domain) : '—'}</td>
+        <td>${escapeHtml(entry.clientVersion || 'Unknown')}</td>
+        <td>${availableVersion}</td>
+        <td>${escapeHtml(formatDateTime(collectedAt))}</td>
+        <td><input type="checkbox" class="updates-row-checkbox" data-platform="${entry.platform}" data-target="${escapeHtml(target)}"></td>
+      </tr>`;
+    }).join('');
+
+    renderPager('updatesPager', 'updates', page, totalPages, renderMergedUpdatesTable);
+    updateUpdatesSelectionState();
   }
 
   function loadLinuxClientUpdates() {
@@ -1578,15 +1728,16 @@
       .then(data => {
         state.linuxClientUpdates = data;
         byId('linuxUpdatesPreferredSubnet').value = data.preferredLinuxSubnet || '';
-        renderLinuxClientUpdates(data);
+        renderMergedUpdatesTable();
+        updateLinuxUpdatesBadge(data.packageAvailable ? data.outdatedCount : 0);
       })
       .catch(error => {
-        byId('linuxUpdatesPackageStatus').textContent = `Client update status unavailable: ${error.message}`;
+        byId('updatesPackageStatus').textContent = `Client update status unavailable: ${error.message}`;
       });
   }
 
   // Saves the SAME server setting Client actions' own field and Settings >
-  // General > Linux client targeting edit - reloading afterward re-resolves
+  // Linux > Linux client targeting edit - reloading afterward re-resolves
   // every outdated client's push target (entry.target, the hidden checkbox
   // value in the table below) using the newly saved preference.
   function saveLinuxUpdatesPreferredSubnet() {
@@ -1625,100 +1776,18 @@
   // Badge-only counterpart to handleClientUpdatesSummary (Windows), used by
   // the dedicated fetches in pollForUpdates() and the initial page load -
   // updates just the Manage dropdown count, without the full loadLinuxClientUpdates()/
-  // renderLinuxClientUpdates() table rebuild.
+  // renderMergedUpdatesTable() table rebuild.
   function handleLinuxClientUpdatesSummary(data) {
     updateLinuxUpdatesBadge(data.packageAvailable ? data.outdatedCount : 0);
   }
 
-  function renderLinuxClientUpdates(data) {
-    if (!data.packageAvailable) {
-      byId('linuxUpdatesPackageStatus').textContent = 'No Linux client package is available yet - build one on Deploy > Package first.';
-      byId('linuxUpdatesBody').innerHTML = '';
-      updateLinuxUpdatesBadge(0);
-      return;
-    }
-
-    const updates = data.updates || [];
-    updateLinuxUpdatesBadge(updates.length);
-    byId('linuxUpdatesPackageStatus').textContent = `Current package version: v${escapeHtml(data.currentVersion)}. ${updates.length} client(s) outdated.`;
-
-    if (updates.length === 0) {
-      byId('linuxUpdatesBody').innerHTML = '<tr><td colspan="5" class="empty">All Linux clients are up to date.</td></tr>';
-      byId('linuxUpdatesPushButton').disabled = true;
-      return;
-    }
-
-    byId('linuxUpdatesBody').innerHTML = updates.map(entry => `<tr>
-      <td>${escapeHtml(entry.hostname)}</td>
-      <td>${escapeHtml(entry.clientVersion || 'unknown')}</td>
-      <td>v${escapeHtml(data.currentVersion)}</td>
-      <td>${escapeHtml(formatDateTime(entry.sourceUpdatedAt))}</td>
-      <td><input type="checkbox" class="linux-update-select" value="${escapeHtml(entry.target || entry.hostname)}"></td>
-    </tr>`).join('');
-
-    document.querySelectorAll('.linux-update-select').forEach(checkbox => {
-      checkbox.addEventListener('change', updateLinuxUpdatesPushButtonState);
-    });
-    updateLinuxUpdatesPushButtonState();
-  }
-
-  function updateLinuxUpdatesPushButtonState() {
-    const anyChecked = document.querySelectorAll('.linux-update-select:checked').length > 0;
-    const trustChecked = byId('linuxUpdatesTrustNewHostKeys').checked;
-    const acknowledgeChecked = byId('linuxUpdatesAcknowledgeHostKeyRisk').checked;
-    byId('linuxUpdatesPushButton').disabled = !anyChecked || (trustChecked && !acknowledgeChecked);
-  }
-
-  // Mirrors updateLinuxTrustNewHostKeysUi (Linux Client actions) - same
-  // pairing (risk-ack field only shown/required once "trust new host keys"
-  // is checked), reusing this panel's own combined button-state function
-  // instead of a bare disabled=false so the trust/ack pairing is still
-  // enforced client-side after the checkbox toggles.
   function updateLinuxUpdatesTrustNewHostKeysUi() {
     const trustChecked = byId('linuxUpdatesTrustNewHostKeys').checked;
     byId('linuxUpdatesAcknowledgeHostKeyRiskField').classList.toggle('hidden', !trustChecked);
     if (!trustChecked) {
       byId('linuxUpdatesAcknowledgeHostKeyRisk').checked = false;
     }
-    updateLinuxUpdatesPushButtonState();
-  }
-
-  function startLinuxUpdatesPush() {
-    const selected = Array.from(document.querySelectorAll('.linux-update-select:checked')).map(cb => cb.value);
-    if (selected.length === 0) return;
-
-    const authMode = byId('linuxUpdatesAuthMode').value;
-    const username = authMode === 'ad' ? '' : byId('linuxUpdatesUsername').value.trim();
-    const password = authMode === 'credentials' ? byId('linuxUpdatesPassword').value : '';
-    const trustNewHostKeys = byId('linuxUpdatesTrustNewHostKeys').checked;
-    const acknowledgeHostKeyRisk = byId('linuxUpdatesAcknowledgeHostKeyRisk').checked;
-    byId('linuxUpdatesPushButton').disabled = true;
-    byId('linuxUpdatesStatus').classList.add('empty');
-    byId('linuxUpdatesStatus').textContent = 'Starting update job...';
-
-    fetch('/api/v1/linux-client-install', {
-      method: 'POST',
-      cache: 'no-store',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets: selected.join('\n'), authMode, username, password, trustNewHostKeys, acknowledgeHostKeyRisk })
-    })
-      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
-      .then(({ ok, status, data }) => {
-        if (!ok) throw new Error(data.error || `HTTP ${status}`);
-        return data;
-      })
-      .then(data => {
-        state.linuxUpdatesJobId = data.jobId;
-        if (state.linuxUpdatesPollTimer) window.clearInterval(state.linuxUpdatesPollTimer);
-        pollLinuxInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', loadLinuxClientUpdates, 'linuxUpdatesPollTimer');
-        state.linuxUpdatesPollTimer = window.setInterval(() => pollLinuxInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', loadLinuxClientUpdates, 'linuxUpdatesPollTimer'), 3000);
-      })
-      .catch(error => {
-        byId('linuxUpdatesStatus').textContent = `Failed to start update job: ${error.message}`;
-      })
-      .finally(() => {
-        updateLinuxUpdatesPushButtonState();
-      });
+    updateUpdatesSelectionState();
   }
 
   function updateLinuxUpdatesScheduleFieldVisibility() {
@@ -1793,8 +1862,8 @@
       state.knownScheduledJobId = scheduledJobId;
       if (state.view === 'deploy' && state.subview === 'updates' && !state.updatePollTimer) {
         state.updateJobId = scheduledJobId;
-        pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', pruneCompletedUpdateTargets);
-        state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', pruneCompletedUpdateTargets), 3000);
+        pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows'));
+        state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows')), 3000);
       }
     }
   }
@@ -1896,12 +1965,14 @@
       });
   }
 
+  // Shared by Deploy > Updates' read-only "Saved account:" hint and
+  // Settings > Windows > Client update credentials' editable fields - one
+  // GET serves both. Settings pre-fills the username directly (a
+  // management context, like every other settings form); Deploy >
+  // Updates' own Manual-mode fields are a separate, never-pre-filled pair
+  // (see updateUpdatesCredentialFieldVisibility) - typing there sends a
+  // one-off override, it never reads or writes the saved account.
   function loadClientUpdateCredentials() {
-    // The username/password push fields are never pre-filled from the saved
-    // account: a form that looks empty but silently carries a stale
-    // username (with a genuinely blank password) would send a mismatched
-    // credential pair to WinRM instead of either the saved pair or the
-    // service identity. This hint is display-only.
     const hint = byId('updatesSavedAccountHint');
     fetch('/api/v1/client-updates/credentials', { cache: 'no-store' })
       .then(response => {
@@ -1915,17 +1986,18 @@
         } else {
           hint.classList.add('hidden');
         }
-        applyPasswordPlaceholder('updatesPassword', !!data.hasPassword, 'leave blank to keep the current one');
+        byId('windowsCredsUsername').value = data.username || '';
+        applyPasswordPlaceholder('windowsCredsPassword', !!data.hasPassword, 'leave blank to keep the current one');
       })
       .catch(() => {});
   }
 
   function saveClientUpdateCredentials() {
-    const username = byId('updatesUsername').value.trim();
-    const password = byId('updatesPassword').value;
-    const messageElement = byId('updatesCredentialsMessage');
+    const username = byId('windowsCredsUsername').value.trim();
+    const password = byId('windowsCredsPassword').value;
+    const messageElement = byId('windowsCredsMessage');
 
-    byId('updatesSaveCredentialsButton').disabled = true;
+    byId('windowsCredsSaveButton').disabled = true;
     fetch('/api/v1/client-updates/credentials', {
       method: 'POST',
       cache: 'no-store',
@@ -1937,13 +2009,7 @@
         return response.json();
       })
       .then(() => {
-        // Clear both fields, not just password: leaving the typed username
-        // behind paired with the just-cleared password reproduces the exact
-        // mismatched-pair bug fixed in 0.16.6 (real login + blank password
-        // sent straight to WinRM) the moment "Update selected" is clicked
-        // right after "Save" without retyping anything.
-        byId('updatesUsername').value = '';
-        byId('updatesPassword').value = '';
+        byId('windowsCredsPassword').value = '';
         showSavedMessage(messageElement, 'Saved.', false);
         loadClientUpdateCredentials();
       })
@@ -1951,14 +2017,14 @@
         showSavedMessage(messageElement, `Failed to save: ${error.message}`, true);
       })
       .finally(() => {
-        byId('updatesSaveCredentialsButton').disabled = false;
+        byId('windowsCredsSaveButton').disabled = false;
       });
   }
 
   function clearClientUpdateCredentials() {
-    const messageElement = byId('updatesCredentialsMessage');
+    const messageElement = byId('windowsCredsMessage');
 
-    byId('updatesClearCredentialsButton').disabled = true;
+    byId('windowsCredsClearButton').disabled = true;
     fetch('/api/v1/client-updates/credentials', {
       method: 'POST',
       cache: 'no-store',
@@ -1970,8 +2036,8 @@
         return response.json();
       })
       .then(() => {
-        byId('updatesUsername').value = '';
-        byId('updatesPassword').value = '';
+        byId('windowsCredsUsername').value = '';
+        byId('windowsCredsPassword').value = '';
         byId('updatesSavedAccountHint').classList.add('hidden');
         showSavedMessage(messageElement, 'Saved credentials deleted.', false);
       })
@@ -1979,91 +2045,122 @@
         showSavedMessage(messageElement, `Failed to delete: ${error.message}`, true);
       })
       .finally(() => {
-        byId('updatesClearCredentialsButton').disabled = false;
+        byId('windowsCredsClearButton').disabled = false;
       });
   }
 
   // pollInstallJob's onComplete only fires once the whole job finishes -
-  // for a batch push to many machines, the outdated-clients table
-  // (#updatesBody) previously stayed unchanged until every target was
-  // done, even though job.results already grows one entry per target as
-  // each one finishes (RunClientActionJob appends and saves after each
-  // target, run sequentially). This removes a target's row as soon as
-  // ITS OWN result shows up as a success, without waiting for the batch.
-  // A failed target is deliberately left in the table - it's still
-  // outdated and may need a retry.
-  function pruneCompletedUpdateTargets(job) {
+  // for a batch push to many machines, the merged table previously stayed
+  // unchanged until every target was done, even though job.results already
+  // grows one entry per target as each one finishes (RunClientActionJob
+  // appends and saves after each target, run sequentially). This removes a
+  // completed target from the underlying data (not just the current
+  // page's DOM - a page-scoped removal could show a false "every client is
+  // up to date" while a later page still had outdated rows) and re-renders
+  // through the normal pipeline, so pagination/OS-filter/sort/selection-
+  // state/outdated counts all stay correct. A failed target is
+  // deliberately left in - it's still outdated and may need a retry.
+  // platform scopes the removal to the sub-job that just progressed
+  // (Windows and Linux poll independently, see startMergedUpdatesPush), so
+  // a Windows job completing a target never touches a same-named Linux row
+  // and vice versa.
+  function pruneCompletedUpdateTargets(job, platform) {
     const results = job.results || [];
     const completedTargets = new Set(results.filter(result => result.status === 'completed').map(result => result.target));
     if (completedTargets.size === 0) return;
 
-    document.querySelectorAll('.updates-row-checkbox').forEach(checkbox => {
-      if (completedTargets.has(checkbox.dataset.computerName)) {
-        checkbox.closest('tr').remove();
-      }
+    const data = platform === 'windows' ? state.clientUpdates : state.linuxClientUpdates;
+    if (!data || !data.updates) return;
+    const remaining = data.updates.filter(entry => {
+      const target = platform === 'windows' ? entry.computerName : (entry.target || entry.hostname);
+      return !completedTargets.has(target);
     });
-    updateUpdatesSelectionState();
-
-    if (!document.querySelector('.updates-row-checkbox')) {
-      byId('updatesBody').innerHTML = '<tr><td colspan="6" class="empty">Every reporting client is up to date.</td></tr>';
-    }
+    if (remaining.length === data.updates.length) return;
+    data.updates = remaining;
+    data.outdatedCount = remaining.length;
+    renderMergedUpdatesTable();
   }
 
+  // Single gate for the merged "Update selected" button: at least one row
+  // checked (either platform), AND - only relevant when a Linux row is
+  // checked - "trust new host keys" isn't left checked without its
+  // acknowledgement checkbox (mirrors Deploy > Actions' own pairing rule).
   function updateUpdatesSelectionState() {
-    const checkboxes = Array.from(document.querySelectorAll('.updates-row-checkbox'));
-    const anyChecked = checkboxes.some(checkbox => checkbox.checked);
-    byId('updatesPushButton').disabled = !anyChecked;
+    const anyChecked = document.querySelectorAll('.updates-row-checkbox:checked').length > 0;
+    const trustChecked = byId('linuxUpdatesTrustNewHostKeys').checked;
+    const acknowledgeChecked = byId('linuxUpdatesAcknowledgeHostKeyRisk').checked;
+    byId('updatesPushButton').disabled = !anyChecked || (trustChecked && !acknowledgeChecked);
   }
 
-  function startClientUpdateJob() {
-    const targets = Array.from(document.querySelectorAll('.updates-row-checkbox:checked'))
-      .map(checkbox => checkbox.dataset.computerName);
-    if (targets.length === 0) return;
-
-    // Both fields are normally empty here: loadClientUpdateCredentials only
-    // ever shows the saved username as a read-only hint, never into these
-    // inputs (a pre-filled username paired with an always-blank password
-    // would send a mismatched credential pair to WinRM). useSavedCredentials:
-    // true below tells the server "if both fields are blank, use the saved
-    // account instead of the service identity" - typing a fresh
-    // username+password here still overrides that for this one push,
-    // matching Client actions' per-action behavior.
-    const useAdCredentials = byId('updatesUseAdCredentials').checked;
-    const username = useAdCredentials ? '' : byId('updatesUsername').value.trim();
-    const password = useAdCredentials ? '' : byId('updatesPassword').value;
-    // #installServerUrl is populated once, unconditionally, on page load
-    // (see the byId('installServerUrl').value = ... line near the bottom
-    // of this file) - it always holds a real value by the time any tab is
-    // used, so reusing it here needs no extra loading/fallback logic.
-    const serverUrl = byId('installServerUrl').value.trim();
+  // Splits the checked rows by their already-known platform (stamped at
+  // render time - never inferred from row content, see
+  // clientPlatformLabel's doc comment) and fires up to two independent
+  // requests against the same unified /api/v1/client-install endpoint
+  // Deploy > Actions uses, each with that platform's own credential
+  // source and its own status/poll target - so a mixed selection needs no
+  // extra UI, just two ordinary pushes running side by side.
+  function startMergedUpdatesPush() {
+    const checked = Array.from(document.querySelectorAll('.updates-row-checkbox:checked'));
+    const windowsTargets = checked.filter(cb => cb.dataset.platform === 'windows').map(cb => cb.dataset.target);
+    const linuxTargets = checked.filter(cb => cb.dataset.platform === 'linux').map(cb => cb.dataset.target);
+    if (windowsTargets.length === 0 && linuxTargets.length === 0) return;
 
     byId('updatesPushButton').disabled = true;
-    byId('updatesStatus').classList.add('empty');
-    byId('updatesStatus').textContent = 'Starting update job...';
+    const serverUrl = `${window.location.origin}/api/v1/inventory`;
 
-    fetch('/api/v1/client-install', {
-      method: 'POST',
-      cache: 'no-store',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets: targets.join('\n'), serverUrl, username, password, force: false, addToTrustedHosts: false, useSavedCredentials: true, useAdCredentials })
-    })
-      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
-      .then(({ ok, status, data }) => {
-        if (!ok) throw new Error(data.error || `HTTP ${status}`);
-        return data;
+    if (windowsTargets.length > 0) {
+      const winRmAuthMode = byId('updatesWinRmAuthMode').value;
+      const username = winRmAuthMode === 'manual' ? byId('updatesUsername').value.trim() : '';
+      const password = winRmAuthMode === 'manual' ? byId('updatesPassword').value : '';
+      byId('updatesStatus').classList.add('empty');
+      byId('updatesStatus').textContent = 'Starting update job...';
+      fetch('/api/v1/client-install', {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targets: windowsTargets.join('\n'), mode: 'force-windows', serverUrl, winRmAuthMode, username, password, force: false, addToTrustedHosts: false })
       })
-      .then(data => {
-        state.updateJobId = data.jobId;
-        if (state.updatePollTimer) window.clearInterval(state.updatePollTimer);
-        pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', pruneCompletedUpdateTargets);
-        state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', pruneCompletedUpdateTargets), 3000);
+        .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
+        .then(({ ok, status, data }) => {
+          if (!ok) throw new Error(data.error || `HTTP ${status}`);
+          state.updateJobId = data.jobId;
+          if (state.updatePollTimer) window.clearInterval(state.updatePollTimer);
+          pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows'));
+          state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows')), 3000);
+        })
+        .catch(error => {
+          byId('updatesStatus').textContent = `Failed to start update job: ${error.message}`;
+        })
+        .finally(updateUpdatesSelectionState);
+    }
+
+    if (linuxTargets.length > 0) {
+      const sshAuthMode = byId('linuxUpdatesAuthMode').value;
+      const sshUsername = sshAuthMode === 'global' ? '' : byId('linuxUpdatesUsername').value.trim();
+      const sshPassword = sshAuthMode === 'manual' ? byId('linuxUpdatesPassword').value : '';
+      const trustNewHostKeys = byId('linuxUpdatesTrustNewHostKeys').checked;
+      const acknowledgeHostKeyRisk = byId('linuxUpdatesAcknowledgeHostKeyRisk').checked;
+      byId('linuxUpdatesStatus').classList.add('empty');
+      byId('linuxUpdatesStatus').textContent = 'Starting update job...';
+      fetch('/api/v1/client-install', {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targets: linuxTargets.join('\n'), mode: 'force-linux', sshAuthMode, sshUsername, sshPassword, trustNewHostKeys, acknowledgeHostKeyRisk })
       })
-      .catch(error => {
-        byId('updatesStatus').textContent = `Failed to start update job: ${error.message}`;
-      })
-      .finally(() => {
-        byId('updatesPushButton').disabled = false;
-      });
+        .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
+        .then(({ ok, status, data }) => {
+          if (!ok) throw new Error(data.error || `HTTP ${status}`);
+          state.linuxUpdatesJobId = data.jobId;
+          if (state.linuxUpdatesPollTimer) window.clearInterval(state.linuxUpdatesPollTimer);
+          pollInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', () => loadLinuxClientUpdates(), 'linuxUpdatesPollTimer', job => pruneCompletedUpdateTargets(job, 'linux'));
+          state.linuxUpdatesPollTimer = window.setInterval(() => pollInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', () => loadLinuxClientUpdates(), 'linuxUpdatesPollTimer', job => pruneCompletedUpdateTargets(job, 'linux')), 3000);
+        })
+        .catch(error => {
+          byId('linuxUpdatesStatus').textContent = `Failed to start update job: ${error.message}`;
+        })
+        .finally(updateUpdatesSelectionState);
+    }
   }
 
   function loadPackageStatus() {
@@ -2111,7 +2208,12 @@
           ? `Linux client binary present (v${escapeHtml(data.binaryVersion || 'unknown')}).`
           : 'No Linux client binary found - run Build-LinuxClient.ps1 and place the output in the Linux client package directory first.';
         byId('linuxPkgStatus').textContent = statusText;
-        byId('linuxPkgServerUrl').value = data.serverUrl || '';
+        // Only overwrite the auto-filled default (see the init-time
+        // window.location.origin assignment) when the server actually has
+        // a saved value - an unconditional assignment here would blank the
+        // field with '' on every page load until something is saved once,
+        // same guard as loadPackageStatus's Windows pkgServerUrl above.
+        if (data.serverUrl) byId('linuxPkgServerUrl').value = data.serverUrl;
         byId('linuxPkgIntervalHours').value = data.intervalHours || 6;
         byId('linuxPkgStatusIntervalMinutes').value = data.statusIntervalMinutes || 30;
         byId('linuxPkgInstallPath').value = data.installPath || '/opt/windows-inventory-lite';
@@ -2245,7 +2347,7 @@
     }
     const risks = data.risks || [];
     const parts = [
-      data.useHttps ? 'HTTPS: enabled' : 'HTTPS: disabled (configured but not active - turn on in Settings > General)',
+      data.useHttps ? 'HTTPS: enabled' : 'HTTPS: disabled (configured but not active - turn on in Settings > Server)',
       'Subject: ' + escapeHtml(data.subject || 'Unknown'),
       'Expires: ' + escapeHtml(formatDateTime(data.notAfter)),
       data.isExpired ? '<span class="usb-badge">EXPIRED</span>' : '',
@@ -2328,8 +2430,8 @@
         const risks = data.risks || [];
         showCertMessage(
           risks.length
-            ? `Certificate uploaded with ${risks.length} risk(s): ${risks.join(' ')} Enable HTTPS from Settings > General when ready.`
-            : 'Certificate uploaded. Enable HTTPS from Settings > General when ready.',
+            ? `Certificate uploaded with ${risks.length} risk(s): ${risks.join(' ')} Enable HTTPS from Settings > Server when ready.`
+            : 'Certificate uploaded. Enable HTTPS from Settings > Server when ready.',
           risks.length > 0
         );
       })
@@ -2476,7 +2578,7 @@
       });
   }
 
-  function loadGeneralSettings() {
+  function loadServerSettings() {
     fetch('/api/v1/server/settings', { cache: 'no-store' })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -2484,11 +2586,15 @@
       })
       .then(data => {
         byId('generalStaleHours').value = data.staleHours || 48;
+        byId('generalIngestionRejectionLogRetentionDays').value = data.ingestionRejectionLogRetentionDays || 30;
+        byId('generalIngestionRejectionLogMaxEntries').value = data.ingestionRejectionLogMaxEntries || 5000;
         byId('generalInstallLogRetentionDays').value = data.installLogRetentionDays || 30;
         byId('generalPort').value = data.port || 8080;
         byId('generalEnableHttp').checked = data.enableHttp !== false;
         byId('generalHttpsPort').value = data.httpsPort || 8443;
         byId('generalUseHttps').checked = !!data.useHttps;
+        byId('generalHstsEnabled').checked = !!data.hstsEnabled;
+        byId('generalHstsMaxAgeHours').value = data.hstsMaxAgeHours || 24;
         // Compared against on save to decide whether the "this will disconnect
         // you" confirmation is actually needed - staleHours/useHttps changes
         // alone don't move the port this browser is talking to.
@@ -2504,6 +2610,22 @@
         } else {
           hint.classList.add('hidden');
         }
+        byId('generalDebugLogEnabled').checked = !!data.debugLogEnabled;
+        byId('generalDebugLogPath').textContent = data.debugLogPath || '-';
+        renderConnectionStatus(data);
+      })
+      .catch(error => {
+        showSavedMessage(byId('generalMessage'), `Settings unavailable: ${error.message}`, true);
+      });
+  }
+
+  function loadWindowsSettings() {
+    fetch('/api/v1/server/settings', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
         byId('generalAdSyncEnabled').checked = !!data.adSyncEnabled;
         byId('generalAdDescriptionSyncEnabled').checked = !!data.adDescriptionSyncEnabled;
         state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
@@ -2517,13 +2639,26 @@
         applyPasswordPlaceholder('generalAdPassword', !!data.adPasswordConfigured, 'leave blank to keep the current password');
         byId('generalAdComputerImportOUs').value = data.adComputerImportOUs || '';
         updateAdIdentityFields();
-        byId('generalPreferredLinuxSubnet').value = data.preferredLinuxSubnet || '';
-        byId('generalDebugLogEnabled').checked = !!data.debugLogEnabled;
-        byId('generalDebugLogPath').textContent = data.debugLogPath || '-';
-        renderConnectionStatus(data);
       })
       .catch(error => {
-        showGeneralMessage(`Settings unavailable: ${error.message}`, true);
+        showSavedMessage(byId('windowsSettingsMessage'), `Settings unavailable: ${error.message}`, true);
+      });
+  }
+
+  function loadLinuxSettings() {
+    fetch('/api/v1/server/settings', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('generalPreferredLinuxSubnet').value = data.preferredLinuxSubnet || '';
+        byId('linuxDefaultIntervalHours').value = data.linuxDefaultIntervalHours || 6;
+        byId('linuxDefaultStatusIntervalMinutes').value = data.linuxDefaultStatusIntervalMinutes || 30;
+        byId('linuxDefaultInstallPath').value = data.linuxDefaultInstallPath || '/opt/windows-inventory-lite';
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxSettingsMessage'), `Settings unavailable: ${error.message}`, true);
       });
   }
 
@@ -2560,17 +2695,17 @@
     setStatusDot('statusCertDot', 'statusCertDetail', certOn, certDetail);
   }
 
-  function showGeneralMessage(msg, isError) {
-    showSavedMessage(byId('generalMessage'), msg, isError);
-  }
-
-  function saveGeneralSettings(acknowledgeRisks, confirmedDisruption, acknowledgeIngestionTokenRisk) {
+  function saveServerSettings(acknowledgeRisks, confirmedDisruption, acknowledgeIngestionTokenRisk) {
     const staleHours = Number.parseInt(byId('generalStaleHours').value, 10) || 48;
+    const ingestionRejectionLogRetentionDays = Number.parseInt(byId('generalIngestionRejectionLogRetentionDays').value, 10) || 30;
+    const ingestionRejectionLogMaxEntries = Number.parseInt(byId('generalIngestionRejectionLogMaxEntries').value, 10) || 5000;
     const installLogRetentionDays = Number.parseInt(byId('generalInstallLogRetentionDays').value, 10) || 30;
     const port = Number.parseInt(byId('generalPort').value, 10) || 8080;
     const enableHttp = byId('generalEnableHttp').checked;
     const httpsPort = Number.parseInt(byId('generalHttpsPort').value, 10) || 8443;
     const useHttps = byId('generalUseHttps').checked;
+    const hstsEnabled = byId('generalHstsEnabled').checked;
+    const hstsMaxAgeHours = Number.parseInt(byId('generalHstsMaxAgeHours').value, 10) || 24;
     const requireIngestionToken = byId('generalRequireIngestionToken').checked;
 
     // Only the HTTP port and the Enable HTTP switch can actually move this
@@ -2604,18 +2739,8 @@
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        staleHours, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, requireIngestionToken,
+        staleHours, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, hstsEnabled, hstsMaxAgeHours, ingestionRejectionLogRetentionDays, ingestionRejectionLogMaxEntries, requireIngestionToken,
         acknowledgeRisks: !!acknowledgeRisks, acknowledgeIngestionTokenRisk: !!acknowledgeIngestionTokenRisk,
-        adSyncEnabled: byId('generalAdSyncEnabled').checked,
-        adDescriptionSyncEnabled: byId('generalAdDescriptionSyncEnabled').checked,
-        adSyncMode: byId('generalAdSyncMode').value,
-        adSyncIntervalHours: Number.parseInt(byId('generalAdSyncIntervalHours').value, 10) || 24,
-        adDomain: byId('generalAdDomain').value.trim(),
-        adUseServiceIdentity: byId('generalAdUseServiceIdentity').checked,
-        adUsername: byId('generalAdUsername').value.trim(),
-        adPassword: byId('generalAdPassword').value,
-        adComputerImportOUs: byId('generalAdComputerImportOUs').value,
-        preferredLinuxSubnet: byId('generalPreferredLinuxSubnet').value.trim(),
         debugLogEnabled: byId('generalDebugLogEnabled').checked
       })
     })
@@ -2627,7 +2752,7 @@
               `${data.error}\n\n${data.risks.join('\n')}\n\nEnable HTTPS anyway?`
             );
             if (confirmed) {
-              saveGeneralSettings(true, true);
+              saveServerSettings(true, true);
               return;
             }
             byId('generalUseHttps').checked = false;
@@ -2638,18 +2763,79 @@
         state.staleHours = data.staleHours || 48;
         state.generalLoadedPort = data.port || 8080;
         state.generalLoadedEnableHttp = data.enableHttp !== false;
-        state.adDescriptionSyncEnabled = byId('generalAdDescriptionSyncEnabled').checked;
         renderDashboardTiles();
         renderConnectionStatus(data);
-        byId('generalAdPassword').value = '';
-        showGeneralMessage('Settings saved.', false);
+        showSavedMessage(byId('generalMessage'), 'Settings saved.', false);
         loadIngestionTokenStatus();
       })
       .catch(error => {
-        showGeneralMessage(`Save failed: ${error.message}`, true);
+        showSavedMessage(byId('generalMessage'), `Save failed: ${error.message}`, true);
       })
       .finally(() => {
         byId('generalSaveButton').disabled = false;
+      });
+  }
+
+  function saveWindowsSettings() {
+    byId('windowsSettingsSaveButton').disabled = true;
+    byId('windowsSettingsMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        adSyncEnabled: byId('generalAdSyncEnabled').checked,
+        adDescriptionSyncEnabled: byId('generalAdDescriptionSyncEnabled').checked,
+        adSyncMode: byId('generalAdSyncMode').value,
+        adSyncIntervalHours: Number.parseInt(byId('generalAdSyncIntervalHours').value, 10) || 24,
+        adDomain: byId('generalAdDomain').value.trim(),
+        adUseServiceIdentity: byId('generalAdUseServiceIdentity').checked,
+        adUsername: byId('generalAdUsername').value.trim(),
+        adPassword: byId('generalAdPassword').value,
+        adComputerImportOUs: byId('generalAdComputerImportOUs').value
+      })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        state.adDescriptionSyncEnabled = byId('generalAdDescriptionSyncEnabled').checked;
+        byId('generalAdPassword').value = '';
+        showSavedMessage(byId('windowsSettingsMessage'), 'Settings saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('windowsSettingsMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('windowsSettingsSaveButton').disabled = false;
+      });
+  }
+
+  function saveLinuxSettings() {
+    byId('linuxSettingsSaveButton').disabled = true;
+    byId('linuxSettingsMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        preferredLinuxSubnet: byId('generalPreferredLinuxSubnet').value.trim(),
+        linuxDefaultIntervalHours: Number.parseInt(byId('linuxDefaultIntervalHours').value, 10) || 6,
+        linuxDefaultStatusIntervalMinutes: Number.parseInt(byId('linuxDefaultStatusIntervalMinutes').value, 10) || 30,
+        linuxDefaultInstallPath: byId('linuxDefaultInstallPath').value.trim()
+      })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        showSavedMessage(byId('linuxSettingsMessage'), 'Settings saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxSettingsMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('linuxSettingsSaveButton').disabled = false;
       });
   }
 
@@ -2772,6 +2958,58 @@
       });
   }
 
+  // Deliberately reads/writes the general settings endpoint, not
+  // /api/v1/server/admin-password - that endpoint's Save (changeAdminPassword
+  // below) unconditionally requires re-entering the current password and a
+  // new password >= 8 characters, which would be wrong UX for saving an
+  // unrelated numeric setting. This mirrors the "Windows/Linux Client update
+  // credentials" blocks elsewhere in Settings: an independently-saved
+  // .settings-block living on a tab that also has its own main Save button.
+  function loadLoginLockoutSettings() {
+    fetch('/api/v1/server/settings', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('loginLockoutThreshold').value = data.loginLockoutThreshold != null ? data.loginLockoutThreshold : 10;
+        byId('loginLockoutWindowMinutes').value = data.loginLockoutWindowMinutes || 15;
+        byId('loginLockoutDurationMinutes').value = data.loginLockoutDurationMinutes || 15;
+        byId('sessionLifetimeHours').value = data.sessionLifetimeHours || 12;
+      })
+      .catch(error => {
+        showSavedMessage(byId('loginLockoutMessage'), `Settings unavailable: ${error.message}`, true);
+      });
+  }
+
+  function saveLoginLockoutSettings() {
+    byId('loginLockoutSaveButton').disabled = true;
+    byId('loginLockoutMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        loginLockoutThreshold: Number.parseInt(byId('loginLockoutThreshold').value, 10) || 0,
+        loginLockoutWindowMinutes: Number.parseInt(byId('loginLockoutWindowMinutes').value, 10) || 15,
+        loginLockoutDurationMinutes: Number.parseInt(byId('loginLockoutDurationMinutes').value, 10) || 15,
+        sessionLifetimeHours: Number.parseInt(byId('sessionLifetimeHours').value, 10) || 12
+      })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        showSavedMessage(byId('loginLockoutMessage'), 'Settings saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('loginLockoutMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('loginLockoutSaveButton').disabled = false;
+      });
+  }
+
   function changeAdminPassword() {
     const configured = !!state.adminPasswordConfigured;
     const newUsername = byId('adminUsername').value.trim();
@@ -2811,7 +3049,7 @@
         byId('adminCurrentPassword').value = '';
         byId('adminNewPassword').value = '';
         byId('adminConfirmPassword').value = '';
-        showAdminPasswordMessage('Saved. Your browser may prompt for the new credentials on the next request.', false);
+        showAdminPasswordMessage('Saved. Your session was refreshed automatically - no need to log in again.', false);
         loadAdminPasswordStatus();
       })
       .catch(error => {
@@ -3356,32 +3594,11 @@
       .filter(item => item.count > 0);
   }
 
-  // Top N software titles by the number of distinct computers that have any
-  // version of it installed - a client with three Chrome versions counts once.
-  function getTopSoftwareNames(clients, limit) {
-    const counts = new Map();
-    clients.forEach(client => {
-      const seenNames = new Set();
-      getClientSoftware(client).forEach(item => {
-        const name = (item.name || '').trim();
-        if (!name) return;
-        const key = name.toLowerCase();
-        if (seenNames.has(key)) return;
-        seenNames.add(key);
-        if (!counts.has(key)) counts.set(key, { label: name, count: 0 });
-        counts.get(key).count++;
-      });
-    });
-    return Array.from(counts.values())
-      .sort((a, b) => b.count - a.count)
-      .slice(0, limit);
-  }
-
   // One bar per distinct OS release across both platforms: Windows reports
   // it as os.caption, Linux as os.prettyName (collect.OSInfo). Same
   // [{label, count}] shape as getTopCpuModels/getRamBuckets so it can go
   // straight into renderBarChart. Grouped case-insensitively but displayed
-  // with the first-seen casing, matching getTopSoftwareNames' approach.
+  // with the first-seen casing.
   function getOsVersionBreakdown(clients, limit) {
     const counts = new Map();
     clients.forEach(client => {
@@ -3440,8 +3657,16 @@
     // Windows-only by design, not an oversight: neither Windows activation
     // nor Office activation has any Linux equivalent, so these two tiles
     // stay state.clients-only while Clients/Stale go fleet-wide.
-    byId('dashWindowsActivated').textContent = clients.filter(client => client.activation && client.activation.windows && client.activation.windows.activated).length;
-    byId('dashOfficeActivated').textContent = clients.filter(client => client.activation && client.activation.office && client.activation.office.activated).length;
+    const windowsActivatedCount = clients.filter(client => client.activation && client.activation.windows && client.activation.windows.activated).length;
+    const officeActivatedCount = clients.filter(client => client.activation && client.activation.office && client.activation.office.activated).length;
+    byId('dashWindowsActivated').textContent = windowsActivatedCount;
+    byId('dashOfficeActivated').textContent = officeActivatedCount;
+    // Green only at 100% of the same Windows-only denominator the counts
+    // above use - and only when there's at least one Windows client to be
+    // activated, so an empty fleet doesn't render as a false "fully
+    // activated" success state.
+    byId('dashWindowsActivatedTile').classList.toggle('tile-success', clients.length > 0 && windowsActivatedCount === clients.length);
+    byId('dashOfficeActivatedTile').classList.toggle('tile-success', clients.length > 0 && officeActivatedCount === clients.length);
     // isStale needs no platform handling - it reads collectedAt ||
     // sourceUpdatedAt, both of which Linux client reports also carry.
     const dashStaleCount = allClients.filter(isStale).length;
@@ -3450,11 +3675,6 @@
     byId('dashStaleTile').classList.toggle('tile-alert', dashStaleCount > 0);
     byId('dashLicenseCount').textContent = state.licenses.length;
     byId('dashUsbCount').textContent = allClients.filter(client => client.hasUsbStorage).length;
-    // Top software stays Windows-only: the Linux client inventories running
-    // services, a different concept that would not mix meaningfully into a
-    // "top installed software" chart. The OS chart below is the cross-
-    // platform Software-card addition.
-    renderBarChart('dashSoftwareChart', getTopSoftwareNames(clients, 5));
     renderBarChart('dashOsChart', getOsVersionBreakdown(allClients, 5));
     renderBarChart('dashCpuChart', getTopCpuModels(allClients, 4));
     renderBarChart('dashRamChart', getRamBuckets(allClients));
@@ -3578,11 +3798,19 @@
         return `${escapeHtml(d.type)}${escapeHtml(size)}${badge} <small>${escapeHtml(d.model)}</small>`;
       }).join('<br>') || 'Unknown';
 
+      const { key: clientSoftwareSortKey, dir: clientSoftwareSortDir } = state.sort.clientSoftware;
+      const sortedClientSoftware = applySort(clientSoftware, item => clientSoftwareSortValue(item, clientSoftwareSortKey), clientSoftwareSortDir);
+
       const nestedTable = isWindows
         ? `<h2>${escapeHtml(client.computerName)} software</h2>
             <table class="nested-table">
-              <thead><tr><th>Name</th><th>Version</th><th>Publisher</th><th>Install date</th></tr></thead>
-              <tbody>${clientSoftware.map(item => `<tr>
+              <thead><tr>
+                <th data-sort-table="clientSoftware" data-sort-key="name" class="sortable">Name</th>
+                <th data-sort-table="clientSoftware" data-sort-key="version" class="sortable">Version</th>
+                <th data-sort-table="clientSoftware" data-sort-key="publisher" class="sortable">Publisher</th>
+                <th data-sort-table="clientSoftware" data-sort-key="installDate" class="sortable">Install date</th>
+              </tr></thead>
+              <tbody>${sortedClientSoftware.map(item => `<tr>
                 <td>${escapeHtml(item.name)}</td>
                 <td>${escapeHtml(item.version)}</td>
                 <td>${escapeHtml(item.publisher)}</td>
@@ -3608,7 +3836,7 @@
 
       return `<tr class="${staleClass}">
         <td><button class="link-button" type="button" ${expandAttr}>${escapeHtml(clientDisplayName(client))}</button> <small class="platform-tag">${escapeHtml(clientPlatformLabel(client))}</small>${usbBadge}${staleBadge}${domainHtml}${ipAddressesHtml ? `<small class="mono">${ipAddressesHtml}</small>` : ''}</td>
-        <td>${escapeHtml(client.clientVersion)}</td>
+        <td>${escapeHtml(client.clientVersion)}${client.tokenIssue ? ` <span class="usb-badge" title="A recent request from this client's last known address ${client.tokenIssue === 'missing' ? 'had no ingestion token' : 'had a wrong ingestion token'}">${client.tokenIssue === 'missing' ? 'TOKEN MISSING' : 'TOKEN MISMATCH'}</span>` : ''}</td>
         <td>${osCell}</td>
         <td>${officeCell}</td>
         <td>${activationCell}</td>
@@ -3632,6 +3860,13 @@
     });
 
     byId('inventoryBody').innerHTML = rows.join('') || '<tr><td colspan="9" class="empty">No matching inventory records.</td></tr>';
+    // The clientSoftware <th> elements above are rebuilt from scratch on
+    // every call (they live inside inventoryBody's innerHTML, unlike the
+    // Clients/Software/Hardware/Licenses <thead>s, which are static in
+    // index.html and persist across renders) - the earlier renderSortHeaders()
+    // call above ran before they existed, so re-run it now that they're in
+    // the DOM to give the active clientSoftware sort column its arrow.
+    renderSortHeaders();
     if (editingClientId) {
       const platformSelector = editingIsLinux ? '[data-platform="linux"]' : ':not([data-platform])';
       const restoredInput = document.querySelector(`.description-edit-input[data-description-client="${editingClientId}"]${platformSelector}`);
@@ -3747,6 +3982,51 @@
 
     tbody.innerHTML = rows.join('') || '<tr><td colspan="3" class="empty">No matching service records.</td></tr>';
     renderPager('linuxServicesPager', 'linuxServices', page, totalPages, () => renderLinuxServicesTable(state.linuxClients));
+  }
+
+  function loadIngestionRejectionLog() {
+    fetch('/api/v1/server/ingestion-rejections', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.ingestionRejectionEntries = data.entries || [];
+        renderIngestionRejectionsTable();
+      })
+      .catch(error => {
+        byId('ingestionRejectionsBody').innerHTML = `<tr><td colspan="6" class="empty">Log unavailable: ${escapeHtml(error.message)}</td></tr>`;
+      });
+  }
+
+  function ingestionRejectionSortValue(entry, key) {
+    switch (key) {
+      case 'timestampUtc': return new Date(entry.timestampUtc || 0).getTime();
+      case 'sourceIp': return (entry.sourceIp || '').toLowerCase();
+      case 'endpoint': return (entry.endpoint || '').toLowerCase();
+      case 'reason': return (entry.reason || '').toLowerCase();
+      default: return '';
+    }
+  }
+
+  function renderIngestionRejectionsTable() {
+    const entries = state.ingestionRejectionEntries || [];
+    const { key: sortKey, dir: sortDir } = state.sort.ingestionRejections;
+    const sorted = applySort(entries, entry => ingestionRejectionSortValue(entry, sortKey), sortDir);
+    const { items: pageItems, page, totalPages } = paginate(sorted, state.page.ingestionRejections, state.pageSize.ingestionRejections);
+    state.page.ingestionRejections = page;
+
+    const rows = pageItems.map(entry => `<tr>
+        <td class="mono">${escapeHtml(formatDateTime(entry.timestampUtc))}</td>
+        <td class="mono">${escapeHtml(entry.sourceIp)}</td>
+        <td>${entry.hostname ? escapeHtml(entry.hostname) : '—'}</td>
+        <td>${escapeHtml(entry.endpoint)}</td>
+        <td>${entry.reason === 'missing' ? 'Token missing' : 'Token mismatch'}</td>
+        <td>${entry.matchedClient ? escapeHtml(entry.matchedClient) : '—'}</td>
+      </tr>`);
+
+    byId('ingestionRejectionsBody').innerHTML = rows.join('') || '<tr><td colspan="6" class="empty">No rejected ingestion attempts recorded.</td></tr>';
+    renderPager('ingestionRejectionsPager', 'ingestionRejections', page, totalPages, () => renderIngestionRejectionsTable());
   }
 
   // One <li> per computer inside an expanded hardware group. Cross-platform:
@@ -3869,25 +4149,27 @@
     renderSoftwareTable(state.clients);
     renderFilteredHardwarePage();
     renderLicenses();
+    renderIngestionRejectionsTable();
     populateSoftwareDatalists();
     byId('dashboardView').classList.toggle('hidden', state.view !== 'dashboard');
     byId('clientsView').classList.toggle('hidden', state.view !== 'clients');
     byId('softwareView').classList.toggle('hidden', state.view !== 'software');
     byId('hardwareView').classList.toggle('hidden', state.view !== 'hardware');
     byId('licensesView').classList.toggle('hidden', state.view !== 'licenses');
+    byId('loggingView').classList.toggle('hidden', state.view !== 'logging');
     byId('linuxServicesView').classList.toggle('hidden', state.view !== 'linuxServices');
     // Deploy: Actions shows both platforms' sections together (stacked, own
-    // headings - see Task 2), Updates likewise, Package is already
-    // cross-platform on one section (no stacking needed).
+    // headings), Updates and Package are each already cross-platform on one
+    // merged section (no stacking needed).
     byId('installView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
-    byId('linuxInstallView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
     byId('installHistoryView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
     byId('updatesView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'updates'));
-    byId('linuxUpdatesView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'updates'));
     byId('packageView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'package'));
-    // Settings: exactly one of the three shows at a time (no stacking).
-    byId('generalView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'general'));
-    byId('generalStatusView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'general'));
+    // Settings: exactly one of the five shows at a time (no stacking).
+    byId('serverSettingsView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'server'));
+    byId('generalStatusView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'server'));
+    byId('windowsSettingsView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'windows'));
+    byId('linuxSettingsView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'linux'));
     byId('certificateView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'certificate'));
     byId('adminPasswordView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'adminPassword'));
     byId('dashboardTab').classList.toggle('active', state.view === 'dashboard');
@@ -3895,9 +4177,9 @@
     byId('softwareTab').classList.toggle('active', state.view === 'software');
     byId('hardwareTab').classList.toggle('active', state.view === 'hardware');
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
+    byId('loggingTab').classList.toggle('active', state.view === 'logging');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
     byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'licenses'].includes(state.view));
-    byId('manageDropdownButton').classList.toggle('active', state.view === 'deploy' || state.view === 'settings');
     byId('deployTab').classList.toggle('active', state.view === 'deploy');
     byId('settingsTab').classList.toggle('active', state.view === 'settings');
     const isInventoryView = inventoryViews.includes(state.view);
@@ -3975,6 +4257,15 @@
   function pollForUpdates() {
     fetch('/api/v1/clients', { cache: 'no-store' })
       .then(response => {
+        if (response.status === 401) {
+          // The session expired while this tab was already open (or the
+          // admin logged this session out remotely). Reload rather than
+          // just failing silently - a fresh unauthenticated request to /
+          // now correctly renders the login page (see SendUnauthorized).
+          stopPolling();
+          window.location.reload();
+          throw new Error('Session expired');
+        }
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
       })
@@ -4007,7 +4298,7 @@
 
     // Separate fetch, badge-only: the Manage dropdown "Client updates" count should
     // stay live even when the Client updates tab itself isn't open. A full
-    // loadClientUpdates()/renderClientUpdates() call is deliberately NOT used
+    // loadClientUpdates()/renderMergedUpdatesTable() call is deliberately NOT used
     // here - it rebuilds #updatesBody's row checkboxes, which would silently
     // clear an in-progress selection if the user has this tab open and rows
     // checked when a poll tick lands. handleClientUpdatesSummary also picks
@@ -4143,6 +4434,36 @@
     clearTimeout(paginationResizeTimer);
     paginationResizeTimer = setTimeout(recalculateActivePagination, 150);
   });
+  // Shared by the three clickable Dashboard tiles below: jumps to Clients
+  // pre-filtered/pre-sorted so whatever the tile promised (the stalest
+  // clients, the ones missing an activation) is what's actually on top -
+  // clearing any leftover search text so it can't hide them, and resetting
+  // to page 1 since the old page number belongs to a completely different
+  // sort order.
+  function navigateToClientsSortedBy(sortKey, osFilter) {
+    byId('searchInput').value = '';
+    state.osFilter.clients = osFilter;
+    state.sort.clients = { key: sortKey, dir: 1 };
+    state.page.clients = 1;
+    setView('clients');
+  }
+  // role="button"/tabindex="0" in the HTML make these keyboard-focusable,
+  // but only <button>/<a> get Enter/Space activation for free from the
+  // browser - a plain div with role="button" needs it wired by hand.
+  const dashboardTileHandlers = [
+    ['dashWindowsActivatedTile', () => navigateToClientsSortedBy('activation', 'windows')],
+    ['dashOfficeActivatedTile', () => navigateToClientsSortedBy('officeActivation', 'windows')],
+    ['dashStaleTile', () => navigateToClientsSortedBy('collectedAt', 'all')]
+  ];
+  dashboardTileHandlers.forEach(([id, handler]) => {
+    byId(id).addEventListener('click', handler);
+    byId(id).addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        handler();
+      }
+    });
+  });
   byId('dashboardTab').addEventListener('click', () => {
     setView('dashboard');
   });
@@ -4161,31 +4482,33 @@
     if (state.view === 'deploy') loadDeploySubviewData(state.subview);
     if (state.view === 'settings') loadSettingsSubviewData(state.subview);
     if (state.view === 'licenses') loadLicenses();
+    if (state.view === 'logging') loadIngestionRejectionLog();
     if (state.view === 'clients' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
   });
-  byId('installServerUrl').value = `${window.location.origin}/api/v1/inventory`;
-  byId('linuxInstallServerUrl').value = `${window.location.origin}/api/v1/linux/inventory`;
-  byId('clientAction').addEventListener('change', updateClientActionUi);
-  byId('linuxClientAction').addEventListener('change', updateLinuxClientActionUi);
-  byId('linuxInstallAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField'));
-  byId('linuxInstallButton').addEventListener('click', startLinuxClientActionJob);
-  byId('linuxInstallPreferredSubnetSaveButton').addEventListener('click', saveLinuxInstallPreferredSubnet);
-  byId('linuxTrustNewHostKeys').addEventListener('change', updateLinuxTrustNewHostKeysUi);
-  byId('linuxAcknowledgeHostKeyRisk').addEventListener('change', updateLinuxTrustNewHostKeysUi);
-  byId('linuxUpdatesAuthMode').addEventListener('change', () => updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField'));
-  byId('linuxUpdatesSelectAll').addEventListener('change', () => {
-    const checked = byId('linuxUpdatesSelectAll').checked;
-    document.querySelectorAll('.linux-update-select').forEach(cb => { cb.checked = checked; });
-    updateLinuxUpdatesPushButtonState();
-  });
-  byId('linuxUpdatesPushButton').addEventListener('click', startLinuxUpdatesPush);
+  byId('pkgServerUrl').value = `${window.location.origin}/api/v1/inventory`;
+  byId('linuxPkgServerUrl').value = `${window.location.origin}/api/v1/linux/inventory`;
+  byId('clientAction').addEventListener('change', updateInstallFieldVisibility);
+  byId('clientActionMode').addEventListener('change', updateInstallFieldVisibility);
+  byId('installSshAuthMode').addEventListener('change', updateInstallFieldVisibility);
+  byId('installPreferredSubnetSaveButton').addEventListener('click', saveInstallPreferredSubnet);
+  byId('installTrustNewHostKeys').addEventListener('change', updateInstallTrustNewHostKeysUi);
+  byId('installAcknowledgeHostKeyRisk').addEventListener('change', updateInstallTrustNewHostKeysUi);
+  byId('linuxUpdatesAuthMode').addEventListener('change', updateLinuxUpdatesAuthModeFieldsUi);
+  // linuxUpdatesSelectAll/linuxUpdatesPushButton/updatesUseAdCredentials
+  // listeners removed here: Task 1's merged Deploy > Updates markup has no
+  // such elements any more (one shared updatesSelectAll/updatesPushButton
+  // now covers both platforms, and Windows credentials moved to the
+  // updatesWinRmAuthMode dropdown below) - the old byId() calls threw and
+  // aborted this whole setup block before it reached the wiring below.
+  // Re-wiring push-dispatch/credential-UI to the new elements is Task 3's
+  // job, not this one's.
   byId('linuxUpdatesPreferredSubnetSaveButton').addEventListener('click', saveLinuxUpdatesPreferredSubnet);
   byId('linuxUpdatesTrustNewHostKeys').addEventListener('change', updateLinuxUpdatesTrustNewHostKeysUi);
   byId('linuxUpdatesAcknowledgeHostKeyRisk').addEventListener('change', updateLinuxUpdatesTrustNewHostKeysUi);
   byId('linuxUpdatesScheduleMode').addEventListener('change', updateLinuxUpdatesScheduleFieldVisibility);
   byId('linuxUpdatesScheduleSaveButton').addEventListener('click', saveLinuxUpdateSchedule);
-  byId('installUseAdCredentials').addEventListener('change', updateInstallCredentialFieldsUi);
-  byId('updatesUseAdCredentials').addEventListener('change', updateUpdatesCredentialFieldsUi);
+  byId('installWinRmAuthMode').addEventListener('change', updateInstallFieldVisibility);
+  byId('updatesWinRmAuthMode').addEventListener('change', updateUpdatesCredentialFieldVisibility);
   byId('installButton').addEventListener('click', startClientActionJob);
   byId('installLoadAdAllButton').addEventListener('click', () => loadTargetsFromAd(false));
   byId('installLoadAdMissingButton').addEventListener('click', () => loadTargetsFromAd(true));
@@ -4223,6 +4546,8 @@
       // (data-sort-table="clients"), goes through render().
       if (table === 'linuxServices') {
         renderLinuxServicesTable(state.linuxClients);
+      } else if (table === 'updates') {
+        renderMergedUpdatesTable();
       } else {
         render();
       }
@@ -4244,6 +4569,25 @@
     if (softwareBtn) {
       const key = 'software:' + softwareBtn.dataset.software;
       const row = document.querySelector(`[data-software-details="${softwareBtn.dataset.software}"]`);
+      if (row) {
+        const nowHidden = row.classList.toggle('hidden');
+        if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
+      }
+      return;
+    }
+
+    const attemptBtn = e.target.closest('[data-attempt-toggle]');
+    if (attemptBtn) {
+      const jobId = attemptBtn.dataset.attemptJob;
+      const key = 'attempt:' + jobId + ':' + attemptBtn.dataset.attemptToggle;
+      // Scoped to the button's own status box (.install-status), not a
+      // bare document-wide query - harmless today since only one status
+      // box (installStatus) ever renders attempt rows, but a job id +
+      // index pair is only unique WITHIN one status box's own render, not
+      // guaranteed unique document-wide if a future status box (e.g.
+      // Phase 4's Updates view) renders attempt rows too.
+      const container = attemptBtn.closest('.install-status');
+      const row = container && container.querySelector(`[data-attempt-details="${attemptBtn.dataset.attemptToggle}"][data-attempt-job="${CSS.escape(jobId)}"]`);
       if (row) {
         const nowHidden = row.classList.toggle('hidden');
         if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
@@ -4321,11 +4665,13 @@
   byId('deploySubtabActions').addEventListener('click', () => setView('deploy', 'actions'));
   byId('deploySubtabUpdates').addEventListener('click', () => setView('deploy', 'updates'));
   byId('deploySubtabPackage').addEventListener('click', () => setView('deploy', 'package'));
-  byId('settingsSubtabGeneral').addEventListener('click', () => setView('settings', 'general'));
+  byId('settingsSubtabServer').addEventListener('click', () => setView('settings', 'server'));
+  byId('settingsSubtabWindows').addEventListener('click', () => setView('settings', 'windows'));
+  byId('settingsSubtabLinux').addEventListener('click', () => setView('settings', 'linux'));
   byId('settingsSubtabCertificate').addEventListener('click', () => setView('settings', 'certificate'));
   byId('settingsSubtabAdminPassword').addEventListener('click', () => setView('settings', 'adminPassword'));
   byId('deployTab').addEventListener('click', () => setView('deploy', 'actions'));
-  byId('settingsTab').addEventListener('click', () => setView('settings', 'general'));
+  byId('settingsTab').addEventListener('click', () => setView('settings', 'server'));
 
   function toggleDropdown(buttonId, menuId, forceClosed) {
     const button = byId(buttonId);
@@ -4345,12 +4691,11 @@
     }
   }
 
-  // Escape closes whichever dropdown the keypress happened inside and
-  // returns focus to that menu's own trigger button; ArrowDown/ArrowUp
-  // move focus between its items, wrapping at each end. One handler for
-  // both Fleet and Manage - they're structurally identical (a trigger
-  // button plus a menu of item buttons), read from the closest
-  // .topnav-dropdown-menu rather than hardcoded to either one.
+  // Escape closes the Fleet dropdown (the only one left since Install/
+  // Settings became standalone top-level buttons) and returns focus to
+  // its trigger button; ArrowDown/ArrowUp move focus between its items,
+  // wrapping at each end. Reads from the closest .topnav-dropdown-menu
+  // rather than hardcoding the id, in case a future dropdown reuses it.
   function handleDropdownKeydown(event) {
     if (event.key !== 'Escape' && event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
     const menu = event.target.closest('.topnav-dropdown-menu');
@@ -4375,15 +4720,8 @@
   byId('fleetDropdownButton').addEventListener('click', (event) => {
     event.stopPropagation();
     toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu');
-    toggleDropdown('manageDropdownButton', 'manageDropdownMenu', true);
-  });
-  byId('manageDropdownButton').addEventListener('click', (event) => {
-    event.stopPropagation();
-    toggleDropdown('manageDropdownButton', 'manageDropdownMenu');
-    toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu', true);
   });
   byId('fleetDropdownMenu').addEventListener('keydown', handleDropdownKeydown);
-  byId('manageDropdownMenu').addEventListener('keydown', handleDropdownKeydown);
   // Clicking any dropdown item closes its own menu (the item's own click
   // handler, registered above/in earlier tasks, has already fired and set
   // the view by the time this delegated listener runs).
@@ -4397,11 +4735,10 @@
   });
   document.addEventListener('click', () => {
     toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu', true);
-    toggleDropdown('manageDropdownButton', 'manageDropdownMenu', true);
   });
-  byId('updatesSaveCredentialsButton').addEventListener('click', saveClientUpdateCredentials);
-  byId('updatesClearCredentialsButton').addEventListener('click', clearClientUpdateCredentials);
-  byId('updatesPushButton').addEventListener('click', startClientUpdateJob);
+  byId('windowsCredsSaveButton').addEventListener('click', saveClientUpdateCredentials);
+  byId('windowsCredsClearButton').addEventListener('click', clearClientUpdateCredentials);
+  byId('updatesPushButton').addEventListener('click', startMergedUpdatesPush);
   byId('updatesSelectAll').addEventListener('change', () => {
     const checked = byId('updatesSelectAll').checked;
     document.querySelectorAll('.updates-row-checkbox').forEach(checkbox => { checkbox.checked = checked; });
@@ -4420,7 +4757,9 @@
   byId('pkgDownloadButton').addEventListener('click', () => {
     window.location.href = '/api/v1/client-package/download';
   });
-  byId('generalSaveButton').addEventListener('click', () => saveGeneralSettings(false));
+  byId('generalSaveButton').addEventListener('click', () => saveServerSettings(false));
+  byId('windowsSettingsSaveButton').addEventListener('click', saveWindowsSettings);
+  byId('linuxSettingsSaveButton').addEventListener('click', saveLinuxSettings);
   byId('generalAdUseServiceIdentity').addEventListener('change', updateAdIdentityFields);
   byId('generalAdSyncMode').addEventListener('change', updateAdSyncIntervalField);
   byId('updatesScheduleMode').addEventListener('change', updateScheduleFieldVisibility);
@@ -4428,6 +4767,7 @@
   byId('certUploadButton').addEventListener('click', uploadCertificate);
   byId('certDeleteButton').addEventListener('click', deleteCertificate);
   byId('licensesTab').addEventListener('click', () => setView('licenses'));
+  byId('loggingTab').addEventListener('click', () => setView('logging'));
   byId('linuxServicesTab').addEventListener('click', () => setView('linuxServices'));
   byId('exportLinuxServicesBtn').addEventListener('click', exportLinuxServices);
   byId('exportLicensesBtn').addEventListener('click', exportLicenses);
@@ -4448,6 +4788,7 @@
     }
   });
   byId('adminPasswordSaveButton').addEventListener('click', changeAdminPassword);
+  byId('loginLockoutSaveButton').addEventListener('click', saveLoginLockoutSettings);
   byId('ingestionTokenRegenerateButton').addEventListener('click', regenerateIngestionToken);
   byId('linuxCredsSaveButton').addEventListener('click', saveLinuxUpdateCredentials);
   byId('linuxCredsClearButton').addEventListener('click', clearLinuxUpdateCredentials);
@@ -4460,9 +4801,10 @@
   if (state.view === 'deploy') loadDeploySubviewData(state.subview);
   if (state.view === 'settings') loadSettingsSubviewData(state.subview);
   if (state.view === 'licenses') loadLicenses();
-  updateClientActionUi();
+  if (state.view === 'logging') loadIngestionRejectionLog();
+  updateInstallFieldVisibility();
   loadInstallHistory();
-  updateLinuxClientActionUi();
-  updateLinuxAuthModeFieldsUi('linuxInstallAuthMode', 'linuxInstallCredentialsField', 'linuxInstallPasswordField');
-  updateLinuxAuthModeFieldsUi('linuxUpdatesAuthMode', 'linuxUpdatesCredentialsField', 'linuxUpdatesPasswordField');
+  updateLinuxUpdatesAuthModeFieldsUi();
+  updateUpdatesCredentialFieldVisibility();
+  updateUpdatesSelectionState();
 }());
