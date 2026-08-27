@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.54.1]
+
+### Fixed
+
+- Removed the All/Windows/Linux OS filter pill from Deploy > Updates (added in v0.44.0). It lives in the shared global topbar, which sits above Deploy's own Actions/Updates/Package subtab strip - several sections above the merged updates table it actually filtered - and was reported as a visually disconnected artifact. Deploy > Updates now always shows every outdated client from both platforms, unfiltered; the same filter pill is unaffected on Clients/Hardware, where it sits directly above the one table it governs.
+
 ## [0.54.0]
 
 ### Changed

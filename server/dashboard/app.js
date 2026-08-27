@@ -67,11 +67,7 @@
     // state.pageSize. 'all' | 'windows' | 'linux'. The keys are literally
     // view names, so renderOsFilterActive can repaint the one shared pill
     // from state.osFilter[state.view] when the user switches pages.
-    // 'deploy', not 'updates': state.view is 'deploy' for every Deploy
-    // subview (Actions/Updates/Package), and renderOsFilterActive() reads
-    // state.osFilter[state.view] - this key must match that, not the
-    // subview name.
-    osFilter: { hardware: 'all', clients: 'all', deploy: 'all' }
+    osFilter: { hardware: 'all', clients: 'all' }
   };
 
   const MIN_PAGE_SIZE = 5;
@@ -1688,12 +1684,9 @@
       : 'No Linux client package uploaded yet - build one on Deploy > Package.');
     byId('updatesPackageStatus').textContent = statusParts.join('. ') + '.';
 
-    let entries = []
+    const entries = []
       .concat(windowsAvailable ? stampUpdatePlatform(windowsData.updates || [], 'windows') : [])
       .concat(linuxAvailable ? stampUpdatePlatform(linuxData.updates || [], 'linux') : []);
-
-    const filter = state.osFilter.deploy || 'all';
-    if (filter !== 'all') entries = entries.filter(e => e.platform === filter);
 
     if (entries.length === 0) {
       byId('updatesBody').innerHTML = '<tr><td colspan="6" class="empty">Every reporting client is up to date.</td></tr>';
@@ -4191,11 +4184,10 @@
     byId('settingsTab').classList.toggle('active', state.view === 'settings');
     const isInventoryView = inventoryViews.includes(state.view);
     const isLinuxInventoryView = linuxInventoryViews.includes(state.view);
-    const isUpdatesView = state.view === 'deploy' && state.subview === 'updates';
     byId('searchInput').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
-    byId('topbar').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView && !isUpdatesView);
+    byId('topbar').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
     byId('generatedAt').classList.toggle('hidden', !isInventoryView && !isLinuxInventoryView);
-    byId('osFilter').classList.toggle('hidden', !(state.view === 'hardware' || state.view === 'clients' || (state.view === 'deploy' && state.subview === 'updates')));
+    byId('osFilter').classList.toggle('hidden', !(state.view === 'hardware' || state.view === 'clients'));
     renderOsFilterActive();
     renderSubtabStrips();
     recalculateActivePagination();
@@ -4667,11 +4659,6 @@
         state.page.hwRam = 1;
         renderOsFilterActive();
         renderFilteredHardwarePage();
-      } else if (state.view === 'deploy' && state.subview === 'updates') {
-        state.osFilter.deploy = filter;
-        state.page.updates = 1;
-        renderOsFilterActive();
-        renderMergedUpdatesTable();
       }
     }
   });
