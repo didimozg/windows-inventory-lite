@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.54.3";
+        internal const string ProductVersion = "0.54.4";
 
         private static int Main(string[] args)
         {
@@ -10112,6 +10112,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings validates sessionLifetimeHours is between 1 and 720", TestConfigureServerSettingsValidatesSessionLifetimeHours);
             allPassed &= SelfTestCheck(output, "SendUnauthorized serves the embedded login page for a browser navigation to /, with no WWW-Authenticate", TestSendUnauthorizedServesLoginPageForBrowserNavigation);
             allPassed &= SelfTestCheck(output, "SendUnauthorized keeps the plain-text 401 body for API routes", TestSendUnauthorizedServesPlainTextForApiRequests);
+            allPassed &= SelfTestCheck(output, "SendDashboardImage returns 404 with no body when the file is missing", TestSendDashboardImageReturns404WhenFileMissing);
+            allPassed &= SelfTestCheck(output, "SendDashboardImage's 200 response carries the same security headers as every other response", TestSendDashboardImageIncludesSecurityHeaders);
             allPassed &= SelfTestCheck(output, "TryParsePortFromPrefix extracts the port from a ListenPrefix URL", TestTryParsePortFromPrefix);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper escapes RFC 4515 special characters", TestLdapFilterEscapeSpecialChars);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper leaves a normal computer name untouched", TestLdapFilterEscapeNormalName);
@@ -11137,6 +11139,92 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 {
                     return "expected the API route's 401 to keep declaring text/plain";
                 }
+            }
+
+            return null;
+        }
+
+        private static string TestSendDashboardImageReturns404WhenFileMissing()
+        {
+            ServerOptions options = new ServerOptions();
+            options.ContentPath = Path.Combine(Path.GetTempPath(), "wil-selftest-dashimg-missing-" + Guid.NewGuid().ToString("N"));
+            InventoryServer server = new InventoryServer(options);
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.SendDashboardImage(stream, "brand-mark.png", "image/png");
+                string response = Encoding.ASCII.GetString(stream.ToArray());
+                if (!response.Contains("404"))
+                {
+                    return "expected a missing image file to produce a 404, got: " + response.Substring(0, Math.Min(response.Length, 40));
+                }
+            }
+
+            return null;
+        }
+
+        private static string TestSendDashboardImageIncludesSecurityHeaders()
+        {
+            ServerOptions options = new ServerOptions();
+            options.ContentPath = Path.Combine(Path.GetTempPath(), "wil-selftest-dashimg-present-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.ContentPath);
+            byte[] fakeImageBytes = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+            string filePath = Path.Combine(options.ContentPath, "brand-mark.png");
+            File.WriteAllBytes(filePath, fakeImageBytes);
+
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendDashboardImage(stream, "brand-mark.png", "image/png");
+                    byte[] responseBytes = stream.ToArray();
+
+                    byte[] terminator = { (byte)'\r', (byte)'\n', (byte)'\r', (byte)'\n' };
+                    int headerEnd = -1;
+                    for (int i = 0; i <= responseBytes.Length - terminator.Length; i++)
+                    {
+                        bool match = true;
+                        for (int j = 0; j < terminator.Length; j++)
+                        {
+                            if (responseBytes[i + j] != terminator[j]) { match = false; break; }
+                        }
+                        if (match) { headerEnd = i + terminator.Length; break; }
+                    }
+                    if (headerEnd < 0)
+                    {
+                        return "expected a header/body separator (\\r\\n\\r\\n) in the response";
+                    }
+
+                    string header = Encoding.ASCII.GetString(responseBytes, 0, headerEnd);
+                    string[] expectedHeaders = { "200 OK", "Content-Type: image/png", "X-Content-Type-Options: nosniff", "X-Frame-Options: DENY", "Content-Security-Policy:", "Referrer-Policy:", "Permissions-Policy:" };
+                    foreach (string expected in expectedHeaders)
+                    {
+                        if (!header.Contains(expected))
+                        {
+                            return "expected the response header to contain '" + expected + "', got: " + header;
+                        }
+                    }
+
+                    byte[] body = new byte[responseBytes.Length - headerEnd];
+                    Array.Copy(responseBytes, headerEnd, body, 0, body.Length);
+                    if (body.Length != fakeImageBytes.Length)
+                    {
+                        return "expected the response body to be exactly the file's bytes (" + fakeImageBytes.Length + "), got " + body.Length;
+                    }
+                    for (int i = 0; i < fakeImageBytes.Length; i++)
+                    {
+                        if (body[i] != fakeImageBytes[i])
+                        {
+                            return "expected the response body to match the source file's bytes exactly, byte " + i + " differed";
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                Directory.Delete(options.ContentPath, true);
             }
 
             return null;

@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.54.4]
+
+### Changed
+
+- Deploy > Actions (Linux/mixed modes) now shows the effective install/uninstall path as a read-only hint, sourced live from Settings > Linux > Install defaults - the field itself was removed in v0.54.0, but nothing on this page told an operator what path an uninstall would actually target. Still can't tell if a specific client was installed under a different path than the current setting (the server has no per-client record of that), so the hint says so.
+
+### Fixed
+
+- Added self-tests for `SendDashboardImage` (added in v0.54.0, previously untested): a missing file returns 404, and a present file's response carries the same security headers as every other response.
+
 ## [0.54.3]
 
 ### Security
