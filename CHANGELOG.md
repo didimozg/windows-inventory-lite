@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.53.0]
+
+### Added
+
+- Session-based dashboard login: the browser's native Basic Auth prompt (which cached credentials unreliably across browsers, making "Log out" work inconsistently) is replaced by a small embedded login page and a real server-side session (`wil_session` cookie, configurable lifetime under Settings > Admin password, default 12 hours). Logging out now genuinely invalidates the session on the server, not just this browser's copy. Classic Basic Auth (`curl -u user:pass`) continues to work unchanged for scripts and automation - only the dashboard's own sign-in experience changed.
+
+### Security
+
+- Rotating the admin password now also invalidates every active session - previously only Basic Auth credentials were affected, so a stolen session cookie would have survived a password rotation. The new login endpoint shares the same per-IP lockout as Basic Auth and is gated by the same CSRF/Content-Type checks as every other state-changing endpoint.
+
 ## [0.52.3]
 
 ### Changed
