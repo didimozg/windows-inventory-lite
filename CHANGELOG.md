@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.54.5]
+
+### Security
+
+- **v0.54.3's fix for the `rm -rf`-via-install-path issue was incomplete.** `IsValidLinuxInstallPath` (the "at least two path segments" check added in 0.54.3) was only wired into the `POST /api/v1/server/settings` handler, which guards the Settings-saved *default* path. It was never called from `TryValidateLinuxPushValues` - the shared validator actually used by every SSH install, uninstall, and update push (`POST /api/v1/client-install`/`-uninstall`, and the scheduled Linux update push). A request that supplies `installPath` directly in its own body (the dashboard UI stopped offering this field in v0.54.0, but the server always accepted it) - e.g. `"installPath": "/etc"` - had no shell metacharacter and no whitespace, so `ValidatePosixShellSafe` let it straight through into a remote `rm -rf $InstallPath` on the target host, unaffected by v0.54.3's fix. `TryValidateLinuxPushValues` now also calls `IsValidLinuxInstallPath`, closing the actual point of use rather than only the Settings-save path.
+- The same gap existed in `POST /api/v1/linux-client-package/configure` (Deploy > Package's Linux tab) - a bare top-level `installPath` there doesn't reach an automatic `rm -rf` (the generated `install.sh` only ever `mkdir -p`/`cp`s, fully quoted), but it does get saved to `linux-package-settings.json`, which the scheduled update push reads back into the now-fixed `TryValidateLinuxPushValues` - fixed at this entry point too, for defense in depth.
+- **v0.54.2 and v0.54.4's own GitHub release notes are being corrected** to point here instead - v0.54.4 was published as "the fix" but did not actually close this class of the bug, only the Settings-fallback instance of it.
+
 ## [0.54.4]
 
 ### Changed

@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.54.4";
+        internal const string ProductVersion = "0.54.5";
 
         private static int Main(string[] args)
         {
@@ -6784,6 +6784,16 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 installPath = "/opt/windows-inventory-lite";
             }
+            // This value is saved to linux-package-settings.json, which the
+            // scheduled Linux update push (StartScheduledLinuxClientUpdatePush)
+            // later reads straight into TryValidateLinuxPushValues - reject a
+            // bare top-level directory here too, at the point it's actually
+            // set, not just when it's used.
+            if (!IsValidLinuxInstallPath(installPath))
+            {
+                SendText(stream, "{\"error\":\"installPath must be an absolute Linux path with at least two segments (e.g. /opt/windows-inventory-lite) - a bare top-level directory like /usr or /etc is rejected\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
             int intervalHours = 6;
             if (payload.ContainsKey("intervalHours"))
             {
@@ -9542,6 +9552,19 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 ValidatePosixShellSafe(serverUrl, "serverUrl");
                 ValidatePosixShellSafe(token, "token");
                 ValidatePosixShellSafe(installPath, "installPath");
+                // ValidatePosixShellSafe only screens for shell metacharacters
+                // and whitespace - a bare top-level directory like "/etc" has
+                // neither, so it passed straight through into a remote
+                // "rm -rf $InstallPath" on every SSH install/uninstall/update
+                // push that supplies installPath directly in its request body
+                // (the dashboard UI stopped offering this field in v0.54.0,
+                // but the server still accepts it - this is every actual
+                // point of use for that value, not just the Settings-saved
+                // default IsValidLinuxInstallPath already gated in v0.54.3).
+                if (!IsValidLinuxInstallPath(installPath))
+                {
+                    throw new ArgumentException("installPath must be an absolute Linux path with at least two segments (e.g. /opt/windows-inventory-lite) - a bare top-level directory like /usr or /etc is rejected, since this value is used in a remote 'rm -rf' during uninstall.");
+                }
                 return true;
             }
             catch (ArgumentException ex)
@@ -12376,6 +12399,20 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (TryValidateLinuxPushValues("https://example.local", "tok`id`", "/opt/windows-inventory-lite", out error))
             {
                 return "expected an unsafe token to be rejected";
+            }
+            // A bare top-level directory has no shell metacharacter and no
+            // whitespace, so ValidatePosixShellSafe alone lets it through -
+            // but it still reaches "rm -rf $InstallPath" unmodified via a
+            // direct API call that supplies installPath itself (the
+            // dashboard UI no longer offers this field as of v0.54.0, but
+            // the server still accepts it in the request body). This is the
+            // same check IsValidLinuxInstallPath added for the Settings
+            // fallback in v0.54.3 - it must also gate this shared push-value
+            // validator, the actual point of use for every SSH install,
+            // uninstall, and update push.
+            if (TryValidateLinuxPushValues("https://example.local", "a1b2c3", "/etc", out error))
+            {
+                return "expected a bare top-level installPath ('/etc') to be rejected";
             }
             return null;
         }
