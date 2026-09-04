@@ -1574,6 +1574,10 @@ namespace WindowsInventoryLite
                     {
                         SendJson(stream, BuildClientIndex());
                     }
+                    else if (request.Method == "GET" && request.Path.StartsWith("/api/v1/clients/", StringComparison.OrdinalIgnoreCase) && request.Path.EndsWith("/license-keys", StringComparison.OrdinalIgnoreCase))
+                    {
+                        SendClientLicenseKeys(stream, request);
+                    }
                     else if (request.Method == "DELETE" && request.Path.StartsWith("/api/v1/clients/", StringComparison.OrdinalIgnoreCase))
                     {
                         DeleteClient(stream, request);
@@ -1951,6 +1955,78 @@ namespace WindowsInventoryLite
             ackResponse["status"] = "ok";
             ackResponse["licenseKeySources"] = BuildLicenseKeySourcesForClientResponse();
             SendJson(stream, serializer.Serialize(ackResponse));
+        }
+
+        // Looks up one client's stored report and decrypts every
+        // licenses[].key in it. Returns null for an unknown computer name
+        // (the HTTP handler below maps that to a 404) rather than an empty
+        // list, so the two cases stay distinguishable.
+        internal List<Dictionary<string, object>> GetDecryptedLicenseKeysForClient(string computerName)
+        {
+            string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> report;
+            try
+            {
+                report = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+            }
+            catch
+            {
+                return null;
+            }
+
+            List<Dictionary<string, object>> result = new List<Dictionary<string, object>>();
+            if (report == null || !report.ContainsKey("licenses"))
+            {
+                return result;
+            }
+
+            ArrayList licenses = report["licenses"] as ArrayList;
+            if (licenses == null)
+            {
+                return result;
+            }
+
+            foreach (object item in licenses)
+            {
+                Dictionary<string, object> license = item as Dictionary<string, object>;
+                if (license == null)
+                {
+                    continue;
+                }
+
+                Dictionary<string, object> decrypted = new Dictionary<string, object>();
+                decrypted["product"] = license.ContainsKey("product") ? license["product"] : null;
+                decrypted["source"] = license.ContainsKey("source") ? license["source"] : null;
+                decrypted["key"] = license.ContainsKey("key") ? SecretProtector.Unprotect(Convert.ToString(license["key"])) : null;
+                result.Add(decrypted);
+            }
+            return result;
+        }
+
+        private void SendClientLicenseKeys(Stream stream, RequestContext request)
+        {
+            const string prefix = "/api/v1/clients/";
+            const string suffix = "/license-keys";
+            string computerName = request.Path.Substring(prefix.Length, request.Path.Length - prefix.Length - suffix.Length);
+            computerName = Uri.UnescapeDataString(computerName).Trim();
+
+            List<Dictionary<string, object>> licenses = GetDecryptedLicenseKeysForClient(computerName);
+            if (licenses == null)
+            {
+                SendText(stream, "{\"error\":\"client not found\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["licenses"] = licenses;
+            SendJson(stream, serializer.Serialize(response));
         }
 
         // Returns true when an AD lookup is due: either there is no
@@ -10853,6 +10929,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "IsReportIdentifierTooLong rejects an oversized computerName/hostname before it can reach Path.Combine", TestIsReportIdentifierTooLongRejectsOversizedValuesOnly);
             allPassed &= SelfTestCheck(output, "DashboardJs escapes every client-reported field in its table row template, not just normalizes it", TestDashboardJsEscapesClientReportedFieldsInTable);
             allPassed &= SelfTestCheck(output, "ApplyRestrictedConfigAcl grants the current process's own identity, not just Administrators/SYSTEM", TestApplyRestrictedConfigAclGrantsCurrentIdentity);
+            allPassed &= SelfTestCheck(output, "GetDecryptedLicenseKeysForClient decrypts stored keys and returns null for an unknown computer", TestGetDecryptedLicenseKeysForClientRoundTripsAndHandlesUnknownComputer);
             return allPassed;
         }
 
@@ -15401,6 +15478,51 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 }
             }
             return null;
+        }
+
+        private static string TestGetDecryptedLicenseKeysForClientRoundTripsAndHandlesUnknownComputer()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-license-reveal-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                report["computerName"] = "TEST-PC";
+                ArrayList licenses = new ArrayList();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["product"] = "Test Product";
+                entry["source"] = @"HKLM\SOFTWARE\Test\TestValue";
+                entry["key"] = SecretProtector.Protect("REAL-KEY-VALUE", options);
+                licenses.Add(entry);
+                report["licenses"] = licenses;
+                File.WriteAllText(Path.Combine(dataPath, "TEST-PC.json"), serializer.Serialize(report), Encoding.UTF8);
+
+                List<Dictionary<string, object>> decrypted = server.GetDecryptedLicenseKeysForClient("TEST-PC");
+                if (decrypted == null || decrypted.Count != 1)
+                {
+                    return "expected exactly one decrypted license entry for TEST-PC";
+                }
+                if (GetStringValue(decrypted[0], "key") != "REAL-KEY-VALUE")
+                {
+                    return "expected the stored DPAPI-protected key to decrypt back to the original plaintext";
+                }
+
+                List<Dictionary<string, object>> unknown = server.GetDecryptedLicenseKeysForClient("NO-SUCH-COMPUTER");
+                if (unknown != null)
+                {
+                    return "expected null for an unknown computer name (caller maps this to 404)";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
         }
 
         // Administrators+SYSTEM only would permanently lock out a service
