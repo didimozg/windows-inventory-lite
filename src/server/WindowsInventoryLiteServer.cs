@@ -8416,6 +8416,24 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 // permanently. Mirrors Install-Server.ps1's
                 // Set-RestrictedFileAcl, which fixed the identical ordering
                 // bug on the PowerShell side.
+                //
+                // Side effect worth knowing about: restricting the temp
+                // file's ACL before writing content means the WRITING
+                // PROCESS itself must already hold Administrators-or-SYSTEM
+                // access, on every save now, not just a later one - the
+                // real shipped Windows Service always runs as LocalSystem
+                // (Install-Server.ps1 never passes sc.exe an obj= account),
+                // so production is unaffected, but running --console mode
+                // from a non-elevated prompt (including a literal member of
+                // the local Administrators group who has not explicitly
+                // "Run as Administrator" - UAC gives such a process a
+                // filtered token where Administrators is present but marked
+                // deny-only) will now fail on its very first config save,
+                // where it previously happened to succeed by writing into a
+                // temp file that had no ACL restriction yet. That failure is
+                // this fix working as intended (fail closed before any
+                // secret byte is written) rather than a bug - run --console
+                // elevated if it needs to persist its own configuration.
                 string tempPath = options.ConfigPath + ".tmp";
                 File.WriteAllText(tempPath, "", new UTF8Encoding(false));
                 ApplyRestrictedConfigAcl(tempPath);
@@ -13267,6 +13285,18 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // a broad inherited ACL if File.Replace/Move then throws) needs a
         // forced mid-write failure to reproduce, which was verified live
         // (see Task 6's report) rather than through this self-test alone.
+        // ApplyRestrictedConfigAcl(tempPath) itself always succeeds even for
+        // a non-elevated/non-SYSTEM test process, since this process just
+        // created tempPath and, as its owner, retains WRITE_DAC (the right
+        // to modify its own ACL) regardless of what that ACL then says. The
+        // SUBSEQUENT File.WriteAllText of the real secret content is what
+        // then correctly fails once the DACL no longer grants this process
+        // FILE_WRITE_DATA - this is the fix working as intended (fail
+        // closed before any secret byte is written), not a bug, but it
+        // means this self-test cannot assume the save succeeds under every
+        // identity. Mirrors this file's existing GrantCurrentUserAccessForTest
+        // precedent (used by TestLinuxKnownHostsRoundTrip) for the same
+        // underlying UAC-split-token/non-privileged-CI reason.
         private static string TestSaveServerConfigValuesRestrictsTempFileBeforeWritingContent()
         {
             string dataDir = Path.Combine(Path.GetTempPath(), "wil-selftest-acl-race-" + Guid.NewGuid().ToString("N"));
@@ -13282,9 +13312,47 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 Dictionary<string, string> updates = new Dictionary<string, string>();
                 updates["WebUsername"] = "admin";
                 updates["WebPassword"] = "test-password-value";
-                saveMethod.Invoke(server, new object[] { updates });
-
                 string tempPath = options.ConfigPath + ".tmp";
+
+                bool deniedByAcl = false;
+                try
+                {
+                    saveMethod.Invoke(server, new object[] { updates });
+                }
+                catch (System.Reflection.TargetInvocationException ex)
+                {
+                    if (!(ex.InnerException is UnauthorizedAccessException))
+                    {
+                        string innerType = ex.InnerException == null ? "null" : ex.InnerException.GetType().Name;
+                        string innerMessage = ex.InnerException == null ? "" : ex.InnerException.Message;
+                        return "expected the save to either succeed or fail with UnauthorizedAccessException (this test process lacking Administrators/SYSTEM), but it threw " + innerType + ": " + innerMessage;
+                    }
+                    deniedByAcl = true;
+                }
+
+                SecurityIdentifier usersSid = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+
+                if (deniedByAcl)
+                {
+                    if (!File.Exists(tempPath))
+                    {
+                        return null;
+                    }
+                    GrantCurrentUserAccessForTest(tempPath);
+                    if (File.ReadAllText(tempPath).Length != 0)
+                    {
+                        return "expected the abandoned .tmp file to be empty (ACL must be restricted before any secret content is written), but it held content";
+                    }
+                    foreach (FileSystemAccessRule rule in File.GetAccessControl(tempPath).GetAccessRules(true, false, typeof(SecurityIdentifier)))
+                    {
+                        if (rule.IdentityReference is SecurityIdentifier && ((SecurityIdentifier)rule.IdentityReference) == usersSid)
+                        {
+                            return "expected the abandoned .tmp file's ACL to NOT grant BUILTIN\\Users any explicit rule even before this test's own verification grant";
+                        }
+                    }
+                    return null;
+                }
+
                 if (File.Exists(tempPath))
                 {
                     return "expected the .tmp file to be gone after a successful save (renamed over the final path), but it still exists - the fix must not leave a stale temp file behind on the success path";
@@ -13294,20 +13362,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     return "expected server-config.json to exist after a successful save";
                 }
 
-                FileSecurity finalAcl = File.GetAccessControl(options.ConfigPath);
-                AuthorizationRuleCollection rules = finalAcl.GetAccessRules(true, false, typeof(SecurityIdentifier));
-                bool hasBuiltinUsersRule = false;
-                foreach (FileSystemAccessRule rule in rules)
+                foreach (FileSystemAccessRule rule in File.GetAccessControl(options.ConfigPath).GetAccessRules(true, false, typeof(SecurityIdentifier)))
                 {
-                    SecurityIdentifier usersSid = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
                     if (rule.IdentityReference is SecurityIdentifier && ((SecurityIdentifier)rule.IdentityReference) == usersSid)
                     {
-                        hasBuiltinUsersRule = true;
+                        return "expected server-config.json's final ACL to NOT grant BUILTIN\\Users any explicit rule - ApplyRestrictedConfigAcl should have replaced inherited permissions";
                     }
-                }
-                if (hasBuiltinUsersRule)
-                {
-                    return "expected server-config.json's final ACL to NOT grant BUILTIN\\Users any explicit rule - ApplyRestrictedConfigAcl should have replaced inherited permissions";
                 }
                 return null;
             }
