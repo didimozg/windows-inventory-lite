@@ -21,6 +21,7 @@
     certificateStatus: null, certificateHistory: [],
     staleHours: 48,
     licenses: [], editingLicenseId: null, licenseFormComputers: [],
+    licenseKeySources: [], editingLicenseKeySourceId: null,
     sort: {
       // 'name', not 'computerName': the Clients table is cross-platform
       // now, and its Computer column shows clientDisplayName() - Windows'
@@ -208,6 +209,7 @@
     if (view === 'deploy') loadDeploySubviewData(state.subview);
     if (view === 'settings') loadSettingsSubviewData(state.subview);
     if (view === 'licenses') loadLicenses();
+    if (view === 'licenseKeySources') loadLicenseKeySources();
     if (view === 'logging') loadIngestionRejectionLog();
     // 'clients' and 'hardware' are in this list because both merged views
     // read Linux data too - opening either tab re-fetches it rather than
@@ -3347,6 +3349,85 @@
       });
   }
 
+  function loadLicenseKeySources() {
+    fetch('/api/v1/license-key-sources', { cache: 'no-store' })
+      .then(r => r.json())
+      .then(data => {
+        state.licenseKeySources = data.licenseKeySources || [];
+        renderLicenseKeySources();
+      });
+  }
+
+  function renderLicenseKeySources() {
+    const tbody = byId('licenseKeySourcesBody');
+    tbody.innerHTML = state.licenseKeySources.map(source => `
+      <tr>
+        <td>${escapeHtml(source.product)}</td>
+        <td>${escapeHtml(source.registryHive)}</td>
+        <td class="mono">${escapeHtml(source.registryPath)}</td>
+        <td class="mono">${escapeHtml(source.valueName)}</td>
+        <td><button data-edit-license-key-source="${escapeHtml(source.id)}" class="export-button" type="button">Edit</button></td>
+        <td><button data-delete-license-key-source="${escapeHtml(source.id)}" class="export-button" type="button">Delete</button></td>
+      </tr>
+    `).join('') || '<tr><td colspan="6" class="empty">No license key sources configured.</td></tr>';
+
+    tbody.querySelectorAll('[data-edit-license-key-source]').forEach(button => {
+      button.addEventListener('click', () => openLicenseKeySourceForm(button.dataset.editLicenseKeySource));
+    });
+    tbody.querySelectorAll('[data-delete-license-key-source]').forEach(button => {
+      button.addEventListener('click', () => removeLicenseKeySource(button.dataset.deleteLicenseKeySource));
+    });
+  }
+
+  function openLicenseKeySourceForm(sourceId) {
+    state.editingLicenseKeySourceId = sourceId || null;
+    const source = sourceId ? state.licenseKeySources.find(s => s.id === sourceId) : null;
+    byId('licenseKeySourceProduct').value = source ? source.product : '';
+    byId('licenseKeySourceRegistryHive').value = source ? source.registryHive : 'HKEY_LOCAL_MACHINE';
+    byId('licenseKeySourceRegistryPath').value = source ? source.registryPath : '';
+    byId('licenseKeySourceValueName').value = source ? source.valueName : '';
+    byId('licenseKeySourceForm').classList.remove('hidden');
+  }
+
+  function closeLicenseKeySourceForm() {
+    state.editingLicenseKeySourceId = null;
+    byId('licenseKeySourceForm').classList.add('hidden');
+  }
+
+  function saveLicenseKeySource() {
+    const product = byId('licenseKeySourceProduct').value.trim();
+    const registryHive = byId('licenseKeySourceRegistryHive').value;
+    const registryPath = byId('licenseKeySourceRegistryPath').value.trim();
+    const valueName = byId('licenseKeySourceValueName').value.trim();
+    const editingId = state.editingLicenseKeySourceId;
+    const url = editingId ? `/api/v1/license-key-sources/${encodeURIComponent(editingId)}` : '/api/v1/license-key-sources';
+    const method = editingId ? 'PUT' : 'POST';
+
+    fetch(url, {
+      method,
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ product, registryHive, registryPath, valueName })
+    })
+      .then(r => r.json().then(data => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        const messageEl = byId('licenseKeySourceMessage');
+        if (!ok) {
+          messageEl.textContent = data.error || 'Failed to save.';
+          messageEl.classList.remove('hidden');
+          return;
+        }
+        messageEl.classList.add('hidden');
+        closeLicenseKeySourceForm();
+        loadLicenseKeySources();
+      });
+  }
+
+  function removeLicenseKeySource(sourceId) {
+    fetch(`/api/v1/license-key-sources/${encodeURIComponent(sourceId)}`, { method: 'DELETE', cache: 'no-store' })
+      .then(() => loadLicenseKeySources());
+  }
+
   function getSoftwareGroups(clients) {
     const groups = new Map();
     clients.forEach(client => {
@@ -4164,6 +4245,7 @@
     byId('softwareView').classList.toggle('hidden', state.view !== 'software');
     byId('hardwareView').classList.toggle('hidden', state.view !== 'hardware');
     byId('licensesView').classList.toggle('hidden', state.view !== 'licenses');
+    byId('licenseKeySourcesView').classList.toggle('hidden', state.view !== 'licenseKeySources');
     byId('loggingView').classList.toggle('hidden', state.view !== 'logging');
     byId('linuxServicesView').classList.toggle('hidden', state.view !== 'linuxServices');
     // Deploy: Actions shows both platforms' sections together (stacked, own
@@ -4775,6 +4857,10 @@
   byId('certUploadButton').addEventListener('click', uploadCertificate);
   byId('certDeleteButton').addEventListener('click', deleteCertificate);
   byId('licensesTab').addEventListener('click', () => setView('licenses'));
+  byId('licenseKeySourcesTab').addEventListener('click', () => setView('licenseKeySources'));
+  byId('licenseKeySourceAddButton').addEventListener('click', () => openLicenseKeySourceForm(null));
+  byId('licenseKeySourceSaveButton').addEventListener('click', saveLicenseKeySource);
+  byId('licenseKeySourceCancelButton').addEventListener('click', closeLicenseKeySourceForm);
   byId('loggingTab').addEventListener('click', () => setView('logging'));
   byId('linuxServicesTab').addEventListener('click', () => setView('linuxServices'));
   byId('exportLinuxServicesBtn').addEventListener('click', exportLinuxServices);
