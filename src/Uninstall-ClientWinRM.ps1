@@ -168,6 +168,22 @@ $script:RemoveClientScriptBlock = {
         Write-Host "Service is not installed: $ServiceName"
     }
 
+    # Inlined (not a called function, same reason as the shared-root check
+    # below): this block runs in a separate remote runspace over WinRM,
+    # which cannot resolve functions defined in the local script. Only
+    # "starts with / and >= 2 segments" existed for the Linux side before
+    # this same fix (see docs/superpowers/plans/2026-09-04-security-
+    # hardening-batch.md) - this is the Windows-path-shaped twin of that
+    # fix: the value must resolve (after collapsing any ..\.\ segments via
+    # GetFullPath) to a real subdirectory under
+    # %ProgramData%\WindowsInventoryLite\, not just any path that happens
+    # to exist.
+    $allowedRoot = [System.IO.Path]::GetFullPath((Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite')).TrimEnd('\')
+    $resolvedInstallPath = [System.IO.Path]::GetFullPath($ClientInstallPath).TrimEnd('\')
+    if (-not $resolvedInstallPath.StartsWith("$allowedRoot\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to delete '$ClientInstallPath' (resolves to '$resolvedInstallPath') - it is not a real subdirectory of '$allowedRoot'."
+    }
+
     # Safety net for the client/server co-located case: if $ClientInstallPath
     # still resolves to the shared WindowsInventoryLite root (an explicit
     # override, or a target never reinstalled since the client-data layout

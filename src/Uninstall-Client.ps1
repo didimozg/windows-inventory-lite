@@ -30,6 +30,20 @@ function Test-IsSharedServerRoot {
     return Test-Path -LiteralPath (Join-Path -Path $SharedRoot -ChildPath 'server-config.json')
 }
 
+# Depth/shape check for the recursive delete below: $InstallPath must resolve
+# (after collapsing any ..\.\ segments via GetFullPath) to a real subdirectory
+# under %ProgramData%\WindowsInventoryLite\, not just any path that happens to
+# exist - the Windows-path-shaped twin of the /opt/ allowlist already applied
+# to the Linux-side scripts.
+function Test-IsUnderAllowedInstallRoot {
+    param([string]$Path)
+    $allowedRoot = [System.IO.Path]::GetFullPath((Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite')).TrimEnd('\')
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if (-not $resolvedPath.StartsWith("$allowedRoot\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to delete '$Path' (resolves to '$resolvedPath') - it is not a real subdirectory of '$allowedRoot'."
+    }
+}
+
 if (-not $InstallPath) {
     $InstallPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\client-data'
 }
@@ -62,6 +76,7 @@ if (Test-IsSharedServerRoot -Path $InstallPath -SharedRoot $sharedRoot) {
 }
 else {
     if ((Test-Path -LiteralPath $InstallPath) -and $PSCmdlet.ShouldProcess($InstallPath, 'Remove client files')) {
+        Test-IsUnderAllowedInstallRoot -Path $InstallPath
         Remove-Item -LiteralPath $InstallPath -Recurse -Force
     }
 
