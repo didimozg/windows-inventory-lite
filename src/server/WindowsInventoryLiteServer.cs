@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.54.9";
+        internal const string ProductVersion = "0.54.10";
 
         private static int Main(string[] args)
         {
@@ -8511,26 +8511,26 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 // Set-RestrictedFileAcl, which fixed the identical ordering
                 // bug on the PowerShell side.
                 //
-                // Side effect worth knowing about: restricting the temp
-                // file's ACL before writing content means the WRITING
-                // PROCESS itself must already hold Administrators-or-SYSTEM
-                // access, on every save now, not just a later one - the
-                // real shipped Windows Service always runs as LocalSystem
-                // (Install-Server.ps1 never passes sc.exe an obj= account),
-                // so production is unaffected, but running --console mode
-                // from a non-elevated prompt (including a literal member of
-                // the local Administrators group who has not explicitly
-                // "Run as Administrator" - UAC gives such a process a
-                // filtered token where Administrators is present but marked
-                // deny-only) will now fail on its very first config save,
-                // where it previously happened to succeed by writing into a
-                // temp file that had no ACL restriction yet. That failure is
-                // this fix working as intended (fail closed before any
-                // secret byte is written) rather than a bug - run --console
-                // elevated if it needs to persist its own configuration.
+                // ApplyRestrictedConfigAcl now always grants the CURRENT
+                // process's own identity (not just Administrators/SYSTEM),
+                // so this write is never blocked by the process's own
+                // privilege level - the earlier version of this comment
+                // documented a real side effect where a non-elevated
+                // --console run needed Administrators/SYSTEM to save its own
+                // config; that requirement no longer exists, since the
+                // process granting the restriction always grants itself
+                // access at the same time. What IS still checked here: if
+                // the restriction genuinely fails for some other reason
+                // (disk/filesystem error, a hostile pre-existing ACL on
+                // tempPath denying even WRITE_DAC), abort rather than write
+                // real secret content into a file whose ACL is not known to
+                // be restricted.
                 string tempPath = options.ConfigPath + ".tmp";
                 File.WriteAllText(tempPath, "", new UTF8Encoding(false));
-                ApplyRestrictedConfigAcl(tempPath);
+                if (!ApplyRestrictedConfigAcl(tempPath))
+                {
+                    throw new UnauthorizedAccessException("Could not restrict the temp config file's ACL before writing secret content into it - refusing to write '" + tempPath + "' with an unconfirmed ACL.");
+                }
                 File.WriteAllText(tempPath, json, new UTF8Encoding(false));
                 if (File.Exists(options.ConfigPath))
                 {
@@ -8545,28 +8545,56 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         }
 
         // Mirrors Install-Server.ps1's Set-RestrictedFileAcl: restricts
-        // server-config.json to Administrators + SYSTEM only. This file can
-        // hold DPAPI-LocalMachine-protected secrets (AdPassword/WebPassword/
+        // server-config.json to Administrators + SYSTEM (+ the identity
+        // actually running this server process). This file can hold
+        // DPAPI-LocalMachine-protected secrets (AdPassword/WebPassword/
         // Token, see SecretProtector.cs) which ANY local process can decrypt
         // - the file's DACL is the only real confidentiality boundary for
         // them. Reapplied on every write, not just at install time, so the
         // file can never drift back to an inherited (broader) ACL if it is
         // ever deleted and recreated by the running service.
-        private void ApplyRestrictedConfigAcl(string path)
+        //
+        // Grant set matches ApplyRestrictedDirectoryAcl's own reasoning: a
+        // service configured to run under a custom, non-LocalSystem account
+        // (a supported `sc.exe config ... obj=` operation, undocumented by
+        // this project's own installer but not prevented by it either) must
+        // still be able to read back and re-save the config it just
+        // restricted - Administrators+SYSTEM alone would permanently lock
+        // that identity out the moment it saves once. Granting the
+        // operating identity here does not widen the attack surface: it is
+        // the SAME account already running the whole server process, which
+        // already holds every secret this file protects in memory.
+        //
+        // Returns whether the restriction actually took effect - callers
+        // that write secret content immediately after calling this (see
+        // SaveServerConfigValues' temp-file step) must check this and abort
+        // rather than write real content into a file whose ACL restriction
+        // is not actually known to have succeeded. Other callers that
+        // restrict an already-fully-written final path may still discard
+        // it (best-effort, same as before this change) - the content is
+        // already committed either way, and a failure here is still logged.
+        private bool ApplyRestrictedConfigAcl(string path)
         {
             try
             {
                 SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
                 SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                SecurityIdentifier currentSid = WindowsIdentity.GetCurrent().User;
                 FileSecurity acl = File.GetAccessControl(path);
                 acl.SetAccessRuleProtection(true, false);
                 acl.AddAccessRule(new FileSystemAccessRule(adminSid, FileSystemRights.FullControl, AccessControlType.Allow));
                 acl.AddAccessRule(new FileSystemAccessRule(systemSid, FileSystemRights.FullControl, AccessControlType.Allow));
+                if (currentSid != null && !currentSid.Equals(adminSid) && !currentSid.Equals(systemSid))
+                {
+                    acl.AddAccessRule(new FileSystemAccessRule(currentSid, FileSystemRights.FullControl, AccessControlType.Allow));
+                }
                 File.SetAccessControl(path, acl);
+                return true;
             }
             catch (Exception ex)
             {
                 DebugLogger.Log(options, "Config", "Could not restrict server-config.json permissions: " + DebugLogger.SanitizeForLog(ex.Message));
+                return false;
             }
         }
 
@@ -8864,15 +8892,24 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
                 SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                SecurityIdentifier currentSid = WindowsIdentity.GetCurrent().User;
 
                 // DACL first, persisted on its own - this alone matches
                 // ApplyRestrictedConfigAcl's own guarantee (no elevation
                 // needed) and must not be lost if the Owner step below
-                // fails for lack of privilege.
+                // fails for lack of privilege. Also grants the current
+                // operating identity, same reasoning as
+                // ApplyRestrictedDirectoryAcl/ApplyRestrictedConfigAcl - a
+                // service running under a custom account must still be able
+                // to read/rotate its own key file afterward.
                 FileSecurity acl = File.GetAccessControl(path);
                 acl.SetAccessRuleProtection(true, false);
                 acl.AddAccessRule(new FileSystemAccessRule(adminSid, FileSystemRights.FullControl, AccessControlType.Allow));
                 acl.AddAccessRule(new FileSystemAccessRule(systemSid, FileSystemRights.FullControl, AccessControlType.Allow));
+                if (currentSid != null && !currentSid.Equals(adminSid) && !currentSid.Equals(systemSid))
+                {
+                    acl.AddAccessRule(new FileSystemAccessRule(currentSid, FileSystemRights.FullControl, AccessControlType.Allow));
+                }
                 File.SetAccessControl(path, acl);
 
                 // Owner is a separate persist step - setting it to a SID
@@ -9149,7 +9186,21 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             // could otherwise leave a truncated/corrupt file, which then
             // reads back as "no records" and silently loses every
             // previously trusted host's pin.
+            //
+            // The temp file's ACL is restricted BEFORE any content is
+            // written into it, same fix and same reasoning as
+            // SaveServerConfigValues' identical temp-file pattern: writing
+            // the real content first and restricting only the final path
+            // left the temp file under the containing directory's inherited
+            // ACL for the whole window it held real fingerprint data, and a
+            // subsequent File.Replace/Move failure would have left it
+            // behind permanently.
             string tempPath = path + ".tmp";
+            File.WriteAllText(tempPath, "", new UTF8Encoding(false));
+            if (!ApplyRestrictedConfigAcl(tempPath))
+            {
+                throw new UnauthorizedAccessException("Could not restrict the temp known-hosts file's ACL before writing content into it - refusing to write '" + tempPath + "' with an unconfirmed ACL.");
+            }
             File.WriteAllText(tempPath, json, new UTF8Encoding(false));
             if (File.Exists(path))
             {
@@ -10434,6 +10485,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "NormalizeReportIdentifier treats a blank identifier the same as a missing one", TestNormalizeReportIdentifierTreatsBlankSameAsMissing);
             allPassed &= SelfTestCheck(output, "IsReportIdentifierTooLong rejects an oversized computerName/hostname before it can reach Path.Combine", TestIsReportIdentifierTooLongRejectsOversizedValuesOnly);
             allPassed &= SelfTestCheck(output, "DashboardJs escapes every client-reported field in its table row template, not just normalizes it", TestDashboardJsEscapesClientReportedFieldsInTable);
+            allPassed &= SelfTestCheck(output, "ApplyRestrictedConfigAcl grants the current process's own identity, not just Administrators/SYSTEM", TestApplyRestrictedConfigAclGrantsCurrentIdentity);
             return allPassed;
         }
 
@@ -14789,6 +14841,48 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 }
             }
             return null;
+        }
+
+        // Administrators+SYSTEM only would permanently lock out a service
+        // configured to run under a custom account (sc.exe config ... obj=)
+        // the moment it saved once - matching ApplyRestrictedDirectoryAcl's
+        // already-shipped precedent, the current process's own identity is
+        // now always granted too, since it's the same account that already
+        // holds every secret this file protects, in memory, regardless.
+        private static string TestApplyRestrictedConfigAclGrantsCurrentIdentity()
+        {
+            string tempPath = Path.Combine(Path.GetTempPath(), "wil-selftest-config-acl-current-identity-" + Guid.NewGuid().ToString("N"));
+            File.WriteAllText(tempPath, "test content", new UTF8Encoding(false));
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo applyMethod = typeof(InventoryServer).GetMethod("ApplyRestrictedConfigAcl", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                object resultObj = applyMethod.Invoke(server, new object[] { tempPath });
+                if (!(bool)resultObj)
+                {
+                    return "expected ApplyRestrictedConfigAcl to report success restricting a file this process just created and owns";
+                }
+
+                SecurityIdentifier currentSid = WindowsIdentity.GetCurrent().User;
+                bool hasCurrentIdentityRule = false;
+                foreach (FileSystemAccessRule rule in File.GetAccessControl(tempPath).GetAccessRules(true, false, typeof(SecurityIdentifier)))
+                {
+                    if (rule.IdentityReference is SecurityIdentifier && ((SecurityIdentifier)rule.IdentityReference).Equals(currentSid) && rule.FileSystemRights == FileSystemRights.FullControl)
+                    {
+                        hasCurrentIdentityRule = true;
+                    }
+                }
+                if (!hasCurrentIdentityRule)
+                {
+                    return "expected the restricted ACL to grant the current process's own identity FullControl, in addition to Administrators/SYSTEM";
+                }
+                return null;
+            }
+            finally
+            {
+                try { File.Delete(tempPath); } catch { }
+            }
         }
 
         private static string ExtractSessionCookieValue(string rawHttpResponse)

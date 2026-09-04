@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.54.10]
+
+### Security
+
+- **Config/key-file ACL restriction now also grants the current process's own identity**, not just Administrators/SYSTEM - matching the design `ApplyRestrictedDirectoryAcl` already used for the SSH directory. Restricting to Administrators+SYSTEM only would permanently lock out a service configured to run under a custom account (`sc.exe config ... obj=`, a supported if undocumented-by-this-project operation) the moment it saved its config once; granting the operating identity does not widen the attack surface (it's the same account already running the whole process, which already holds every secret in memory). Applied to `ApplyRestrictedConfigAcl` (server-config.json, licenses.json, the Linux known-hosts store all share it) and `ApplyRestrictedKeyFileAcl` (the SSH private key). As a side effect, this also removes v0.54.7's disclosed requirement that a non-elevated `--console` run needs Administrators/SYSTEM to save its own config - the process now always grants itself access at the same time it restricts everyone else.
+- `ApplyRestrictedConfigAcl` used to silently swallow its own exception, so if the ACL restriction itself failed for some other reason, `SaveServerConfigValues` proceeded to write real secrets into a file whose ACL was never confirmed restricted. It now reports success/failure to its one caller that writes secret content immediately afterward, which aborts the save rather than writing into an unconfirmed file.
+- Found while auditing the other `ApplyRestrictedConfigAcl` callers for the same pattern: `SaveLinuxKnownHosts` had the identical pre-Task-6 bug `SaveServerConfigValues` once had - it wrote real fingerprint data to a temp file before restricting it, not after. Fixed with the same create-empty-restrict-then-write ordering.
+
+197 self-tests (was 196), 133/133 Pester green under Windows PowerShell 5.1. Live-verified: a real (unforced) admin password rotation now succeeds under a non-elevated process, and the resulting file's ACL grants exactly Administrators, SYSTEM, and that process's own identity.
+
 ## [0.54.9]
 
 ### Security
