@@ -1947,7 +1947,10 @@ namespace WindowsInventoryLite
                 File.WriteAllText(path, json, new UTF8Encoding(false));
             }
             DebugLogger.Log(options, "Client", "Inventory report accepted from '" + DebugLogger.SanitizeForLog(computerName) + "'");
-            SendJson(stream, "{\"status\":\"ok\"}");
+            Dictionary<string, object> ackResponse = new Dictionary<string, object>();
+            ackResponse["status"] = "ok";
+            ackResponse["licenseKeySources"] = BuildLicenseKeySourcesForClientResponse();
+            SendJson(stream, serializer.Serialize(ackResponse));
         }
 
         // Returns true when an AD lookup is due: either there is no
@@ -6102,6 +6105,30 @@ namespace WindowsInventoryLite
                 }
             }
             return newestByIp;
+        }
+
+        // Trims each stored source down to only the fields a client needs
+        // to read a registry value - the admin-only id/createdAt/updatedAt
+        // fields never leave the server.
+        private ArrayList BuildLicenseKeySourcesForClientResponse()
+        {
+            ArrayList result = new ArrayList();
+            List<Dictionary<string, object>> sources;
+            lock (licenseKeySourcesLock)
+            {
+                sources = LoadLicenseKeySources();
+            }
+
+            foreach (Dictionary<string, object> source in sources)
+            {
+                Dictionary<string, object> trimmed = new Dictionary<string, object>();
+                trimmed["product"] = GetStringValue(source, "product");
+                trimmed["registryHive"] = GetStringValue(source, "registryHive");
+                trimmed["registryPath"] = GetStringValue(source, "registryPath");
+                trimmed["valueName"] = GetStringValue(source, "valueName");
+                result.Add(trimmed);
+            }
+            return result;
         }
 
         private string BuildClientIndex()
@@ -10753,6 +10780,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
             allPassed &= SelfTestCheck(output, "IsValidRegistryHiveName accepts only HKEY_LOCAL_MACHINE/HKEY_CURRENT_USER", TestIsValidRegistryHiveNameAcceptsOnlyKnownHives);
             allPassed &= SelfTestCheck(output, "License key sources CRUD storage round-trips through disk", TestLicenseKeySourcesCrudRoundTrip);
+            allPassed &= SelfTestCheck(output, "BuildLicenseKeySourcesForClientResponse omits admin-only fields", TestBuildLicenseKeySourcesForClientResponseTrimsToClientFields);
             allPassed &= SelfTestCheck(output, "SaveServerConfigValues leaves the final config file with a restricted ACL, no leftover .tmp file", TestSaveServerConfigValuesRestrictsTempFileBeforeWritingContent);
             allPassed &= SelfTestCheck(output, "Linux known-hosts store round-trips and overwrites by host:port", TestLinuxKnownHostsRoundTrip);
             allPassed &= SelfTestCheck(output, "A malformed known-hosts file surfaces as a read error from FindLinuxKnownHost, not as 'no record found'", TestLinuxKnownHostsReadFailureSurfacesAsError);
@@ -13835,6 +13863,50 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (GetStringValue(reloaded[0], "product") != "Test Product")
                 {
                     return "expected the saved product name to round-trip through disk";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestBuildLicenseKeySourcesForClientResponseTrimsToClientFields()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-license-key-sources-response-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> sources = new List<Dictionary<string, object>>();
+                Dictionary<string, object> record = new Dictionary<string, object>();
+                record["id"] = "test-id";
+                record["product"] = "Test Product";
+                record["registryHive"] = "HKEY_LOCAL_MACHINE";
+                record["registryPath"] = @"SOFTWARE\Test";
+                record["valueName"] = "TestValue";
+                record["createdAt"] = "2026-01-01T00:00:00Z";
+                sources.Add(record);
+                server.SaveLicenseKeySources(sources);
+
+                ArrayList response = server.BuildLicenseKeySourcesForClientResponse();
+                if (response.Count != 1)
+                {
+                    return "expected exactly one entry in the client-facing response, got " + response.Count;
+                }
+
+                Dictionary<string, object> trimmed = response[0] as Dictionary<string, object>;
+                if (trimmed == null || GetStringValue(trimmed, "product") != "Test Product")
+                {
+                    return "expected the trimmed entry to carry the product field";
+                }
+                if (trimmed.ContainsKey("id") || trimmed.ContainsKey("createdAt"))
+                {
+                    return "expected id/createdAt to be omitted from the client-facing response - the client has no use for them";
                 }
                 return null;
             }
