@@ -22,6 +22,40 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
         }
     }
 
+    It 'Test-LinuxInstallPathDepth rejects a bare top-level directory and a relative path' {
+        # No shell metacharacter and no whitespace, so Test-PosixShellSafe
+        # alone would let these through - this script is directly runnable
+        # on its own (bypassing the C# server's own IsValidLinuxInstallPath
+        # gate entirely), so it needs the same two-segment-minimum check
+        # applied here too. Asserting on the message (not just -Throw)
+        # matters here specifically: a first version of this check threw
+        # for the WRONG reason on a single-segment path ("The property
+        # 'Count' cannot be found on this object" - a Windows PowerShell
+        # 5.1 vs 7 scalar-vs-array quirk), which -Throw alone would have
+        # accepted as a false-positive pass.
+        $invalidSingleSegment = @('/usr', '/etc', '/opt')
+        foreach ($value in $invalidSingleSegment) {
+            { Test-LinuxInstallPathDepth -InstallPath $value } | Should -Throw '*at least two*'
+        }
+        $invalidOther = @('/', 'opt/wil', '', $null)
+        foreach ($value in $invalidOther) {
+            { Test-LinuxInstallPathDepth -InstallPath $value } | Should -Throw '*at least two*'
+        }
+    }
+
+    It 'Test-LinuxInstallPathDepth accepts a real multi-segment absolute path' {
+        $valid = @('/opt/windows-inventory-lite', '/home/svc/wil', '/opt/wil/')
+        foreach ($value in $valid) {
+            { Test-LinuxInstallPathDepth -InstallPath $value } | Should -Not -Throw
+        }
+    }
+
+    It 'New-SystemdUnitFiles rejects a bare top-level InstallDirectory' {
+        $dir = Join-Path -Path $TestDrive -ChildPath 'units-bad-path'
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        { New-SystemdUnitFiles -Directory $dir -InstallDirectory '/etc' -Url 'https://example.local/api/v1/linux/inventory' -SharedToken '' -Hours 6 } | Should -Throw '*at least two*'
+    }
+
     It 'New-SystemdUnitFiles writes a oneshot service with the correct ExecStart' {
         $dir = Join-Path -Path $TestDrive -ChildPath 'units1'
         New-Item -Path $dir -ItemType Directory -Force | Out-Null

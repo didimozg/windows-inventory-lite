@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.54.6]
+
+### Security
+
+- The two standalone Linux SSH scripts (`Install-ClientDebianSSH.ps1`, `Uninstall-ClientDebianSSH.ps1`) had no equivalent to `IsValidLinuxInstallPath`'s "at least two path segments" check - only `Test-PosixShellSafe` (shell metacharacters/whitespace). Both scripts are directly runnable on their own per README.md's Quick Start, independent of the C# server entirely, so v0.54.3/v0.54.5's fixes did not protect a direct invocation with e.g. `-InstallPath /etc` - it would still reach `Uninstall-ClientDebianSSH.ps1`'s `rm -rf $InstallPath`. Added a matching `Test-LinuxInstallPathDepth` to both scripts, wired into every function that consumes an install path (`New-SystemdUnitFiles`, `New-SystemdStatusUnitFiles`, the install loop, `Get-LinuxUninstallCommand`).
+- Caught along the way: the first version of that new check used `.Count` on an unwrapped pipeline result, which throws `"The property 'Count' cannot be found on this object"` for any single-segment path under Windows PowerShell 5.1 (PS7+ wraps scalars with a `Count` property; 5.1 does not) - the exploit path (`/etc`) was rejected, but for the wrong reason, and a bare `Should -Throw` Pester assertion would have accepted that as a false-positive pass. Fixed by forcing the pipeline result into an array with `@(...)`; tests now assert on the actual error message, not just that something threw.
+
 ## [0.54.5]
 
 ### Security

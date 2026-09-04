@@ -34,6 +34,21 @@ Describe 'Windows Inventory Lite Uninstall-ClientDebianSSH' {
         { Get-LinuxUninstallCommand -InstallPath '/opt/wil /usr' -SudoPrefix 'sudo ' } | Should -Throw
     }
 
+    It 'Get-LinuxUninstallCommand rejects a bare top-level InstallPath' {
+        # No shell metacharacter and no whitespace, so ValidatePosixShellSafe
+        # alone would let this through into "rm -rf /etc" - this script is
+        # directly runnable on its own (bypassing the C# server's own
+        # IsValidLinuxInstallPath gate entirely), so it needs the same
+        # two-segment-minimum check applied here too. Asserting on the
+        # message (not just -Throw) matters here specifically: a first
+        # version of this check threw for the WRONG reason on a single-
+        # segment path ("The property 'Count' cannot be found on this
+        # object" - a Windows PowerShell 5.1 vs 7 scalar-vs-array quirk),
+        # which -Throw alone would have accepted as a false-positive pass.
+        { Get-LinuxUninstallCommand -InstallPath '/etc' -SudoPrefix 'sudo ' } | Should -Throw '*at least two*'
+        { Get-LinuxUninstallCommand -InstallPath '/' -SudoPrefix 'sudo ' } | Should -Throw '*at least two*'
+    }
+
     It 'Invoke-RemoteCommand uses ssh.exe for key auth' {
         Mock ssh.exe { $global:LASTEXITCODE = 0; return 'ok' }
         $script:usingPassword = $false

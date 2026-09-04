@@ -60,6 +60,26 @@ function Test-PosixShellSafe {
     }
 }
 
+# Test-PosixShellSafe only screens for shell metacharacters and whitespace -
+# it has no opinion on whether the path itself is a sane place to rm -rf.
+# Mirrors IsValidLinuxInstallPath in WindowsInventoryLiteServer.cs: require
+# at least two path segments so a bare top-level directory like /usr or
+# /etc is rejected without needing to enumerate every dangerous name. The
+# C# server already gates this for every request that reaches it through
+# the dashboard/API, but this script is also directly runnable on its own
+# (see README.md's Quick Start), which bypasses that gate entirely.
+function Test-LinuxInstallPathDepth {
+    param([string]$InstallPath)
+    # @(...) forces this to always be an array, even with 0 or 1 elements -
+    # Windows PowerShell 5.1 (unlike PS7+) has no .Count on a bare scalar,
+    # so a single-segment path like "/etc" would throw a confusing
+    # "property 'Count' cannot be found" instead of the intended message.
+    $segments = @($InstallPath.Trim('/') -split '/' | Where-Object { $_ -ne '' })
+    if (-not $InstallPath.StartsWith('/') -or $segments.Count -lt 2) {
+        throw "InstallPath must be an absolute Linux path with at least two segments (e.g. /opt/windows-inventory-lite) - a bare top-level directory like /usr or /etc is rejected."
+    }
+}
+
 function ConvertTo-PlainText {
     param([System.Security.SecureString]$Secure)
     $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
@@ -82,6 +102,7 @@ function Get-LinuxUninstallCommand {
         [string]$SudoPrefix
     )
     Test-PosixShellSafe -Value $InstallPath -FieldName 'InstallPath'
+    Test-LinuxInstallPathDepth -InstallPath $InstallPath
 
     return "${SudoPrefix}systemctl disable --now wil-linux-client.timer wil-linux-client.service wil-linux-client-status.timer wil-linux-client-status.service && " +
         "${SudoPrefix}rm -f /etc/systemd/system/wil-linux-client.service /etc/systemd/system/wil-linux-client.timer /etc/systemd/system/wil-linux-client-status.service /etc/systemd/system/wil-linux-client-status.timer && " +
