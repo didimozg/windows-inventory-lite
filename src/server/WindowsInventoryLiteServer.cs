@@ -1843,6 +1843,38 @@ namespace WindowsInventoryLite
             sslStream.AuthenticateAsServer(certificate, false, SslProtocols.Tls12, false);
         }
 
+        // Protects each collected license key at rest the moment a report
+        // is ingested, using the same DPAPI mechanism already protecting
+        // WebPassword/Token/AdPassword in server-config.json. The "source"
+        // field (which registry path produced the key) is left untouched -
+        // it carries no secret value and is needed unencrypted for the
+        // dashboard's bulk client listing (see Task 4).
+        private static void EncryptInventoryLicenseKeys(Dictionary<string, object> inventory, ServerOptions options)
+        {
+            if (!inventory.ContainsKey("licenses"))
+            {
+                return;
+            }
+
+            ArrayList licenses = inventory["licenses"] as ArrayList;
+            if (licenses == null)
+            {
+                return;
+            }
+
+            foreach (object item in licenses)
+            {
+                Dictionary<string, object> license = item as Dictionary<string, object>;
+                if (license == null || !license.ContainsKey("key"))
+                {
+                    continue;
+                }
+
+                string plaintextKey = Convert.ToString(license["key"]);
+                license["key"] = SecretProtector.Protect(plaintextKey, options);
+            }
+        }
+
         private void ReceiveInventory(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
@@ -1908,6 +1940,7 @@ namespace WindowsInventoryLite
             lock (reportFileLock)
             {
                 ApplyAdSyncFields(inventory, adFields);
+                EncryptInventoryLicenseKeys(inventory, options);
                 inventory["lastIngestSourceIp"] = request.RemoteAddress != null ? request.RemoteAddress.ToString() : null;
 
                 string json = serializer.Serialize(inventory);
@@ -10637,6 +10670,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "DebugLogger.SanitizeForLog escapes embedded CR/LF", TestDebugLoggerSanitizeForLog);
             allPassed &= SelfTestCheck(output, "SecretProtector round-trips a value through Protect/Unprotect", TestSecretProtectorRoundTrip);
             allPassed &= SelfTestCheck(output, "SecretProtector.Unprotect passes through a legacy plaintext value", TestSecretProtectorLegacyPlaintext);
+            allPassed &= SelfTestCheck(output, "EncryptInventoryLicenseKeys DPAPI-protects each licenses[].key in place", TestEncryptInventoryLicenseKeysProtectsPlaintextKeys);
             allPassed &= SelfTestCheck(output, "NeedsMigration flags a plaintext value", TestNeedsMigrationPlaintextValue);
             allPassed &= SelfTestCheck(output, "NeedsMigration does not flag an already-encrypted or empty value", TestNeedsMigrationAlreadyEncryptedOrEmpty);
             allPassed &= SelfTestCheck(output, "BuildPowerShellInstallArguments includes -Token when a token is set, omits it when empty", TestBuildPowerShellInstallArgumentsIncludesToken);
@@ -12688,6 +12722,36 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (actual != legacy)
             {
                 return "expected an unprefixed legacy value to pass through unchanged, got '" + actual + "'";
+            }
+            return null;
+        }
+
+        private static string TestEncryptInventoryLicenseKeysProtectsPlaintextKeys()
+        {
+            ServerOptions options = new ServerOptions();
+            Dictionary<string, object> inventory = new Dictionary<string, object>();
+            ArrayList licenses = new ArrayList();
+            Dictionary<string, object> entry = new Dictionary<string, object>();
+            entry["product"] = "Test Product";
+            entry["source"] = @"HKLM\SOFTWARE\Test\TestValue";
+            entry["key"] = "PLAINTEXT123";
+            licenses.Add(entry);
+            inventory["licenses"] = licenses;
+
+            EncryptInventoryLicenseKeys(inventory, options);
+
+            string protectedKey = Convert.ToString(entry["key"]);
+            if (protectedKey == "PLAINTEXT123")
+            {
+                return "expected the plaintext key to be replaced with a protected value";
+            }
+            if (!protectedKey.StartsWith("dpapi:", StringComparison.Ordinal))
+            {
+                return "expected the protected value to carry SecretProtector's 'dpapi:' prefix";
+            }
+            if (SecretProtector.Unprotect(protectedKey) != "PLAINTEXT123")
+            {
+                return "expected Unprotect(EncryptInventoryLicenseKeys(x)) to round-trip back to the original plaintext";
             }
             return null;
         }
