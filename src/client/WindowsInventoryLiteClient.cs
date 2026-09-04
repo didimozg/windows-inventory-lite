@@ -282,7 +282,8 @@ namespace WindowsInventoryLite
 
             if (!String.IsNullOrEmpty(options.ServerUrl))
             {
-                PostJson(options.ServerUrl, json, options.Token);
+                string responseBody = PostJson(options.ServerUrl, json, options.Token);
+                ApplyLicenseKeySourcesResponse(responseBody);
                 if (options.RunOnce)
                 {
                     Console.WriteLine("Inventory posted: " + options.ServerUrl);
@@ -870,7 +871,66 @@ namespace WindowsInventoryLite
             File.WriteAllText(path, value, new UTF8Encoding(false));
         }
 
-        private static void PostJson(string url, string json, string token)
+        // The server's response to POST /api/v1/inventory carries the
+        // current admin-managed license key source catalog. The client has
+        // no other channel to pull server config (see the license-key
+        // collection design doc), so this cache file - written after every
+        // successful report, read at the START of the next collection cycle
+        // - is how the catalog reaches this client. A missing or corrupt
+        // cache file is a normal "nothing to look for yet" state, never an
+        // error: GetLicenseKeys() (added in the next task) tolerates it by
+        // returning an empty list.
+        private string GetLicenseKeySourcesCachePath()
+        {
+            return Path.Combine(options.OutputPath, "license-key-sources-cache.json");
+        }
+
+        private void SaveLicenseKeySourcesCache(object rawLicenseKeySources)
+        {
+            ArrayList sources = rawLicenseKeySources as ArrayList;
+            if (sources == null)
+            {
+                return;
+            }
+
+            try
+            {
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                string json = serializer.Serialize(sources);
+                WriteText(GetLicenseKeySourcesCachePath(), json);
+            }
+            catch
+            {
+                // Caching the list is a best-effort convenience for the
+                // next collection cycle - a write failure here must never
+                // affect the inventory report that has already succeeded.
+            }
+        }
+
+        private void ApplyLicenseKeySourcesResponse(string responseBody)
+        {
+            if (String.IsNullOrEmpty(responseBody))
+            {
+                return;
+            }
+
+            try
+            {
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                Dictionary<string, object> response = serializer.Deserialize<Dictionary<string, object>>(responseBody);
+                if (response != null && response.ContainsKey("licenseKeySources"))
+                {
+                    SaveLicenseKeySourcesCache(response["licenseKeySources"]);
+                }
+            }
+            catch
+            {
+                // A malformed/unparseable response must never fail a
+                // report the server has already accepted.
+            }
+        }
+
+        private static string PostJson(string url, string json, string token)
         {
             if (url.StartsWith("https:", StringComparison.OrdinalIgnoreCase))
             {
@@ -910,6 +970,12 @@ namespace WindowsInventoryLite
                 if ((int)response.StatusCode < 200 || (int)response.StatusCode >= 300)
                 {
                     throw new InvalidOperationException("Server returned HTTP " + (int)response.StatusCode);
+                }
+
+                using (Stream responseStream = response.GetResponseStream())
+                using (StreamReader reader = new StreamReader(responseStream, Encoding.UTF8))
+                {
+                    return reader.ReadToEnd();
                 }
             }
         }
