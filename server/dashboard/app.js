@@ -22,6 +22,7 @@
     staleHours: 48,
     licenses: [], editingLicenseId: null, licenseFormComputers: [],
     licenseKeySources: [], editingLicenseKeySourceId: null,
+    revealedLicenseKeys: {},
     sort: {
       // 'name', not 'computerName': the Clients table is cross-platform
       // now, and its Computer column shows clientDisplayName() - Windows'
@@ -3946,6 +3947,29 @@
               </tr>`).join('') || '<tr><td colspan="4" class="empty">No service records.</td></tr>'}</tbody>
             </table>`;
 
+      // Windows-only: client.licenses is already redacted to {product, source}
+      // by the server (LoadClientReports, Task 4) - the real key value is
+      // fetched on demand from GET .../license-keys (Task 5) only when a row's
+      // "show" button is clicked, and cached in state.revealedLicenseKeys so a
+      // second click that re-masks the value never re-fetches. The API's real
+      // client identifier is client.computerName (see SendClientLicenseKeys in
+      // WindowsInventoryLiteServer.cs), not the safeId()-hashed `clientId`
+      // used elsewhere on this row purely for DOM wiring (expand/collapse) -
+      // data-client-id below carries computerName, same convention as
+      // formatDescriptionEditor's separate data-computer-name attribute.
+      const clientLicenseKeys = isWindows ? (client.licenses || []) : [];
+      const licenseKeysTable = clientLicenseKeys.length
+        ? `<h2>${escapeHtml(client.computerName)} license keys</h2>
+            <table class="nested-table">
+              <thead><tr><th>Product</th><th>Source</th><th>Key</th></tr></thead>
+              <tbody>${clientLicenseKeys.map((item, index) => `<tr>
+                <td>${escapeHtml(item.product)}</td>
+                <td class="mono">${escapeHtml(item.source)}</td>
+                <td><button class="link-button" type="button" data-reveal-license-key data-client-id="${escapeHtml(client.computerName)}" data-license-key-index="${index}">•••••• (show)</button></td>
+              </tr>`).join('')}</tbody>
+            </table>`
+        : '';
+
       const detailsHidden = state.expandedDetails.has((isWindows ? 'client:' : 'linux-client:') + clientId) ? '' : 'hidden';
       const detailsAttr = isWindows ? `data-client-details="${clientId}"` : `data-linux-client-details="${clientId}"`;
       const deleteAttr = isWindows
@@ -3972,6 +3996,7 @@
               <div><strong>Storage</strong><span>${disksSummary}</span></div>
             </div>
             ${nestedTable}
+            ${licenseKeysTable}
           </div>
         </td>
       </tr>`;
@@ -4683,6 +4708,31 @@
         const nowHidden = row.classList.toggle('hidden');
         if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
       }
+      return;
+    }
+
+    const revealKeyBtn = e.target.closest('[data-reveal-license-key]');
+    if (revealKeyBtn) {
+      const clientId = revealKeyBtn.dataset.clientId;
+      const index = Number(revealKeyBtn.dataset.licenseKeyIndex);
+      if (revealKeyBtn.dataset.revealed === 'true') {
+        revealKeyBtn.textContent = '•••••• (show)';
+        revealKeyBtn.dataset.revealed = 'false';
+        return;
+      }
+      if (state.revealedLicenseKeys[clientId]) {
+        revealKeyBtn.textContent = state.revealedLicenseKeys[clientId][index] + ' (hide)';
+        revealKeyBtn.dataset.revealed = 'true';
+        return;
+      }
+      fetch(`/api/v1/clients/${encodeURIComponent(clientId)}/license-keys`, { cache: 'no-store' })
+        .then(r => r.json())
+        .then(data => {
+          const keys = (data.licenses || []).map(item => item.key);
+          state.revealedLicenseKeys[clientId] = keys;
+          revealKeyBtn.textContent = keys[index] + ' (hide)';
+          revealKeyBtn.dataset.revealed = 'true';
+        });
       return;
     }
 
