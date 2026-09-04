@@ -88,14 +88,14 @@ Full parameter tables for every install/build/uninstall script, the `server-conf
 
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
-| `-InstallPath` | `C:\ProgramData\WindowsInventoryLite\client-data` | Installation folder to remove. Refused if it resolves to the server's own shared root (detected via a `server-config.json` check), to protect a server co-located on the same machine. |
+| `-InstallPath` | `C:\ProgramData\WindowsInventoryLite\client-data` | Installation folder to remove. Must resolve to a real subdirectory under `C:\ProgramData\WindowsInventoryLite\` (a bare top-level or `..`-traversed path is refused), and is also refused if it resolves to the server's own shared root (detected via a `server-config.json` check), to protect a server co-located on the same machine. |
 
 ## Uninstall-ClientWinRM.ps1
 
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
 | `-ComputerName` | `-` | One or more target computer names or IP addresses. Mandatory. |
-| `-InstallPath` | `C:\ProgramData\WindowsInventoryLite\client-data` | Installation folder to remove on remote hosts. Refused if it resolves to the target's own shared server root. |
+| `-InstallPath` | `C:\ProgramData\WindowsInventoryLite\client-data` | Installation folder to remove on remote hosts. Must resolve to a real subdirectory under `C:\ProgramData\WindowsInventoryLite\` (a bare top-level or `..`-traversed path is refused), and is also refused if it resolves to the target's own shared server root. |
 | `-Credential` | `-` | PSCredential for WinRM authentication. Optional. |
 | `-CredentialUsername` | `-` | WinRM username as a plain string. Used if `-Credential` is not provided. |
 | `-CredentialPassword` | `-` | WinRM password as a `SecureString`. Used if `-Credential` is not provided. |
@@ -159,7 +159,7 @@ Requires a Go toolchain (<https://go.dev/dl/>) to rebuild from source. `Install-
 | --------- | ------- | ----------- |
 | `-ComputerName` | `-` | Target host name or IP address. Mandatory. |
 | `-ServerUrl` | `-` | HTTP(S) endpoint that receives Linux client JSON reports. Mandatory (install only). |
-| `-InstallPath` | `/opt/windows-inventory-lite` | Installation directory on the target host. |
+| `-InstallPath` | `/opt/windows-inventory-lite` | Installation directory on the target host. Must be a real subdirectory under `/opt/` - a bare `/opt`, a path outside `/opt/`, or a `.`/`..` path segment is refused. |
 | `-CredentialUsername` | `-` | SSH username. Mandatory. |
 | `-KeyPath` | `-` | Path to an SSH private key, for key-based authentication. |
 | `-CredentialPassword` | `-` | `SecureString` password, for password-based authentication (requires `plink.exe`/`pscp.exe` in `deploy\linux-client\`; Windows' own OpenSSH client cannot authenticate with a password non-interactively). |
@@ -192,7 +192,7 @@ Password-based pushes additionally require `plink.exe`/`pscp.exe` (PuTTY) in `de
 - `PreferredLinuxSubnet`: optional IPv4 CIDR (for example `192.168.1.0/24`) restricting which subnet Linux client targeting considers. Default: empty (no filtering).
 - `LinuxDefaultIntervalHours`: default collection interval offered when installing a Linux client. Default: `6`, range 1-24.
 - `LinuxDefaultStatusIntervalMinutes`: default service-status poll interval for a Linux client. Default: `30`, range 1-1440.
-- `LinuxDefaultInstallPath`: default installation directory offered when installing a Linux client. Default: `/opt/windows-inventory-lite`, must start with `/`.
+- `LinuxDefaultInstallPath`: default installation directory offered when installing a Linux client. Default: `/opt/windows-inventory-lite`. Must be a real subdirectory under `/opt/`, with no `.`/`..` path segment - as of v0.54.7 a value outside `/opt/` (previously accepted if it just had two path segments, e.g. `/home/svc/wil`) is rejected; re-point any such existing value under `/opt/` and reinstall affected Linux clients.
 
 ## Uninstall commands
 

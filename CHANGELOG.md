@@ -15,6 +15,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Fixed a config-save ACL race: `SaveServerConfigValues` used to write secrets (DPAPI-encrypted `WebPassword`/`Token`/`AdPassword`) into a temp file under the containing folder's inherited permissions before restricting the final file's ACL - if the atomic rename then failed, that weakly-protected temp file was left behind with real secrets in it, permanently. The temp file's ACL is now restricted before any secret content is written into it. Side effect worth knowing: this means the server process itself now needs Administrators-or-SYSTEM access to save its own configuration, on every save, not only a later one - true by default for the shipped Windows Service (always runs as LocalSystem), but running in `--console` mode from a non-elevated prompt (including a local Administrator who hasn't explicitly elevated, since UAC marks that group deny-only on a filtered token) will now fail to persist configuration where it previously happened to succeed by way of the same gap this fix closes.
 - Fixed admin password rotation to be atomic: `ChangeAdminPassword` used to mutate the live username/password and only then try to persist it, so a failed save left the password changed in memory (silently reverting on restart, since disk kept the old value) while every existing session stayed valid, since session invalidation ran even later and was never reached. It now persists first; a save failure leaves the password and every session exactly as they were before the attempt.
 
+### Breaking
+
+- A Linux install path outside `/opt/` (e.g. `/home/svc/wil`) was accepted by every version through v0.54.6 as long as it had two path segments. It is rejected as of this version. If `LinuxDefaultInstallPath` or a client's own install path is not under `/opt/`, every install, update, uninstall, and scheduled push against that client will now fail with a validation error - re-point the setting under `/opt/` and reinstall affected Linux clients.
+
 188 self-tests (was 185), full Pester suite green under Windows PowerShell 5.1.
 
 ## [0.54.6]

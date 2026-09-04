@@ -6813,7 +6813,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             // set, not just when it's used.
             if (!IsValidLinuxInstallPath(installPath))
             {
-                SendText(stream, "{\"error\":\"installPath must be an absolute Linux path with at least two segments (e.g. /opt/windows-inventory-lite) - a bare top-level directory like /usr or /etc is rejected\"}", "application/json; charset=utf-8", 400);
+                SendText(stream, "{\"error\":\"installPath must be a real subdirectory under /opt/ (e.g. /opt/windows-inventory-lite), with no '.' or '..' path segment\"}", "application/json; charset=utf-8", 400);
                 return;
             }
             int intervalHours = 6;
@@ -7823,7 +7823,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 string linuxDefaultInstallPath = Convert.ToString(payload["linuxDefaultInstallPath"]).Trim();
                 if (!IsValidLinuxInstallPath(linuxDefaultInstallPath))
                 {
-                    SendText(stream, "{\"error\":\"linuxDefaultInstallPath must be an absolute Linux path with at least two segments (e.g. /opt/windows-inventory-lite) - a bare top-level directory like /usr or /etc is rejected, since this value is used in a remote 'rm -rf' during uninstall\"}", "application/json; charset=utf-8", 400);
+                    SendText(stream, "{\"error\":\"linuxDefaultInstallPath must be a real subdirectory under /opt/ (e.g. /opt/windows-inventory-lite), with no '.' or '..' path segment, since this value is used in a remote 'rm -rf' during uninstall\"}", "application/json; charset=utf-8", 400);
                     return;
                 }
                 options.LinuxDefaultInstallPath = linuxDefaultInstallPath;
@@ -9631,7 +9631,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 // default IsValidLinuxInstallPath already gated in v0.54.3).
                 if (!IsValidLinuxInstallPath(installPath))
                 {
-                    throw new ArgumentException("installPath must be an absolute Linux path with at least two segments (e.g. /opt/windows-inventory-lite) - a bare top-level directory like /usr or /etc is rejected, since this value is used in a remote 'rm -rf' during uninstall.");
+                    throw new ArgumentException("installPath must be a real subdirectory under /opt/ (e.g. /opt/windows-inventory-lite), with no '.' or '..' path segment, since this value is used in a remote 'rm -rf' during uninstall.");
                 }
                 return true;
             }

@@ -184,15 +184,17 @@ $script:RemoveClientScriptBlock = {
         throw "Refusing to delete '$ClientInstallPath' (resolves to '$resolvedInstallPath') - it is not a real subdirectory of '$allowedRoot'."
     }
 
-    # Safety net for the client/server co-located case: if $ClientInstallPath
-    # still resolves to the shared WindowsInventoryLite root (an explicit
-    # override, or a target never reinstalled since the client-data layout
-    # shipped) and server-config.json is sitting right there, a recursive
-    # delete would take the server's own data with it. Refuse only in that
-    # specific case - a client-only target's bare root (no server-config.json)
-    # still gets fully cleaned up as before. Inlined (not a called function)
-    # because this block runs in a separate remote runspace over WinRM,
-    # which cannot resolve functions defined in the local script.
+    # Historical safety net for the client/server co-located case (an
+    # explicit -InstallPath override pointing at the bare shared root): the
+    # allowlist check above already refuses a bare $sharedRoot unconditionally
+    # now (it is not a real SUBDIRECTORY of itself), so this branch can no
+    # longer be reached with $isSharedServerRoot true OR false - the delete
+    # below only ever runs for a genuine subdirectory. Left in place as
+    # defense in depth and because it costs nothing; if $ClientInstallPath
+    # is ever changed to allow the bare root again, this still catches the
+    # one case that matters. Inlined (not a called function) because this
+    # block runs in a separate remote runspace over WinRM, which cannot
+    # resolve functions defined in the local script.
     $sharedRoot = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite'
     $isSharedServerRoot = ($ClientInstallPath.TrimEnd('\') -eq $sharedRoot.TrimEnd('\')) -and (Test-Path -LiteralPath (Join-Path -Path $sharedRoot -ChildPath 'server-config.json'))
 
