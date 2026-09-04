@@ -8303,13 +8303,28 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return;
             }
 
-            options.WebUsername = newUsername;
-            options.WebPassword = newPassword;
-
+            // Persist FIRST, mutate live state only after the save
+            // succeeds - the previous order mutated options.WebUsername/
+            // WebPassword before persisting, so a save failure (disk
+            // full, AV/backup file lock, an ACL problem like the one
+            // fixed alongside this) left the password changed in memory
+            // (silently reverting on the next restart, since disk still
+            // had the old value) with sessionStore never cleared below -
+            // meaning every pre-rotation session, including one the
+            // admin may be rotating specifically because they suspect
+            // it's compromised, stayed valid. If SaveServerConfigValues
+            // throws here, it propagates to the caller's normal error
+            // handling with options.WebUsername/WebPassword and
+            // sessionStore both untouched - the admin sees a real error
+            // and can retry, with the system in the same consistent
+            // state it was in before the attempt.
             Dictionary<string, string> updates = new Dictionary<string, string>();
             updates["WebUsername"] = newUsername;
             updates["WebPassword"] = newPassword;
             SaveServerConfigValues(updates);
+
+            options.WebUsername = newUsername;
+            options.WebPassword = newPassword;
 
             try
             {
@@ -10331,6 +10346,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "GenerateSystemdStatusUnitLines passes the token via EnvironmentFile, never on the command line", TestGenerateSystemdStatusUnitLinesUsesEnvironmentFileNotCommandLineToken);
             allPassed &= SelfTestCheck(output, "GenerateSystemdEnvFileLines matches the PowerShell New-SystemdEnvFile format", TestGenerateSystemdEnvFileLinesMatchesPowerShellFormat);
             allPassed &= SelfTestCheck(output, "Full session lifecycle: a cookie value produced by SendLoginResult authorizes IsWebRequestAuthorized, then SendLogoutResult makes that same cookie stop authorizing it", TestSessionLifecycleEndToEndLoginAuthorizeLogout);
+            allPassed &= SelfTestCheck(output, "ChangeAdminPassword does not mutate the live credential or clear sessions when persisting the new config fails", TestChangeAdminPasswordDoesNotMutateStateWhenSaveFails);
             return allPassed;
         }
 
@@ -14296,6 +14312,60 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
 
             return null;
+        }
+
+        // ChangeAdminPassword used to mutate options.WebUsername/WebPassword
+        // and only persist afterward - if SaveServerConfigValues then threw,
+        // the password had already changed in memory (silently reverting on
+        // the next restart, since disk kept the old value) while every
+        // pre-rotation session stayed valid, since sessionStore is cleared
+        // even later. This forces the save to fail and asserts the
+        // in-memory credential is untouched.
+        private static string TestChangeAdminPasswordDoesNotMutateStateWhenSaveFails()
+        {
+            string dataDir = Path.Combine(Path.GetTempPath(), "wil-selftest-password-rotation-atomic-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataDir);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataDir;
+                options.ConfigPath = Path.Combine(dataDir, "server-config.json");
+                options.WebUsername = "admin";
+                options.WebPassword = "original-password";
+                options.SessionLifetimeHours = 12;
+                InventoryServer server = new InventoryServer(options);
+
+                // Force the save to fail by pointing ConfigPath at a directory that
+                // does not exist and cannot be created mid-call (simulates the same
+                // real-world failure class as a locked file or a full disk).
+                options.ConfigPath = Path.Combine(dataDir, "does-not-exist", "server-config.json");
+
+                System.Reflection.MethodInfo changeMethod = typeof(InventoryServer).GetMethod("ChangeAdminPassword", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    RequestContext request = new RequestContext();
+                    request.Body = "{\"currentPassword\":\"original-password\",\"newUsername\":\"admin\",\"newPassword\":\"new-password-value\"}";
+                    request.Headers = new Dictionary<string, string>();
+                    try
+                    {
+                        changeMethod.Invoke(server, new object[] { stream, request });
+                    }
+                    catch (System.Reflection.TargetInvocationException)
+                    {
+                        // Expected - the save throws because the directory doesn't exist.
+                    }
+                }
+
+                if (options.WebPassword != "original-password")
+                {
+                    return "expected options.WebPassword to remain unchanged after a failed save, but it was mutated to '" + options.WebPassword + "'";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataDir, true); } catch { }
+            }
         }
 
         private static bool ContainsSignature(byte[] data, byte thirdByte, byte fourthByte)
