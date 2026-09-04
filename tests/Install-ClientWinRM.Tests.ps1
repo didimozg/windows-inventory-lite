@@ -25,6 +25,11 @@ Describe 'Windows Inventory Lite Install-ClientWinRM safety guard' {
         }
     }
 
+    It 'refuses to delete a .. traversal path that resolves outside the WindowsInventoryLite root' {
+        $traversalPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\..\..\Windows'
+        { & $script:RemoveRemotePackageScriptBlock -Path $traversalPath } | Should -Throw '*is not a real subdirectory of*'
+    }
+
     It 'removes the default WinRMDeploy path, a real subdirectory of the allowed root rather than the root itself' {
         $originalProgramData = $env:ProgramData
         $env:ProgramData = $TestDrive

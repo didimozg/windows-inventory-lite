@@ -57,4 +57,9 @@ Describe 'Windows Inventory Lite Uninstall-Client safety guard' {
             $env:ProgramData = $originalProgramData
         }
     }
+
+    It 'Test-IsUnderAllowedInstallRoot refuses a .. traversal path that resolves outside the WindowsInventoryLite root' {
+        $traversalPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\..\..\Windows'
+        { Test-IsUnderAllowedInstallRoot -Path $traversalPath } | Should -Throw '*is not a real subdirectory of*'
+    }
 }

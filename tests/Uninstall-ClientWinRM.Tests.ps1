@@ -50,4 +50,9 @@ Describe 'Windows Inventory Lite Uninstall-ClientWinRM safety guard' {
             { & $script:RemoveClientScriptBlock -ServiceName 'nonexistent-service-for-test' -ClientInstallPath $path } | Should -Throw '*is not a real subdirectory of*'
         }
     }
+
+    It 'refuses to delete a .. traversal path that resolves outside the WindowsInventoryLite root' {
+        $traversalPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\..\..\Windows'
+        { & $script:RemoveClientScriptBlock -ServiceName 'nonexistent-service-for-test' -ClientInstallPath $traversalPath } | Should -Throw '*is not a real subdirectory of*'
+    }
 }
