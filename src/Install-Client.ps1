@@ -51,6 +51,7 @@ function Test-BatchSafeValue {
 Test-BatchSafeValue -Value $ServerUrl -FieldName 'ServerUrl'
 Test-BatchSafeValue -Value $Token -FieldName 'Token'
 Test-BatchSafeValue -Value $ServerSharePath -FieldName 'ServerSharePath'
+Test-BatchSafeValue -Value $InstallPath -FieldName 'InstallPath'
 
 # $PSScriptRoot is unset for a top-level script (not a module) on Windows
 # PowerShell 2.0 - it only started working outside modules in PS 3.0. This
