@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.54.8]
+
+### Fixed
+
+- `RunLinuxClientUninstallTarget` never re-validated `installPath` at its own point of use, relying entirely on the caller having already validated - its install-side sibling already does this as a documented "last line of defence". Currently safe (the caller is genuinely the only path in), but added the matching check for structural symmetry.
+- `installJobs` (in-memory) never removed a completed job, so its `Password`/`SshPassword` fields stayed resident in memory for the server's entire uptime and the dictionary grew unbounded. A completed job is now removed from memory (the on-disk copy, which already omits those fields, remains the durable record). Also moved `job.Status`/`StartedAtUtc`/`CompletedAtUtc` writes inside the same lock other code already reads them under.
+- An expired session cookie fell through to Basic Auth correctly but its `sessionStore` entry was never removed until the next successful login - it now gets pruned as soon as it's found expired.
+- A present-but-blank `computerName`/`hostname` in an inventory report (as opposed to a missing one) wrote a literal `.json` file, which the dashboard's client list then silently picked up. Blank is now treated the same as missing.
+- Added `form-action 'self'` to the Content-Security-Policy - `default-src` does not cover `form-action`, so this was previously unrestricted.
+- Added a self-test proving a successful admin password rotation invalidates every pre-rotation session (the failure-path half of this was already covered).
+
+194 self-tests (was 188), full Pester suite green under Windows PowerShell 5.1.
+
 ## [0.54.7]
 
 ### Security

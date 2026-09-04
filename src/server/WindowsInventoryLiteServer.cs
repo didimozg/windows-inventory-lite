@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.54.7";
+        internal const string ProductVersion = "0.54.8";
 
         private static int Main(string[] args)
         {
@@ -1858,7 +1858,7 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            string computerName = Convert.ToString(inventory.ContainsKey("computerName") ? inventory["computerName"] : "unknown");
+            string computerName = NormalizeReportIdentifier(inventory.ContainsKey("computerName") ? Convert.ToString(inventory["computerName"]) : null);
             string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
 
             // Read the previous report and compute the AD fields (which may
@@ -2266,7 +2266,7 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            string hostname = Convert.ToString(inventory.ContainsKey("hostname") ? inventory["hostname"] : "unknown");
+            string hostname = NormalizeReportIdentifier(inventory.ContainsKey("hostname") ? Convert.ToString(inventory["hostname"]) : null);
             string path = Path.Combine(options.LinuxDataPath, SanitizeFileName(hostname) + ".json");
 
             // Same lock-avoidance reasoning as ReceiveInventory: compute the
@@ -2332,7 +2332,7 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            string hostname = Convert.ToString(payload.ContainsKey("hostname") ? payload["hostname"] : "unknown");
+            string hostname = NormalizeReportIdentifier(payload.ContainsKey("hostname") ? Convert.ToString(payload["hostname"]) : null);
             ArrayList activeUnits = new ArrayList();
             if (payload.ContainsKey("activeUnits") && payload["activeUnits"] is ArrayList)
             {
@@ -3469,10 +3469,10 @@ namespace WindowsInventoryLite
         private void RunClientActionJob(object state)
         {
             InstallJob job = (InstallJob)state;
-            job.Status = "running";
-            job.StartedAtUtc = DateTime.UtcNow;
             lock (installJobsLock)
             {
+                job.Status = "running";
+                job.StartedAtUtc = DateTime.UtcNow;
                 SaveInstallJob(job);
             }
 
@@ -3513,11 +3513,20 @@ namespace WindowsInventoryLite
                 }
             }
 
-            job.CompletedAtUtc = DateTime.UtcNow;
-            job.Status = "completed";
             lock (installJobsLock)
             {
+                job.CompletedAtUtc = DateTime.UtcNow;
+                job.Status = "completed";
                 SaveInstallJob(job);
+                // The on-disk copy (SaveInstallJob, just above) is the durable
+                // record and already omits Password/SshPassword (ToDictionary) -
+                // nothing is lost by also dropping the in-memory entry now that
+                // the job is done. Without this, installJobs grew unbounded for
+                // the server's entire uptime, keeping every job's plaintext
+                // WinRM/SSH password resident in memory long after it was
+                // needed. SendClientInstallJob already falls back to reading
+                // the file when a job isn't found in memory.
+                installJobs.Remove(job.Id);
             }
             CleanupInstallJobLogs();
         }
@@ -3837,6 +3846,19 @@ namespace WindowsInventoryLite
             {
                 result["status"] = "failed";
                 result["message"] = "Linux SSH uninstaller script was not found: " + options.LinuxSshUninstallerPath;
+                return result;
+            }
+
+            // Last line of defence, mirroring RunLinuxClientInstallTarget's own
+            // re-validation at its point of use - the caller (StartClientAction)
+            // is currently the only call site and already validates installPath,
+            // but a validator that exists without being re-checked at the actual
+            // point of use is exactly the shape that produced this project's
+            // install-path validation gaps before.
+            if (!IsValidLinuxInstallPath(installPath))
+            {
+                result["status"] = "failed";
+                result["message"] = "installPath must be a real subdirectory under /opt/ (e.g. /opt/windows-inventory-lite), with no '.' or '..' path segment";
                 return result;
             }
 
@@ -5228,10 +5250,21 @@ namespace WindowsInventoryLite
                 {
                     SessionRecord record;
                     sessionStore.TryGetValue(sessionToken, out record);
-                    if (IsSessionValid(record, DateTime.UtcNow))
+                    DateTime now = DateTime.UtcNow;
+                    if (IsSessionValid(record, now))
                     {
-                        record.ExpiresUtc = ComputeSessionExpiry(DateTime.UtcNow, options.SessionLifetimeHours);
+                        record.ExpiresUtc = ComputeSessionExpiry(now, options.SessionLifetimeHours);
                         return true;
+                    }
+                    // A found-but-expired record used to just fall through to
+                    // Basic Auth below, leaving the stale entry in sessionStore
+                    // until the next successful login's own prune swept it out -
+                    // a dashboard tab left open with nobody logging back in
+                    // could linger there indefinitely. Sweeping here too closes
+                    // that gap without adding a new timer/background thread.
+                    if (record != null)
+                    {
+                        PruneExpiredSessionsLocked(now);
                     }
                 }
             }
@@ -6289,7 +6322,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // message reports the exact hash it expected - the fastest way to
         // get a fresh one).
         private const string ContentSecurityPolicy =
-            "default-src 'self'; script-src 'self' 'sha256-rqltRpQDffCU3nbpQC/zdbFn0/Eb4PSGrbmQ8EbS3q4=' 'sha256-307+P/nzCy66y2Q8MR0B+9BDei02iFWi+rMImlh6/C0='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+            "default-src 'self'; script-src 'self' 'sha256-rqltRpQDffCU3nbpQC/zdbFn0/Eb4PSGrbmQ8EbS3q4=' 'sha256-307+P/nzCy66y2Q8MR0B+9BDei02iFWi+rMImlh6/C0='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
         // same-origin (not the stricter no-referrer) deliberately: this
         // dashboard's own pages never navigate cross-origin, so a leak to
@@ -6368,6 +6401,17 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // appends an extension rather than using the sanitized value bare -
         // an underscore prefix breaks the match while keeping the name
         // recognizable.
+        // A present-but-blank computerName/hostname (e.g. "" or "   ") used to
+        // slip past the ContainsKey-only "unknown" fallback at each ingestion
+        // call site, since Convert.ToString("") is "" - not missing - and
+        // SanitizeFileName("") is also "", producing a literal ".json" report
+        // file that LoadClientReports' *.json glob then happily picks up as a
+        // client with no name. Treats blank the same as missing.
+        private static string NormalizeReportIdentifier(string value)
+        {
+            return String.IsNullOrWhiteSpace(value) ? "unknown" : value;
+        }
+
         private static string SanitizeFileName(string value)
         {
             StringBuilder builder = new StringBuilder();
@@ -10347,6 +10391,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "GenerateSystemdEnvFileLines matches the PowerShell New-SystemdEnvFile format", TestGenerateSystemdEnvFileLinesMatchesPowerShellFormat);
             allPassed &= SelfTestCheck(output, "Full session lifecycle: a cookie value produced by SendLoginResult authorizes IsWebRequestAuthorized, then SendLogoutResult makes that same cookie stop authorizing it", TestSessionLifecycleEndToEndLoginAuthorizeLogout);
             allPassed &= SelfTestCheck(output, "ChangeAdminPassword does not mutate the live credential or clear sessions when persisting the new config fails", TestChangeAdminPasswordDoesNotMutateStateWhenSaveFails);
+            allPassed &= SelfTestCheck(output, "RunLinuxClientUninstallTarget rejects an unsafe installPath before attempting any SSH connection", TestRunLinuxClientUninstallTargetRejectsUnsafeInstallPath);
+            allPassed &= SelfTestCheck(output, "RunClientActionJob removes a completed job from the in-memory installJobs dictionary", TestRunClientActionJobRemovesCompletedJobFromMemory);
+            allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized prunes an expired session from sessionStore on use, not just at the next login", TestIsWebRequestAuthorizedPrunesExpiredSessionOnUse);
+            allPassed &= SelfTestCheck(output, "ChangeAdminPassword invalidates every pre-rotation session on a successful rotation", TestChangeAdminPasswordInvalidatesSessionsOnSuccess);
+            allPassed &= SelfTestCheck(output, "Content-Security-Policy restricts form-action to 'self'", TestContentSecurityPolicyRestrictsFormAction);
+            allPassed &= SelfTestCheck(output, "NormalizeReportIdentifier treats a blank identifier the same as a missing one", TestNormalizeReportIdentifierTreatsBlankSameAsMissing);
             return allPassed;
         }
 
@@ -14366,6 +14416,284 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 try { Directory.Delete(dataDir, true); } catch { }
             }
+        }
+
+        // RunLinuxClientInstallTarget already re-validates installPath at its own
+        // point of use as a "last line of defence" (see its own comment there) -
+        // its uninstall sibling didn't, relying entirely on the caller
+        // (StartClientAction) having validated already. Currently safe (that's
+        // genuinely the only call site), but a validator not re-checked at its
+        // actual point of use is exactly the shape of this project's prior
+        // install-path validation gaps.
+        private static string TestRunLinuxClientUninstallTargetRejectsUnsafeInstallPath()
+        {
+            string dataDir = Path.Combine(Path.GetTempPath(), "wil-selftest-uninstall-revalidate-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataDir);
+            try
+            {
+                string stubUninstallerPath = Path.Combine(dataDir, "Uninstall-ClientDebianSSH.ps1");
+                File.WriteAllText(stubUninstallerPath, "# stub, never actually run - installPath validation fails before this would be invoked");
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataDir;
+                options.LinuxSshUninstallerPath = stubUninstallerPath;
+                InventoryServer server = new InventoryServer(options);
+
+                System.Reflection.MethodInfo runMethod = typeof(InventoryServer).GetMethod("RunLinuxClientUninstallTarget", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                object resultObj = runMethod.Invoke(server, new object[] { "192.0.2.10", "manual", "root", "x", null, "/etc" });
+                Dictionary<string, object> result = (Dictionary<string, object>)resultObj;
+
+                if (GetStringValue(result, "status") != "failed")
+                {
+                    return "expected a bare-top-level installPath ('/etc') to be rejected before any SSH connection is attempted, got status '" + GetStringValue(result, "status") + "'";
+                }
+                if (!GetStringValue(result, "message").Contains("/opt/"))
+                {
+                    return "expected the rejection message to mention the /opt/ requirement, got: " + GetStringValue(result, "message");
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataDir, true); } catch { }
+            }
+        }
+
+        // installJobs (in-memory) held plaintext WinRM/SSH passwords resident for
+        // the server process's entire lifetime, growing unbounded, since nothing
+        // ever removed a completed job from it - the on-disk job file already
+        // correctly omits those fields (ToDictionary), so nothing is lost by also
+        // dropping the in-memory entry once the job is done; SendClientInstallJob
+        // already falls back to reading the file when the job isn't in memory.
+        // An empty Targets list makes RunClientActionJob's per-target loop a
+        // no-op, reaching the exact "completed" code path being tested with no
+        // real WinRM/SSH network activity.
+        private static string TestRunClientActionJobRemovesCompletedJobFromMemory()
+        {
+            string dataDir = Path.Combine(Path.GetTempPath(), "wil-selftest-job-prune-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataDir);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataDir;
+                InventoryServer server = new InventoryServer(options);
+
+                InstallJob job = new InstallJob();
+                job.Id = Guid.NewGuid().ToString("N");
+                job.Action = "install";
+                job.Status = "queued";
+                job.CreatedAtUtc = DateTime.UtcNow;
+                job.Targets = new ArrayList();
+                job.Results = new ArrayList();
+                job.Mode = "force-windows";
+
+                System.Reflection.FieldInfo installJobsField = typeof(InventoryServer).GetField("installJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Dictionary<string, InstallJob> installJobs = (Dictionary<string, InstallJob>)installJobsField.GetValue(server);
+                installJobs[job.Id] = job;
+
+                System.Reflection.MethodInfo runMethod = typeof(InventoryServer).GetMethod("RunClientActionJob", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                runMethod.Invoke(server, new object[] { job });
+
+                if (job.Status != "completed")
+                {
+                    return "expected job.Status to be 'completed' after RunClientActionJob finishes with no targets, got '" + job.Status + "'";
+                }
+                if (installJobs.ContainsKey(job.Id))
+                {
+                    return "expected the completed job to be removed from the in-memory installJobs dictionary once finished (it stays readable from disk via SendClientInstallJob's own fallback) - otherwise its plaintext WinRM/SSH password fields stay resident in memory indefinitely";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataDir, true); } catch { }
+            }
+        }
+
+        // A cookie whose session is found but already expired fell through to
+        // Basic Auth correctly, but the expired sessionStore entry itself was
+        // never removed - only PruneExpiredSessionsLocked, called just once per
+        // login, ever swept it out. A dashboard left open past its session
+        // lifetime with no one logging back in could linger there indefinitely.
+        private static string TestIsWebRequestAuthorizedPrunesExpiredSessionOnUse()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            InventoryServer server = new InventoryServer(options);
+
+            System.Reflection.FieldInfo sessionStoreField = typeof(InventoryServer).GetField("sessionStore", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            Dictionary<string, SessionRecord> sessionStore = (Dictionary<string, SessionRecord>)sessionStoreField.GetValue(server);
+
+            string expiredToken = "expired-token-for-test";
+            SessionRecord expiredRecord = new SessionRecord();
+            expiredRecord.ExpiresUtc = DateTime.UtcNow.AddHours(-1);
+            sessionStore[expiredToken] = expiredRecord;
+
+            RequestContext request = new RequestContext();
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["cookie"] = "wil_session=" + expiredToken;
+            request.RemoteAddress = IPAddress.Parse("192.168.1.50");
+
+            server.IsWebRequestAuthorized(request);
+
+            if (sessionStore.ContainsKey(expiredToken))
+            {
+                return "expected an expired session found during IsWebRequestAuthorized to be pruned from sessionStore immediately, not left to linger until the next login";
+            }
+            return null;
+        }
+
+        // The existing end-to-end session test (TestSessionLifecycleEndToEndLoginAuthorizeLogout)
+        // covers login->authorize->logout; this covers the other session-killing
+        // path this project's own backlog flagged as untested - a SUCCESSFUL
+        // password rotation must invalidate every session that predates it, not
+        // just fail safely if the save itself fails (already covered by
+        // TestChangeAdminPasswordDoesNotMutateStateWhenSaveFails).
+        private static string TestChangeAdminPasswordInvalidatesSessionsOnSuccess()
+        {
+            string dataDir = Path.Combine(Path.GetTempPath(), "wil-selftest-password-rotation-session-kill-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataDir);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataDir;
+                options.ConfigPath = Path.Combine(dataDir, "server-config.json");
+                options.WebUsername = "admin";
+                options.WebPassword = "original-password";
+                options.SessionLifetimeHours = 12;
+                InventoryServer server = new InventoryServer(options);
+                IPAddress remoteAddress = IPAddress.Parse("192.168.1.50");
+
+                RequestContext loginRequest = new RequestContext();
+                loginRequest.Method = "POST";
+                loginRequest.Path = "/api/v1/server/login";
+                loginRequest.Headers = new Dictionary<string, string>();
+                loginRequest.RemoteAddress = remoteAddress;
+                loginRequest.Body = "{\"username\":\"admin\",\"password\":\"original-password\"}";
+
+                string preRotationCookie;
+                using (MemoryStream loginStream = new MemoryStream())
+                {
+                    server.SendLoginResult(loginStream, loginRequest);
+                    preRotationCookie = ExtractSessionCookieValue(Encoding.UTF8.GetString(loginStream.ToArray()));
+                    if (preRotationCookie == null)
+                    {
+                        return "expected the login response to contain a Set-Cookie: wil_session=... header";
+                    }
+                }
+
+                System.Reflection.MethodInfo changeMethod = typeof(InventoryServer).GetMethod("ChangeAdminPassword", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                string freshCookie;
+                using (MemoryStream rotateStream = new MemoryStream())
+                {
+                    RequestContext rotateRequest = new RequestContext();
+                    rotateRequest.Headers = new Dictionary<string, string>();
+                    rotateRequest.Body = "{\"currentPassword\":\"original-password\",\"newUsername\":\"admin\",\"newPassword\":\"new-password-value\"}";
+                    try
+                    {
+                        changeMethod.Invoke(server, new object[] { rotateStream, rotateRequest });
+                    }
+                    catch (System.Reflection.TargetInvocationException ex)
+                    {
+                        if (ex.InnerException is UnauthorizedAccessException)
+                        {
+                            // This test process itself is not running as
+                            // Administrators/SYSTEM (a documented, expected
+                            // condition for --console/dev use without explicit
+                            // elevation, or a locked-down CI/sandbox account -
+                            // see SaveServerConfigValues' own comment). A
+                            // successful rotation's save requires that
+                            // privilege on every save now, not just a later
+                            // one, so this specific "kills sessions on
+                            // SUCCESS" property cannot be exercised live in
+                            // this environment - the "does nothing bad happen
+                            // on FAILURE" half is already independently
+                            // covered by TestChangeAdminPasswordDoesNotMutateStateWhenSaveFails.
+                            return null;
+                        }
+                        throw;
+                    }
+                    freshCookie = ExtractSessionCookieValue(Encoding.UTF8.GetString(rotateStream.ToArray()));
+                    if (freshCookie == null)
+                    {
+                        return "expected a successful password rotation to issue the caller a fresh session cookie";
+                    }
+                }
+
+                RequestContext preRotationRequest = new RequestContext();
+                preRotationRequest.Headers = new Dictionary<string, string>();
+                preRotationRequest.Headers["cookie"] = preRotationCookie;
+                preRotationRequest.RemoteAddress = remoteAddress;
+                if (server.IsWebRequestAuthorized(preRotationRequest))
+                {
+                    return "expected the pre-rotation session cookie to stop authorizing once the password rotation succeeded";
+                }
+
+                RequestContext freshRequest = new RequestContext();
+                freshRequest.Headers = new Dictionary<string, string>();
+                freshRequest.Headers["cookie"] = freshCookie;
+                freshRequest.RemoteAddress = remoteAddress;
+                if (!server.IsWebRequestAuthorized(freshRequest))
+                {
+                    return "expected the fresh session cookie issued by the successful rotation to authorize a request";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataDir, true); } catch { }
+            }
+        }
+
+        // default-src does NOT cover form-action (a CSP quirk - it has no
+        // fallback), so without an explicit directive an injected
+        // <form action="https://evil..."> phishing overlay (e.g. via the
+        // fallback dashboard JS's unescaped innerHTML sink) would not be
+        // blocked even though inline script execution already is.
+        private static string TestContentSecurityPolicyRestrictsFormAction()
+        {
+            System.Reflection.FieldInfo cspField = typeof(InventoryServer).GetField("ContentSecurityPolicy", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            string csp = (string)cspField.GetValue(null);
+            if (!csp.Contains("form-action 'self'"))
+            {
+                return "expected the Content-Security-Policy to include \"form-action 'self'\", got: " + csp;
+            }
+            return null;
+        }
+
+        private static string TestNormalizeReportIdentifierTreatsBlankSameAsMissing()
+        {
+            string[] blankInputs = { null, "", "   ", "\t" };
+            foreach (string input in blankInputs)
+            {
+                if (NormalizeReportIdentifier(input) != "unknown")
+                {
+                    return "expected a blank/missing identifier ('" + (input ?? "null") + "') to normalize to 'unknown', got '" + NormalizeReportIdentifier(input) + "'";
+                }
+            }
+            if (NormalizeReportIdentifier("REAL-HOST-01") != "REAL-HOST-01")
+            {
+                return "expected a real identifier to pass through unchanged";
+            }
+            return null;
+        }
+
+        private static string ExtractSessionCookieValue(string rawHttpResponse)
+        {
+            const string cookiePrefix = "Set-Cookie: wil_session=";
+            int cookieHeaderStart = rawHttpResponse.IndexOf(cookiePrefix, StringComparison.Ordinal);
+            if (cookieHeaderStart < 0)
+            {
+                return null;
+            }
+            int valueStart = cookieHeaderStart + "Set-Cookie: ".Length;
+            int valueEnd = rawHttpResponse.IndexOf(';', valueStart);
+            if (valueEnd < 0)
+            {
+                return null;
+            }
+            return rawHttpResponse.Substring(valueStart, valueEnd - valueStart);
         }
 
         private static bool ContainsSignature(byte[] data, byte thirdByte, byte fourthByte)
