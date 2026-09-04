@@ -3957,17 +3957,39 @@ namespace WindowsInventoryLite
         // is gone (v0.54.0), this value alone governs every SSH-based install
         // AND uninstall Deploy > Actions runs, so a value like "/etc" or
         // "/usr" would pass the old check straight into a remote
-        // "rm -rf $InstallPath". Require at least two path segments so a
-        // bare top-level directory is rejected without needing to enumerate
-        // every dangerous name.
+        // "rm -rf $InstallPath".
+        //
+        // Was "starts with / and has >= 2 segments" - defeated by traversal
+        // ("/opt/../etc" has 2 segments and no rejected character) and too weak
+        // even without traversal ("/usr/bin", "/etc/systemd" both have 2
+        // segments and are still catastrophic under the remote "rm -rf
+        // $InstallPath" this value ends up in). A denylist of dangerous
+        // directories would still be incomplete by construction - this is an
+        // allowlist instead: the value must be a real subdirectory under /opt/,
+        // and no path segment anywhere may be "." or ".." (checked independently
+        // of the /opt/ prefix, so "/opt/../etc" is caught by the traversal rule
+        // even though it technically starts with "/opt/").
         internal static bool IsValidLinuxInstallPath(string path)
         {
             if (String.IsNullOrEmpty(path) || !path.StartsWith("/"))
             {
                 return false;
             }
-            string[] segments = path.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
-            return segments.Length >= 2;
+            string[] allSegments = path.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (string segment in allSegments)
+            {
+                if (segment == ".." || segment == ".")
+                {
+                    return false;
+                }
+            }
+            if (!path.StartsWith("/opt/", StringComparison.Ordinal))
+            {
+                return false;
+            }
+            string remainder = path.Substring("/opt/".Length);
+            string[] remainderSegments = remainder.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+            return remainderSegments.Length >= 1;
         }
 
         private static readonly Regex HostKeyFingerprintPattern = new Regex(
@@ -10250,6 +10272,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "IsValidSshTarget rejects shell-injection shapes, flag-lookalikes, and empty values", TestIsValidSshTargetRejectsInjectionAndEmpty);
             allPassed &= SelfTestCheck(output, "IsValidLinuxInstallPath accepts a real multi-segment absolute path", TestIsValidLinuxInstallPathAcceptsMultiSegmentPath);
             allPassed &= SelfTestCheck(output, "IsValidLinuxInstallPath rejects a bare top-level directory, a relative path, and empty/null", TestIsValidLinuxInstallPathRejectsTopLevelAndInvalid);
+            allPassed &= SelfTestCheck(output, "IsValidLinuxInstallPath rejects .. and . traversal even inside an /opt/ path", TestIsValidLinuxInstallPathRejectsTraversal);
             allPassed &= SelfTestCheck(output, "GenerateRandomToken returns a 64-character lowercase hex string, different each call", TestGenerateRandomTokenShape);
             allPassed &= SelfTestCheck(output, "Ingestion token configured-state reflects whether options.Token is set", TestSendIngestionTokenStatusReflectsConfiguredState);
             allPassed &= SelfTestCheck(output, "Linux SSH tools status reflects plink.exe/pscp.exe file presence", TestSendLinuxSshToolsStatusReflectsFilePresence);
@@ -12414,6 +12437,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 return "expected a bare top-level installPath ('/etc') to be rejected";
             }
+            if (TryValidateLinuxPushValues("https://example.local", "a1b2c3", "/opt/../etc", out error))
+            {
+                return "expected a traversal installPath ('/opt/../etc') to be rejected";
+            }
             return null;
         }
 
@@ -13515,7 +13542,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private static string TestIsValidLinuxInstallPathAcceptsMultiSegmentPath()
         {
-            string[] valid = { "/opt/windows-inventory-lite", "/home/svc/wil", "/opt/wil/" };
+            string[] valid = { "/opt/windows-inventory-lite", "/opt/wil/", "/opt/a/b" };
             foreach (string path in valid)
             {
                 if (!IsValidLinuxInstallPath(path))
@@ -13528,12 +13555,25 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private static string TestIsValidLinuxInstallPathRejectsTopLevelAndInvalid()
         {
-            string[] invalid = { "/", "/usr", "/etc", "/opt", "opt/wil", "", null };
+            string[] invalid = { "/", "/usr", "/etc", "/opt", "/opt/", "opt/wil", "", null, "/home/foo", "/usr/bin", "/etc/systemd", "/var/lib" };
             foreach (string path in invalid)
             {
                 if (IsValidLinuxInstallPath(path))
                 {
                     return "expected path '" + path + "' to be rejected, but IsValidLinuxInstallPath accepted it";
+                }
+            }
+            return null;
+        }
+
+        private static string TestIsValidLinuxInstallPathRejectsTraversal()
+        {
+            string[] traversal = { "/opt/../etc", "/opt/../../etc", "/../etc", "/opt/./etc", "/opt/wil/../../etc" };
+            foreach (string path in traversal)
+            {
+                if (IsValidLinuxInstallPath(path))
+                {
+                    return "expected traversal path '" + path + "' to be rejected, but IsValidLinuxInstallPath accepted it";
                 }
             }
             return null;
