@@ -6071,6 +6071,26 @@ namespace WindowsInventoryLite
                         }
                     }
 
+                    ArrayList licenses = client.ContainsKey("licenses") ? client["licenses"] as ArrayList : null;
+                    if (licenses != null)
+                    {
+                        ArrayList redactedLicenses = new ArrayList();
+                        foreach (object licenseItem in licenses)
+                        {
+                            Dictionary<string, object> license = licenseItem as Dictionary<string, object>;
+                            if (license == null)
+                            {
+                                continue;
+                            }
+                            Dictionary<string, object> redacted = new Dictionary<string, object>();
+                            redacted["product"] = license.ContainsKey("product") ? license["product"] : null;
+                            redacted["source"] = license.ContainsKey("source") ? license["source"] : null;
+                            redactedLicenses.Add(redacted);
+                        }
+                        client["licenses"] = redactedLicenses;
+                        client["licenseKeyCount"] = redactedLicenses.Count;
+                    }
+
                     clients.Add(client);
                 }
                 catch
@@ -10773,6 +10793,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue flags a matching-IP rejection newer than the client's last report", TestComputeClientTokenIssueRecentRejectionFlagged);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue picks the newest matching-IP entry's reason when several match", TestComputeClientTokenIssueNewestWins);
             allPassed &= SelfTestCheck(output, "LoadClientReports sets tokenIssue on a client whose IP has a newer rejected attempt", TestLoadClientReportsSetsTokenIssueFromRejectionLog);
+            allPassed &= SelfTestCheck(output, "LoadClientReports strips license keys (not just masks them) from the bulk client listing", TestLoadClientReportsRedactsLicenseKeysFromBulkListing);
             allPassed &= SelfTestCheck(output, "ResolveEffectiveToken falls back to the live server token when the request supplies none", TestResolveEffectiveTokenFallsBackToLiveTokenWhenBlank);
             allPassed &= SelfTestCheck(output, "RequiresIngestionTokenRiskAcknowledgment only fires on an actual on-to-off transition without prior acknowledgment", TestRequiresIngestionTokenRiskAcknowledgmentOnlyWhenTurningEnforcementOff);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
@@ -12390,6 +12411,62 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestLoadClientReportsRedactsLicenseKeysFromBulkListing()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-license-redact-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                report["computerName"] = "TEST-PC";
+                ArrayList licenses = new ArrayList();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["product"] = "Test Product";
+                entry["source"] = @"HKLM\SOFTWARE\Test\TestValue";
+                entry["key"] = "dpapi:should-never-appear-in-bulk-listing";
+                licenses.Add(entry);
+                report["licenses"] = licenses;
+                File.WriteAllText(Path.Combine(dataPath, "TEST-PC.json"), serializer.Serialize(report), Encoding.UTF8);
+
+                ArrayList clients = server.LoadClientReports();
+                if (clients.Count != 1)
+                {
+                    return "expected exactly one client report, got " + clients.Count;
+                }
+
+                Dictionary<string, object> client = clients[0] as Dictionary<string, object>;
+                ArrayList redactedLicenses = client["licenses"] as ArrayList;
+                if (redactedLicenses == null || redactedLicenses.Count != 1)
+                {
+                    return "expected the licenses array to survive redaction with the same entry count";
+                }
+
+                Dictionary<string, object> redactedEntry = redactedLicenses[0] as Dictionary<string, object>;
+                if (redactedEntry.ContainsKey("key"))
+                {
+                    return "expected the 'key' field to be stripped entirely from the bulk listing, not just masked";
+                }
+                if (GetStringValue(redactedEntry, "product") != "Test Product")
+                {
+                    return "expected the 'product' field to survive redaction";
+                }
+                if (!client.ContainsKey("licenseKeyCount") || Convert.ToInt32(client["licenseKeyCount"]) != 1)
+                {
+                    return "expected licenseKeyCount to be computed as 1";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
             }
         }
 
