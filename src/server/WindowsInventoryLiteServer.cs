@@ -8405,7 +8405,20 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 // holds the auth credential and encrypted secrets, so a
                 // process crash or a concurrent reader must never be able to
                 // observe a truncated/partial write.
+                //
+                // The temp file's ACL is restricted BEFORE any secret bytes
+                // are written into it, not after the swap - writing first
+                // and restricting only the final path (the previous order)
+                // left the temp file under the containing directory's
+                // inherited ACL for the whole window it held the real
+                // content, and if the subsequent File.Replace/Move then
+                // threw, that weakly-protected file was left behind
+                // permanently. Mirrors Install-Server.ps1's
+                // Set-RestrictedFileAcl, which fixed the identical ordering
+                // bug on the PowerShell side.
                 string tempPath = options.ConfigPath + ".tmp";
+                File.WriteAllText(tempPath, "", new UTF8Encoding(false));
+                ApplyRestrictedConfigAcl(tempPath);
                 File.WriteAllText(tempPath, json, new UTF8Encoding(false));
                 if (File.Exists(options.ConfigPath))
                 {
@@ -10259,6 +10272,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields is a no-op for a brand-new computer with sync disabled", TestComputeAdSyncFieldsNoOpForNewComputerWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
+            allPassed &= SelfTestCheck(output, "SaveServerConfigValues leaves the final config file with a restricted ACL, no leftover .tmp file", TestSaveServerConfigValuesRestrictsTempFileBeforeWritingContent);
             allPassed &= SelfTestCheck(output, "Linux known-hosts store round-trips and overwrites by host:port", TestLinuxKnownHostsRoundTrip);
             allPassed &= SelfTestCheck(output, "A malformed known-hosts file surfaces as a read error from FindLinuxKnownHost, not as 'no record found'", TestLinuxKnownHostsReadFailureSurfacesAsError);
             allPassed &= SelfTestCheck(output, "TryParseHostKeyDetails extracts type+fingerprint from a real captured plink failure, ignores unrelated failures", TestParseHostKeyFingerprintFromRealCapturedOutput);
@@ -13243,6 +13257,63 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // Proves the success-path final ACL only - SaveServerConfigValues's
+        // temp file is restricted and renamed away within a single lock
+        // statement, so a same-process test observes only the end state.
+        // The actual bug this guards against (a temp file left behind under
+        // a broad inherited ACL if File.Replace/Move then throws) needs a
+        // forced mid-write failure to reproduce, which was verified live
+        // (see Task 6's report) rather than through this self-test alone.
+        private static string TestSaveServerConfigValuesRestrictsTempFileBeforeWritingContent()
+        {
+            string dataDir = Path.Combine(Path.GetTempPath(), "wil-selftest-acl-race-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataDir);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataDir;
+                options.ConfigPath = Path.Combine(dataDir, "server-config.json");
+                InventoryServer server = new InventoryServer(options);
+
+                System.Reflection.MethodInfo saveMethod = typeof(InventoryServer).GetMethod("SaveServerConfigValues", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Dictionary<string, string> updates = new Dictionary<string, string>();
+                updates["WebUsername"] = "admin";
+                updates["WebPassword"] = "test-password-value";
+                saveMethod.Invoke(server, new object[] { updates });
+
+                string tempPath = options.ConfigPath + ".tmp";
+                if (File.Exists(tempPath))
+                {
+                    return "expected the .tmp file to be gone after a successful save (renamed over the final path), but it still exists - the fix must not leave a stale temp file behind on the success path";
+                }
+                if (!File.Exists(options.ConfigPath))
+                {
+                    return "expected server-config.json to exist after a successful save";
+                }
+
+                FileSecurity finalAcl = File.GetAccessControl(options.ConfigPath);
+                AuthorizationRuleCollection rules = finalAcl.GetAccessRules(true, false, typeof(SecurityIdentifier));
+                bool hasBuiltinUsersRule = false;
+                foreach (FileSystemAccessRule rule in rules)
+                {
+                    SecurityIdentifier usersSid = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+                    if (rule.IdentityReference is SecurityIdentifier && ((SecurityIdentifier)rule.IdentityReference) == usersSid)
+                    {
+                        hasBuiltinUsersRule = true;
+                    }
+                }
+                if (hasBuiltinUsersRule)
+                {
+                    return "expected server-config.json's final ACL to NOT grant BUILTIN\\Users any explicit rule - ApplyRestrictedConfigAcl should have replaced inherited permissions";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataDir, true); } catch { }
             }
         }
 
