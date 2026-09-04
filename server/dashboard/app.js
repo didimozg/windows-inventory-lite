@@ -40,6 +40,7 @@
       hwDisk: { key: 'model', dir: 1 },
       hwRam: { key: 'totalMb', dir: -1 },
       licenses: { key: 'name', dir: 1 },
+      licenseKeySources: { key: 'product', dir: 1 },
       linuxServices: { key: 'name', dir: 1 },
       ingestionRejections: { key: 'timestampUtc', dir: -1 },
       // Sorts the merged Deploy > Updates table (Windows + Linux outdated
@@ -722,6 +723,16 @@
       case 'version': return (license.version || '').toLowerCase();
       case 'license': return (license.license || '').toLowerCase();
       case 'comment': return (license.comment || '').toLowerCase();
+      default: return '';
+    }
+  }
+
+  function licenseKeySourceSortValue(source, key) {
+    switch (key) {
+      case 'product': return (source.product || '').toLowerCase();
+      case 'registryHive': return (source.registryHive || '').toLowerCase();
+      case 'registryPath': return (source.registryPath || '').toLowerCase();
+      case 'valueName': return (source.valueName || '').toLowerCase();
       default: return '';
     }
   }
@@ -3351,16 +3362,24 @@
 
   function loadLicenseKeySources() {
     fetch('/api/v1/license-key-sources', { cache: 'no-store' })
-      .then(r => r.json())
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
       .then(data => {
         state.licenseKeySources = data.licenseKeySources || [];
         renderLicenseKeySources();
+      })
+      .catch(error => {
+        byId('licenseKeySourcesBody').innerHTML = `<tr><td colspan="6" class="empty">License key sources are not available: ${escapeHtml(error.message)}</td></tr>`;
       });
   }
 
   function renderLicenseKeySources() {
     const tbody = byId('licenseKeySourcesBody');
-    tbody.innerHTML = state.licenseKeySources.map(source => `
+    const { key: sortKey, dir: sortDir } = state.sort.licenseKeySources;
+    const items = applySort(state.licenseKeySources, s => licenseKeySourceSortValue(s, sortKey), sortDir);
+    tbody.innerHTML = items.map(source => `
       <tr>
         <td>${escapeHtml(source.product)}</td>
         <td>${escapeHtml(source.registryHive)}</td>
@@ -3386,6 +3405,7 @@
     byId('licenseKeySourceRegistryHive').value = source ? source.registryHive : 'HKEY_LOCAL_MACHINE';
     byId('licenseKeySourceRegistryPath').value = source ? source.registryPath : '';
     byId('licenseKeySourceValueName').value = source ? source.valueName : '';
+    byId('licenseKeySourceMessage').className = 'pkg-message hidden';
     byId('licenseKeySourceForm').classList.remove('hidden');
   }
 
@@ -3411,21 +3431,30 @@
     })
       .then(r => r.json().then(data => ({ ok: r.ok, data })))
       .then(({ ok, data }) => {
-        const messageEl = byId('licenseKeySourceMessage');
-        if (!ok) {
-          messageEl.textContent = data.error || 'Failed to save.';
-          messageEl.classList.remove('hidden');
-          return;
-        }
-        messageEl.classList.add('hidden');
+        if (!ok) throw new Error(data.error || 'Failed to save.');
         closeLicenseKeySourceForm();
         loadLicenseKeySources();
+      })
+      .catch(error => {
+        const messageEl = byId('licenseKeySourceMessage');
+        messageEl.textContent = error.message;
+        messageEl.className = 'pkg-message error';
       });
   }
 
   function removeLicenseKeySource(sourceId) {
+    const source = state.licenseKeySources.find(s => s.id === sourceId);
+    const confirmed = window.confirm(`Delete license key source for ${source ? source.product : 'this item'}?`);
+    if (!confirmed) return;
+
     fetch(`/api/v1/license-key-sources/${encodeURIComponent(sourceId)}`, { method: 'DELETE', cache: 'no-store' })
-      .then(() => loadLicenseKeySources());
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        loadLicenseKeySources();
+      })
+      .catch(error => {
+        window.alert(`Failed to delete license key source: ${error.message}`);
+      });
   }
 
   function getSoftwareGroups(clients) {
@@ -4629,15 +4658,17 @@
         current.dir = 1;
       }
       if (state.page[table] !== undefined) state.page[table] = 1;
-      // render() doesn't touch the Linux Services table (it's loaded and
-      // rendered through its own loadLinuxClients()/setView('linuxServices')
-      // path, not the main render pipeline) - re-render it directly. Every
-      // other table, including the merged Clients table
-      // (data-sort-table="clients"), goes through render().
+      // render() doesn't touch the Linux Services, Updates, or License key
+      // sources tables (each is loaded and rendered through its own
+      // load.../setView() path, not the main render pipeline) - re-render
+      // them directly. Every other table, including the merged Clients
+      // table (data-sort-table="clients"), goes through render().
       if (table === 'linuxServices') {
         renderLinuxServicesTable(state.linuxClients);
       } else if (table === 'updates') {
         renderMergedUpdatesTable();
+      } else if (table === 'licenseKeySources') {
+        renderLicenseKeySources();
       } else {
         render();
       }
