@@ -872,6 +872,7 @@ namespace WindowsInventoryLite
         private volatile string lastScheduledUpdateJobId;
         private volatile string lastScheduledLinuxUpdateJobId;
         private readonly object licensesLock = new object();
+        private readonly object licenseKeySourcesLock = new object();
         private readonly object certificateHistoryLock = new object();
         private readonly object listenerRestartLock = new object();
         // HTTP and HTTPS are two fully independent listeners on two
@@ -1760,6 +1761,22 @@ namespace WindowsInventoryLite
                     else if (request.Method == "DELETE" && request.Path.StartsWith("/api/v1/licenses/", StringComparison.OrdinalIgnoreCase))
                     {
                         DeleteLicense(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/license-key-sources")
+                    {
+                        SendLicenseKeySources(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/license-key-sources")
+                    {
+                        CreateLicenseKeySource(stream, request);
+                    }
+                    else if (request.Method == "PUT" && request.Path.StartsWith("/api/v1/license-key-sources/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        UpdateLicenseKeySource(stream, request);
+                    }
+                    else if (request.Method == "DELETE" && request.Path.StartsWith("/api/v1/license-key-sources/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        DeleteLicenseKeySource(stream, request);
                     }
                     else if (request.Method == "GET" && (request.Path == "/" || request.Path == "/index.html"))
                     {
@@ -9531,6 +9548,271 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendJson(stream, "{\"status\":\"deleted\"}");
         }
 
+        // Admin-managed catalog of {product, registryHive, registryPath,
+        // valueName} entries telling Windows clients which registry values
+        // to read for third-party license keys. Holds no secret material
+        // itself - only where to look - so unlike licenses.json it does not
+        // need ApplyRestrictedConfigAcl's Administrators+SYSTEM-only
+        // restriction. Stored the same way as licenses.json (own subfolder,
+        // full-array-rewrite on every save) for consistency, not because
+        // this data is sensitive.
+        private string GetLicenseKeySourcesDirectory()
+        {
+            return Path.Combine(options.DataPath, "_license-key-sources");
+        }
+
+        private string GetLicenseKeySourcesFilePath()
+        {
+            return Path.Combine(GetLicenseKeySourcesDirectory(), "license-key-sources.json");
+        }
+
+        private List<Dictionary<string, object>> LoadLicenseKeySources()
+        {
+            string path = GetLicenseKeySourcesFilePath();
+            if (!File.Exists(path))
+            {
+                return new List<Dictionary<string, object>>();
+            }
+
+            List<Dictionary<string, object>> sources = new List<Dictionary<string, object>>();
+            try
+            {
+                JavaScriptSerializer serializer = CreateJsonSerializer();
+                string json = File.ReadAllText(path, Encoding.UTF8);
+                ArrayList raw = serializer.Deserialize<ArrayList>(json);
+                if (raw != null)
+                {
+                    foreach (object item in raw)
+                    {
+                        Dictionary<string, object> record = item as Dictionary<string, object>;
+                        if (record != null)
+                        {
+                            sources.Add(record);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return sources;
+        }
+
+        private void SaveLicenseKeySources(List<Dictionary<string, object>> sources)
+        {
+            string directory = GetLicenseKeySourcesDirectory();
+            if (!Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            string json = serializer.Serialize(sources);
+            File.WriteAllText(GetLicenseKeySourcesFilePath(), json, new UTF8Encoding(false));
+        }
+
+        private static bool IsValidRegistryHiveName(string hive)
+        {
+            return String.Equals(hive, "HKEY_LOCAL_MACHINE", StringComparison.OrdinalIgnoreCase)
+                || String.Equals(hive, "HKEY_CURRENT_USER", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string ExtractLicenseKeySourceId(string path)
+        {
+            const string prefix = "/api/v1/license-key-sources/";
+            string id = path.Substring(prefix.Length);
+            int queryStart = id.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                id = id.Substring(0, queryStart);
+            }
+            return Uri.UnescapeDataString(id).Trim();
+        }
+
+        private void SendLicenseKeySources(Stream stream)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            List<Dictionary<string, object>> sources;
+            lock (licenseKeySourcesLock)
+            {
+                sources = LoadLicenseKeySources();
+            }
+
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["licenseKeySources"] = sources;
+            SendJson(stream, serializer.Serialize(response));
+        }
+
+        private void CreateLicenseKeySource(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string product = Convert.ToString(payload.ContainsKey("product") ? payload["product"] : "").Trim();
+            string registryHive = Convert.ToString(payload.ContainsKey("registryHive") ? payload["registryHive"] : "").Trim();
+            string registryPath = Convert.ToString(payload.ContainsKey("registryPath") ? payload["registryPath"] : "").Trim();
+            string valueName = Convert.ToString(payload.ContainsKey("valueName") ? payload["valueName"] : "").Trim();
+
+            if (String.IsNullOrEmpty(product))
+            {
+                SendText(stream, "{\"error\":\"product is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            if (!IsValidRegistryHiveName(registryHive))
+            {
+                SendText(stream, "{\"error\":\"registryHive must be HKEY_LOCAL_MACHINE or HKEY_CURRENT_USER\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            if (String.IsNullOrEmpty(registryPath))
+            {
+                SendText(stream, "{\"error\":\"registryPath is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            if (String.IsNullOrEmpty(valueName))
+            {
+                SendText(stream, "{\"error\":\"valueName is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string nowUtc = DateTime.UtcNow.ToString("o");
+            Dictionary<string, object> record = new Dictionary<string, object>();
+            record["id"] = Guid.NewGuid().ToString("N");
+            record["product"] = product;
+            record["registryHive"] = registryHive;
+            record["registryPath"] = registryPath;
+            record["valueName"] = valueName;
+            record["createdAt"] = nowUtc;
+            record["updatedAt"] = nowUtc;
+
+            lock (licenseKeySourcesLock)
+            {
+                List<Dictionary<string, object>> sources = LoadLicenseKeySources();
+                sources.Add(record);
+                SaveLicenseKeySources(sources);
+            }
+
+            SendJson(stream, serializer.Serialize(record));
+        }
+
+        private void UpdateLicenseKeySource(Stream stream, RequestContext request)
+        {
+            string id = ExtractLicenseKeySourceId(request.Path);
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string product = Convert.ToString(payload.ContainsKey("product") ? payload["product"] : "").Trim();
+            string registryHive = Convert.ToString(payload.ContainsKey("registryHive") ? payload["registryHive"] : "").Trim();
+            string registryPath = Convert.ToString(payload.ContainsKey("registryPath") ? payload["registryPath"] : "").Trim();
+            string valueName = Convert.ToString(payload.ContainsKey("valueName") ? payload["valueName"] : "").Trim();
+
+            if (String.IsNullOrEmpty(product))
+            {
+                SendText(stream, "{\"error\":\"product is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            if (!IsValidRegistryHiveName(registryHive))
+            {
+                SendText(stream, "{\"error\":\"registryHive must be HKEY_LOCAL_MACHINE or HKEY_CURRENT_USER\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            if (String.IsNullOrEmpty(registryPath))
+            {
+                SendText(stream, "{\"error\":\"registryPath is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            if (String.IsNullOrEmpty(valueName))
+            {
+                SendText(stream, "{\"error\":\"valueName is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            lock (licenseKeySourcesLock)
+            {
+                List<Dictionary<string, object>> sources = LoadLicenseKeySources();
+                Dictionary<string, object> record = null;
+                for (int i = 0; i < sources.Count; i++)
+                {
+                    if (String.Equals(GetStringValue(sources[i], "id"), id, StringComparison.OrdinalIgnoreCase))
+                    {
+                        record = sources[i];
+                        break;
+                    }
+                }
+
+                if (record == null)
+                {
+                    SendText(stream, "{\"error\":\"license key source not found\"}", "application/json; charset=utf-8", 404);
+                    return;
+                }
+
+                record["product"] = product;
+                record["registryHive"] = registryHive;
+                record["registryPath"] = registryPath;
+                record["valueName"] = valueName;
+                record["updatedAt"] = DateTime.UtcNow.ToString("o");
+
+                SaveLicenseKeySources(sources);
+                SendJson(stream, serializer.Serialize(record));
+            }
+        }
+
+        private void DeleteLicenseKeySource(Stream stream, RequestContext request)
+        {
+            string id = ExtractLicenseKeySourceId(request.Path);
+
+            lock (licenseKeySourcesLock)
+            {
+                List<Dictionary<string, object>> sources = LoadLicenseKeySources();
+                int indexToRemove = -1;
+                for (int i = 0; i < sources.Count; i++)
+                {
+                    if (String.Equals(GetStringValue(sources[i], "id"), id, StringComparison.OrdinalIgnoreCase))
+                    {
+                        indexToRemove = i;
+                        break;
+                    }
+                }
+
+                if (indexToRemove < 0)
+                {
+                    SendText(stream, "{\"error\":\"license key source not found\"}", "application/json; charset=utf-8", 404);
+                    return;
+                }
+
+                sources.RemoveAt(indexToRemove);
+                SaveLicenseKeySources(sources);
+            }
+
+            SendJson(stream, "{\"status\":\"deleted\"}");
+        }
+
         private static string GetExeVersion(string path)
         {
             try
@@ -10435,6 +10717,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields is a no-op for a brand-new computer with sync disabled", TestComputeAdSyncFieldsNoOpForNewComputerWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
+            allPassed &= SelfTestCheck(output, "IsValidRegistryHiveName accepts only HKEY_LOCAL_MACHINE/HKEY_CURRENT_USER", TestIsValidRegistryHiveNameAcceptsOnlyKnownHives);
+            allPassed &= SelfTestCheck(output, "License key sources CRUD storage round-trips through disk", TestLicenseKeySourcesCrudRoundTrip);
             allPassed &= SelfTestCheck(output, "SaveServerConfigValues leaves the final config file with a restricted ACL, no leftover .tmp file", TestSaveServerConfigValuesRestrictsTempFileBeforeWritingContent);
             allPassed &= SelfTestCheck(output, "Linux known-hosts store round-trips and overwrites by host:port", TestLinuxKnownHostsRoundTrip);
             allPassed &= SelfTestCheck(output, "A malformed known-hosts file surfaces as a read error from FindLinuxKnownHost, not as 'no record found'", TestLinuxKnownHostsReadFailureSurfacesAsError);
@@ -13424,6 +13708,69 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (!hasSystemFullControl)
                 {
                     return "expected SYSTEM to have FullControl on licenses.json";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestIsValidRegistryHiveNameAcceptsOnlyKnownHives()
+        {
+            if (!IsValidRegistryHiveName("HKEY_LOCAL_MACHINE"))
+            {
+                return "expected HKEY_LOCAL_MACHINE to be valid";
+            }
+            if (!IsValidRegistryHiveName("HKEY_CURRENT_USER"))
+            {
+                return "expected HKEY_CURRENT_USER to be valid";
+            }
+            if (IsValidRegistryHiveName("HKEY_CLASSES_ROOT"))
+            {
+                return "expected HKEY_CLASSES_ROOT to be rejected";
+            }
+            if (IsValidRegistryHiveName(""))
+            {
+                return "expected an empty string to be rejected";
+            }
+            return null;
+        }
+
+        private static string TestLicenseKeySourcesCrudRoundTrip()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-license-key-sources-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> sources = server.LoadLicenseKeySources();
+                if (sources.Count != 0)
+                {
+                    return "expected an empty list before any source is saved";
+                }
+
+                Dictionary<string, object> record = new Dictionary<string, object>();
+                record["id"] = "test-id";
+                record["product"] = "Test Product";
+                record["registryHive"] = "HKEY_LOCAL_MACHINE";
+                record["registryPath"] = @"SOFTWARE\Test";
+                record["valueName"] = "TestValue";
+                sources.Add(record);
+                server.SaveLicenseKeySources(sources);
+
+                List<Dictionary<string, object>> reloaded = server.LoadLicenseKeySources();
+                if (reloaded.Count != 1)
+                {
+                    return "expected exactly one source after SaveLicenseKeySources, got " + reloaded.Count;
+                }
+                if (GetStringValue(reloaded[0], "product") != "Test Product")
+                {
+                    return "expected the saved product name to round-trip through disk";
                 }
                 return null;
             }
