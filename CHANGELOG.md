@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.54.9]
+
+### Security
+
+- Capped `computerName`/`hostname` length on all three ingestion endpoints (Windows, Linux inventory, Linux service-status) at 255 characters, rejected before `Path.Combine`. An unbounded value previously threw `PathTooLongException`, caught only by the outer handler, which writes the full exception to the Windows Event Log and returns `500` - reachable with zero credentials whenever no ingestion token is configured (the default until one is set).
+- The embedded fallback dashboard JS (served for `/app.js` only when the real file is missing from `ContentPath`) built its inventory table via a `text()` helper that normalized but never escaped HTML, then assigned the result through `.innerHTML=` - a malicious or compromised managed client could inject markup/script that executes in the dashboard admin's session the moment this fallback is served. Added an `escapeHtml` helper (matching the real `app.js`'s own) and applied it to every client-reported field in the row template.
+- `Uninstall-Server.ps1` deleted `InstallPath`/`ContentPath`/`ClientPackagePath`/`DataPath` (all read from `server-config.json`, an operator-supplied `-ConfigPath`) with no validation. Not reachable via any HTTP API (none of these keys are writable through the dashboard), but added a guard rejecting bare drive roots and well-known Windows system directories before each `Remove-Item -Recurse -Force` - a shape check rather than a `%ProgramData%`-only allowlist, since a custom `-InstallPath` is a supported, documented option.
+
+196 self-tests (was 194), full Pester suite (133, was 129) green under Windows PowerShell 5.1.
+
 ## [0.54.8]
 
 ### Fixed

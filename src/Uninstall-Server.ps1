@@ -26,6 +26,36 @@ function Get-ConfigValue {
     return $null
 }
 
+# installPath/contentPath/clientPackagePath/dataPath below all come from
+# server-config.json (an operator-supplied -ConfigPath), with no validation
+# before reaching Remove-Item -Recurse -Force further down - a malformed or
+# maliciously-crafted config could point one of them at C:\, C:\Windows, or
+# similar. Not reachable via any HTTP API today (none of these keys are
+# writable through SaveServerConfigValues - they're only ever set by
+# Install-Server.ps1 from its own install-time parameters), but the same
+# "not reachable today" reasoning already stopped being true once for this
+# project's Linux install-path field. This can't use the same
+# %ProgramData%-only allowlist the Windows client-side sinks use, since
+# -InstallPath is a documented, supported custom-path option for
+# Install-Server.ps1 (any real custom install must still be removable) -
+# a shape guard against known-catastrophic locations instead.
+function Test-IsPathSafeToRemove {
+    param([string]$Path)
+
+    $resolved = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $driveRoot = [System.IO.Path]::GetPathRoot($resolved).TrimEnd('\')
+    if ($resolved -eq $driveRoot) {
+        throw "Refusing to delete '$Path' (resolves to '$resolved') - a bare drive root is never a real Windows Inventory Lite install path."
+    }
+
+    $systemPaths = @($env:SystemRoot, $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData) | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') }
+    foreach ($systemPath in $systemPaths) {
+        if ($resolved -eq $systemPath) {
+            throw "Refusing to delete '$Path' (resolves to '$resolved') - this is a well-known Windows system directory, not a real Windows Inventory Lite install path."
+        }
+    }
+}
+
 function Read-ServerConfig {
     param([string]$Path)
 
@@ -97,12 +127,14 @@ foreach ($ruleName in @('Windows Inventory Lite Server (HTTP)', 'Windows Invento
 
 foreach ($path in @($installPath, $contentPath, $clientPackagePath)) {
     if ((Test-Path -LiteralPath $path) -and $PSCmdlet.ShouldProcess($path, 'Remove directory')) {
+        Test-IsPathSafeToRemove -Path $path
         Remove-Item -LiteralPath $path -Recurse -Force
     }
 }
 
 if ($RemoveData) {
     if ((Test-Path -LiteralPath $dataPath) -and $PSCmdlet.ShouldProcess($dataPath, 'Remove inventory data')) {
+        Test-IsPathSafeToRemove -Path $dataPath
         Remove-Item -LiteralPath $dataPath -Recurse -Force
     }
     if ((Test-Path -LiteralPath $ConfigPath) -and $PSCmdlet.ShouldProcess($ConfigPath, 'Remove server configuration')) {
