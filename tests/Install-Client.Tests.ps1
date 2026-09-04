@@ -7,6 +7,14 @@ Describe 'Windows Inventory Lite Install-Client client-data layout' {
         . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory'
     }
 
+    It 'rejects a shell-unsafe InstallPath' {
+        { . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory' -InstallPath 'C:\wil&calc.exe' } | Should -Throw '*InstallPath*'
+    }
+
+    It 'accepts a safe InstallPath' {
+        { . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory' -InstallPath 'C:\ProgramData\WindowsInventoryLite\client-data' } | Should -Not -Throw
+    }
+
     It 'Get-ClientServiceCommand embeds --output and --debug-log-path' {
         $command = Get-ClientServiceCommand -ServicePath 'C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharePath '' -SharedToken '' -OutputDirectory 'C:\ProgramData\WindowsInventoryLite\client-data' -DebugLogPath 'C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug-client.log'
         $command | Should -Match '--output "C:\\ProgramData\\WindowsInventoryLite\\client-data"'

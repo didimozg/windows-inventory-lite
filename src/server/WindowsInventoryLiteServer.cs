@@ -22,7 +22,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.54.5";
+        internal const string ProductVersion = "0.54.9";
 
         private static int Main(string[] args)
         {
@@ -1858,7 +1858,13 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            string computerName = Convert.ToString(inventory.ContainsKey("computerName") ? inventory["computerName"] : "unknown");
+            string computerName = NormalizeReportIdentifier(inventory.ContainsKey("computerName") ? Convert.ToString(inventory["computerName"]) : null);
+            if (IsReportIdentifierTooLong(computerName))
+            {
+                DebugLogger.Log(options, "Client", "Rejected inventory report: computerName exceeds " + MaxReportIdentifierLength + " characters");
+                SendText(stream, "{\"error\":\"computerName is too long\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
             string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
 
             // Read the previous report and compute the AD fields (which may
@@ -2266,7 +2272,13 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            string hostname = Convert.ToString(inventory.ContainsKey("hostname") ? inventory["hostname"] : "unknown");
+            string hostname = NormalizeReportIdentifier(inventory.ContainsKey("hostname") ? Convert.ToString(inventory["hostname"]) : null);
+            if (IsReportIdentifierTooLong(hostname))
+            {
+                DebugLogger.Log(options, "Client", "Rejected Linux inventory report: hostname exceeds " + MaxReportIdentifierLength + " characters");
+                SendText(stream, "{\"error\":\"hostname is too long\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
             string path = Path.Combine(options.LinuxDataPath, SanitizeFileName(hostname) + ".json");
 
             // Same lock-avoidance reasoning as ReceiveInventory: compute the
@@ -2332,7 +2344,13 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            string hostname = Convert.ToString(payload.ContainsKey("hostname") ? payload["hostname"] : "unknown");
+            string hostname = NormalizeReportIdentifier(payload.ContainsKey("hostname") ? Convert.ToString(payload["hostname"]) : null);
+            if (IsReportIdentifierTooLong(hostname))
+            {
+                DebugLogger.Log(options, "Client", "Rejected Linux service-status report: hostname exceeds " + MaxReportIdentifierLength + " characters");
+                SendText(stream, "{\"error\":\"hostname is too long\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
             ArrayList activeUnits = new ArrayList();
             if (payload.ContainsKey("activeUnits") && payload["activeUnits"] is ArrayList)
             {
@@ -3469,10 +3487,10 @@ namespace WindowsInventoryLite
         private void RunClientActionJob(object state)
         {
             InstallJob job = (InstallJob)state;
-            job.Status = "running";
-            job.StartedAtUtc = DateTime.UtcNow;
             lock (installJobsLock)
             {
+                job.Status = "running";
+                job.StartedAtUtc = DateTime.UtcNow;
                 SaveInstallJob(job);
             }
 
@@ -3513,11 +3531,20 @@ namespace WindowsInventoryLite
                 }
             }
 
-            job.CompletedAtUtc = DateTime.UtcNow;
-            job.Status = "completed";
             lock (installJobsLock)
             {
+                job.CompletedAtUtc = DateTime.UtcNow;
+                job.Status = "completed";
                 SaveInstallJob(job);
+                // The on-disk copy (SaveInstallJob, just above) is the durable
+                // record and already omits Password/SshPassword (ToDictionary) -
+                // nothing is lost by also dropping the in-memory entry now that
+                // the job is done. Without this, installJobs grew unbounded for
+                // the server's entire uptime, keeping every job's plaintext
+                // WinRM/SSH password resident in memory long after it was
+                // needed. SendClientInstallJob already falls back to reading
+                // the file when a job isn't found in memory.
+                installJobs.Remove(job.Id);
             }
             CleanupInstallJobLogs();
         }
@@ -3840,6 +3867,19 @@ namespace WindowsInventoryLite
                 return result;
             }
 
+            // Last line of defence, mirroring RunLinuxClientInstallTarget's own
+            // re-validation at its point of use - the caller (StartClientAction)
+            // is currently the only call site and already validates installPath,
+            // but a validator that exists without being re-checked at the actual
+            // point of use is exactly the shape that produced this project's
+            // install-path validation gaps before.
+            if (!IsValidLinuxInstallPath(installPath))
+            {
+                result["status"] = "failed";
+                result["message"] = "installPath must be a real subdirectory under /opt/ (e.g. /opt/windows-inventory-lite), with no '.' or '..' path segment";
+                return result;
+            }
+
             string expectedHostKey = null;
             Dictionary<string, object> knownHost;
             try
@@ -3957,17 +3997,39 @@ namespace WindowsInventoryLite
         // is gone (v0.54.0), this value alone governs every SSH-based install
         // AND uninstall Deploy > Actions runs, so a value like "/etc" or
         // "/usr" would pass the old check straight into a remote
-        // "rm -rf $InstallPath". Require at least two path segments so a
-        // bare top-level directory is rejected without needing to enumerate
-        // every dangerous name.
+        // "rm -rf $InstallPath".
+        //
+        // Was "starts with / and has >= 2 segments" - defeated by traversal
+        // ("/opt/../etc" has 2 segments and no rejected character) and too weak
+        // even without traversal ("/usr/bin", "/etc/systemd" both have 2
+        // segments and are still catastrophic under the remote "rm -rf
+        // $InstallPath" this value ends up in). A denylist of dangerous
+        // directories would still be incomplete by construction - this is an
+        // allowlist instead: the value must be a real subdirectory under /opt/,
+        // and no path segment anywhere may be "." or ".." (checked independently
+        // of the /opt/ prefix, so "/opt/../etc" is caught by the traversal rule
+        // even though it technically starts with "/opt/").
         internal static bool IsValidLinuxInstallPath(string path)
         {
             if (String.IsNullOrEmpty(path) || !path.StartsWith("/"))
             {
                 return false;
             }
-            string[] segments = path.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
-            return segments.Length >= 2;
+            string[] allSegments = path.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (string segment in allSegments)
+            {
+                if (segment == ".." || segment == ".")
+                {
+                    return false;
+                }
+            }
+            if (!path.StartsWith("/opt/", StringComparison.Ordinal))
+            {
+                return false;
+            }
+            string remainder = path.Substring("/opt/".Length);
+            string[] remainderSegments = remainder.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+            return remainderSegments.Length >= 1;
         }
 
         private static readonly Regex HostKeyFingerprintPattern = new Regex(
@@ -5206,10 +5268,21 @@ namespace WindowsInventoryLite
                 {
                     SessionRecord record;
                     sessionStore.TryGetValue(sessionToken, out record);
-                    if (IsSessionValid(record, DateTime.UtcNow))
+                    DateTime now = DateTime.UtcNow;
+                    if (IsSessionValid(record, now))
                     {
-                        record.ExpiresUtc = ComputeSessionExpiry(DateTime.UtcNow, options.SessionLifetimeHours);
+                        record.ExpiresUtc = ComputeSessionExpiry(now, options.SessionLifetimeHours);
                         return true;
+                    }
+                    // A found-but-expired record used to just fall through to
+                    // Basic Auth below, leaving the stale entry in sessionStore
+                    // until the next successful login's own prune swept it out -
+                    // a dashboard tab left open with nobody logging back in
+                    // could linger there indefinitely. Sweeping here too closes
+                    // that gap without adding a new timer/background thread.
+                    if (record != null)
+                    {
+                        PruneExpiredSessionsLocked(now);
                     }
                 }
             }
@@ -6267,7 +6340,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // message reports the exact hash it expected - the fastest way to
         // get a fresh one).
         private const string ContentSecurityPolicy =
-            "default-src 'self'; script-src 'self' 'sha256-rqltRpQDffCU3nbpQC/zdbFn0/Eb4PSGrbmQ8EbS3q4=' 'sha256-307+P/nzCy66y2Q8MR0B+9BDei02iFWi+rMImlh6/C0='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+            "default-src 'self'; script-src 'self' 'sha256-rqltRpQDffCU3nbpQC/zdbFn0/Eb4PSGrbmQ8EbS3q4=' 'sha256-307+P/nzCy66y2Q8MR0B+9BDei02iFWi+rMImlh6/C0='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
         // same-origin (not the stricter no-referrer) deliberately: this
         // dashboard's own pages never navigate cross-origin, so a leak to
@@ -6346,6 +6419,34 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // appends an extension rather than using the sanitized value bare -
         // an underscore prefix breaks the match while keeping the name
         // recognizable.
+        // A present-but-blank computerName/hostname (e.g. "" or "   ") used to
+        // slip past the ContainsKey-only "unknown" fallback at each ingestion
+        // call site, since Convert.ToString("") is "" - not missing - and
+        // SanitizeFileName("") is also "", producing a literal ".json" report
+        // file that LoadClientReports' *.json glob then happily picks up as a
+        // client with no name. Treats blank the same as missing.
+        private static string NormalizeReportIdentifier(string value)
+        {
+            return String.IsNullOrWhiteSpace(value) ? "unknown" : value;
+        }
+
+        // An unreasonably long computerName/hostname used to reach
+        // Path.Combine unchecked, where it throws PathTooLongException -
+        // caught only by HandleClient's outer exception handler, which
+        // writes the full exception to the Windows Event Log and returns
+        // 500. Reachable with zero credentials whenever RequireIngestionToken
+        // is false (the default until a token is configured), so an
+        // unauthenticated, unbounded value could flood the Event Log.
+        // 255 comfortably exceeds any real Windows/Linux hostname (NetBIOS
+        // caps at 15, DNS-style FQDNs at 253) while still catching the
+        // abusive case outright, well before Path.Combine.
+        private const int MaxReportIdentifierLength = 255;
+
+        private static bool IsReportIdentifierTooLong(string value)
+        {
+            return value.Length > MaxReportIdentifierLength;
+        }
+
         private static string SanitizeFileName(string value)
         {
             StringBuilder builder = new StringBuilder();
@@ -6791,7 +6892,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             // set, not just when it's used.
             if (!IsValidLinuxInstallPath(installPath))
             {
-                SendText(stream, "{\"error\":\"installPath must be an absolute Linux path with at least two segments (e.g. /opt/windows-inventory-lite) - a bare top-level directory like /usr or /etc is rejected\"}", "application/json; charset=utf-8", 400);
+                SendText(stream, "{\"error\":\"installPath must be a real subdirectory under /opt/ (e.g. /opt/windows-inventory-lite), with no '.' or '..' path segment\"}", "application/json; charset=utf-8", 400);
                 return;
             }
             int intervalHours = 6;
@@ -7801,7 +7902,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 string linuxDefaultInstallPath = Convert.ToString(payload["linuxDefaultInstallPath"]).Trim();
                 if (!IsValidLinuxInstallPath(linuxDefaultInstallPath))
                 {
-                    SendText(stream, "{\"error\":\"linuxDefaultInstallPath must be an absolute Linux path with at least two segments (e.g. /opt/windows-inventory-lite) - a bare top-level directory like /usr or /etc is rejected, since this value is used in a remote 'rm -rf' during uninstall\"}", "application/json; charset=utf-8", 400);
+                    SendText(stream, "{\"error\":\"linuxDefaultInstallPath must be a real subdirectory under /opt/ (e.g. /opt/windows-inventory-lite), with no '.' or '..' path segment, since this value is used in a remote 'rm -rf' during uninstall\"}", "application/json; charset=utf-8", 400);
                     return;
                 }
                 options.LinuxDefaultInstallPath = linuxDefaultInstallPath;
@@ -8281,13 +8382,28 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return;
             }
 
-            options.WebUsername = newUsername;
-            options.WebPassword = newPassword;
-
+            // Persist FIRST, mutate live state only after the save
+            // succeeds - the previous order mutated options.WebUsername/
+            // WebPassword before persisting, so a save failure (disk
+            // full, AV/backup file lock, an ACL problem like the one
+            // fixed alongside this) left the password changed in memory
+            // (silently reverting on the next restart, since disk still
+            // had the old value) with sessionStore never cleared below -
+            // meaning every pre-rotation session, including one the
+            // admin may be rotating specifically because they suspect
+            // it's compromised, stayed valid. If SaveServerConfigValues
+            // throws here, it propagates to the caller's normal error
+            // handling with options.WebUsername/WebPassword and
+            // sessionStore both untouched - the admin sees a real error
+            // and can retry, with the system in the same consistent
+            // state it was in before the attempt.
             Dictionary<string, string> updates = new Dictionary<string, string>();
             updates["WebUsername"] = newUsername;
             updates["WebPassword"] = newPassword;
             SaveServerConfigValues(updates);
+
+            options.WebUsername = newUsername;
+            options.WebPassword = newPassword;
 
             try
             {
@@ -8383,7 +8499,38 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 // holds the auth credential and encrypted secrets, so a
                 // process crash or a concurrent reader must never be able to
                 // observe a truncated/partial write.
+                //
+                // The temp file's ACL is restricted BEFORE any secret bytes
+                // are written into it, not after the swap - writing first
+                // and restricting only the final path (the previous order)
+                // left the temp file under the containing directory's
+                // inherited ACL for the whole window it held the real
+                // content, and if the subsequent File.Replace/Move then
+                // threw, that weakly-protected file was left behind
+                // permanently. Mirrors Install-Server.ps1's
+                // Set-RestrictedFileAcl, which fixed the identical ordering
+                // bug on the PowerShell side.
+                //
+                // Side effect worth knowing about: restricting the temp
+                // file's ACL before writing content means the WRITING
+                // PROCESS itself must already hold Administrators-or-SYSTEM
+                // access, on every save now, not just a later one - the
+                // real shipped Windows Service always runs as LocalSystem
+                // (Install-Server.ps1 never passes sc.exe an obj= account),
+                // so production is unaffected, but running --console mode
+                // from a non-elevated prompt (including a literal member of
+                // the local Administrators group who has not explicitly
+                // "Run as Administrator" - UAC gives such a process a
+                // filtered token where Administrators is present but marked
+                // deny-only) will now fail on its very first config save,
+                // where it previously happened to succeed by writing into a
+                // temp file that had no ACL restriction yet. That failure is
+                // this fix working as intended (fail closed before any
+                // secret byte is written) rather than a bug - run --console
+                // elevated if it needs to persist its own configuration.
                 string tempPath = options.ConfigPath + ".tmp";
+                File.WriteAllText(tempPath, "", new UTF8Encoding(false));
+                ApplyRestrictedConfigAcl(tempPath);
                 File.WriteAllText(tempPath, json, new UTF8Encoding(false));
                 if (File.Exists(options.ConfigPath))
                 {
@@ -9563,7 +9710,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 // default IsValidLinuxInstallPath already gated in v0.54.3).
                 if (!IsValidLinuxInstallPath(installPath))
                 {
-                    throw new ArgumentException("installPath must be an absolute Linux path with at least two segments (e.g. /opt/windows-inventory-lite) - a bare top-level directory like /usr or /etc is rejected, since this value is used in a remote 'rm -rf' during uninstall.");
+                    throw new ArgumentException("installPath must be a real subdirectory under /opt/ (e.g. /opt/windows-inventory-lite), with no '.' or '..' path segment, since this value is used in a remote 'rm -rf' during uninstall.");
                 }
                 return true;
             }
@@ -10075,7 +10222,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         private const string DashboardHtml = @"<!doctype html><html lang=""en""><head><meta charset=""utf-8""><meta name=""viewport"" content=""width=device-width, initial-scale=1""><title>Windows Inventory Lite</title><link rel=""stylesheet"" href=""/styles.css""></head><body><header class=""topbar""><div><h1>Windows Inventory Lite</h1><p id=""generatedAt"">Waiting for inventory data.</p></div><input id=""searchInput"" type=""search"" placeholder=""Filter computers, OS, Office, software""></header><main><section class=""summary""><div><span id=""clientCount"">0</span><small>Clients</small></div><div><span id=""windowsActivated"">0</span><small>Windows activated</small></div><div><span id=""officeActivated"">0</span><small>Office activated</small></div><div><span id=""staleCount"">0</span><small>Stale &gt;48h</small></div></section><section class=""table-wrap""><table><thead><tr><th>Computer</th><th>OS</th><th>Office</th><th>Windows</th><th>Office activation</th><th>Software</th><th>Collected</th></tr></thead><tbody id=""inventoryBody""></tbody></table></section></main><script src=""/app.js""></script></body></html>";
 
         // Fallback for /app.js, same reasoning as DashboardHtml above.
-        private const string DashboardJs = @"(function(){const staleHours=48;const state={clients:[]};function byId(id){return document.getElementById(id)}function text(v){return v===undefined||v===null||v===''?'Unknown':String(v)}function activated(v){return v?'Activated':'Not detected'}function isStale(c){const d=new Date(c.collectedAt||c.sourceUpdatedAt||0);return Number.isNaN(d.getTime())||((Date.now()-d.getTime())/36e5)>staleHours}function matches(c,q){if(!q)return true;const software=(c.software||[]).map(i=>`${i.name} ${i.version}`).join(' ');const h=[c.computerName,c.domain,c.os&&c.os.caption,c.os&&c.os.version,c.office&&c.office.name,c.office&&c.office.version,software].join(' ').toLowerCase();return h.indexOf(q.toLowerCase())!==-1}function summary(clients){byId('clientCount').textContent=clients.length;byId('windowsActivated').textContent=clients.filter(c=>c.activation&&c.activation.windows&&c.activation.windows.activated).length;byId('officeActivated').textContent=clients.filter(c=>c.activation&&c.activation.office&&c.activation.office.activated).length;byId('staleCount').textContent=clients.filter(isStale).length}function table(clients){const q=byId('searchInput').value.trim();const rows=clients.filter(c=>matches(c,q)).map(c=>{const os=c.os||{},office=c.office||{},a=c.activation||{},wa=a.windows||{},oa=a.office||{},count=(c.software||[]).length;return `<tr class=""${isStale(c)?'stale':''}""><td><strong>${text(c.computerName)}</strong><small>${text(c.domain)}</small></td><td>${text(os.caption)}<small>${text(os.version)} build ${text(os.buildNumber)}</small></td><td>${text(office.name)}<small>${text(office.version)}</small></td><td>${activated(wa.activated)}</td><td>${activated(oa.activated)}</td><td>${count}</td><td>${text(c.collectedAt)}</td></tr>`});byId('inventoryBody').innerHTML=rows.join('')||'<tr><td colspan=""7"" class=""empty"">No matching inventory records.</td></tr>'}function render(){summary(state.clients);table(state.clients)}fetch('/api/v1/clients',{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error(`HTTP ${r.status}`);return r.json()}).then(d=>{state.clients=d.clients||[];byId('generatedAt').textContent=`Generated: ${text(d.generatedAt)}`;render()}).catch(e=>{byId('generatedAt').textContent=`Inventory index is not available: ${e.message}`;render()});byId('searchInput').addEventListener('input',render)}());";
+        private const string DashboardJs = @"(function(){const staleHours=48;const state={clients:[]};function byId(id){return document.getElementById(id)}function text(v){return v===undefined||v===null||v===''?'Unknown':String(v)}function escapeHtml(v){return text(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/""/g,'&quot;').replace(/'/g,'&#39;')}function activated(v){return v?'Activated':'Not detected'}function isStale(c){const d=new Date(c.collectedAt||c.sourceUpdatedAt||0);return Number.isNaN(d.getTime())||((Date.now()-d.getTime())/36e5)>staleHours}function matches(c,q){if(!q)return true;const software=(c.software||[]).map(i=>`${i.name} ${i.version}`).join(' ');const h=[c.computerName,c.domain,c.os&&c.os.caption,c.os&&c.os.version,c.office&&c.office.name,c.office&&c.office.version,software].join(' ').toLowerCase();return h.indexOf(q.toLowerCase())!==-1}function summary(clients){byId('clientCount').textContent=clients.length;byId('windowsActivated').textContent=clients.filter(c=>c.activation&&c.activation.windows&&c.activation.windows.activated).length;byId('officeActivated').textContent=clients.filter(c=>c.activation&&c.activation.office&&c.activation.office.activated).length;byId('staleCount').textContent=clients.filter(isStale).length}function table(clients){const q=byId('searchInput').value.trim();const rows=clients.filter(c=>matches(c,q)).map(c=>{const os=c.os||{},office=c.office||{},a=c.activation||{},wa=a.windows||{},oa=a.office||{},count=(c.software||[]).length;return `<tr class=""${isStale(c)?'stale':''}""><td><strong>${escapeHtml(c.computerName)}</strong><small>${escapeHtml(c.domain)}</small></td><td>${escapeHtml(os.caption)}<small>${escapeHtml(os.version)} build ${escapeHtml(os.buildNumber)}</small></td><td>${escapeHtml(office.name)}<small>${escapeHtml(office.version)}</small></td><td>${activated(wa.activated)}</td><td>${activated(oa.activated)}</td><td>${count}</td><td>${escapeHtml(c.collectedAt)}</td></tr>`});byId('inventoryBody').innerHTML=rows.join('')||'<tr><td colspan=""7"" class=""empty"">No matching inventory records.</td></tr>'}function render(){summary(state.clients);table(state.clients)}fetch('/api/v1/clients',{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error(`HTTP ${r.status}`);return r.json()}).then(d=>{state.clients=d.clients||[];byId('generatedAt').textContent=`Generated: ${text(d.generatedAt)}`;render()}).catch(e=>{byId('generatedAt').textContent=`Inventory index is not available: ${e.message}`;render()});byId('searchInput').addEventListener('input',render)}());";
 
         // Fallback for /styles.css, same reasoning as DashboardHtml above.
         private const string DashboardCss = @":root{--bg:#f5f7fa;--panel:#fff;--text:#17202a;--muted:#5f6b7a;--line:#d9e0e8;--accent:#126f8f;--warn:#fff1c2}*{box-sizing:border-box}body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--text)}.topbar{display:flex;gap:24px;align-items:center;justify-content:space-between;padding:24px 32px;background:var(--panel);border-bottom:1px solid var(--line)}h1{margin:0 0 6px;font-size:24px;font-weight:650}p,small{color:var(--muted)}p{margin:0}input[type=search]{width:min(520px,45vw);min-width:280px;height:40px;padding:0 12px;border:1px solid var(--line);border-radius:6px;font:inherit}main{padding:24px 32px}.summary{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:12px;margin-bottom:18px}.summary div{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}.summary span{display:block;margin-bottom:4px;color:var(--accent);font-size:28px;font-weight:700}.table-wrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:8px}table{width:100%;border-collapse:collapse;min-width:980px}th,td{padding:12px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{background:#edf2f6;font-size:12px;color:var(--muted);text-transform:uppercase}td small{display:block;margin-top:4px}tr.stale td{background:var(--warn)}.empty{padding:28px;text-align:center;color:var(--muted)}@media(max-width:820px){.topbar{align-items:stretch;flex-direction:column;padding:18px}input[type=search]{width:100%;min-width:0}main{padding:18px}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}}";
@@ -10237,6 +10384,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields is a no-op for a brand-new computer with sync disabled", TestComputeAdSyncFieldsNoOpForNewComputerWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
+            allPassed &= SelfTestCheck(output, "SaveServerConfigValues leaves the final config file with a restricted ACL, no leftover .tmp file", TestSaveServerConfigValuesRestrictsTempFileBeforeWritingContent);
             allPassed &= SelfTestCheck(output, "Linux known-hosts store round-trips and overwrites by host:port", TestLinuxKnownHostsRoundTrip);
             allPassed &= SelfTestCheck(output, "A malformed known-hosts file surfaces as a read error from FindLinuxKnownHost, not as 'no record found'", TestLinuxKnownHostsReadFailureSurfacesAsError);
             allPassed &= SelfTestCheck(output, "TryParseHostKeyDetails extracts type+fingerprint from a real captured plink failure, ignores unrelated failures", TestParseHostKeyFingerprintFromRealCapturedOutput);
@@ -10250,6 +10398,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "IsValidSshTarget rejects shell-injection shapes, flag-lookalikes, and empty values", TestIsValidSshTargetRejectsInjectionAndEmpty);
             allPassed &= SelfTestCheck(output, "IsValidLinuxInstallPath accepts a real multi-segment absolute path", TestIsValidLinuxInstallPathAcceptsMultiSegmentPath);
             allPassed &= SelfTestCheck(output, "IsValidLinuxInstallPath rejects a bare top-level directory, a relative path, and empty/null", TestIsValidLinuxInstallPathRejectsTopLevelAndInvalid);
+            allPassed &= SelfTestCheck(output, "IsValidLinuxInstallPath rejects .. and . traversal even inside an /opt/ path", TestIsValidLinuxInstallPathRejectsTraversal);
             allPassed &= SelfTestCheck(output, "GenerateRandomToken returns a 64-character lowercase hex string, different each call", TestGenerateRandomTokenShape);
             allPassed &= SelfTestCheck(output, "Ingestion token configured-state reflects whether options.Token is set", TestSendIngestionTokenStatusReflectsConfiguredState);
             allPassed &= SelfTestCheck(output, "Linux SSH tools status reflects plink.exe/pscp.exe file presence", TestSendLinuxSshToolsStatusReflectsFilePresence);
@@ -10276,6 +10425,15 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "GenerateSystemdStatusUnitLines passes the token via EnvironmentFile, never on the command line", TestGenerateSystemdStatusUnitLinesUsesEnvironmentFileNotCommandLineToken);
             allPassed &= SelfTestCheck(output, "GenerateSystemdEnvFileLines matches the PowerShell New-SystemdEnvFile format", TestGenerateSystemdEnvFileLinesMatchesPowerShellFormat);
             allPassed &= SelfTestCheck(output, "Full session lifecycle: a cookie value produced by SendLoginResult authorizes IsWebRequestAuthorized, then SendLogoutResult makes that same cookie stop authorizing it", TestSessionLifecycleEndToEndLoginAuthorizeLogout);
+            allPassed &= SelfTestCheck(output, "ChangeAdminPassword does not mutate the live credential or clear sessions when persisting the new config fails", TestChangeAdminPasswordDoesNotMutateStateWhenSaveFails);
+            allPassed &= SelfTestCheck(output, "RunLinuxClientUninstallTarget rejects an unsafe installPath before attempting any SSH connection", TestRunLinuxClientUninstallTargetRejectsUnsafeInstallPath);
+            allPassed &= SelfTestCheck(output, "RunClientActionJob removes a completed job from the in-memory installJobs dictionary", TestRunClientActionJobRemovesCompletedJobFromMemory);
+            allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized prunes an expired session from sessionStore on use, not just at the next login", TestIsWebRequestAuthorizedPrunesExpiredSessionOnUse);
+            allPassed &= SelfTestCheck(output, "ChangeAdminPassword invalidates every pre-rotation session on a successful rotation", TestChangeAdminPasswordInvalidatesSessionsOnSuccess);
+            allPassed &= SelfTestCheck(output, "Content-Security-Policy restricts form-action to 'self'", TestContentSecurityPolicyRestrictsFormAction);
+            allPassed &= SelfTestCheck(output, "NormalizeReportIdentifier treats a blank identifier the same as a missing one", TestNormalizeReportIdentifierTreatsBlankSameAsMissing);
+            allPassed &= SelfTestCheck(output, "IsReportIdentifierTooLong rejects an oversized computerName/hostname before it can reach Path.Combine", TestIsReportIdentifierTooLongRejectsOversizedValuesOnly);
+            allPassed &= SelfTestCheck(output, "DashboardJs escapes every client-reported field in its table row template, not just normalizes it", TestDashboardJsEscapesClientReportedFieldsInTable);
             return allPassed;
         }
 
@@ -12414,6 +12572,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 return "expected a bare top-level installPath ('/etc') to be rejected";
             }
+            if (TryValidateLinuxPushValues("https://example.local", "a1b2c3", "/opt/../etc", out error))
+            {
+                return "expected a traversal installPath ('/opt/../etc') to be rejected";
+            }
             return null;
         }
 
@@ -13219,6 +13381,105 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
+        // Proves the success-path final ACL only - SaveServerConfigValues's
+        // temp file is restricted and renamed away within a single lock
+        // statement, so a same-process test observes only the end state.
+        // The actual bug this guards against (a temp file left behind under
+        // a broad inherited ACL if File.Replace/Move then throws) needs a
+        // forced mid-write failure to reproduce, which was verified live
+        // (see Task 6's report) rather than through this self-test alone.
+        // ApplyRestrictedConfigAcl(tempPath) itself always succeeds even for
+        // a non-elevated/non-SYSTEM test process, since this process just
+        // created tempPath and, as its owner, retains WRITE_DAC (the right
+        // to modify its own ACL) regardless of what that ACL then says. The
+        // SUBSEQUENT File.WriteAllText of the real secret content is what
+        // then correctly fails once the DACL no longer grants this process
+        // FILE_WRITE_DATA - this is the fix working as intended (fail
+        // closed before any secret byte is written), not a bug, but it
+        // means this self-test cannot assume the save succeeds under every
+        // identity. Mirrors this file's existing GrantCurrentUserAccessForTest
+        // precedent (used by TestLinuxKnownHostsRoundTrip) for the same
+        // underlying UAC-split-token/non-privileged-CI reason.
+        private static string TestSaveServerConfigValuesRestrictsTempFileBeforeWritingContent()
+        {
+            string dataDir = Path.Combine(Path.GetTempPath(), "wil-selftest-acl-race-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataDir);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataDir;
+                options.ConfigPath = Path.Combine(dataDir, "server-config.json");
+                InventoryServer server = new InventoryServer(options);
+
+                System.Reflection.MethodInfo saveMethod = typeof(InventoryServer).GetMethod("SaveServerConfigValues", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Dictionary<string, string> updates = new Dictionary<string, string>();
+                updates["WebUsername"] = "admin";
+                updates["WebPassword"] = "test-password-value";
+                string tempPath = options.ConfigPath + ".tmp";
+
+                bool deniedByAcl = false;
+                try
+                {
+                    saveMethod.Invoke(server, new object[] { updates });
+                }
+                catch (System.Reflection.TargetInvocationException ex)
+                {
+                    if (!(ex.InnerException is UnauthorizedAccessException))
+                    {
+                        string innerType = ex.InnerException == null ? "null" : ex.InnerException.GetType().Name;
+                        string innerMessage = ex.InnerException == null ? "" : ex.InnerException.Message;
+                        return "expected the save to either succeed or fail with UnauthorizedAccessException (this test process lacking Administrators/SYSTEM), but it threw " + innerType + ": " + innerMessage;
+                    }
+                    deniedByAcl = true;
+                }
+
+                SecurityIdentifier usersSid = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+
+                if (deniedByAcl)
+                {
+                    if (!File.Exists(tempPath))
+                    {
+                        return null;
+                    }
+                    GrantCurrentUserAccessForTest(tempPath);
+                    if (File.ReadAllText(tempPath).Length != 0)
+                    {
+                        return "expected the abandoned .tmp file to be empty (ACL must be restricted before any secret content is written), but it held content";
+                    }
+                    foreach (FileSystemAccessRule rule in File.GetAccessControl(tempPath).GetAccessRules(true, false, typeof(SecurityIdentifier)))
+                    {
+                        if (rule.IdentityReference is SecurityIdentifier && ((SecurityIdentifier)rule.IdentityReference) == usersSid)
+                        {
+                            return "expected the abandoned .tmp file's ACL to NOT grant BUILTIN\\Users any explicit rule even before this test's own verification grant";
+                        }
+                    }
+                    return null;
+                }
+
+                if (File.Exists(tempPath))
+                {
+                    return "expected the .tmp file to be gone after a successful save (renamed over the final path), but it still exists - the fix must not leave a stale temp file behind on the success path";
+                }
+                if (!File.Exists(options.ConfigPath))
+                {
+                    return "expected server-config.json to exist after a successful save";
+                }
+
+                foreach (FileSystemAccessRule rule in File.GetAccessControl(options.ConfigPath).GetAccessRules(true, false, typeof(SecurityIdentifier)))
+                {
+                    if (rule.IdentityReference is SecurityIdentifier && ((SecurityIdentifier)rule.IdentityReference) == usersSid)
+                    {
+                        return "expected server-config.json's final ACL to NOT grant BUILTIN\\Users any explicit rule - ApplyRestrictedConfigAcl should have replaced inherited permissions";
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataDir, true); } catch { }
+            }
+        }
+
         // SaveLinuxKnownHosts applies a restrictive Administrators+SYSTEM-only ACL to the
         // known-hosts file (matching SaveLicenses/SaveConfig). Under UAC split-token behavior,
         // this test process runs non-elevated, so it cannot read the file back through the
@@ -13515,7 +13776,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private static string TestIsValidLinuxInstallPathAcceptsMultiSegmentPath()
         {
-            string[] valid = { "/opt/windows-inventory-lite", "/home/svc/wil", "/opt/wil/" };
+            string[] valid = { "/opt/windows-inventory-lite", "/opt/wil/", "/opt/a/b" };
             foreach (string path in valid)
             {
                 if (!IsValidLinuxInstallPath(path))
@@ -13528,12 +13789,25 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private static string TestIsValidLinuxInstallPathRejectsTopLevelAndInvalid()
         {
-            string[] invalid = { "/", "/usr", "/etc", "/opt", "opt/wil", "", null };
+            string[] invalid = { "/", "/usr", "/etc", "/opt", "/opt/", "opt/wil", "", null, "/home/foo", "/usr/bin", "/etc/systemd", "/var/lib" };
             foreach (string path in invalid)
             {
                 if (IsValidLinuxInstallPath(path))
                 {
                     return "expected path '" + path + "' to be rejected, but IsValidLinuxInstallPath accepted it";
+                }
+            }
+            return null;
+        }
+
+        private static string TestIsValidLinuxInstallPathRejectsTraversal()
+        {
+            string[] traversal = { "/opt/../etc", "/opt/../../etc", "/../etc", "/opt/./etc", "/opt/wil/../../etc" };
+            foreach (string path in traversal)
+            {
+                if (IsValidLinuxInstallPath(path))
+                {
+                    return "expected traversal path '" + path + "' to be rejected, but IsValidLinuxInstallPath accepted it";
                 }
             }
             return null;
@@ -14125,6 +14399,413 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
 
             return null;
+        }
+
+        // ChangeAdminPassword used to mutate options.WebUsername/WebPassword
+        // and only persist afterward - if SaveServerConfigValues then threw,
+        // the password had already changed in memory (silently reverting on
+        // the next restart, since disk kept the old value) while every
+        // pre-rotation session stayed valid, since sessionStore is cleared
+        // even later. This forces the save to fail and asserts the
+        // in-memory credential is untouched.
+        private static string TestChangeAdminPasswordDoesNotMutateStateWhenSaveFails()
+        {
+            string dataDir = Path.Combine(Path.GetTempPath(), "wil-selftest-password-rotation-atomic-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataDir);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataDir;
+                options.ConfigPath = Path.Combine(dataDir, "server-config.json");
+                options.WebUsername = "admin";
+                options.WebPassword = "original-password";
+                options.SessionLifetimeHours = 12;
+                InventoryServer server = new InventoryServer(options);
+
+                // Force the save to fail by pointing ConfigPath at a directory that
+                // does not exist and cannot be created mid-call (simulates the same
+                // real-world failure class as a locked file or a full disk).
+                options.ConfigPath = Path.Combine(dataDir, "does-not-exist", "server-config.json");
+
+                System.Reflection.MethodInfo changeMethod = typeof(InventoryServer).GetMethod("ChangeAdminPassword", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    RequestContext request = new RequestContext();
+                    request.Body = "{\"currentPassword\":\"original-password\",\"newUsername\":\"admin\",\"newPassword\":\"new-password-value\"}";
+                    request.Headers = new Dictionary<string, string>();
+                    try
+                    {
+                        changeMethod.Invoke(server, new object[] { stream, request });
+                    }
+                    catch (System.Reflection.TargetInvocationException)
+                    {
+                        // Expected - the save throws because the directory doesn't exist.
+                    }
+                }
+
+                if (options.WebPassword != "original-password")
+                {
+                    return "expected options.WebPassword to remain unchanged after a failed save, but it was mutated to '" + options.WebPassword + "'";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataDir, true); } catch { }
+            }
+        }
+
+        // RunLinuxClientInstallTarget already re-validates installPath at its own
+        // point of use as a "last line of defence" (see its own comment there) -
+        // its uninstall sibling didn't, relying entirely on the caller
+        // (StartClientAction) having validated already. Currently safe (that's
+        // genuinely the only call site), but a validator not re-checked at its
+        // actual point of use is exactly the shape of this project's prior
+        // install-path validation gaps.
+        private static string TestRunLinuxClientUninstallTargetRejectsUnsafeInstallPath()
+        {
+            string dataDir = Path.Combine(Path.GetTempPath(), "wil-selftest-uninstall-revalidate-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataDir);
+            try
+            {
+                string stubUninstallerPath = Path.Combine(dataDir, "Uninstall-ClientDebianSSH.ps1");
+                File.WriteAllText(stubUninstallerPath, "# stub, never actually run - installPath validation fails before this would be invoked");
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataDir;
+                options.LinuxSshUninstallerPath = stubUninstallerPath;
+                InventoryServer server = new InventoryServer(options);
+
+                System.Reflection.MethodInfo runMethod = typeof(InventoryServer).GetMethod("RunLinuxClientUninstallTarget", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                object resultObj = runMethod.Invoke(server, new object[] { "192.0.2.10", "manual", "root", "x", null, "/etc" });
+                Dictionary<string, object> result = (Dictionary<string, object>)resultObj;
+
+                if (GetStringValue(result, "status") != "failed")
+                {
+                    return "expected a bare-top-level installPath ('/etc') to be rejected before any SSH connection is attempted, got status '" + GetStringValue(result, "status") + "'";
+                }
+                if (!GetStringValue(result, "message").Contains("/opt/"))
+                {
+                    return "expected the rejection message to mention the /opt/ requirement, got: " + GetStringValue(result, "message");
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataDir, true); } catch { }
+            }
+        }
+
+        // installJobs (in-memory) held plaintext WinRM/SSH passwords resident for
+        // the server process's entire lifetime, growing unbounded, since nothing
+        // ever removed a completed job from it - the on-disk job file already
+        // correctly omits those fields (ToDictionary), so nothing is lost by also
+        // dropping the in-memory entry once the job is done; SendClientInstallJob
+        // already falls back to reading the file when the job isn't in memory.
+        // An empty Targets list makes RunClientActionJob's per-target loop a
+        // no-op, reaching the exact "completed" code path being tested with no
+        // real WinRM/SSH network activity.
+        private static string TestRunClientActionJobRemovesCompletedJobFromMemory()
+        {
+            string dataDir = Path.Combine(Path.GetTempPath(), "wil-selftest-job-prune-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataDir);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataDir;
+                InventoryServer server = new InventoryServer(options);
+
+                InstallJob job = new InstallJob();
+                job.Id = Guid.NewGuid().ToString("N");
+                job.Action = "install";
+                job.Status = "queued";
+                job.CreatedAtUtc = DateTime.UtcNow;
+                job.Targets = new ArrayList();
+                job.Results = new ArrayList();
+                job.Mode = "force-windows";
+
+                System.Reflection.FieldInfo installJobsField = typeof(InventoryServer).GetField("installJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Dictionary<string, InstallJob> installJobs = (Dictionary<string, InstallJob>)installJobsField.GetValue(server);
+                installJobs[job.Id] = job;
+
+                System.Reflection.MethodInfo runMethod = typeof(InventoryServer).GetMethod("RunClientActionJob", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                runMethod.Invoke(server, new object[] { job });
+
+                if (job.Status != "completed")
+                {
+                    return "expected job.Status to be 'completed' after RunClientActionJob finishes with no targets, got '" + job.Status + "'";
+                }
+                if (installJobs.ContainsKey(job.Id))
+                {
+                    return "expected the completed job to be removed from the in-memory installJobs dictionary once finished (it stays readable from disk via SendClientInstallJob's own fallback) - otherwise its plaintext WinRM/SSH password fields stay resident in memory indefinitely";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataDir, true); } catch { }
+            }
+        }
+
+        // A cookie whose session is found but already expired fell through to
+        // Basic Auth correctly, but the expired sessionStore entry itself was
+        // never removed - only PruneExpiredSessionsLocked, called just once per
+        // login, ever swept it out. A dashboard left open past its session
+        // lifetime with no one logging back in could linger there indefinitely.
+        private static string TestIsWebRequestAuthorizedPrunesExpiredSessionOnUse()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            InventoryServer server = new InventoryServer(options);
+
+            System.Reflection.FieldInfo sessionStoreField = typeof(InventoryServer).GetField("sessionStore", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            Dictionary<string, SessionRecord> sessionStore = (Dictionary<string, SessionRecord>)sessionStoreField.GetValue(server);
+
+            string expiredToken = "expired-token-for-test";
+            SessionRecord expiredRecord = new SessionRecord();
+            expiredRecord.ExpiresUtc = DateTime.UtcNow.AddHours(-1);
+            sessionStore[expiredToken] = expiredRecord;
+
+            RequestContext request = new RequestContext();
+            request.Headers = new Dictionary<string, string>();
+            request.Headers["cookie"] = "wil_session=" + expiredToken;
+            request.RemoteAddress = IPAddress.Parse("192.168.1.50");
+
+            server.IsWebRequestAuthorized(request);
+
+            if (sessionStore.ContainsKey(expiredToken))
+            {
+                return "expected an expired session found during IsWebRequestAuthorized to be pruned from sessionStore immediately, not left to linger until the next login";
+            }
+            return null;
+        }
+
+        // The existing end-to-end session test (TestSessionLifecycleEndToEndLoginAuthorizeLogout)
+        // covers login->authorize->logout; this covers the other session-killing
+        // path this project's own backlog flagged as untested - a SUCCESSFUL
+        // password rotation must invalidate every session that predates it, not
+        // just fail safely if the save itself fails (already covered by
+        // TestChangeAdminPasswordDoesNotMutateStateWhenSaveFails).
+        private static string TestChangeAdminPasswordInvalidatesSessionsOnSuccess()
+        {
+            string dataDir = Path.Combine(Path.GetTempPath(), "wil-selftest-password-rotation-session-kill-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataDir);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataDir;
+                options.ConfigPath = Path.Combine(dataDir, "server-config.json");
+                options.WebUsername = "admin";
+                options.WebPassword = "original-password";
+                options.SessionLifetimeHours = 12;
+                InventoryServer server = new InventoryServer(options);
+                IPAddress remoteAddress = IPAddress.Parse("192.168.1.50");
+
+                RequestContext loginRequest = new RequestContext();
+                loginRequest.Method = "POST";
+                loginRequest.Path = "/api/v1/server/login";
+                loginRequest.Headers = new Dictionary<string, string>();
+                loginRequest.RemoteAddress = remoteAddress;
+                loginRequest.Body = "{\"username\":\"admin\",\"password\":\"original-password\"}";
+
+                string preRotationCookie;
+                using (MemoryStream loginStream = new MemoryStream())
+                {
+                    server.SendLoginResult(loginStream, loginRequest);
+                    preRotationCookie = ExtractSessionCookieValue(Encoding.UTF8.GetString(loginStream.ToArray()));
+                    if (preRotationCookie == null)
+                    {
+                        return "expected the login response to contain a Set-Cookie: wil_session=... header";
+                    }
+                }
+
+                System.Reflection.MethodInfo changeMethod = typeof(InventoryServer).GetMethod("ChangeAdminPassword", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                string freshCookie;
+                using (MemoryStream rotateStream = new MemoryStream())
+                {
+                    RequestContext rotateRequest = new RequestContext();
+                    rotateRequest.Headers = new Dictionary<string, string>();
+                    rotateRequest.Body = "{\"currentPassword\":\"original-password\",\"newUsername\":\"admin\",\"newPassword\":\"new-password-value\"}";
+                    try
+                    {
+                        changeMethod.Invoke(server, new object[] { rotateStream, rotateRequest });
+                    }
+                    catch (System.Reflection.TargetInvocationException ex)
+                    {
+                        if (ex.InnerException is UnauthorizedAccessException)
+                        {
+                            // This test process itself is not running as
+                            // Administrators/SYSTEM (a documented, expected
+                            // condition for --console/dev use without explicit
+                            // elevation, or a locked-down CI/sandbox account -
+                            // see SaveServerConfigValues' own comment). A
+                            // successful rotation's save requires that
+                            // privilege on every save now, not just a later
+                            // one, so this specific "kills sessions on
+                            // SUCCESS" property cannot be exercised live in
+                            // this environment - the "does nothing bad happen
+                            // on FAILURE" half is already independently
+                            // covered by TestChangeAdminPasswordDoesNotMutateStateWhenSaveFails.
+                            return null;
+                        }
+                        throw;
+                    }
+                    freshCookie = ExtractSessionCookieValue(Encoding.UTF8.GetString(rotateStream.ToArray()));
+                    if (freshCookie == null)
+                    {
+                        return "expected a successful password rotation to issue the caller a fresh session cookie";
+                    }
+                }
+
+                RequestContext preRotationRequest = new RequestContext();
+                preRotationRequest.Headers = new Dictionary<string, string>();
+                preRotationRequest.Headers["cookie"] = preRotationCookie;
+                preRotationRequest.RemoteAddress = remoteAddress;
+                if (server.IsWebRequestAuthorized(preRotationRequest))
+                {
+                    return "expected the pre-rotation session cookie to stop authorizing once the password rotation succeeded";
+                }
+
+                RequestContext freshRequest = new RequestContext();
+                freshRequest.Headers = new Dictionary<string, string>();
+                freshRequest.Headers["cookie"] = freshCookie;
+                freshRequest.RemoteAddress = remoteAddress;
+                if (!server.IsWebRequestAuthorized(freshRequest))
+                {
+                    return "expected the fresh session cookie issued by the successful rotation to authorize a request";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataDir, true); } catch { }
+            }
+        }
+
+        // default-src does NOT cover form-action (a CSP quirk - it has no
+        // fallback), so without an explicit directive an injected
+        // <form action="https://evil..."> phishing overlay (e.g. via the
+        // fallback dashboard JS's unescaped innerHTML sink) would not be
+        // blocked even though inline script execution already is.
+        private static string TestContentSecurityPolicyRestrictsFormAction()
+        {
+            System.Reflection.FieldInfo cspField = typeof(InventoryServer).GetField("ContentSecurityPolicy", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            string csp = (string)cspField.GetValue(null);
+            if (!csp.Contains("form-action 'self'"))
+            {
+                return "expected the Content-Security-Policy to include \"form-action 'self'\", got: " + csp;
+            }
+            return null;
+        }
+
+        private static string TestNormalizeReportIdentifierTreatsBlankSameAsMissing()
+        {
+            string[] blankInputs = { null, "", "   ", "\t" };
+            foreach (string input in blankInputs)
+            {
+                if (NormalizeReportIdentifier(input) != "unknown")
+                {
+                    return "expected a blank/missing identifier ('" + (input ?? "null") + "') to normalize to 'unknown', got '" + NormalizeReportIdentifier(input) + "'";
+                }
+            }
+            if (NormalizeReportIdentifier("REAL-HOST-01") != "REAL-HOST-01")
+            {
+                return "expected a real identifier to pass through unchanged";
+            }
+            return null;
+        }
+
+        private static string TestIsReportIdentifierTooLongRejectsOversizedValuesOnly()
+        {
+            if (IsReportIdentifierTooLong("a-perfectly-normal-hostname"))
+            {
+                return "expected a normal-length hostname to be accepted";
+            }
+            if (IsReportIdentifierTooLong(new string('a', MaxReportIdentifierLength)))
+            {
+                return "expected a hostname exactly at the max length to be accepted";
+            }
+            if (!IsReportIdentifierTooLong(new string('a', MaxReportIdentifierLength + 1)))
+            {
+                return "expected a hostname one character over the max length to be rejected";
+            }
+            if (!IsReportIdentifierTooLong(new string('a', 5000)))
+            {
+                return "expected a 5000-character hostname to be rejected";
+            }
+            return null;
+        }
+
+        // DashboardJs's table() function builds each row via a template
+        // literal and assigns the joined result through .innerHTML= - every
+        // field that comes straight from a client's own self-reported
+        // inventory (computerName/domain/os.*/office.*/collectedAt) must go
+        // through escapeHtml, not the plain text() helper (which only
+        // normalizes undefined/null/empty, never escapes), or a malicious/
+        // compromised client can inject markup/script that executes in the
+        // dashboard admin's authenticated session (stored XSS) the moment
+        // this fallback happens to be served (ContentPath missing the real
+        // app.js). Real app.js already gets this right everywhere; this
+        // fallback copy did not.
+        private static string TestDashboardJsEscapesClientReportedFieldsInTable()
+        {
+            if (!DashboardJs.Contains("function escapeHtml("))
+            {
+                return "expected the fallback DashboardJs to define an escapeHtml helper";
+            }
+            string[] mustBeEscaped = {
+                "${escapeHtml(c.computerName)}",
+                "${escapeHtml(c.domain)}",
+                "${escapeHtml(os.caption)}",
+                "${escapeHtml(os.version)}",
+                "${escapeHtml(os.buildNumber)}",
+                "${escapeHtml(office.name)}",
+                "${escapeHtml(office.version)}",
+                "${escapeHtml(c.collectedAt)}",
+            };
+            foreach (string expected in mustBeEscaped)
+            {
+                if (!DashboardJs.Contains(expected))
+                {
+                    return "expected DashboardJs's table row template to contain '" + expected + "'";
+                }
+            }
+            string[] mustNotRemainUnescaped = {
+                "${text(c.computerName)}",
+                "${text(c.domain)}",
+                "${text(os.caption)}",
+                "${text(os.version)}",
+                "${text(os.buildNumber)}",
+                "${text(office.name)}",
+                "${text(office.version)}",
+                "${text(c.collectedAt)}",
+            };
+            foreach (string forbidden in mustNotRemainUnescaped)
+            {
+                if (DashboardJs.Contains(forbidden))
+                {
+                    return "expected the unescaped pattern '" + forbidden + "' to no longer be present in DashboardJs's table row template";
+                }
+            }
+            return null;
+        }
+
+        private static string ExtractSessionCookieValue(string rawHttpResponse)
+        {
+            const string cookiePrefix = "Set-Cookie: wil_session=";
+            int cookieHeaderStart = rawHttpResponse.IndexOf(cookiePrefix, StringComparison.Ordinal);
+            if (cookieHeaderStart < 0)
+            {
+                return null;
+            }
+            int valueStart = cookieHeaderStart + "Set-Cookie: ".Length;
+            int valueEnd = rawHttpResponse.IndexOf(';', valueStart);
+            if (valueEnd < 0)
+            {
+                return null;
+            }
+            return rawHttpResponse.Substring(valueStart, valueEnd - valueStart);
         }
 
         private static bool ContainsSignature(byte[] data, byte thirdByte, byte fourthByte)

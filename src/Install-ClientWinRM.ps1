@@ -279,59 +279,88 @@ function Invoke-RemoteDeploy {
     } -ArgumentList $RemoteDeployPath, $RemoteClientPath, $ServerUrl, $IntervalHours, $Token, ([bool]$Force)
 }
 
-foreach ($computer in $ComputerName) {
-    $session = $null
-    try {
-        Write-Host "Connecting: $computer"
-        if ($AddToTrustedHosts -or ($Credential -and (Test-IpAddress -Value $computer))) {
-            Write-Host "Adding TrustedHosts entry: $computer"
-            Add-TargetToTrustedHosts -TargetComputer $computer
-        }
-        $session = New-InventorySession -TargetComputer $computer
+# Defined as a script-scope scriptblock variable (not an inline literal at
+# the Invoke-Command call site) so Pester can invoke the exact same code
+# locally (no -ComputerName/-Session) to test the path-safety guard below,
+# without needing a real WinRM target.
+$script:RemoveRemotePackageScriptBlock = {
+    param([string]$Path)
 
-        $selectedClientPath = Get-RemoteClientPackagePath -Session $session
-        $remoteDeployPath = Join-Path -Path $RemotePackagePath -ChildPath 'Deploy-ClientGpo.ps1'
-        $remoteClientPath = Join-Path -Path $RemotePackagePath -ChildPath (Split-Path -Leaf $selectedClientPath)
-
-        Write-Host "Copying deploy script: $computer"
-        Copy-FileOverWinRM -Session $session -LocalPath $deployPath -RemotePath $remoteDeployPath
-
-        Write-Host "Copying client package: $computer"
-        Copy-FileOverWinRM -Session $session -LocalPath $selectedClientPath -RemotePath $remoteClientPath
-
-        Write-Host "Installing client service: $computer"
-        Invoke-RemoteDeploy -Session $session -RemoteDeployPath $remoteDeployPath -RemoteClientPath $remoteClientPath
-
-        if (-not $KeepRemotePackage) {
-            Invoke-Command -Session $session -ScriptBlock {
-                param([string]$Path)
-
-                if (Test-Path -LiteralPath $Path) {
-                    Remove-Item -LiteralPath $Path -Recurse -Force
-                }
-            } -ArgumentList $RemotePackagePath
-        }
-
-        Write-Host "Client installed: $computer"
+    # Inlined (not a called function, same reason as
+    # Uninstall-ClientWinRM.ps1's own $script:RemoveClientScriptBlock guard):
+    # this block runs in a separate remote runspace over WinRM, which cannot
+    # resolve functions defined in the local script. Only "starts with / and
+    # >= 2 segments" existed for the Linux side before this same fix (see
+    # docs/superpowers/plans/2026-09-04-security-hardening-batch.md) - this
+    # is the Windows-path-shaped twin of that fix: the value must resolve
+    # (after collapsing any ..\.\ segments via GetFullPath) to a real
+    # subdirectory under %ProgramData%\WindowsInventoryLite\, not just any
+    # path that happens to exist.
+    $allowedRoot = [System.IO.Path]::GetFullPath((Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite')).TrimEnd('\')
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if (-not $resolvedPath.StartsWith("$allowedRoot\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to delete '$Path' (resolves to '$resolvedPath') - it is not a real subdirectory of '$allowedRoot'."
     }
-    catch {
-        $hadFailure = $true
-        # Write-Error would work too, but PowerShell wraps it in a full
-        # ErrorRecord (position info relative to the wrapping one-line
-        # -Command invocation, CategoryInfo, FullyQualifiedErrorId) when it
-        # reaches the caller's captured stderr - exactly the kind of wall
-        # of PowerShell plumbing text Get-FriendlyConnectionError above is
-        # meant to spare the dashboard's job log from. A plain stderr write
-        # carries the same message with none of that ceremony.
-        [Console]::Error.WriteLine(("Failed to install client on {0}: {1}" -f $computer, (Get-FriendlyConnectionError -Exception $_.Exception)))
-    }
-    finally {
-        if ($session) {
-            Remove-PSSession -Session $session
-        }
+
+    if (Test-Path -LiteralPath $Path) {
+        Remove-Item -LiteralPath $Path -Recurse -Force
     }
 }
 
-if ($hadFailure) {
-    exit 1
+# Wrapped so Pester can dot-source this file (". $ScriptPath -ComputerName ...
+# -ServerUrl ... -PackagePath ...") to load $script:RemoveRemotePackageScriptBlock
+# for direct unit testing without attempting a real WinRM connection - same
+# technique used in src\Uninstall-ClientWinRM.ps1, src\Install-Client.ps1, and
+# deploy\client\Deploy-ClientGpo.ps1.
+if ($MyInvocation.InvocationName -ne '.') {
+    foreach ($computer in $ComputerName) {
+        $session = $null
+        try {
+            Write-Host "Connecting: $computer"
+            if ($AddToTrustedHosts -or ($Credential -and (Test-IpAddress -Value $computer))) {
+                Write-Host "Adding TrustedHosts entry: $computer"
+                Add-TargetToTrustedHosts -TargetComputer $computer
+            }
+            $session = New-InventorySession -TargetComputer $computer
+
+            $selectedClientPath = Get-RemoteClientPackagePath -Session $session
+            $remoteDeployPath = Join-Path -Path $RemotePackagePath -ChildPath 'Deploy-ClientGpo.ps1'
+            $remoteClientPath = Join-Path -Path $RemotePackagePath -ChildPath (Split-Path -Leaf $selectedClientPath)
+
+            Write-Host "Copying deploy script: $computer"
+            Copy-FileOverWinRM -Session $session -LocalPath $deployPath -RemotePath $remoteDeployPath
+
+            Write-Host "Copying client package: $computer"
+            Copy-FileOverWinRM -Session $session -LocalPath $selectedClientPath -RemotePath $remoteClientPath
+
+            Write-Host "Installing client service: $computer"
+            Invoke-RemoteDeploy -Session $session -RemoteDeployPath $remoteDeployPath -RemoteClientPath $remoteClientPath
+
+            if (-not $KeepRemotePackage) {
+                Invoke-Command -Session $session -ScriptBlock $script:RemoveRemotePackageScriptBlock -ArgumentList $RemotePackagePath
+            }
+
+            Write-Host "Client installed: $computer"
+        }
+        catch {
+            $hadFailure = $true
+            # Write-Error would work too, but PowerShell wraps it in a full
+            # ErrorRecord (position info relative to the wrapping one-line
+            # -Command invocation, CategoryInfo, FullyQualifiedErrorId) when it
+            # reaches the caller's captured stderr - exactly the kind of wall
+            # of PowerShell plumbing text Get-FriendlyConnectionError above is
+            # meant to spare the dashboard's job log from. A plain stderr write
+            # carries the same message with none of that ceremony.
+            [Console]::Error.WriteLine(("Failed to install client on {0}: {1}" -f $computer, (Get-FriendlyConnectionError -Exception $_.Exception)))
+        }
+        finally {
+            if ($session) {
+                Remove-PSSession -Session $session
+            }
+        }
+    }
+
+    if ($hadFailure) {
+        exit 1
+    }
 }

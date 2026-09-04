@@ -10,13 +10,14 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-# Safety net for the client/server co-located case: if $InstallPath still
-# resolves to the shared WindowsInventoryLite root (an explicit override,
-# or an uninstall run against a machine never reinstalled since the
-# client-data layout shipped) and server-config.json is sitting right
-# there, a recursive delete would take the server's own data with it.
-# Refuse only in that specific case - a client-only machine's bare root
-# (no server-config.json) still gets fully cleaned up as before.
+# Historical safety net for the client/server co-located case (an explicit
+# -InstallPath override pointing at the bare shared root): Test-IsUnderAllowedInstallRoot
+# below already refuses a bare $sharedRoot unconditionally now (it is not a
+# real SUBDIRECTORY of itself), so this branch can no longer be reached with
+# either outcome of the server-config.json check - the delete further down
+# only ever runs for a genuine subdirectory. Left in place as defense in
+# depth and because it costs nothing; if $InstallPath is ever changed to
+# allow the bare root again, this still catches the one case that matters.
 function Test-IsSharedServerRoot {
     param(
         [string]$Path,
@@ -28,6 +29,20 @@ function Test-IsSharedServerRoot {
     }
 
     return Test-Path -LiteralPath (Join-Path -Path $SharedRoot -ChildPath 'server-config.json')
+}
+
+# Depth/shape check for the recursive delete below: $InstallPath must resolve
+# (after collapsing any ..\.\ segments via GetFullPath) to a real subdirectory
+# under %ProgramData%\WindowsInventoryLite\, not just any path that happens to
+# exist - the Windows-path-shaped twin of the /opt/ allowlist already applied
+# to the Linux-side scripts.
+function Test-IsUnderAllowedInstallRoot {
+    param([string]$Path)
+    $allowedRoot = [System.IO.Path]::GetFullPath((Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite')).TrimEnd('\')
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if (-not $resolvedPath.StartsWith("$allowedRoot\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to delete '$Path' (resolves to '$resolvedPath') - it is not a real subdirectory of '$allowedRoot'."
+    }
 }
 
 if (-not $InstallPath) {
@@ -54,6 +69,10 @@ if ($LASTEXITCODE -eq 0 -and $PSCmdlet.ShouldProcess($serviceName, 'Stop and del
     & sc.exe stop $serviceName | Out-Null
     & sc.exe delete $serviceName | Out-Null
     Start-Sleep -Seconds 2
+}
+
+if (Test-Path -LiteralPath $InstallPath) {
+    Test-IsUnderAllowedInstallRoot -Path $InstallPath
 }
 
 $sharedRoot = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite'

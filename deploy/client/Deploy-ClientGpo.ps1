@@ -48,6 +48,7 @@ function Test-BatchSafeValue {
 }
 Test-BatchSafeValue -Value $ServerUrl -FieldName 'ServerUrl'
 Test-BatchSafeValue -Value $Token -FieldName 'Token'
+Test-BatchSafeValue -Value $InstallPath -FieldName 'InstallPath'
 
 $ServiceName = 'WindowsInventoryLiteClient'
 $ScriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path

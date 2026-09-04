@@ -6,6 +6,51 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.54.9]
+
+### Security
+
+- Capped `computerName`/`hostname` length on all three ingestion endpoints (Windows, Linux inventory, Linux service-status) at 255 characters, rejected before `Path.Combine`. An unbounded value previously threw `PathTooLongException`, caught only by the outer handler, which writes the full exception to the Windows Event Log and returns `500` - reachable with zero credentials whenever no ingestion token is configured (the default until one is set).
+- The embedded fallback dashboard JS (served for `/app.js` only when the real file is missing from `ContentPath`) built its inventory table via a `text()` helper that normalized but never escaped HTML, then assigned the result through `.innerHTML=` - a malicious or compromised managed client could inject markup/script that executes in the dashboard admin's session the moment this fallback is served. Added an `escapeHtml` helper (matching the real `app.js`'s own) and applied it to every client-reported field in the row template.
+- `Uninstall-Server.ps1` deleted `InstallPath`/`ContentPath`/`ClientPackagePath`/`DataPath` (all read from `server-config.json`, an operator-supplied `-ConfigPath`) with no validation. Not reachable via any HTTP API (none of these keys are writable through the dashboard), but added a guard rejecting bare drive roots and well-known Windows system directories before each `Remove-Item -Recurse -Force` - a shape check rather than a `%ProgramData%`-only allowlist, since a custom `-InstallPath` is a supported, documented option.
+
+196 self-tests (was 194), full Pester suite (133, was 129) green under Windows PowerShell 5.1.
+
+## [0.54.8]
+
+### Fixed
+
+- `RunLinuxClientUninstallTarget` never re-validated `installPath` at its own point of use, relying entirely on the caller having already validated - its install-side sibling already does this as a documented "last line of defence". Currently safe (the caller is genuinely the only path in), but added the matching check for structural symmetry.
+- `installJobs` (in-memory) never removed a completed job, so its `Password`/`SshPassword` fields stayed resident in memory for the server's entire uptime and the dictionary grew unbounded. A completed job is now removed from memory (the on-disk copy, which already omits those fields, remains the durable record). Also moved `job.Status`/`StartedAtUtc`/`CompletedAtUtc` writes inside the same lock other code already reads them under.
+- An expired session cookie fell through to Basic Auth correctly but its `sessionStore` entry was never removed until the next successful login - it now gets pruned as soon as it's found expired.
+- A present-but-blank `computerName`/`hostname` in an inventory report (as opposed to a missing one) wrote a literal `.json` file, which the dashboard's client list then silently picked up. Blank is now treated the same as missing.
+- Added `form-action 'self'` to the Content-Security-Policy - `default-src` does not cover `form-action`, so this was previously unrestricted.
+- Added a self-test proving a successful admin password rotation invalidates every pre-rotation session (the failure-path half of this was already covered).
+
+194 self-tests (was 188), full Pester suite green under Windows PowerShell 5.1.
+
+## [0.54.7]
+
+### Security
+
+- **The install-path check from v0.54.0-v0.54.6 was still incomplete.** `IsValidLinuxInstallPath`/`Test-LinuxInstallPathDepth`'s "starts with `/` and has at least two segments" rule was defeated by `..`/`.` traversal (`/opt/../etc` has two segments and no rejected character, and resolves to `/etc` on the remote host) and was too weak even without traversal (`/usr/bin`, `/etc/systemd`, `/var/lib` all passed and are still catastrophic under a remote `rm -rf`). Replaced with an allowlist: the value must be a real subdirectory under `/opt/`, and no path segment anywhere may be `.` or `..`. Applied identically to the C# server and to both standalone Linux SSH scripts (`Test-LinuxInstallPathDepth` renamed to `Test-LinuxInstallPathSafe`). Live-verified end-to-end against a running server and by dot-sourcing the real scripts under Windows PowerShell 5.1.
+- Extended the same shape of protection to three Windows-side `Remove-Item -Recurse -Force` sinks (`Uninstall-ClientWinRM.ps1`, `Install-ClientWinRM.ps1`, `Uninstall-Client.ps1`) and wired the existing shell-injection guard onto `Deploy-ClientGpo.ps1`'s and `Install-Client.ps1`'s previously-unvalidated `InstallPath`. None of these are reachable from the dashboard today, fixed for defense in depth - "not reachable today" is exactly what stopped being true for the Linux install path once already.
+- Fixed a config-save ACL race: `SaveServerConfigValues` used to write secrets (DPAPI-encrypted `WebPassword`/`Token`/`AdPassword`) into a temp file under the containing folder's inherited permissions before restricting the final file's ACL - if the atomic rename then failed, that weakly-protected temp file was left behind with real secrets in it, permanently. The temp file's ACL is now restricted before any secret content is written into it. Side effect worth knowing: this means the server process itself now needs Administrators-or-SYSTEM access to save its own configuration, on every save, not only a later one - true by default for the shipped Windows Service (always runs as LocalSystem), but running in `--console` mode from a non-elevated prompt (including a local Administrator who hasn't explicitly elevated, since UAC marks that group deny-only on a filtered token) will now fail to persist configuration where it previously happened to succeed by way of the same gap this fix closes.
+- Fixed admin password rotation to be atomic: `ChangeAdminPassword` used to mutate the live username/password and only then try to persist it, so a failed save left the password changed in memory (silently reverting on restart, since disk kept the old value) while every existing session stayed valid, since session invalidation ran even later and was never reached. It now persists first; a save failure leaves the password and every session exactly as they were before the attempt.
+
+### Breaking
+
+- A Linux install path outside `/opt/` (e.g. `/home/svc/wil`) was accepted by every version through v0.54.6 as long as it had two path segments. It is rejected as of this version. If `LinuxDefaultInstallPath` or a client's own install path is not under `/opt/`, every install, update, uninstall, and scheduled push against that client will now fail with a validation error - re-point the setting under `/opt/` and reinstall affected Linux clients.
+
+188 self-tests (was 185), full Pester suite green under Windows PowerShell 5.1.
+
+## [0.54.6]
+
+### Security
+
+- The two standalone Linux SSH scripts (`Install-ClientDebianSSH.ps1`, `Uninstall-ClientDebianSSH.ps1`) had no equivalent to `IsValidLinuxInstallPath`'s "at least two path segments" check - only `Test-PosixShellSafe` (shell metacharacters/whitespace). Both scripts are directly runnable on their own per README.md's Quick Start, independent of the C# server entirely, so v0.54.3/v0.54.5's fixes did not protect a direct invocation with e.g. `-InstallPath /etc` - it would still reach `Uninstall-ClientDebianSSH.ps1`'s `rm -rf $InstallPath`. Added a matching `Test-LinuxInstallPathDepth` to both scripts, wired into every function that consumes an install path (`New-SystemdUnitFiles`, `New-SystemdStatusUnitFiles`, the install loop, `Get-LinuxUninstallCommand`).
+- Caught along the way: the first version of that new check used `.Count` on an unwrapped pipeline result, which throws `"The property 'Count' cannot be found on this object"` for any single-segment path under Windows PowerShell 5.1 (PS7+ wraps scalars with a `Count` property; 5.1 does not) - the exploit path (`/etc`) was rejected, but for the wrong reason, and a bare `Should -Throw` Pester assertion would have accepted that as a false-positive pass. Fixed by forcing the pipeline result into an array with `@(...)`; tests now assert on the actual error message, not just that something threw.
+
 ## [0.54.5]
 
 ### Security

@@ -38,4 +38,28 @@ Describe 'Windows Inventory Lite Uninstall-Client safety guard' {
 
         Test-IsSharedServerRoot -Path ($sharedRoot + '\') -SharedRoot $sharedRoot | Should -Be $true
     }
+
+    It 'Test-IsUnderAllowedInstallRoot refuses a path outside the WindowsInventoryLite root' {
+        $dangerousPaths = @('C:\', 'C:\Windows', 'C:\Users', 'C:\ProgramData', (Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite'))
+        foreach ($path in $dangerousPaths) {
+            { Test-IsUnderAllowedInstallRoot -Path $path } | Should -Throw '*is not a real subdirectory of*'
+        }
+    }
+
+    It 'Test-IsUnderAllowedInstallRoot allows the default client-data path, a real subdirectory of the allowed root' {
+        $originalProgramData = $env:ProgramData
+        $env:ProgramData = $TestDrive
+        try {
+            $defaultPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\client-data'
+            { Test-IsUnderAllowedInstallRoot -Path $defaultPath } | Should -Not -Throw
+        }
+        finally {
+            $env:ProgramData = $originalProgramData
+        }
+    }
+
+    It 'Test-IsUnderAllowedInstallRoot refuses a .. traversal path that resolves outside the WindowsInventoryLite root' {
+        $traversalPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\..\..\Windows'
+        { Test-IsUnderAllowedInstallRoot -Path $traversalPath } | Should -Throw '*is not a real subdirectory of*'
+    }
 }

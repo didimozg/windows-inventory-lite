@@ -83,6 +83,40 @@ function Test-PosixShellSafe {
     }
 }
 
+# Test-PosixShellSafe only screens for shell metacharacters and whitespace -
+# it has no opinion on whether the path itself is a sane place to install
+# into or rm -rf. This used to require "at least two path segments," which
+# a bare top-level directory like /usr or /etc could not pass - but that
+# check was defeated by traversal ("/opt/../etc" has two segments and no
+# rejected character) and was too weak even without it ("/usr/bin" also
+# has two segments and is still catastrophic). Now an allowlist: the value
+# must be a real subdirectory under /opt/, and no path segment anywhere
+# may be "." or "..". The C# server already gates this for every request
+# that reaches it through the dashboard/API, but this script is also
+# directly runnable on its own (see README.md's Quick Start), which
+# bypasses that gate entirely.
+function Test-LinuxInstallPathSafe {
+    param([string]$InstallPath)
+    if ([string]::IsNullOrEmpty($InstallPath) -or -not $InstallPath.StartsWith('/')) {
+        throw "InstallPath must be an absolute Linux path under /opt/ (e.g. /opt/windows-inventory-lite)."
+    }
+    # @(...) forces this to always be an array, even with 0 or 1 elements -
+    # Windows PowerShell 5.1 (unlike PS7+) has no .Count on a bare scalar.
+    $allSegments = @($InstallPath.Trim('/') -split '/' | Where-Object { $_ -ne '' })
+    foreach ($segment in $allSegments) {
+        if ($segment -eq '..' -or $segment -eq '.') {
+            throw "InstallPath must be an absolute Linux path under /opt/ (e.g. /opt/windows-inventory-lite) - a '..' or '.' path segment is rejected."
+        }
+    }
+    if (-not $InstallPath.StartsWith('/opt/')) {
+        throw "InstallPath must be an absolute Linux path under /opt/ (e.g. /opt/windows-inventory-lite) - a bare top-level directory like /usr or /etc is rejected."
+    }
+    $remainderSegments = @(($InstallPath.Substring('/opt/'.Length)).Trim('/') -split '/' | Where-Object { $_ -ne '' })
+    if ($remainderSegments.Count -lt 1) {
+        throw "InstallPath must be an absolute Linux path under /opt/ (e.g. /opt/windows-inventory-lite) - a bare /opt is rejected."
+    }
+}
+
 function ConvertTo-PlainText {
     param([System.Security.SecureString]$Secure)
     $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
@@ -108,6 +142,7 @@ function New-SystemdUnitFiles {
     )
 
     Test-PosixShellSafe -Value $InstallDirectory -FieldName 'InstallPath'
+    Test-LinuxInstallPathSafe -InstallPath $InstallDirectory
     Test-PosixShellSafe -Value $Url -FieldName 'ServerUrl'
     Test-PosixShellSafe -Value $SharedToken -FieldName 'Token'
 
@@ -171,6 +206,7 @@ function New-SystemdStatusUnitFiles {
     )
 
     Test-PosixShellSafe -Value $InstallDirectory -FieldName 'InstallPath'
+    Test-LinuxInstallPathSafe -InstallPath $InstallDirectory
     Test-PosixShellSafe -Value $Url -FieldName 'ServerUrl'
     Test-PosixShellSafe -Value $SharedToken -FieldName 'Token'
 
@@ -713,6 +749,7 @@ if ($MyInvocation.InvocationName -ne '.') {
 
                 Write-Host "Installing service: $computer"
                 Test-PosixShellSafe -Value $InstallPath -FieldName 'InstallPath'
+                Test-LinuxInstallPathSafe -InstallPath $InstallPath
                 # chmod BEFORE the file is in place would race; chmod right after
                 # the mv is the smallest window available over a single SSH command
                 # chain. 600 + root ownership (the mv runs under sudo for a non-root

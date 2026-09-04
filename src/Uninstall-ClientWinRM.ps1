@@ -168,15 +168,33 @@ $script:RemoveClientScriptBlock = {
         Write-Host "Service is not installed: $ServiceName"
     }
 
-    # Safety net for the client/server co-located case: if $ClientInstallPath
-    # still resolves to the shared WindowsInventoryLite root (an explicit
-    # override, or a target never reinstalled since the client-data layout
-    # shipped) and server-config.json is sitting right there, a recursive
-    # delete would take the server's own data with it. Refuse only in that
-    # specific case - a client-only target's bare root (no server-config.json)
-    # still gets fully cleaned up as before. Inlined (not a called function)
-    # because this block runs in a separate remote runspace over WinRM,
-    # which cannot resolve functions defined in the local script.
+    # Inlined (not a called function, same reason as the shared-root check
+    # below): this block runs in a separate remote runspace over WinRM,
+    # which cannot resolve functions defined in the local script. Only
+    # "starts with / and >= 2 segments" existed for the Linux side before
+    # this same fix (see docs/superpowers/plans/2026-09-04-security-
+    # hardening-batch.md) - this is the Windows-path-shaped twin of that
+    # fix: the value must resolve (after collapsing any ..\.\ segments via
+    # GetFullPath) to a real subdirectory under
+    # %ProgramData%\WindowsInventoryLite\, not just any path that happens
+    # to exist.
+    $allowedRoot = [System.IO.Path]::GetFullPath((Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite')).TrimEnd('\')
+    $resolvedInstallPath = [System.IO.Path]::GetFullPath($ClientInstallPath).TrimEnd('\')
+    if (-not $resolvedInstallPath.StartsWith("$allowedRoot\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to delete '$ClientInstallPath' (resolves to '$resolvedInstallPath') - it is not a real subdirectory of '$allowedRoot'."
+    }
+
+    # Historical safety net for the client/server co-located case (an
+    # explicit -InstallPath override pointing at the bare shared root): the
+    # allowlist check above already refuses a bare $sharedRoot unconditionally
+    # now (it is not a real SUBDIRECTORY of itself), so this branch can no
+    # longer be reached with $isSharedServerRoot true OR false - the delete
+    # below only ever runs for a genuine subdirectory. Left in place as
+    # defense in depth and because it costs nothing; if $ClientInstallPath
+    # is ever changed to allow the bare root again, this still catches the
+    # one case that matters. Inlined (not a called function) because this
+    # block runs in a separate remote runspace over WinRM, which cannot
+    # resolve functions defined in the local script.
     $sharedRoot = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite'
     $isSharedServerRoot = ($ClientInstallPath.TrimEnd('\') -eq $sharedRoot.TrimEnd('\')) -and (Test-Path -LiteralPath (Join-Path -Path $sharedRoot -ChildPath 'server-config.json'))
 

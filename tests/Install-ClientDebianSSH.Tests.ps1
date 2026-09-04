@@ -22,6 +22,44 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
         }
     }
 
+    It 'Test-LinuxInstallPathSafe rejects a path outside /opt/, a bare /opt, and a relative path' {
+        # No shell metacharacter and no whitespace, so Test-PosixShellSafe
+        # alone would let these through - this script is directly runnable
+        # on its own (bypassing the C# server's own IsValidLinuxInstallPath
+        # gate entirely), so it needs the same /opt/-allowlist check
+        # applied here too. Asserting on the message (not just -Throw)
+        # matters here specifically: a first version of the predecessor
+        # check threw for the WRONG reason on a single-segment path ("The
+        # property 'Count' cannot be found on this object" - a Windows
+        # PowerShell 5.1 vs 7 scalar-vs-array quirk), which -Throw alone
+        # would have accepted as a false-positive pass.
+        $invalid = @('/usr', '/etc', '/opt', '/opt/', '/', 'opt/wil', '', $null, '/home/foo', '/usr/bin')
+        foreach ($value in $invalid) {
+            { Test-LinuxInstallPathSafe -InstallPath $value } | Should -Throw '*absolute Linux path under /opt/*'
+        }
+    }
+
+    It 'Test-LinuxInstallPathSafe rejects .. and . traversal even inside an /opt/ path' {
+        $traversal = @('/opt/../etc', '/opt/../../etc', '/../etc', '/opt/./etc', '/opt/wil/../../etc')
+        foreach ($value in $traversal) {
+            { Test-LinuxInstallPathSafe -InstallPath $value } | Should -Throw '*absolute Linux path under /opt/*'
+        }
+    }
+
+    It 'Test-LinuxInstallPathSafe accepts a real subdirectory under /opt/' {
+        $valid = @('/opt/windows-inventory-lite', '/opt/wil/', '/opt/a/b')
+        foreach ($value in $valid) {
+            { Test-LinuxInstallPathSafe -InstallPath $value } | Should -Not -Throw
+        }
+    }
+
+    It 'New-SystemdUnitFiles rejects a bare top-level InstallDirectory or a traversal path' {
+        $dir = Join-Path -Path $TestDrive -ChildPath 'units-bad-path'
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        { New-SystemdUnitFiles -Directory $dir -InstallDirectory '/etc' -Url 'https://example.local/api/v1/linux/inventory' -SharedToken '' -Hours 6 } | Should -Throw '*absolute Linux path under /opt/*'
+        { New-SystemdUnitFiles -Directory $dir -InstallDirectory '/opt/../etc' -Url 'https://example.local/api/v1/linux/inventory' -SharedToken '' -Hours 6 } | Should -Throw '*absolute Linux path under /opt/*'
+    }
+
     It 'New-SystemdUnitFiles writes a oneshot service with the correct ExecStart' {
         $dir = Join-Path -Path $TestDrive -ChildPath 'units1'
         New-Item -Path $dir -ItemType Directory -Force | Out-Null
