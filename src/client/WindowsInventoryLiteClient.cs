@@ -309,6 +309,7 @@ namespace WindowsInventoryLite
             result["os"] = GetOperatingSystem();
             result["office"] = GetOfficeVersion();
             result["activation"] = GetActivation();
+            result["licenses"] = GetLicenseKeys();
             result["software"] = options.SkipSoftware ? new ArrayList() : GetInstalledSoftware();
 
             result["cpu"] = GetCpu();
@@ -555,6 +556,110 @@ namespace WindowsInventoryLite
             result["buildNumber"] = GetString(os, "BuildNumber");
             result["architecture"] = GetString(os, "OSArchitecture");
             result["installDate"] = GetString(os, "InstallDate");
+            return result;
+        }
+
+        private sealed class LicenseKeySource
+        {
+            public string Product;
+            public string RegistryHive;
+            public string RegistryPath;
+            public string ValueName;
+        }
+
+        private List<LicenseKeySource> LoadLicenseKeySourcesCache()
+        {
+            List<LicenseKeySource> result = new List<LicenseKeySource>();
+            string path = GetLicenseKeySourcesCachePath();
+            if (!File.Exists(path))
+            {
+                return result;
+            }
+
+            try
+            {
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                string json = File.ReadAllText(path, Encoding.UTF8);
+                ArrayList raw = serializer.Deserialize<ArrayList>(json);
+                if (raw == null)
+                {
+                    return result;
+                }
+
+                foreach (object item in raw)
+                {
+                    Dictionary<string, object> record = item as Dictionary<string, object>;
+                    if (record == null)
+                    {
+                        continue;
+                    }
+
+                    LicenseKeySource source = new LicenseKeySource();
+                    source.Product = GetString(record, "product");
+                    source.RegistryHive = GetString(record, "registryHive");
+                    source.RegistryPath = GetString(record, "registryPath");
+                    source.ValueName = GetString(record, "valueName");
+                    if (!String.IsNullOrEmpty(source.RegistryPath) && !String.IsNullOrEmpty(source.ValueName))
+                    {
+                        result.Add(source);
+                    }
+                }
+            }
+            catch
+            {
+                return new List<LicenseKeySource>();
+            }
+
+            return result;
+        }
+
+        // Reads each cached source's exact registry value - no automatic
+        // WOW6432Node fallback guessing, since the admin-entered path is
+        // expected to already be the empirically-verified exact location
+        // (e.g. KriptoPro CSP's own confirmed path already lives under
+        // WOW6432Node; the admin enters that literal path, this code does
+        // not need to search for it). A missing path/value is a normal
+        // "not installed here" outcome, matching GetActivationState's own
+        // tolerance for an absent WMI class.
+        private ArrayList GetLicenseKeys()
+        {
+            ArrayList result = new ArrayList();
+            foreach (LicenseKeySource source in LoadLicenseKeySourcesCache())
+            {
+                try
+                {
+                    RegistryKey root = String.Equals(source.RegistryHive, "HKEY_CURRENT_USER", StringComparison.OrdinalIgnoreCase)
+                        ? Registry.CurrentUser
+                        : Registry.LocalMachine;
+
+                    using (RegistryKey key = root.OpenSubKey(source.RegistryPath))
+                    {
+                        if (key == null)
+                        {
+                            continue;
+                        }
+
+                        object rawValue = key.GetValue(source.ValueName);
+                        if (rawValue == null)
+                        {
+                            continue;
+                        }
+
+                        Dictionary<string, object> entry = new Dictionary<string, object>();
+                        entry["product"] = source.Product;
+                        entry["source"] = source.RegistryHive + "\\" + source.RegistryPath + "\\" + source.ValueName;
+                        entry["key"] = Convert.ToString(rawValue);
+                        result.Add(entry);
+                    }
+                }
+                catch
+                {
+                    // A single bad entry (permissions, corrupt hive,
+                    // unexpected value type) must not abort collection of
+                    // the rest of the report.
+                }
+            }
+
             return result;
         }
 
