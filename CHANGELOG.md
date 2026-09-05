@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.55.0]
+
+### Added
+
+- **Admin-managed license key source catalog** (`/api/v1/license-key-sources*`, new "License key sources" dashboard tab): lets an admin define `{product, registryHive, registryPath, valueName}` entries describing where a third-party product stores its license key in the registry - no built-in list is shipped, since no reliable public "product -> registry location" database exists (verified empirically: even secondhand documentation for a real product, KriptoPro CSP, named the wrong registry value).
+- **Client-side license key collection**: Windows clients now read the admin's catalog and collect any matching registry values into their inventory report. The catalog reaches clients piggybacked on the response to their existing `POST /api/v1/inventory` call (cached locally, applied starting the client's *next* collection cycle) - no new client-initiated request, no change to the client's push-only connection model.
+- **Dashboard-authenticated reveal endpoint** (`GET /api/v1/clients/<computerName>/license-keys`) and a "Licenses found" sub-section in each client's expanded detail row, masked by default with a per-row "show" toggle.
+
+### Security
+
+- Collected license keys are DPAPI-encrypted at rest on ingest (`SecretProtector`, the same mechanism already protecting `WebPassword`/`Token`/`AdPassword`) and are stripped entirely - not merely masked - from the bulk `GET /api/v1/clients` listing. The reveal endpoint requires the same dashboard authentication (session cookie or Basic Auth) as every other management endpoint, never the ingestion token alone.
+
+### Changed
+
+- Client and server versions are now unified under one project-wide version number. Previously tracked independently (server was 0.54.10, client was 0.2.2) per the 2026-07-18 versioning note above - both now report 0.55.0, and will change together going forward.
+
+203 self-tests (was 197), 133/133 Pester green under Windows PowerShell 5.1.
+
 ## [0.54.10]
 
 ### Security
