@@ -196,7 +196,7 @@ Returns the full Windows client inventory index in one response. Top-level field
 
 Looks up one client's stored report and returns its `licenses` array with every `key` decrypted (`SecretProtector.Unprotect`). The computer name is taken as everything between the `/api/v1/clients/` prefix and the `/license-keys` suffix (URL-decoded, trimmed), the same way the description/delete routes above extract it. Called only when the dashboard admin explicitly clicks "show" on one license entry - nothing is bulk-decrypted or pre-fetched.
 
-- Response: `{"licenses": [{"product": "...", "source": "...", "key": "..."}]}`. `404 {"error": "client not found"}` if the client has no stored report, if the URL has no computer-name segment at all, or if the report has no `licenses` array (empty list is still a 200, not a 404 - `licenses: []`).
+- Response: `{"licenses": [{"product": "...", "source": "...", "key": "..."}]}`. `404 {"error": "client not found"}` if the client has no stored report (including an unreadable/corrupt report file) or the URL has no computer-name segment at all. A report with a missing or non-array `licenses` field is still a `200` with `licenses: []`, not a 404.
 
 ```bash
 curl -X GET "https://server:8443/api/v1/clients/WORKSTATION01/license-keys" \
