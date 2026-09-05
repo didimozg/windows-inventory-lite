@@ -107,6 +107,10 @@ namespace WindowsInventoryLite
         public string LinuxUpdateUsername;
         public string LinuxUpdatePassword;
         public string LinuxUpdateKeyPath;
+        public string SoftwareRepositoryPath;
+        public string SoftwareRepositoryUsername;
+        public string SoftwareRepositoryPassword;
+        public int SoftwareShareScanIntervalMinutes;
         public string LinuxClientPackagePath;
         // CIDR block (e.g. "192.168.1.0/24") an admin can set in Settings >
         // Linux when a Linux host reports several NICs and the "wrong"
@@ -259,6 +263,7 @@ namespace WindowsInventoryLite
             options.HstsMaxAgeHours = 24;
             options.IngestionRejectionLogRetentionDays = 30;
             options.IngestionRejectionLogMaxEntries = 5000;
+            options.SoftwareShareScanIntervalMinutes = 60;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -690,6 +695,24 @@ namespace WindowsInventoryLite
                 if (String.IsNullOrEmpty(options.LinuxUpdateKeyPath))
                 {
                     options.LinuxUpdateKeyPath = GetConfigString(config, "LinuxUpdateKeyPath");
+                }
+                if (String.IsNullOrEmpty(options.SoftwareRepositoryPath))
+                {
+                    options.SoftwareRepositoryPath = GetConfigString(config, "SoftwareRepositoryPath");
+                }
+                if (String.IsNullOrEmpty(options.SoftwareRepositoryUsername))
+                {
+                    options.SoftwareRepositoryUsername = GetConfigString(config, "SoftwareRepositoryUsername");
+                }
+                if (String.IsNullOrEmpty(options.SoftwareRepositoryPassword))
+                {
+                    options.SoftwareRepositoryPassword = SecretProtector.Unprotect(GetConfigString(config, "SoftwareRepositoryPassword"));
+                }
+                string configuredScanInterval = GetConfigString(config, "SoftwareShareScanIntervalMinutes");
+                int parsedScanInterval;
+                if (!String.IsNullOrEmpty(configuredScanInterval) && Int32.TryParse(configuredScanInterval, out parsedScanInterval) && parsedScanInterval >= 5 && parsedScanInterval <= 1440)
+                {
+                    options.SoftwareShareScanIntervalMinutes = parsedScanInterval;
                 }
                 if (options.LinuxUpdateScheduleMode == "off")
                 {
@@ -1787,6 +1810,14 @@ namespace WindowsInventoryLite
                     {
                         DeleteLicenseKeySource(stream, request);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/software-repository/settings")
+                    {
+                        SendSoftwareRepositoryCredentialsStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/software-repository/settings")
+                    {
+                        ConfigureSoftwareRepositoryCredentials(stream, request);
+                    }
                     else if (request.Method == "GET" && (request.Path == "/" || request.Path == "/index.html"))
                     {
                         SendDashboardFile(stream, "index.html", DashboardHtml, "text/html; charset=utf-8");
@@ -2734,6 +2765,77 @@ namespace WindowsInventoryLite
             SaveServerConfigValues(updates);
 
             SendLinuxUpdateCredentialsStatus(stream);
+        }
+
+        private void SendSoftwareRepositoryCredentialsStatus(Stream stream)
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["path"] = options.SoftwareRepositoryPath ?? "";
+            result["username"] = String.IsNullOrEmpty(options.SoftwareRepositoryUsername) ? null : options.SoftwareRepositoryUsername;
+            result["hasPassword"] = !String.IsNullOrEmpty(options.SoftwareRepositoryPassword);
+            result["scanIntervalMinutes"] = options.SoftwareShareScanIntervalMinutes;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void ConfigureSoftwareRepositoryCredentials(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            bool clear = payload.ContainsKey("clear") && Convert.ToBoolean(payload["clear"]);
+            string path = payload.ContainsKey("path") ? Convert.ToString(payload["path"]).Trim() : options.SoftwareRepositoryPath;
+            string username;
+            string password;
+            if (clear)
+            {
+                username = "";
+                password = "";
+            }
+            else
+            {
+                username = payload.ContainsKey("username") ? Convert.ToString(payload["username"]).Trim() : options.SoftwareRepositoryUsername;
+                password = payload.ContainsKey("password") && !String.IsNullOrEmpty(Convert.ToString(payload["password"]))
+                    ? Convert.ToString(payload["password"])
+                    : options.SoftwareRepositoryPassword;
+            }
+
+            int scanInterval = options.SoftwareShareScanIntervalMinutes;
+            if (payload.ContainsKey("scanIntervalMinutes"))
+            {
+                int parsedInterval;
+                if (Int32.TryParse(Convert.ToString(payload["scanIntervalMinutes"]), out parsedInterval) && parsedInterval >= 5 && parsedInterval <= 1440)
+                {
+                    scanInterval = parsedInterval;
+                }
+            }
+
+            options.SoftwareRepositoryPath = path;
+            options.SoftwareRepositoryUsername = username;
+            options.SoftwareRepositoryPassword = password;
+            options.SoftwareShareScanIntervalMinutes = scanInterval;
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["SoftwareRepositoryPath"] = path ?? "";
+            updates["SoftwareRepositoryUsername"] = username ?? "";
+            updates["SoftwareRepositoryPassword"] = password ?? "";
+            updates["SoftwareShareScanIntervalMinutes"] = scanInterval.ToString();
+            SaveServerConfigValues(updates);
+
+            SendSoftwareRepositoryCredentialsStatus(stream);
         }
 
         private void SendLinuxUpdateScheduleStatus(Stream stream)
@@ -8651,7 +8753,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // ConfigureCertificate here and Install-Server.ps1's own import
         // step), so there is nothing to encrypt for it.
         private static readonly HashSet<string> EncryptedConfigKeys = new HashSet<string>(
-            new[] { "AdPassword", "WebPassword", "Token", "ClientUpdatePassword", "LinuxUpdatePassword" },
+            new[] { "AdPassword", "WebPassword", "Token", "ClientUpdatePassword", "LinuxUpdatePassword", "SoftwareRepositoryPassword" },
             StringComparer.Ordinal);
 
         private void SaveServerConfigValues(Dictionary<string, string> updates)
@@ -10955,6 +11057,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "DashboardJs escapes every client-reported field in its table row template, not just normalizes it", TestDashboardJsEscapesClientReportedFieldsInTable);
             allPassed &= SelfTestCheck(output, "ApplyRestrictedConfigAcl grants the current process's own identity, not just Administrators/SYSTEM", TestApplyRestrictedConfigAclGrantsCurrentIdentity);
             allPassed &= SelfTestCheck(output, "GetDecryptedLicenseKeysForClient decrypts stored keys and returns null for an unknown computer", TestGetDecryptedLicenseKeysForClientRoundTripsAndHandlesUnknownComputer);
+            allPassed &= SelfTestCheck(output, "SoftwareRepositoryPassword is DPAPI-encrypted at rest", TestSoftwareRepositoryPasswordIsInEncryptedConfigKeys);
             return allPassed;
         }
 
@@ -15548,6 +15651,15 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 try { Directory.Delete(dataPath, true); } catch { }
             }
+        }
+
+        private static string TestSoftwareRepositoryPasswordIsInEncryptedConfigKeys()
+        {
+            if (!EncryptedConfigKeys.Contains("SoftwareRepositoryPassword"))
+            {
+                return "expected SoftwareRepositoryPassword to be in EncryptedConfigKeys so it is never stored in plaintext";
+            }
+            return null;
         }
 
         // Administrators+SYSTEM only would permanently lock out a service
