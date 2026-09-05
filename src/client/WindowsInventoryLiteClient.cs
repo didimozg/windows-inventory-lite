@@ -987,7 +987,13 @@ namespace WindowsInventoryLite
         // returning an empty list.
         private string GetLicenseKeySourcesCachePath()
         {
-            return Path.Combine(options.OutputPath, "license-key-sources-cache.json");
+            // options.OutputPath may be a directory or a literal .json file path
+            // (see CollectAndSave's own localPath resolution above) - mirror that
+            // same branch here so the cache never lands under a file-as-directory.
+            string baseDir = options.OutputPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
+                ? Path.GetDirectoryName(options.OutputPath)
+                : options.OutputPath;
+            return Path.Combine(baseDir, "license-key-sources-cache.json");
         }
 
         private void SaveLicenseKeySourcesCache(object rawLicenseKeySources)

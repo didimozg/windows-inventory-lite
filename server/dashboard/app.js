@@ -4720,11 +4720,16 @@
         revealKeyBtn.dataset.revealed = 'false';
         return;
       }
-      if (state.revealedLicenseKeys[clientId]) {
+      if (state.revealedLicenseKeys[clientId] && state.revealedLicenseKeys[clientId][index] !== undefined) {
         revealKeyBtn.textContent = state.revealedLicenseKeys[clientId][index] + ' (hide)';
         revealKeyBtn.dataset.revealed = 'true';
         return;
       }
+      // No `return` above when the cached array exists but doesn't have this
+      // index (e.g. a re-render shifted indices after new licenses were
+      // collected) - fall through to a real fetch instead of rendering the
+      // stale "undefined (hide)" and permanently marking it revealed, the
+      // same failure mode already fixed on the fetch branch below.
       fetch(`/api/v1/clients/${encodeURIComponent(clientId)}/license-keys`, { cache: 'no-store' })
         .then(response => {
           if (!response.ok) throw new Error(`HTTP ${response.status}`);

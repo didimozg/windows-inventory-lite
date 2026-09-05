@@ -1,6 +1,6 @@
 # API Reference
 
-This is a practical lookup document for the server's HTTP API, not an OpenAPI/Swagger spec. It covers the real, current route surface: 51 routes (43 exact-match paths, 8 with a parameterized path segment) - down from 53 as of v0.42.0, which removed the four separate Linux install/uninstall job routes (`/api/v1/linux-client-install`, `/linux-client-uninstall`, and their GET list/detail equivalents) in favor of the unified `/api/v1/client-install`/`/client-uninstall` pair, and up again with the two new session endpoints below. It does not cover the static dashboard asset routes (`/`, `/app.js`, `/styles.css`, `/favicon.svg`), which serve dashboard files rather than API data.
+This is a practical lookup document for the server's HTTP API, not an OpenAPI/Swagger spec. It covers the real, current route surface: 56 routes (45 exact-match paths, 11 with a parameterized path segment) - down from 53 as of v0.42.0, which removed the four separate Linux install/uninstall job routes (`/api/v1/linux-client-install`, `/linux-client-uninstall`, and their GET list/detail equivalents) in favor of the unified `/api/v1/client-install`/`/client-uninstall` pair, up again with the two session endpoints, and up again with the five license-key routes documented below (the four-route `/api/v1/license-key-sources` catalog plus the `/api/v1/clients/{computerName}/license-keys` reveal endpoint). It does not cover the static dashboard asset routes (`/`, `/app.js`, `/styles.css`, `/favicon.svg`), which serve dashboard files rather than API data.
 
 ## Conventions
 
@@ -41,6 +41,7 @@ This project does not use a structured `{"error": {"code": ..., "message": ...}}
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
 | GET | `/api/v1/clients` | Basic Auth | Return the Windows client inventory index. |
+| GET | `/api/v1/clients/{computerName}/license-keys` | Basic Auth | Return one Windows client's decrypted license keys. |
 | PUT | `/api/v1/clients/{computerName}/description` | Basic Auth | Set a manual description override for one Windows client. |
 | DELETE | `/api/v1/clients/{computerName}` | Basic Auth | Delete one Windows client's stored report. |
 | GET | `/api/v1/linux/clients` | Basic Auth | Return the Linux client inventory index. |
@@ -129,14 +130,23 @@ This project does not use a structured `{"error": {"code": ..., "message": ...}}
 | PUT | `/api/v1/licenses/{id}` | Basic Auth | Update an existing license record. |
 | DELETE | `/api/v1/licenses/{id}` | Basic Auth | Delete a license record. |
 
+### License key sources
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/api/v1/license-key-sources` | Basic Auth | List the admin-managed registry-location catalog used for automatic license key collection. |
+| POST | `/api/v1/license-key-sources` | Basic Auth | Add a catalog entry. |
+| PUT | `/api/v1/license-key-sources/{id}` | Basic Auth | Update an existing catalog entry. |
+| DELETE | `/api/v1/license-key-sources/{id}` | Basic Auth | Delete a catalog entry. |
+
 ## Inventory ingestion
 
 ### POST /api/v1/inventory
 
-Accepts a Windows client's full inventory report as the request body (an arbitrary JSON object; the only field the server reads directly is `computerName`, used to name the stored file) and overwrites `{DataPath}/{computerName}.json` with it, after merging in the current AD-sync fields (`adDescription`, `adSyncStatus`, `adSyncedAt`) so a client's own report never has to know about AD sync.
+Accepts a Windows client's full inventory report as the request body (an arbitrary JSON object; the only field the server reads directly is `computerName`, used to name the stored file) and overwrites `{DataPath}/{computerName}.json` with it, after merging in the current AD-sync fields (`adDescription`, `adSyncStatus`, `adSyncedAt`) so a client's own report never has to know about AD sync. Before the file is written, every `licenses[].key` present in the body is replaced with its DPAPI-encrypted form (`SecretProtector.Protect`) - the client submits it in plaintext, the stored copy never is; see `GET /api/v1/clients/{computerName}/license-keys` below for the only way to read it back decrypted.
 
 - Auth: `X-Inventory-Token` header, checked against the configured token when `RequireIngestionToken` is on.
-- Response: `{"status": "ok"}` on success. `400 {"error": "invalid request body"}` if the body is not valid JSON.
+- Response: `{"status": "ok", "licenseKeySources": [...]}` on success - `licenseKeySources` is the current admin-managed license key source catalog (see `GET /api/v1/license-key-sources` below), trimmed to just `product`/`registryHive`/`registryPath`/`valueName` per entry (no `id`/`createdAt`/`updatedAt`), piggybacked on every ingestion response so the client can cache it for its next collection cycle without a separate config-pull channel. `400 {"error": "invalid request body"}` if the body is not valid JSON.
 
 ```bash
 curl -X POST https://server:8443/api/v1/inventory \
@@ -180,7 +190,18 @@ curl -X POST https://server:8443/api/v1/linux/inventory/service-status \
 
 ### GET /api/v1/clients
 
-Returns the full Windows client inventory index in one response. Top-level fields: `schemaVersion`, `serverVersion`, `generatedAt`, `clientCount`, `staleHours`, `adDescriptionSyncEnabled`, and `clients` - an array where each entry is a client's stored inventory report (the report body as last submitted to `POST /api/v1/inventory`, plus `sourceFile` and `sourceUpdatedAt` added by the server, the latter from the report file's last-write time; `lastIngestSourceIp` is a string, the source IP of the client's most recent successful report, used for ingestion-token-issue correlation; `tokenIssue` is one of `"missing"` or `"mismatched"` when a token problem is detected, absent from the object when there is none).
+Returns the full Windows client inventory index in one response. Top-level fields: `schemaVersion`, `serverVersion`, `generatedAt`, `clientCount`, `staleHours`, `adDescriptionSyncEnabled`, and `clients` - an array where each entry is a client's stored inventory report (the report body as last submitted to `POST /api/v1/inventory`, plus `sourceFile` and `sourceUpdatedAt` added by the server, the latter from the report file's last-write time; `lastIngestSourceIp` is a string, the source IP of the client's most recent successful report, used for ingestion-token-issue correlation; `tokenIssue` is one of `"missing"` or `"mismatched"` when a token problem is detected, absent from the object when there is none). Each entry's `licenses[].key`, if present, stays DPAPI-encrypted in this response - it is never decrypted for the bulk listing, only `product`/`source` are meaningful here. Use the reveal endpoint below to get one client's decrypted keys on demand.
+
+### GET /api/v1/clients/{computerName}/license-keys
+
+Looks up one client's stored report and returns its `licenses` array with every `key` decrypted (`SecretProtector.Unprotect`). The computer name is taken as everything between the `/api/v1/clients/` prefix and the `/license-keys` suffix (URL-decoded, trimmed), the same way the description/delete routes above extract it. Called only when the dashboard admin explicitly clicks "show" on one license entry - nothing is bulk-decrypted or pre-fetched.
+
+- Response: `{"licenses": [{"product": "...", "source": "...", "key": "..."}]}`. `404 {"error": "client not found"}` if the client has no stored report, if the URL has no computer-name segment at all, or if the report has no `licenses` array (empty list is still a 200, not a 404 - `licenses: []`).
+
+```bash
+curl -X GET "https://server:8443/api/v1/clients/WORKSTATION01/license-keys" \
+  -u admin:password
+```
 
 ### PUT /api/v1/clients/{computerName}/description
 
@@ -482,3 +503,28 @@ curl -X POST https://server:8443/api/v1/licenses \
 `{id}` is matched case-insensitively against stored records; it is not validated as a GUID, so any string that matches an existing `id` works. PUT accepts the same fields as POST (`name` required) and preserves the original `id`/`createdAt`; response is the updated record. DELETE removes the matching record; response is `{"status": "deleted"}`. Both return `404 {"error": "license not found"}` for an unknown ID.
 
 All four license endpoints read and write one JSON array file (`licenses.json`) under a single lock, and every write re-applies a restricted file ACL - license keys are stored in plaintext JSON on disk, protected only by filesystem permissions.
+
+## License key sources
+
+Admin-managed catalog telling Windows clients which registry values to read for automatic third-party license key collection. Distinct from the `/api/v1/licenses` catalog above: entries here hold no secret material themselves (just a registry location to check), only `_license-key-sources/license-key-sources.json`, and unlike `licenses.json` do not get a restricted file ACL. The current catalog (trimmed to `product`/`registryHive`/`registryPath`/`valueName`) is also returned to every Windows client on its next `POST /api/v1/inventory` response - see that endpoint above.
+
+### GET /api/v1/license-key-sources
+
+Returns `{"licenseKeySources": [...]}`, each record `{id, product, registryHive, registryPath, valueName, createdAt, updatedAt}`.
+
+### POST /api/v1/license-key-sources
+
+Creates a catalog entry. Request body: `product`, `registryHive`, `registryPath`, `valueName` (all required). `registryHive` must be `HKEY_LOCAL_MACHINE` or `HKEY_CURRENT_USER`. `id` is always server-generated (`Guid.NewGuid`), never client-supplied. Response is the created record itself. `400 {"error": "product is required"}` / `{"error": "registryHive must be HKEY_LOCAL_MACHINE or HKEY_CURRENT_USER"}` / `{"error": "registryPath is required"}` / `{"error": "valueName is required"}` for the respective missing/invalid field, checked in that order.
+
+```bash
+curl -X POST https://server:8443/api/v1/license-key-sources \
+  -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{"product":"KriptoPro CSP", "registryHive":"HKEY_LOCAL_MACHINE", "registryPath":"SOFTWARE\\WOW6432Node\\Crypto Pro\\Cryptography\\CurrentVersion", "valueName":"WLProductID"}'
+```
+
+### PUT /api/v1/license-key-sources/{id} and DELETE /api/v1/license-key-sources/{id}
+
+`{id}` is matched case-insensitively against stored records. PUT accepts the same fields as POST (all required) and preserves the original `id`/`createdAt`; response is the updated record. DELETE removes the matching record; response is `{"status": "deleted"}`. Both return `404 {"error": "license key source not found"}` for an unknown ID.
+
+All four endpoints read and write one JSON array file (`_license-key-sources/license-key-sources.json`) under a single lock, same full-array-rewrite pattern as `licenses.json`.

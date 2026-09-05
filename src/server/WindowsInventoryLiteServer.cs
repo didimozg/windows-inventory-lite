@@ -1574,8 +1574,13 @@ namespace WindowsInventoryLite
                     {
                         SendJson(stream, BuildClientIndex());
                     }
-                    else if (request.Method == "GET" && request.Path.StartsWith("/api/v1/clients/", StringComparison.OrdinalIgnoreCase) && request.Path.EndsWith("/license-keys", StringComparison.OrdinalIgnoreCase))
+                    else if (request.Method == "GET" && request.Path.StartsWith("/api/v1/clients/", StringComparison.OrdinalIgnoreCase))
                     {
+                        // Dispatch on prefix only, like the sibling PUT/DELETE routes below -
+                        // SendClientLicenseKeys strips any query string and validates the
+                        // "/license-keys" suffix itself before doing substring math, so an
+                        // EndsWith check here (which would break once a query string is
+                        // appended) is unnecessary.
                         SendClientLicenseKeys(stream, request);
                     }
                     else if (request.Method == "DELETE" && request.Path.StartsWith("/api/v1/clients/", StringComparison.OrdinalIgnoreCase))
@@ -2013,7 +2018,27 @@ namespace WindowsInventoryLite
         {
             const string prefix = "/api/v1/clients/";
             const string suffix = "/license-keys";
-            string computerName = request.Path.Substring(prefix.Length, request.Path.Length - prefix.Length - suffix.Length);
+            string rawPath = request.Path;
+            int queryStart = rawPath.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                rawPath = rawPath.Substring(0, queryStart);
+            }
+
+            // A request with no computer-name segment at all (e.g. GET
+            // /api/v1/clients/license-keys) still satisfies a naive
+            // StartsWith(prefix)/EndsWith(suffix) check, because the
+            // prefix's trailing "/" and the suffix's leading "/" collapse
+            // into the same character - that makes the computed name
+            // length negative and Substring below throws. Require enough
+            // room for a real name segment before doing the substring math.
+            if (rawPath.Length <= prefix.Length + suffix.Length || !rawPath.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                SendText(stream, "{\"error\":\"client not found\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+
+            string computerName = rawPath.Substring(prefix.Length, rawPath.Length - prefix.Length - suffix.Length);
             computerName = Uri.UnescapeDataString(computerName).Trim();
 
             List<Dictionary<string, object>> licenses = GetDecryptedLicenseKeysForClient(computerName);
