@@ -6,6 +6,7 @@ using System.IO;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Authentication;
 using System.Security.Cryptography;
@@ -923,6 +924,83 @@ namespace WindowsInventoryLite
         public InventoryServer(ServerOptions options)
         {
             this.options = options;
+        }
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool LogonUser(string lpszUsername, string lpszDomain, string lpszPassword, int dwLogonType, int dwLogonProvider, out IntPtr phToken);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        private const int Logon32LogonNewCredentials = 9;
+        private const int Logon32ProviderWinNt50 = 3;
+
+        // Splits "DOMAIN\username" into ("DOMAIN", "username"); a bare
+        // "username" with no backslash uses "." (the local machine) as the
+        // domain, matching how LogonUser itself treats a missing domain.
+        private static void SplitDomainUsername(string input, out string domain, out string username)
+        {
+            int separatorIndex = input.IndexOf('\\');
+            if (separatorIndex < 0)
+            {
+                domain = ".";
+                username = input;
+            }
+            else
+            {
+                domain = input.Substring(0, separatorIndex);
+                username = input.Substring(separatorIndex + 1);
+            }
+        }
+
+        // Runs action impersonating SoftwareRepositoryUsername/Password if
+        // both are configured; otherwise runs it under the current process
+        // identity unchanged. LOGON32_LOGON_NEW_CREDENTIALS does NOT
+        // validate the password at LogonUser-call time - a wrong password
+        // still returns a usable (but useless) token here, and only fails
+        // later, the first time action() actually touches the network
+        // share. Callers must treat a thrown exception from inside action
+        // as a possible bad-credentials symptom, not assume LogonUser's
+        // own success proves the credentials are correct.
+        private static T WithSoftwareRepositoryIdentity<T>(ServerOptions options, Func<T> action)
+        {
+            if (String.IsNullOrEmpty(options.SoftwareRepositoryUsername) || String.IsNullOrEmpty(options.SoftwareRepositoryPassword))
+            {
+                return action();
+            }
+
+            string domain;
+            string username;
+            SplitDomainUsername(options.SoftwareRepositoryUsername, out domain, out username);
+
+            IntPtr tokenHandle = IntPtr.Zero;
+            try
+            {
+                if (!LogonUser(username, domain, options.SoftwareRepositoryPassword, Logon32LogonNewCredentials, Logon32ProviderWinNt50, out tokenHandle))
+                {
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                }
+
+                using (WindowsIdentity identity = new WindowsIdentity(tokenHandle))
+                {
+                    WindowsImpersonationContext context = identity.Impersonate();
+                    try
+                    {
+                        return action();
+                    }
+                    finally
+                    {
+                        context.Undo();
+                    }
+                }
+            }
+            finally
+            {
+                if (tokenHandle != IntPtr.Zero)
+                {
+                    CloseHandle(tokenHandle);
+                }
+            }
         }
 
         public void Start()
@@ -11058,6 +11136,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ApplyRestrictedConfigAcl grants the current process's own identity, not just Administrators/SYSTEM", TestApplyRestrictedConfigAclGrantsCurrentIdentity);
             allPassed &= SelfTestCheck(output, "GetDecryptedLicenseKeysForClient decrypts stored keys and returns null for an unknown computer", TestGetDecryptedLicenseKeysForClientRoundTripsAndHandlesUnknownComputer);
             allPassed &= SelfTestCheck(output, "SoftwareRepositoryPassword is DPAPI-encrypted at rest", TestSoftwareRepositoryPasswordIsInEncryptedConfigKeys);
+            allPassed &= SelfTestCheck(output, "SplitDomainUsername handles both DOMAIN\\user and bare-username forms", TestSplitDomainUsernameHandlesBothForms);
+            allPassed &= SelfTestCheck(output, "WithSoftwareRepositoryIdentity runs the action directly when no credentials are configured", TestWithSoftwareRepositoryIdentityRunsDirectlyWhenNoCredentialsConfigured);
             return allPassed;
         }
 
@@ -15658,6 +15738,35 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (!EncryptedConfigKeys.Contains("SoftwareRepositoryPassword"))
             {
                 return "expected SoftwareRepositoryPassword to be in EncryptedConfigKeys so it is never stored in plaintext";
+            }
+            return null;
+        }
+
+        private static string TestSplitDomainUsernameHandlesBothForms()
+        {
+            string domain;
+            string username;
+            SplitDomainUsername(@"CONTOSO\svc-share", out domain, out username);
+            if (domain != "CONTOSO" || username != "svc-share")
+            {
+                return "expected DOMAIN\\user to split into ('CONTOSO', 'svc-share'), got ('" + domain + "', '" + username + "')";
+            }
+            SplitDomainUsername("localsvc", out domain, out username);
+            if (domain != "." || username != "localsvc")
+            {
+                return "expected a bare username with no backslash to default domain to '.', got ('" + domain + "', '" + username + "')";
+            }
+            return null;
+        }
+
+        private static string TestWithSoftwareRepositoryIdentityRunsDirectlyWhenNoCredentialsConfigured()
+        {
+            ServerOptions options = new ServerOptions();
+            bool ranAction = false;
+            int result = WithSoftwareRepositoryIdentity(options, () => { ranAction = true; return 42; });
+            if (!ranAction || result != 42)
+            {
+                return "expected the action to run directly (no impersonation attempted) when no credentials are configured";
             }
             return null;
         }
