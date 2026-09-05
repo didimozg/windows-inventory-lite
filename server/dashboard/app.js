@@ -4726,12 +4726,19 @@
         return;
       }
       fetch(`/api/v1/clients/${encodeURIComponent(clientId)}/license-keys`, { cache: 'no-store' })
-        .then(r => r.json())
+        .then(response => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.json();
+        })
         .then(data => {
           const keys = (data.licenses || []).map(item => item.key);
+          if (keys[index] === undefined) throw new Error('Key missing from response.');
           state.revealedLicenseKeys[clientId] = keys;
           revealKeyBtn.textContent = keys[index] + ' (hide)';
           revealKeyBtn.dataset.revealed = 'true';
+        })
+        .catch(() => {
+          revealKeyBtn.textContent = '•••••• (failed - retry)';
         });
       return;
     }
