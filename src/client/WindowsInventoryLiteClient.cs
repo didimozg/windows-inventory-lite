@@ -57,6 +57,7 @@ namespace WindowsInventoryLite
         {
             private readonly ClientOptions options;
             private Timer timer;
+            private Timer softwareCheckTimer;
 
             public InventoryService(ClientOptions options)
             {
@@ -69,6 +70,7 @@ namespace WindowsInventoryLite
             protected override void OnStart(string[] args)
             {
                 timer = new Timer(Collect, null, TimeSpan.Zero, TimeSpan.FromHours(options.IntervalHours));
+                softwareCheckTimer = new Timer(CheckSoftwareJobs, null, TimeSpan.FromMinutes(2), TimeSpan.FromHours(options.SoftwareCheckIntervalHours));
             }
 
             protected override void OnStop()
@@ -77,6 +79,11 @@ namespace WindowsInventoryLite
                 {
                     timer.Dispose();
                     timer = null;
+                }
+                if (softwareCheckTimer != null)
+                {
+                    softwareCheckTimer.Dispose();
+                    softwareCheckTimer = null;
                 }
             }
 
@@ -109,6 +116,102 @@ namespace WindowsInventoryLite
                     DebugLogger.Log(options, "Error", ex.ToString());
                 }
             }
+
+            private void CheckSoftwareJobs(object state)
+            {
+                try
+                {
+                    SoftwareJobRunner runner = new SoftwareJobRunner(options);
+                    runner.CheckAndRun();
+                    DebugLogger.Log(options, "Server", "Software job check cycle completed.");
+                }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        System.Diagnostics.EventLog.WriteEntry(Program.ServiceName, ex.ToString(), System.Diagnostics.EventLogEntryType.Warning);
+                    }
+                    catch { }
+                    DebugLogger.Log(options, "Error", ex.ToString());
+                }
+            }
+
+            private sealed class SoftwareJobRunner
+            {
+                private readonly ClientOptions options;
+
+                public SoftwareJobRunner(ClientOptions options)
+                {
+                    this.options = options;
+                }
+
+                public void CheckAndRun()
+                {
+                    // Filled in by a later task: fetch assigned jobs, skip
+                    // already-succeeded ones, run the rest, report results.
+                }
+
+                private string GetSoftwareJobSuccessCachePath()
+                {
+                    return Path.Combine(options.OutputPath, "software-job-success-cache.json");
+                }
+
+                private HashSet<string> LoadSoftwareJobSuccessCache()
+                {
+                    HashSet<string> result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    string path = GetSoftwareJobSuccessCachePath();
+                    if (!File.Exists(path))
+                    {
+                        return result;
+                    }
+
+                    try
+                    {
+                        JavaScriptSerializer serializer = new JavaScriptSerializer();
+                        string json = File.ReadAllText(path, Encoding.UTF8);
+                        ArrayList raw = serializer.Deserialize<ArrayList>(json);
+                        if (raw != null)
+                        {
+                            foreach (object item in raw)
+                            {
+                                result.Add(Convert.ToString(item));
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    }
+                    return result;
+                }
+
+                private void SaveSoftwareJobSuccessCache(HashSet<string> succeededIds)
+                {
+                    try
+                    {
+                        JavaScriptSerializer serializer = new JavaScriptSerializer();
+                        ArrayList list = new ArrayList();
+                        foreach (string id in succeededIds)
+                        {
+                            list.Add(id);
+                        }
+                        string json = serializer.Serialize(list);
+                        string directory = options.OutputPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
+                            ? Path.GetDirectoryName(options.OutputPath)
+                            : options.OutputPath;
+                        if (!Directory.Exists(directory))
+                        {
+                            Directory.CreateDirectory(directory);
+                        }
+                        File.WriteAllText(GetSoftwareJobSuccessCachePath(), json, new UTF8Encoding(false));
+                    }
+                    catch
+                    {
+                        // Best-effort convenience cache - a write failure here
+                        // must never fail the job-check cycle that already ran.
+                    }
+                }
+            }
         }
     }
 
@@ -119,6 +222,7 @@ namespace WindowsInventoryLite
         public string Token;
         public string OutputPath;
         public int IntervalHours;
+        public int SoftwareCheckIntervalHours;
         public bool RunOnce;
         public bool SkipSoftware;
         public bool ShowVersion;
@@ -135,6 +239,7 @@ namespace WindowsInventoryLite
         {
             ClientOptions options = new ClientOptions();
             options.IntervalHours = 6;
+            options.SoftwareCheckIntervalHours = 6;
             options.OutputPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WindowsInventoryLite");
 
             for (int i = 0; i < args.Length; i++)
@@ -174,6 +279,14 @@ namespace WindowsInventoryLite
                     if (Int32.TryParse(args[++i], out parsed) && parsed >= 1 && parsed <= 24)
                     {
                         options.IntervalHours = parsed;
+                    }
+                }
+                else if (key == "--software-check-interval-hours" && i + 1 < args.Length)
+                {
+                    int parsedSoftwareInterval;
+                    if (Int32.TryParse(args[++i], out parsedSoftwareInterval) && parsedSoftwareInterval >= 1 && parsedSoftwareInterval <= 24)
+                    {
+                        options.SoftwareCheckIntervalHours = parsedSoftwareInterval;
                     }
                 }
                 else if (key == "--debug-log-enabled")
