@@ -152,6 +152,7 @@
     if (hash === 'licensekeysources') return { view: 'licenseKeySources', subview: null };
     if (hash === 'windowsupdates') return { view: 'windowsUpdates', subview: null };
     if (hash === 'thirdpartysoftware') return { view: 'thirdPartySoftware', subview: null };
+    if (hash === 'softwarejobhistory') return { view: 'softwareJobHistory', subview: null };
     if (hash === 'logging') return { view: 'logging', subview: null };
     // #linux-clients / #linux are kept as aliases of the merged Clients
     // page (same backward-compat pattern as #linux-hardware above and
@@ -219,6 +220,7 @@
     if (view === 'licenseKeySources') loadLicenseKeySources();
     if (view === 'windowsUpdates') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); }
     if (view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
+    if (view === 'softwareJobHistory') loadSoftwareJobHistory();
     if (view === 'logging') loadIngestionRejectionLog();
     // 'clients' and 'hardware' are in this list because both merged views
     // read Linux data too - opening either tab re-fetches it rather than
@@ -3818,6 +3820,30 @@
       .catch(() => {});
   }
 
+  function loadSoftwareJobHistory() {
+    fetch('/api/v1/software-repository/attempt-history', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        const attempts = data.attempts || [];
+        const sorted = attempts.slice().reverse();
+        byId('softwareJobHistoryBody').innerHTML = sorted.map(a => `
+          <tr>
+            <td>${escapeHtml(a.timestampUtc)}</td>
+            <td>${escapeHtml(a.computerName)}</td>
+            <td>${escapeHtml(a.catalogType)}</td>
+            <td class="mono">${escapeHtml(a.entryId)}</td>
+            <td>${a.success ? 'Success' : 'Failed'}</td>
+            <td>${escapeHtml(String(a.exitCode))}</td>
+            <td>${escapeHtml(a.errorMessage || '')}</td>
+          </tr>
+        `).join('') || '<tr><td colspan="7" class="empty">No attempts recorded yet.</td></tr>';
+      })
+      .catch(() => {});
+  }
+
   function promoteThirdPartySoftwareCandidate(relativePath) {
     openThirdPartySoftwareForm(null);
     byId('thirdPartySoftwareRelativePath').value = relativePath;
@@ -4677,6 +4703,7 @@
     byId('licenseKeySourcesView').classList.toggle('hidden', state.view !== 'licenseKeySources');
     byId('windowsUpdatesView').classList.toggle('hidden', state.view !== 'windowsUpdates');
     byId('thirdPartySoftwareView').classList.toggle('hidden', state.view !== 'thirdPartySoftware');
+    byId('softwareJobHistoryView').classList.toggle('hidden', state.view !== 'softwareJobHistory');
     byId('loggingView').classList.toggle('hidden', state.view !== 'logging');
     byId('linuxServicesView').classList.toggle('hidden', state.view !== 'linuxServices');
     // Deploy: Actions shows both platforms' sections together (stacked, own
@@ -4701,6 +4728,7 @@
     byId('licenseKeySourcesTab').classList.toggle('active', state.view === 'licenseKeySources');
     byId('windowsUpdatesTab').classList.toggle('active', state.view === 'windowsUpdates');
     byId('thirdPartySoftwareTab').classList.toggle('active', state.view === 'thirdPartySoftware');
+    byId('softwareJobHistoryTab').classList.toggle('active', state.view === 'softwareJobHistory');
     byId('loggingTab').classList.toggle('active', state.view === 'logging');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
     byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'licenses', 'licenseKeySources'].includes(state.view));
@@ -5010,6 +5038,7 @@
     if (state.view === 'licenseKeySources') loadLicenseKeySources();
     if (state.view === 'windowsUpdates') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); }
     if (state.view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
+    if (state.view === 'softwareJobHistory') loadSoftwareJobHistory();
     if (state.view === 'logging') loadIngestionRejectionLog();
     if (state.view === 'clients' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
   });
@@ -5356,6 +5385,7 @@
   byId('thirdPartySoftwareSaveButton').addEventListener('click', saveThirdPartySoftware);
   byId('thirdPartySoftwareCancelButton').addEventListener('click', closeThirdPartySoftwareForm);
   byId('thirdPartySoftwareScanButton').addEventListener('click', refreshThirdPartySoftwareScan);
+  byId('softwareJobHistoryTab').addEventListener('click', () => setView('softwareJobHistory'));
   byId('loggingTab').addEventListener('click', () => setView('logging'));
   byId('linuxServicesTab').addEventListener('click', () => setView('linuxServices'));
   byId('exportLinuxServicesBtn').addEventListener('click', exportLinuxServices);
@@ -5393,6 +5423,7 @@
   if (state.view === 'licenseKeySources') loadLicenseKeySources();
   if (state.view === 'windowsUpdates') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); }
   if (state.view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
+  if (state.view === 'softwareJobHistory') loadSoftwareJobHistory();
   if (state.view === 'logging') loadIngestionRejectionLog();
   updateInstallFieldVisibility();
   loadInstallHistory();

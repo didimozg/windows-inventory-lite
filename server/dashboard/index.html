@@ -707,6 +707,17 @@
           </div>
         </section>
 
+        <section id="softwareJobHistoryView" class="hidden" aria-label="Software job attempt history">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Time</th><th>Computer</th><th>Type</th><th>Entry</th><th>Result</th><th>Exit code</th><th>Error</th></tr>
+              </thead>
+              <tbody id="softwareJobHistoryBody"></tbody>
+            </table>
+          </div>
+        </section>
+
         <section id="loggingView" class="hidden" aria-label="Ingestion rejection log">
           <p class="cert-hint">Requests to the inventory-ingestion endpoints rejected for a missing or wrong token. Correlated to a known client by source IP when that IP matches the client's most recent successful report - a best-effort heuristic, not a guarantee (see Settings &gt; Server &gt; Ingestion Token for retention settings).</p>
           <div class="table-wrap">
