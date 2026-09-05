@@ -897,6 +897,7 @@ namespace WindowsInventoryLite
         private volatile string lastScheduledLinuxUpdateJobId;
         private readonly object licensesLock = new object();
         private readonly object licenseKeySourcesLock = new object();
+        private readonly object windowsUpdatesLock = new object();
         private readonly object certificateHistoryLock = new object();
         private readonly object listenerRestartLock = new object();
         // HTTP and HTTPS are two fully independent listeners on two
@@ -1887,6 +1888,22 @@ namespace WindowsInventoryLite
                     else if (request.Method == "DELETE" && request.Path.StartsWith("/api/v1/license-key-sources/", StringComparison.OrdinalIgnoreCase))
                     {
                         DeleteLicenseKeySource(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/windows-updates")
+                    {
+                        SendWindowsUpdates(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/windows-updates")
+                    {
+                        CreateWindowsUpdate(stream, request);
+                    }
+                    else if (request.Method == "PUT" && request.Path.StartsWith("/api/v1/windows-updates/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        UpdateWindowsUpdate(stream, request);
+                    }
+                    else if (request.Method == "DELETE" && request.Path.StartsWith("/api/v1/windows-updates/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        DeleteWindowsUpdate(stream, request);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/software-repository/settings")
                     {
@@ -10174,6 +10191,245 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendJson(stream, "{\"status\":\"deleted\"}");
         }
 
+        private string GetWindowsUpdatesDirectory()
+        {
+            return Path.Combine(options.DataPath, "_windows-updates");
+        }
+
+        private string GetWindowsUpdatesFilePath()
+        {
+            return Path.Combine(GetWindowsUpdatesDirectory(), "windows-updates.json");
+        }
+
+        private List<Dictionary<string, object>> LoadWindowsUpdates()
+        {
+            string path = GetWindowsUpdatesFilePath();
+            if (!File.Exists(path))
+            {
+                return new List<Dictionary<string, object>>();
+            }
+
+            List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+            try
+            {
+                JavaScriptSerializer serializer = CreateJsonSerializer();
+                string json = File.ReadAllText(path, Encoding.UTF8);
+                ArrayList raw = serializer.Deserialize<ArrayList>(json);
+                if (raw != null)
+                {
+                    foreach (object item in raw)
+                    {
+                        Dictionary<string, object> record = item as Dictionary<string, object>;
+                        if (record != null)
+                        {
+                            entries.Add(record);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return entries;
+        }
+
+        private void SaveWindowsUpdates(List<Dictionary<string, object>> entries)
+        {
+            string directory = GetWindowsUpdatesDirectory();
+            if (!Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            string json = serializer.Serialize(entries);
+            File.WriteAllText(GetWindowsUpdatesFilePath(), json, new UTF8Encoding(false));
+        }
+
+        private static string ExtractWindowsUpdateId(string path)
+        {
+            const string prefix = "/api/v1/windows-updates/";
+            string id = path.Substring(prefix.Length);
+            int queryStart = id.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                id = id.Substring(0, queryStart);
+            }
+            return Uri.UnescapeDataString(id).Trim();
+        }
+
+        private void SendWindowsUpdates(Stream stream)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            List<Dictionary<string, object>> entries;
+            lock (windowsUpdatesLock)
+            {
+                entries = LoadWindowsUpdates();
+            }
+
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["windowsUpdates"] = entries;
+            SendJson(stream, serializer.Serialize(response));
+        }
+
+        private void CreateWindowsUpdate(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string name = Convert.ToString(payload.ContainsKey("name") ? payload["name"] : "").Trim();
+            string relativePath = Convert.ToString(payload.ContainsKey("relativePath") ? payload["relativePath"] : "").Trim();
+            string arguments = Convert.ToString(payload.ContainsKey("arguments") ? payload["arguments"] : "").Trim();
+            string targets = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "").Trim();
+            bool requiresReboot = payload.ContainsKey("requiresReboot") && Convert.ToBoolean(payload["requiresReboot"]);
+            bool enabled = !payload.ContainsKey("enabled") || Convert.ToBoolean(payload["enabled"]);
+
+            if (String.IsNullOrEmpty(name))
+            {
+                SendText(stream, "{\"error\":\"name is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            if (String.IsNullOrEmpty(relativePath))
+            {
+                SendText(stream, "{\"error\":\"relativePath is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string nowUtc = DateTime.UtcNow.ToString("o");
+            Dictionary<string, object> record = new Dictionary<string, object>();
+            record["id"] = Guid.NewGuid().ToString("N");
+            record["name"] = name;
+            record["relativePath"] = relativePath;
+            record["arguments"] = arguments;
+            record["requiresReboot"] = requiresReboot;
+            record["enabled"] = enabled;
+            record["targets"] = targets;
+            record["createdAt"] = nowUtc;
+            record["updatedAt"] = nowUtc;
+
+            lock (windowsUpdatesLock)
+            {
+                List<Dictionary<string, object>> entries = LoadWindowsUpdates();
+                entries.Add(record);
+                SaveWindowsUpdates(entries);
+            }
+
+            SendJson(stream, serializer.Serialize(record));
+        }
+
+        private void UpdateWindowsUpdate(Stream stream, RequestContext request)
+        {
+            string id = ExtractWindowsUpdateId(request.Path);
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string name = Convert.ToString(payload.ContainsKey("name") ? payload["name"] : "").Trim();
+            string relativePath = Convert.ToString(payload.ContainsKey("relativePath") ? payload["relativePath"] : "").Trim();
+            string arguments = Convert.ToString(payload.ContainsKey("arguments") ? payload["arguments"] : "").Trim();
+            string targets = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "").Trim();
+            bool requiresReboot = payload.ContainsKey("requiresReboot") && Convert.ToBoolean(payload["requiresReboot"]);
+            bool enabled = !payload.ContainsKey("enabled") || Convert.ToBoolean(payload["enabled"]);
+
+            if (String.IsNullOrEmpty(name))
+            {
+                SendText(stream, "{\"error\":\"name is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            if (String.IsNullOrEmpty(relativePath))
+            {
+                SendText(stream, "{\"error\":\"relativePath is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            lock (windowsUpdatesLock)
+            {
+                List<Dictionary<string, object>> entries = LoadWindowsUpdates();
+                Dictionary<string, object> record = null;
+                for (int i = 0; i < entries.Count; i++)
+                {
+                    if (String.Equals(GetStringValue(entries[i], "id"), id, StringComparison.OrdinalIgnoreCase))
+                    {
+                        record = entries[i];
+                        break;
+                    }
+                }
+
+                if (record == null)
+                {
+                    SendText(stream, "{\"error\":\"windows update entry not found\"}", "application/json; charset=utf-8", 404);
+                    return;
+                }
+
+                record["name"] = name;
+                record["relativePath"] = relativePath;
+                record["arguments"] = arguments;
+                record["requiresReboot"] = requiresReboot;
+                record["enabled"] = enabled;
+                record["targets"] = targets;
+                record["updatedAt"] = DateTime.UtcNow.ToString("o");
+
+                SaveWindowsUpdates(entries);
+                SendJson(stream, serializer.Serialize(record));
+            }
+        }
+
+        private void DeleteWindowsUpdate(Stream stream, RequestContext request)
+        {
+            string id = ExtractWindowsUpdateId(request.Path);
+
+            lock (windowsUpdatesLock)
+            {
+                List<Dictionary<string, object>> entries = LoadWindowsUpdates();
+                int indexToRemove = -1;
+                for (int i = 0; i < entries.Count; i++)
+                {
+                    if (String.Equals(GetStringValue(entries[i], "id"), id, StringComparison.OrdinalIgnoreCase))
+                    {
+                        indexToRemove = i;
+                        break;
+                    }
+                }
+
+                if (indexToRemove < 0)
+                {
+                    SendText(stream, "{\"error\":\"windows update entry not found\"}", "application/json; charset=utf-8", 404);
+                    return;
+                }
+
+                entries.RemoveAt(indexToRemove);
+                SaveWindowsUpdates(entries);
+            }
+
+            SendJson(stream, "{\"status\":\"deleted\"}");
+        }
+
         private static string GetExeVersion(string path)
         {
             try
@@ -11082,6 +11338,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
             allPassed &= SelfTestCheck(output, "IsValidRegistryHiveName accepts only HKEY_LOCAL_MACHINE/HKEY_CURRENT_USER", TestIsValidRegistryHiveNameAcceptsOnlyKnownHives);
             allPassed &= SelfTestCheck(output, "License key sources CRUD storage round-trips through disk", TestLicenseKeySourcesCrudRoundTrip);
+            allPassed &= SelfTestCheck(output, "Windows updates catalog CRUD storage round-trips through disk", TestWindowsUpdatesCrudRoundTrip);
             allPassed &= SelfTestCheck(output, "BuildLicenseKeySourcesForClientResponse omits admin-only fields", TestBuildLicenseKeySourcesForClientResponseTrimsToClientFields);
             allPassed &= SelfTestCheck(output, "SaveServerConfigValues leaves the final config file with a restricted ACL, no leftover .tmp file", TestSaveServerConfigValuesRestrictsTempFileBeforeWritingContent);
             allPassed &= SelfTestCheck(output, "Linux known-hosts store round-trips and overwrites by host:port", TestLinuxKnownHostsRoundTrip);
@@ -14225,6 +14482,46 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (GetStringValue(reloaded[0], "product") != "Test Product")
                 {
                     return "expected the saved product name to round-trip through disk";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestWindowsUpdatesCrudRoundTrip()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-windows-updates-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> entries = server.LoadWindowsUpdates();
+                if (entries.Count != 0)
+                {
+                    return "expected an empty list before any entry is saved";
+                }
+
+                Dictionary<string, object> record = new Dictionary<string, object>();
+                record["id"] = "test-id";
+                record["name"] = "Test KB";
+                record["relativePath"] = @"windows-updates\test.msu";
+                record["arguments"] = "/quiet /norestart";
+                record["requiresReboot"] = true;
+                record["enabled"] = true;
+                record["targets"] = "TEST-PC";
+                entries.Add(record);
+                server.SaveWindowsUpdates(entries);
+
+                List<Dictionary<string, object>> reloaded = server.LoadWindowsUpdates();
+                if (reloaded.Count != 1 || GetStringValue(reloaded[0], "name") != "Test KB")
+                {
+                    return "expected the saved entry to round-trip through disk";
                 }
                 return null;
             }
