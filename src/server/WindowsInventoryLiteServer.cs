@@ -1930,6 +1930,14 @@ namespace WindowsInventoryLite
                     {
                         ConfigureSoftwareRepositoryCredentials(stream, request);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/software-repository/scan-status")
+                    {
+                        SendShareScanStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/software-repository/scan")
+                    {
+                        TriggerShareScan(stream);
+                    }
                     else if (request.Method == "GET" && (request.Path == "/" || request.Path == "/index.html"))
                     {
                         SendDashboardFile(stream, "index.html", DashboardHtml, "text/html; charset=utf-8");
@@ -2948,6 +2956,26 @@ namespace WindowsInventoryLite
             SaveServerConfigValues(updates);
 
             SendSoftwareRepositoryCredentialsStatus(stream);
+        }
+
+        private void SendShareScanStatus(Stream stream)
+        {
+            ShareScanResult result;
+            lock (shareScanLock)
+            {
+                result = lastShareScanResult;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> response = result != null ? result.ToDictionary() : new ShareScanResult().ToDictionary();
+            SendJson(stream, serializer.Serialize(response));
+        }
+
+        private void TriggerShareScan(Stream stream)
+        {
+            ShareScanResult result = ScanSoftwareRepository();
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result.ToDictionary()));
         }
 
         private void SendLinuxUpdateScheduleStatus(Stream stream)
@@ -10686,6 +10714,123 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendJson(stream, "{\"status\":\"deleted\"}");
         }
 
+        private readonly object shareScanLock = new object();
+        private ShareScanResult lastShareScanResult;
+
+        private sealed class ShareScanResult
+        {
+            public bool Success;
+            public string ErrorMessage;
+            public DateTime ScannedAtUtc;
+            public List<string> WindowsUpdateCandidates;
+            public List<string> ThirdPartySoftwareCandidates;
+
+            public Dictionary<string, object> ToDictionary()
+            {
+                Dictionary<string, object> result = new Dictionary<string, object>();
+                result["success"] = Success;
+                result["errorMessage"] = ErrorMessage;
+                result["scannedAt"] = ScannedAtUtc == DateTime.MinValue ? null : ScannedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                result["windowsUpdateCandidates"] = WindowsUpdateCandidates ?? new List<string>();
+                result["thirdPartySoftwareCandidates"] = ThirdPartySoftwareCandidates ?? new List<string>();
+                return result;
+            }
+        }
+
+        // Scans the two fixed subfolders under SoftwareRepositoryPath and
+        // returns files present on disk that no existing catalog entry's
+        // relativePath already references. A scan that fails (share
+        // unreachable, bad credentials only discovered now per
+        // WithSoftwareRepositoryIdentity's own documented lazy-validation
+        // behavior, missing subfolder) does NOT clear the previous
+        // successful result - the caller decides what to keep showing.
+        private ShareScanResult ScanSoftwareRepository()
+        {
+            ShareScanResult result = new ShareScanResult();
+            result.ScannedAtUtc = DateTime.UtcNow;
+
+            if (String.IsNullOrEmpty(options.SoftwareRepositoryPath))
+            {
+                result.Success = false;
+                result.ErrorMessage = "SoftwareRepositoryPath is not configured.";
+                lock (shareScanLock)
+                {
+                    lastShareScanResult = result;
+                }
+                return result;
+            }
+
+            try
+            {
+                List<string> windowsUpdateFiles = WithSoftwareRepositoryIdentity(options, () => ListRelativeFiles(options.SoftwareRepositoryPath, "windows-updates"));
+                List<string> thirdPartyFiles = WithSoftwareRepositoryIdentity(options, () => ListRelativeFiles(options.SoftwareRepositoryPath, "third-party-software"));
+
+                HashSet<string> knownWindowsUpdatePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (Dictionary<string, object> entry in LoadWindowsUpdates())
+                {
+                    knownWindowsUpdatePaths.Add(GetStringValue(entry, "relativePath"));
+                }
+                HashSet<string> knownThirdPartyPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (Dictionary<string, object> entry in LoadThirdPartySoftware())
+                {
+                    knownThirdPartyPaths.Add(GetStringValue(entry, "relativePath"));
+                }
+
+                result.WindowsUpdateCandidates = new List<string>();
+                foreach (string file in windowsUpdateFiles)
+                {
+                    if (!knownWindowsUpdatePaths.Contains(file))
+                    {
+                        result.WindowsUpdateCandidates.Add(file);
+                    }
+                }
+
+                result.ThirdPartySoftwareCandidates = new List<string>();
+                foreach (string file in thirdPartyFiles)
+                {
+                    if (!knownThirdPartyPaths.Contains(file))
+                    {
+                        result.ThirdPartySoftwareCandidates.Add(file);
+                    }
+                }
+
+                result.Success = true;
+            }
+            catch (Exception ex)
+            {
+                result.Success = false;
+                result.ErrorMessage = ex.Message;
+            }
+
+            lock (shareScanLock)
+            {
+                lastShareScanResult = result;
+            }
+            return result;
+        }
+
+        // Recursively lists files under <repositoryRoot>\<subfolderName>,
+        // returned as relativePath strings rooted at repositoryRoot itself
+        // (e.g. "windows-updates\2026-09\kb5001716.msu") - this is exactly
+        // the string shape a catalog entry's own relativePath field is
+        // expected to hold, so the two can be compared directly.
+        private static List<string> ListRelativeFiles(string repositoryRoot, string subfolderName)
+        {
+            List<string> result = new List<string>();
+            string subfolderPath = Path.Combine(repositoryRoot, subfolderName);
+            if (!Directory.Exists(subfolderPath))
+            {
+                return result;
+            }
+
+            foreach (string filePath in Directory.GetFiles(subfolderPath, "*", SearchOption.AllDirectories))
+            {
+                string relative = filePath.Substring(repositoryRoot.Length).TrimStart('\\');
+                result.Add(relative);
+            }
+            return result;
+        }
+
         private static string GetExeVersion(string path)
         {
             try
@@ -11652,6 +11797,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "SoftwareRepositoryPassword is DPAPI-encrypted at rest", TestSoftwareRepositoryPasswordIsInEncryptedConfigKeys);
             allPassed &= SelfTestCheck(output, "SplitDomainUsername handles both DOMAIN\\user and bare-username forms", TestSplitDomainUsernameHandlesBothForms);
             allPassed &= SelfTestCheck(output, "WithSoftwareRepositoryIdentity runs the action directly when no credentials are configured", TestWithSoftwareRepositoryIdentityRunsDirectlyWhenNoCredentialsConfigured);
+            allPassed &= SelfTestCheck(output, "ScanSoftwareRepository reports failure when SoftwareRepositoryPath is not configured", TestScanSoftwareRepositoryReportsMissingConfiguration);
+            allPassed &= SelfTestCheck(output, "ScanSoftwareRepository finds only files not already referenced by a catalog entry's relativePath", TestScanSoftwareRepositoryFindsUncatalogedFilesOnly);
             return allPassed;
         }
 
@@ -16385,6 +16532,69 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
 
             return null;
+        }
+
+        private static string TestScanSoftwareRepositoryReportsMissingConfiguration()
+        {
+            ServerOptions options = new ServerOptions();
+            InventoryServer server = new InventoryServer(options);
+            var result = server.ScanSoftwareRepository();
+            if (result.Success)
+            {
+                return "expected a scan with no configured SoftwareRepositoryPath to report failure";
+            }
+            if (String.IsNullOrEmpty(result.ErrorMessage))
+            {
+                return "expected a non-empty error message explaining the missing configuration";
+            }
+            return null;
+        }
+
+        private static string TestScanSoftwareRepositoryFindsUncatalogedFilesOnly()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-share-scan-test-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-share-scan-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "windows-updates"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "third-party-software"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                File.WriteAllText(Path.Combine(shareRoot, "windows-updates", "already-known.msu"), "test");
+                File.WriteAllText(Path.Combine(shareRoot, "windows-updates", "new-patch.msu"), "test");
+                File.WriteAllText(Path.Combine(shareRoot, "third-party-software", "new-app.exe"), "test");
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> existingWindowsUpdates = new List<Dictionary<string, object>>();
+                Dictionary<string, object> alreadyKnown = new Dictionary<string, object>();
+                alreadyKnown["id"] = "existing";
+                alreadyKnown["relativePath"] = @"windows-updates\already-known.msu";
+                existingWindowsUpdates.Add(alreadyKnown);
+                server.SaveWindowsUpdates(existingWindowsUpdates);
+
+                var result = server.ScanSoftwareRepository();
+                if (!result.Success)
+                {
+                    return "expected the scan to succeed, got error: " + result.ErrorMessage;
+                }
+                if (result.WindowsUpdateCandidates.Count != 1 || result.WindowsUpdateCandidates[0].IndexOf("new-patch.msu", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    return "expected exactly one Windows-update candidate (new-patch.msu) - already-cataloged file must be excluded";
+                }
+                if (result.ThirdPartySoftwareCandidates.Count != 1 || result.ThirdPartySoftwareCandidates[0].IndexOf("new-app.exe", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    return "expected exactly one third-party-software candidate (new-app.exe)";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
         }
 
         // Administrators+SYSTEM only would permanently lock out a service
