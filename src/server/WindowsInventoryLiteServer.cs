@@ -872,6 +872,13 @@ namespace WindowsInventoryLite
         // lockout counter.
         private readonly object ingestionRejectionLogLock = new object();
         private readonly List<IngestionRejectionEntry> ingestionRejectionLog = new List<IngestionRejectionEntry>();
+        // Software-job attempt-history log (see SoftwareJobAttempt /
+        // RecordSoftwareJobAttempt) - same persisted .jsonl
+        // append-with-amortized-prune shape as ingestionRejectionLog above.
+        private readonly object softwareJobAttemptLogLock = new object();
+        private readonly List<SoftwareJobAttempt> softwareJobAttemptLog = new List<SoftwareJobAttempt>();
+        private const int SoftwareJobAttemptLogMaxEntries = 5000;
+        private const int SoftwareJobAttemptLogRetentionDays = 90;
         // IP -> resolved PTR hostname, or null for "resolution attempted,
         // no result" (still cached, so a non-resolving IP is never
         // retried). Cleared entirely (not partially evicted) if it exceeds
@@ -1026,6 +1033,7 @@ namespace WindowsInventoryLite
             MigrateLegacyLinuxSshKey();
             PurgeOrphanedLinuxInstallJobDirectory();
             LoadIngestionRejectionLogFromDisk();
+            LoadSoftwareJobAttemptLogFromDisk();
 
             if (options.EnableHttp)
             {
@@ -1666,6 +1674,10 @@ namespace WindowsInventoryLite
                     {
                         SendClientSoftwareJobs(stream, request);
                     }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/client/software-jobs/results")
+                    {
+                        ReceiveSoftwareJobResults(stream, request);
+                    }
                     else if (IsBasicAuthLockedOut(request, out loginLockoutRetryAfterSeconds))
                     {
                         SendTooManyRequests(stream, loginLockoutRetryAfterSeconds);
@@ -1951,6 +1963,10 @@ namespace WindowsInventoryLite
                     {
                         TriggerShareScan(stream);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/software-repository/attempt-history")
+                    {
+                        SendSoftwareJobAttemptHistory(stream);
+                    }
                     else if (request.Method == "GET" && (request.Path == "/" || request.Path == "/index.html"))
                     {
                         SendDashboardFile(stream, "index.html", DashboardHtml, "text/html; charset=utf-8");
@@ -2205,6 +2221,76 @@ namespace WindowsInventoryLite
             job["arguments"] = GetStringValue(entry, "arguments");
             job["requiresReboot"] = entry.ContainsKey("requiresReboot") && Convert.ToBoolean(entry["requiresReboot"]);
             jobs.Add(job);
+        }
+
+        private void ReceiveSoftwareJobResults(Stream stream, RequestContext request)
+        {
+            string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
+            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
+            {
+                RecordIngestionRejection(request, "software-job-results", ResolveIngestionRejectionReason(token));
+                SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string computerName = NormalizeReportIdentifier(payload.ContainsKey("computerName") ? Convert.ToString(payload["computerName"]) : null);
+            ArrayList results = payload.ContainsKey("results") ? payload["results"] as ArrayList : null;
+            if (results != null)
+            {
+                foreach (object item in results)
+                {
+                    Dictionary<string, object> resultEntry = item as Dictionary<string, object>;
+                    if (resultEntry == null)
+                    {
+                        continue;
+                    }
+
+                    SoftwareJobAttempt attempt = new SoftwareJobAttempt();
+                    attempt.TimestampUtc = DateTime.UtcNow;
+                    attempt.ComputerName = computerName;
+                    attempt.CatalogType = GetStringValue(resultEntry, "catalogType");
+                    attempt.EntryId = GetStringValue(resultEntry, "id");
+                    attempt.Success = resultEntry.ContainsKey("success") && Convert.ToBoolean(resultEntry["success"]);
+                    attempt.ExitCode = resultEntry.ContainsKey("exitCode") ? Convert.ToInt32(resultEntry["exitCode"]) : -1;
+                    attempt.ErrorMessage = resultEntry.ContainsKey("errorMessage") ? GetStringValue(resultEntry, "errorMessage") : null;
+                    RecordSoftwareJobAttempt(attempt);
+                }
+            }
+
+            SendJson(stream, "{\"status\":\"ok\"}");
+        }
+
+        private void SendSoftwareJobAttemptHistory(Stream stream)
+        {
+            List<Dictionary<string, object>> history = new List<Dictionary<string, object>>();
+            lock (softwareJobAttemptLogLock)
+            {
+                foreach (SoftwareJobAttempt attempt in softwareJobAttemptLog)
+                {
+                    history.Add(attempt.ToDictionary());
+                }
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["attempts"] = history;
+            SendJson(stream, serializer.Serialize(response));
         }
 
         // Looks up one client's stored report and decrypts every
@@ -4990,6 +5076,157 @@ namespace WindowsInventoryLite
             File.WriteAllText(GetIngestionRejectionLogPath(), sb.ToString(), new UTF8Encoding(false));
         }
 
+        private string GetSoftwareJobAttemptLogPath()
+        {
+            return Path.Combine(options.DataPath, "_logs", "software-job-attempts.jsonl");
+        }
+
+        private void LoadSoftwareJobAttemptLogFromDisk()
+        {
+            string path = GetSoftwareJobAttemptLogPath();
+            if (!File.Exists(path))
+            {
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            lock (softwareJobAttemptLogLock)
+            {
+                foreach (string line in File.ReadAllLines(path, Encoding.UTF8))
+                {
+                    if (String.IsNullOrEmpty(line))
+                    {
+                        continue;
+                    }
+                    try
+                    {
+                        Dictionary<string, object> raw = serializer.Deserialize<Dictionary<string, object>>(line);
+                        SoftwareJobAttempt entry = new SoftwareJobAttempt();
+                        // A corrupt/unparseable timestamp falls back to
+                        // DateTime.MinValue, not DateTime.UtcNow - the
+                        // latter would make a broken line look like the
+                        // NEWEST entry, immune to the age-based prune below
+                        // (it would never look "old enough" to remove).
+                        // MinValue instead makes it look maximally old, so
+                        // it gets pruned on the very next pass. Mirrors
+                        // LoadIngestionRejectionLogFromDisk.
+                        entry.TimestampUtc = ParseUtcDate(GetStringValue(raw, "timestampUtc"), DateTime.MinValue);
+                        entry.ComputerName = GetStringValue(raw, "computerName");
+                        entry.CatalogType = GetStringValue(raw, "catalogType");
+                        entry.EntryId = GetStringValue(raw, "entryId");
+                        entry.Success = raw.ContainsKey("success") && Convert.ToBoolean(raw["success"]);
+                        entry.ExitCode = raw.ContainsKey("exitCode") ? Convert.ToInt32(raw["exitCode"]) : -1;
+                        entry.ErrorMessage = GetStringValue(raw, "errorMessage");
+                        softwareJobAttemptLog.Add(entry);
+                    }
+                    catch
+                    {
+                        // One corrupt line (e.g. a partial write from an
+                        // unclean shutdown) must not lose every other
+                        // entry - skip it and keep loading the rest.
+                    }
+                }
+
+                // Enforce retention/max-entries at startup too, not only
+                // when a new attempt arrives - mirrors
+                // LoadIngestionRejectionLogFromDisk's own startup prune
+                // pass. Only rewrite the file if pruning actually removed
+                // something; swallow any failure here (a diagnostic log
+                // must never crash server startup).
+                try
+                {
+                    List<SoftwareJobAttempt> pruned = PruneSoftwareJobAttempts(softwareJobAttemptLog, DateTime.UtcNow, SoftwareJobAttemptLogRetentionDays, SoftwareJobAttemptLogMaxEntries);
+                    if (pruned.Count != softwareJobAttemptLog.Count)
+                    {
+                        softwareJobAttemptLog.Clear();
+                        softwareJobAttemptLog.AddRange(pruned);
+                        RewriteSoftwareJobAttemptLogFileLocked();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DebugLogger.Log(options, "Error", "LoadSoftwareJobAttemptLogFromDisk failed to prune/persist the loaded software-job-attempt log at startup: " + ex.Message);
+                }
+            }
+        }
+
+        private void RecordSoftwareJobAttempt(SoftwareJobAttempt entry)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            lock (softwareJobAttemptLogLock)
+            {
+                softwareJobAttemptLog.Add(entry);
+
+                string path = GetSoftwareJobAttemptLogPath();
+                string directory = Path.GetDirectoryName(path);
+                if (!String.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+                File.AppendAllText(path, serializer.Serialize(entry.ToDictionary()) + Environment.NewLine, new UTF8Encoding(false));
+
+                int slack = Math.Max(SoftwareJobAttemptLogMaxEntries / 10, 50);
+                bool oldestEntryAgedOut = softwareJobAttemptLog.Count > 0
+                    && softwareJobAttemptLog[0].TimestampUtc < DateTime.UtcNow.AddDays(-SoftwareJobAttemptLogRetentionDays);
+                if (softwareJobAttemptLog.Count > SoftwareJobAttemptLogMaxEntries + slack || oldestEntryAgedOut)
+                {
+                    List<SoftwareJobAttempt> pruned = PruneSoftwareJobAttempts(softwareJobAttemptLog, DateTime.UtcNow, SoftwareJobAttemptLogRetentionDays, SoftwareJobAttemptLogMaxEntries);
+                    if (pruned.Count != softwareJobAttemptLog.Count)
+                    {
+                        softwareJobAttemptLog.Clear();
+                        softwareJobAttemptLog.AddRange(pruned);
+                        List<Dictionary<string, object>> serializable = new List<Dictionary<string, object>>();
+                        foreach (SoftwareJobAttempt attempt in softwareJobAttemptLog)
+                        {
+                            serializable.Add(attempt.ToDictionary());
+                        }
+                        StringBuilder rewritten = new StringBuilder();
+                        foreach (Dictionary<string, object> record in serializable)
+                        {
+                            rewritten.Append(serializer.Serialize(record));
+                            rewritten.Append(Environment.NewLine);
+                        }
+                        File.WriteAllText(path, rewritten.ToString(), new UTF8Encoding(false));
+                    }
+                }
+            }
+        }
+
+        // Caller must already hold softwareJobAttemptLogLock. Only called
+        // from LoadSoftwareJobAttemptLogFromDisk's startup prune pass -
+        // RecordSoftwareJobAttempt above does its own inline rewrite when
+        // its own prune pass trips. Mirrors RewriteIngestionRejectionLogFileLocked.
+        private void RewriteSoftwareJobAttemptLogFileLocked()
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            StringBuilder sb = new StringBuilder();
+            foreach (SoftwareJobAttempt entry in softwareJobAttemptLog)
+            {
+                sb.Append(serializer.Serialize(entry.ToDictionary()));
+                sb.Append(Environment.NewLine);
+            }
+            File.WriteAllText(GetSoftwareJobAttemptLogPath(), sb.ToString(), new UTF8Encoding(false));
+        }
+
+        private static List<SoftwareJobAttempt> PruneSoftwareJobAttempts(List<SoftwareJobAttempt> entries, DateTime nowUtc, int retentionDays, int maxEntries)
+        {
+            List<SoftwareJobAttempt> withinAge = new List<SoftwareJobAttempt>();
+            foreach (SoftwareJobAttempt entry in entries)
+            {
+                if ((nowUtc - entry.TimestampUtc).TotalDays <= retentionDays)
+                {
+                    withinAge.Add(entry);
+                }
+            }
+
+            if (maxEntries <= 0 || withinAge.Count <= maxEntries)
+            {
+                return withinAge;
+            }
+
+            return withinAge.GetRange(withinAge.Count - maxEntries, maxEntries);
+        }
+
         // Never runs on the request-handling path - queued to the thread
         // pool so a slow/unresponsive resolver cannot delay the 401 already
         // sent to the caller, and cannot be used to make this server do
@@ -7080,6 +7317,36 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             public string SourceIp;
             public string Endpoint;
             public string Reason;
+        }
+
+        // One recorded outcome of a client attempting to install/apply a
+        // software-repository catalog entry, reported back via
+        // ReceiveSoftwareJobResults. Persisted as one JSON-lines record
+        // (see RecordSoftwareJobAttempt) and kept in memory in
+        // softwareJobAttemptLog for fast serving to the dashboard without
+        // re-reading the file.
+        private sealed class SoftwareJobAttempt
+        {
+            public DateTime TimestampUtc;
+            public string ComputerName;
+            public string CatalogType;
+            public string EntryId;
+            public bool Success;
+            public int ExitCode;
+            public string ErrorMessage;
+
+            public Dictionary<string, object> ToDictionary()
+            {
+                Dictionary<string, object> result = new Dictionary<string, object>();
+                result["timestampUtc"] = TimestampUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                result["computerName"] = ComputerName;
+                result["catalogType"] = CatalogType;
+                result["entryId"] = EntryId;
+                result["success"] = Success;
+                result["exitCode"] = ExitCode;
+                result["errorMessage"] = ErrorMessage;
+                return result;
+            }
         }
 
         private sealed class InstallJob
@@ -11874,6 +12141,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries skips the max-entries trim (rather than discarding everything) when maxEntries is 0 or negative", TestPruneIngestionRejectionEntriesZeroMaxEntriesKeepsWithinAge);
             allPassed &= SelfTestCheck(output, "RecordIngestionRejection batches its prune+rewrite instead of rewriting the whole log on every call once at cap", TestRecordIngestionRejectionBatchesRewrites);
             allPassed &= SelfTestCheck(output, "RecordIngestionRejection still enforces day-based retention continuously even when the count-based batch gate never trips", TestRecordIngestionRejectionEnforcesRetentionContinuously);
+            allPassed &= SelfTestCheck(output, "PruneSoftwareJobAttempts keeps the newest entries within a count cap", TestPruneSoftwareJobAttemptsKeepsNewestWithinCap);
+            allPassed &= SelfTestCheck(output, "RecordSoftwareJobAttempt appends the entry to the software-job-attempts.jsonl log file", TestRecordSoftwareJobAttemptAppendsToLogFile);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue returns null when no log entry matches the client's IP", TestComputeClientTokenIssueNoMatch);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue ignores a matching-IP rejection older than the client's last report", TestComputeClientTokenIssueStaleRejectionIgnored);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue flags a matching-IP rejection newer than the client's last report", TestComputeClientTokenIssueRecentRejectionFlagged);
@@ -13440,6 +13709,66 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestPruneSoftwareJobAttemptsKeepsNewestWithinCap()
+        {
+            List<SoftwareJobAttempt> entries = new List<SoftwareJobAttempt>();
+            for (int i = 0; i < 10; i++)
+            {
+                SoftwareJobAttempt attempt = new SoftwareJobAttempt();
+                attempt.TimestampUtc = DateTime.UtcNow.AddMinutes(-10 + i);
+                attempt.EntryId = "entry-" + i;
+                entries.Add(attempt);
+            }
+
+            List<SoftwareJobAttempt> pruned = PruneSoftwareJobAttempts(entries, DateTime.UtcNow, 90, 3);
+            if (pruned.Count != 3)
+            {
+                return "expected exactly 3 entries after pruning to a cap of 3, got " + pruned.Count;
+            }
+            if (pruned[0].EntryId != "entry-7" || pruned[2].EntryId != "entry-9")
+            {
+                return "expected the NEWEST 3 entries to survive pruning (entry-7..entry-9), got " + pruned[0].EntryId + ".." + pruned[2].EntryId;
+            }
+            return null;
+        }
+
+        private static string TestRecordSoftwareJobAttemptAppendsToLogFile()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-job-attempt-log-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+
+                SoftwareJobAttempt attempt = new SoftwareJobAttempt();
+                attempt.TimestampUtc = DateTime.UtcNow;
+                attempt.ComputerName = "TEST-PC";
+                attempt.CatalogType = "windowsUpdate";
+                attempt.EntryId = "test-entry";
+                attempt.Success = true;
+                attempt.ExitCode = 0;
+                server.RecordSoftwareJobAttempt(attempt);
+
+                string logPath = Path.Combine(dataPath, "_logs", "software-job-attempts.jsonl");
+                if (!File.Exists(logPath))
+                {
+                    return "expected software-job-attempts.jsonl to exist after recording one attempt";
+                }
+                string content = File.ReadAllText(logPath);
+                if (content.IndexOf("TEST-PC", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the logged computer name to appear in the persisted file";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
             }
         }
 
