@@ -153,7 +153,10 @@ namespace WindowsInventoryLite
 
                 private string GetSoftwareJobSuccessCachePath()
                 {
-                    return Path.Combine(options.OutputPath, "software-job-success-cache.json");
+                    string baseDir = options.OutputPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
+                        ? Path.GetDirectoryName(options.OutputPath)
+                        : options.OutputPath;
+                    return Path.Combine(baseDir, "software-job-success-cache.json");
                 }
 
                 private HashSet<string> LoadSoftwareJobSuccessCache()
@@ -196,14 +199,13 @@ namespace WindowsInventoryLite
                             list.Add(id);
                         }
                         string json = serializer.Serialize(list);
-                        string directory = options.OutputPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
-                            ? Path.GetDirectoryName(options.OutputPath)
-                            : options.OutputPath;
+                        string path = GetSoftwareJobSuccessCachePath();
+                        string directory = Path.GetDirectoryName(path);
                         if (!Directory.Exists(directory))
                         {
                             Directory.CreateDirectory(directory);
                         }
-                        File.WriteAllText(GetSoftwareJobSuccessCachePath(), json, new UTF8Encoding(false));
+                        File.WriteAllText(path, json, new UTF8Encoding(false));
                     }
                     catch
                     {
