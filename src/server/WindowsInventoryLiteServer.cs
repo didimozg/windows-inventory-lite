@@ -898,6 +898,7 @@ namespace WindowsInventoryLite
         private readonly object licensesLock = new object();
         private readonly object licenseKeySourcesLock = new object();
         private readonly object windowsUpdatesLock = new object();
+        private readonly object thirdPartySoftwareLock = new object();
         private readonly object certificateHistoryLock = new object();
         private readonly object listenerRestartLock = new object();
         // HTTP and HTTPS are two fully independent listeners on two
@@ -1904,6 +1905,22 @@ namespace WindowsInventoryLite
                     else if (request.Method == "DELETE" && request.Path.StartsWith("/api/v1/windows-updates/", StringComparison.OrdinalIgnoreCase))
                     {
                         DeleteWindowsUpdate(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/third-party-software")
+                    {
+                        SendThirdPartySoftware(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/third-party-software")
+                    {
+                        CreateThirdPartySoftware(stream, request);
+                    }
+                    else if (request.Method == "PUT" && request.Path.StartsWith("/api/v1/third-party-software/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        UpdateThirdPartySoftware(stream, request);
+                    }
+                    else if (request.Method == "DELETE" && request.Path.StartsWith("/api/v1/third-party-software/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        DeleteThirdPartySoftware(stream, request);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/software-repository/settings")
                     {
@@ -10430,6 +10447,245 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendJson(stream, "{\"status\":\"deleted\"}");
         }
 
+        private string GetThirdPartySoftwareDirectory()
+        {
+            return Path.Combine(options.DataPath, "_third-party-software");
+        }
+
+        private string GetThirdPartySoftwareFilePath()
+        {
+            return Path.Combine(GetThirdPartySoftwareDirectory(), "third-party-software.json");
+        }
+
+        private List<Dictionary<string, object>> LoadThirdPartySoftware()
+        {
+            string path = GetThirdPartySoftwareFilePath();
+            if (!File.Exists(path))
+            {
+                return new List<Dictionary<string, object>>();
+            }
+
+            List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+            try
+            {
+                JavaScriptSerializer serializer = CreateJsonSerializer();
+                string json = File.ReadAllText(path, Encoding.UTF8);
+                ArrayList raw = serializer.Deserialize<ArrayList>(json);
+                if (raw != null)
+                {
+                    foreach (object item in raw)
+                    {
+                        Dictionary<string, object> record = item as Dictionary<string, object>;
+                        if (record != null)
+                        {
+                            entries.Add(record);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return entries;
+        }
+
+        private void SaveThirdPartySoftware(List<Dictionary<string, object>> entries)
+        {
+            string directory = GetThirdPartySoftwareDirectory();
+            if (!Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            string json = serializer.Serialize(entries);
+            File.WriteAllText(GetThirdPartySoftwareFilePath(), json, new UTF8Encoding(false));
+        }
+
+        private static string ExtractThirdPartySoftwareId(string path)
+        {
+            const string prefix = "/api/v1/third-party-software/";
+            string id = path.Substring(prefix.Length);
+            int queryStart = id.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                id = id.Substring(0, queryStart);
+            }
+            return Uri.UnescapeDataString(id).Trim();
+        }
+
+        private void SendThirdPartySoftware(Stream stream)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            List<Dictionary<string, object>> entries;
+            lock (thirdPartySoftwareLock)
+            {
+                entries = LoadThirdPartySoftware();
+            }
+
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["thirdPartySoftware"] = entries;
+            SendJson(stream, serializer.Serialize(response));
+        }
+
+        private void CreateThirdPartySoftware(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string name = Convert.ToString(payload.ContainsKey("name") ? payload["name"] : "").Trim();
+            string relativePath = Convert.ToString(payload.ContainsKey("relativePath") ? payload["relativePath"] : "").Trim();
+            string arguments = Convert.ToString(payload.ContainsKey("arguments") ? payload["arguments"] : "").Trim();
+            string targets = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "").Trim();
+            bool requiresReboot = payload.ContainsKey("requiresReboot") && Convert.ToBoolean(payload["requiresReboot"]);
+            bool enabled = !payload.ContainsKey("enabled") || Convert.ToBoolean(payload["enabled"]);
+
+            if (String.IsNullOrEmpty(name))
+            {
+                SendText(stream, "{\"error\":\"name is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            if (String.IsNullOrEmpty(relativePath))
+            {
+                SendText(stream, "{\"error\":\"relativePath is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string nowUtc = DateTime.UtcNow.ToString("o");
+            Dictionary<string, object> record = new Dictionary<string, object>();
+            record["id"] = Guid.NewGuid().ToString("N");
+            record["name"] = name;
+            record["relativePath"] = relativePath;
+            record["arguments"] = arguments;
+            record["requiresReboot"] = requiresReboot;
+            record["enabled"] = enabled;
+            record["targets"] = targets;
+            record["createdAt"] = nowUtc;
+            record["updatedAt"] = nowUtc;
+
+            lock (thirdPartySoftwareLock)
+            {
+                List<Dictionary<string, object>> entries = LoadThirdPartySoftware();
+                entries.Add(record);
+                SaveThirdPartySoftware(entries);
+            }
+
+            SendJson(stream, serializer.Serialize(record));
+        }
+
+        private void UpdateThirdPartySoftware(Stream stream, RequestContext request)
+        {
+            string id = ExtractThirdPartySoftwareId(request.Path);
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string name = Convert.ToString(payload.ContainsKey("name") ? payload["name"] : "").Trim();
+            string relativePath = Convert.ToString(payload.ContainsKey("relativePath") ? payload["relativePath"] : "").Trim();
+            string arguments = Convert.ToString(payload.ContainsKey("arguments") ? payload["arguments"] : "").Trim();
+            string targets = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "").Trim();
+            bool requiresReboot = payload.ContainsKey("requiresReboot") && Convert.ToBoolean(payload["requiresReboot"]);
+            bool enabled = !payload.ContainsKey("enabled") || Convert.ToBoolean(payload["enabled"]);
+
+            if (String.IsNullOrEmpty(name))
+            {
+                SendText(stream, "{\"error\":\"name is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            if (String.IsNullOrEmpty(relativePath))
+            {
+                SendText(stream, "{\"error\":\"relativePath is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            lock (thirdPartySoftwareLock)
+            {
+                List<Dictionary<string, object>> entries = LoadThirdPartySoftware();
+                Dictionary<string, object> record = null;
+                for (int i = 0; i < entries.Count; i++)
+                {
+                    if (String.Equals(GetStringValue(entries[i], "id"), id, StringComparison.OrdinalIgnoreCase))
+                    {
+                        record = entries[i];
+                        break;
+                    }
+                }
+
+                if (record == null)
+                {
+                    SendText(stream, "{\"error\":\"third-party software entry not found\"}", "application/json; charset=utf-8", 404);
+                    return;
+                }
+
+                record["name"] = name;
+                record["relativePath"] = relativePath;
+                record["arguments"] = arguments;
+                record["requiresReboot"] = requiresReboot;
+                record["enabled"] = enabled;
+                record["targets"] = targets;
+                record["updatedAt"] = DateTime.UtcNow.ToString("o");
+
+                SaveThirdPartySoftware(entries);
+                SendJson(stream, serializer.Serialize(record));
+            }
+        }
+
+        private void DeleteThirdPartySoftware(Stream stream, RequestContext request)
+        {
+            string id = ExtractThirdPartySoftwareId(request.Path);
+
+            lock (thirdPartySoftwareLock)
+            {
+                List<Dictionary<string, object>> entries = LoadThirdPartySoftware();
+                int indexToRemove = -1;
+                for (int i = 0; i < entries.Count; i++)
+                {
+                    if (String.Equals(GetStringValue(entries[i], "id"), id, StringComparison.OrdinalIgnoreCase))
+                    {
+                        indexToRemove = i;
+                        break;
+                    }
+                }
+
+                if (indexToRemove < 0)
+                {
+                    SendText(stream, "{\"error\":\"third-party software entry not found\"}", "application/json; charset=utf-8", 404);
+                    return;
+                }
+
+                entries.RemoveAt(indexToRemove);
+                SaveThirdPartySoftware(entries);
+            }
+
+            SendJson(stream, "{\"status\":\"deleted\"}");
+        }
+
         private static string GetExeVersion(string path)
         {
             try
@@ -11339,6 +11595,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "IsValidRegistryHiveName accepts only HKEY_LOCAL_MACHINE/HKEY_CURRENT_USER", TestIsValidRegistryHiveNameAcceptsOnlyKnownHives);
             allPassed &= SelfTestCheck(output, "License key sources CRUD storage round-trips through disk", TestLicenseKeySourcesCrudRoundTrip);
             allPassed &= SelfTestCheck(output, "Windows updates catalog CRUD storage round-trips through disk", TestWindowsUpdatesCrudRoundTrip);
+            allPassed &= SelfTestCheck(output, "Third-party software catalog CRUD storage round-trips through disk", TestThirdPartySoftwareCrudRoundTrip);
             allPassed &= SelfTestCheck(output, "BuildLicenseKeySourcesForClientResponse omits admin-only fields", TestBuildLicenseKeySourcesForClientResponseTrimsToClientFields);
             allPassed &= SelfTestCheck(output, "SaveServerConfigValues leaves the final config file with a restricted ACL, no leftover .tmp file", TestSaveServerConfigValuesRestrictsTempFileBeforeWritingContent);
             allPassed &= SelfTestCheck(output, "Linux known-hosts store round-trips and overwrites by host:port", TestLinuxKnownHostsRoundTrip);
@@ -14520,6 +14777,46 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 List<Dictionary<string, object>> reloaded = server.LoadWindowsUpdates();
                 if (reloaded.Count != 1 || GetStringValue(reloaded[0], "name") != "Test KB")
+                {
+                    return "expected the saved entry to round-trip through disk";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestThirdPartySoftwareCrudRoundTrip()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-third-party-software-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> entries = server.LoadThirdPartySoftware();
+                if (entries.Count != 0)
+                {
+                    return "expected an empty list before any entry is saved";
+                }
+
+                Dictionary<string, object> record = new Dictionary<string, object>();
+                record["id"] = "test-id";
+                record["name"] = "Test App";
+                record["relativePath"] = @"third-party-software\setup.exe";
+                record["arguments"] = "/S";
+                record["requiresReboot"] = false;
+                record["enabled"] = true;
+                record["targets"] = "TEST-PC";
+                entries.Add(record);
+                server.SaveThirdPartySoftware(entries);
+
+                List<Dictionary<string, object>> reloaded = server.LoadThirdPartySoftware();
+                if (reloaded.Count != 1 || GetStringValue(reloaded[0], "name") != "Test App")
                 {
                     return "expected the saved entry to round-trip through disk";
                 }
