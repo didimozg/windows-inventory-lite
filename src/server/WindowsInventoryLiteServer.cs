@@ -1044,6 +1044,12 @@ namespace WindowsInventoryLite
             ReconfigureClientUpdateScheduleTimer();
             ReconfigureLinuxUpdateScheduleTimer();
 
+            lock (softwareRepositoryScanTimerLock)
+            {
+                TimeSpan interval = TimeSpan.FromMinutes(Math.Max(5, options.SoftwareShareScanIntervalMinutes));
+                softwareRepositoryScanTimer = new Timer(RunSoftwareRepositoryScanTick, null, TimeSpan.Zero, interval);
+            }
+
             if (!httpSlot.Running && !httpsSlot.Running)
             {
                 // Only reachable by hand-editing server-config.json (the
@@ -1099,6 +1105,14 @@ namespace WindowsInventoryLite
                 {
                     clientUpdateScheduleTimer.Dispose();
                     clientUpdateScheduleTimer = null;
+                }
+            }
+            lock (softwareRepositoryScanTimerLock)
+            {
+                if (softwareRepositoryScanTimer != null)
+                {
+                    softwareRepositoryScanTimer.Dispose();
+                    softwareRepositoryScanTimer = null;
                 }
             }
             StopSlot(httpSlot);
@@ -3061,6 +3075,9 @@ namespace WindowsInventoryLite
         private readonly object linuxUpdateScheduleTimerLock = new object();
         private Timer linuxUpdateScheduleTimer;
 
+        private readonly object softwareRepositoryScanTimerLock = new object();
+        private Timer softwareRepositoryScanTimer;
+
         private void ReconfigureLinuxUpdateScheduleTimer()
         {
             lock (linuxUpdateScheduleTimerLock)
@@ -3117,6 +3134,18 @@ namespace WindowsInventoryLite
             catch (Exception ex)
             {
                 DebugLogger.Log(options, "Error", "Linux update schedule tick failed: " + ex);
+            }
+        }
+
+        private void RunSoftwareRepositoryScanTick(object state)
+        {
+            try
+            {
+                ScanSoftwareRepository();
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Error", "Software repository scan tick failed: " + ex.ToString());
             }
         }
 
