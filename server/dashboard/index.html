@@ -656,6 +656,57 @@
           </div>
         </section>
 
+        <section id="thirdPartySoftwareView" class="hidden" aria-label="Third-party software">
+          <div class="view-toolbar">
+            <button id="thirdPartySoftwareAddButton" class="primary-button" type="button">Add entry</button>
+            <button id="thirdPartySoftwareScanButton" class="export-button" type="button">Refresh discovered files</button>
+          </div>
+          <div id="thirdPartySoftwareDiscoveredMessage" class="pkg-message hidden"></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Discovered file</th><th>Add to catalog</th></tr></thead>
+              <tbody id="thirdPartySoftwareDiscoveredBody"></tbody>
+            </table>
+          </div>
+          <div id="thirdPartySoftwareForm" class="install-panel hidden" aria-label="Third-party software entry">
+            <div class="license-grid">
+              <label class="license-name-field">
+                Name
+                <input id="thirdPartySoftwareName" type="text">
+              </label>
+              <label class="license-key-field">
+                File path in share
+                <input id="thirdPartySoftwareRelativePath" type="text" placeholder="third-party-software\7zip-installer.exe">
+              </label>
+              <label class="license-comment-field">
+                Arguments
+                <input id="thirdPartySoftwareArguments" type="text">
+              </label>
+            </div>
+            <div class="license-computers-field">
+              <label>
+                Targets (computer names, one per line, or comma/semicolon-separated)
+                <textarea id="thirdPartySoftwareTargets" rows="4"></textarea>
+              </label>
+            </div>
+            <label><input id="thirdPartySoftwareRequiresReboot" type="checkbox"> Requires reboot</label>
+            <label><input id="thirdPartySoftwareEnabled" type="checkbox" checked> Enabled</label>
+            <div class="pkg-buttons license-buttons">
+              <button id="thirdPartySoftwareSaveButton" class="primary-button" type="button">Save</button>
+              <button id="thirdPartySoftwareCancelButton" class="export-button" type="button">Cancel</button>
+            </div>
+            <div id="thirdPartySoftwareMessage" class="pkg-message hidden"></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Name</th><th>File path</th><th>Targets</th><th>Enabled</th><th>Edit</th><th>Delete</th></tr>
+              </thead>
+              <tbody id="thirdPartySoftwareBody"></tbody>
+            </table>
+          </div>
+        </section>
+
         <section id="loggingView" class="hidden" aria-label="Ingestion rejection log">
           <p class="cert-hint">Requests to the inventory-ingestion endpoints rejected for a missing or wrong token. Correlated to a known client by source IP when that IP matches the client's most recent successful report - a best-effort heuristic, not a guarantee (see Settings &gt; Server &gt; Ingestion Token for retention settings).</p>
           <div class="table-wrap">

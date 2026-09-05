@@ -23,6 +23,7 @@
     licenses: [], editingLicenseId: null, licenseFormComputers: [],
     licenseKeySources: [], editingLicenseKeySourceId: null,
     windowsUpdates: [], editingWindowsUpdateId: null,
+    thirdPartySoftware: [], editingThirdPartySoftwareId: null,
     revealedLicenseKeys: {},
     sort: {
       // 'name', not 'computerName': the Clients table is cross-platform
@@ -150,6 +151,7 @@
     if (hash === 'licenses') return { view: 'licenses', subview: null };
     if (hash === 'licensekeysources') return { view: 'licenseKeySources', subview: null };
     if (hash === 'windowsupdates') return { view: 'windowsUpdates', subview: null };
+    if (hash === 'thirdpartysoftware') return { view: 'thirdPartySoftware', subview: null };
     if (hash === 'logging') return { view: 'logging', subview: null };
     // #linux-clients / #linux are kept as aliases of the merged Clients
     // page (same backward-compat pattern as #linux-hardware above and
@@ -216,6 +218,7 @@
     if (view === 'licenses') loadLicenses();
     if (view === 'licenseKeySources') loadLicenseKeySources();
     if (view === 'windowsUpdates') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); }
+    if (view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
     if (view === 'logging') loadIngestionRejectionLog();
     // 'clients' and 'hardware' are in this list because both merged views
     // read Linux data too - opening either tab re-fetches it rather than
@@ -3679,6 +3682,157 @@
       .finally(() => { byId('windowsUpdateScanButton').disabled = false; });
   }
 
+  function loadThirdPartySoftware() {
+    fetch('/api/v1/third-party-software', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.thirdPartySoftware = data.thirdPartySoftware || [];
+        renderThirdPartySoftware();
+      })
+      .catch(error => {
+        byId('thirdPartySoftwareBody').innerHTML = `<tr><td colspan="6" class="empty">Third-party software entries are not available: ${escapeHtml(error.message)}</td></tr>`;
+      });
+  }
+
+  function renderThirdPartySoftware() {
+    const tbody = byId('thirdPartySoftwareBody');
+    tbody.innerHTML = state.thirdPartySoftware.map(entry => `
+      <tr>
+        <td>${escapeHtml(entry.name)}</td>
+        <td class="mono">${escapeHtml(entry.relativePath)}</td>
+        <td class="mono">${escapeHtml(entry.targets)}</td>
+        <td>${entry.enabled ? 'Yes' : 'No'}</td>
+        <td><button data-edit-third-party-software="${escapeHtml(entry.id)}" class="export-button" type="button">Edit</button></td>
+        <td><button data-delete-third-party-software="${escapeHtml(entry.id)}" class="export-button" type="button">Delete</button></td>
+      </tr>
+    `).join('') || '<tr><td colspan="6" class="empty">No third-party software configured.</td></tr>';
+
+    tbody.querySelectorAll('[data-edit-third-party-software]').forEach(button => {
+      button.addEventListener('click', () => openThirdPartySoftwareForm(button.dataset.editThirdPartySoftware));
+    });
+    tbody.querySelectorAll('[data-delete-third-party-software]').forEach(button => {
+      button.addEventListener('click', () => removeThirdPartySoftware(button.dataset.deleteThirdPartySoftware));
+    });
+  }
+
+  function openThirdPartySoftwareForm(entryId) {
+    state.editingThirdPartySoftwareId = entryId || null;
+    const entry = entryId ? state.thirdPartySoftware.find(e => e.id === entryId) : null;
+    byId('thirdPartySoftwareName').value = entry ? entry.name : '';
+    byId('thirdPartySoftwareRelativePath').value = entry ? entry.relativePath : '';
+    byId('thirdPartySoftwareArguments').value = entry ? entry.arguments : '';
+    byId('thirdPartySoftwareTargets').value = entry ? entry.targets : '';
+    byId('thirdPartySoftwareRequiresReboot').checked = entry ? !!entry.requiresReboot : false;
+    byId('thirdPartySoftwareEnabled').checked = entry ? !!entry.enabled : true;
+    byId('thirdPartySoftwareMessage').className = 'pkg-message hidden';
+    byId('thirdPartySoftwareForm').classList.remove('hidden');
+  }
+
+  function closeThirdPartySoftwareForm() {
+    state.editingThirdPartySoftwareId = null;
+    byId('thirdPartySoftwareForm').classList.add('hidden');
+  }
+
+  function saveThirdPartySoftware() {
+    const name = byId('thirdPartySoftwareName').value.trim();
+    const relativePath = byId('thirdPartySoftwareRelativePath').value.trim();
+    const argumentsValue = byId('thirdPartySoftwareArguments').value.trim();
+    const targets = byId('thirdPartySoftwareTargets').value.trim();
+    const requiresReboot = byId('thirdPartySoftwareRequiresReboot').checked;
+    const enabled = byId('thirdPartySoftwareEnabled').checked;
+    const editingId = state.editingThirdPartySoftwareId;
+    const url = editingId ? `/api/v1/third-party-software/${encodeURIComponent(editingId)}` : '/api/v1/third-party-software';
+    const method = editingId ? 'PUT' : 'POST';
+
+    fetch(url, {
+      method,
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, relativePath, arguments: argumentsValue, targets, requiresReboot, enabled })
+    })
+      .then(r => r.json().then(data => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Failed to save.');
+        closeThirdPartySoftwareForm();
+        loadThirdPartySoftware();
+      })
+      .catch(error => {
+        const messageEl = byId('thirdPartySoftwareMessage');
+        messageEl.textContent = error.message;
+        messageEl.className = 'pkg-message error';
+      });
+  }
+
+  function removeThirdPartySoftware(entryId) {
+    const entry = state.thirdPartySoftware.find(e => e.id === entryId);
+    const confirmed = window.confirm(`Delete third-party software entry "${entry ? entry.name : 'this item'}"?`);
+    if (!confirmed) return;
+
+    fetch(`/api/v1/third-party-software/${encodeURIComponent(entryId)}`, { method: 'DELETE', cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        loadThirdPartySoftware();
+      })
+      .catch(error => {
+        window.alert(`Failed to delete third-party software entry: ${error.message}`);
+      });
+  }
+
+  function loadThirdPartySoftwareDiscovered() {
+    fetch('/api/v1/software-repository/scan-status', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        const tbody = byId('thirdPartySoftwareDiscoveredBody');
+        const candidates = data.thirdPartySoftwareCandidates || [];
+        tbody.innerHTML = candidates.map(path => `
+          <tr>
+            <td class="mono">${escapeHtml(path)}</td>
+            <td><button data-promote-third-party-software="${escapeHtml(path)}" class="export-button" type="button">Add to catalog</button></td>
+          </tr>
+        `).join('') || '<tr><td colspan="2" class="empty">No new files discovered.</td></tr>';
+
+        tbody.querySelectorAll('[data-promote-third-party-software]').forEach(button => {
+          button.addEventListener('click', () => promoteThirdPartySoftwareCandidate(button.dataset.promoteThirdPartySoftware));
+        });
+
+        const messageElement = byId('thirdPartySoftwareDiscoveredMessage');
+        if (!data.success) {
+          messageElement.className = 'pkg-message error';
+          const lastGood = data.lastSuccessfulScanAt ? ` (showing results from the last successful scan: ${data.lastSuccessfulScanAt})` : '';
+          messageElement.textContent = `Last scan attempt failed: ${data.errorMessage || 'unknown error'}${lastGood}`;
+          messageElement.classList.remove('hidden');
+        } else if (data.scannedAt) {
+          messageElement.className = 'pkg-message';
+          messageElement.textContent = `Last scanned: ${data.scannedAt}`;
+          messageElement.classList.remove('hidden');
+        } else {
+          messageElement.classList.add('hidden');
+        }
+      })
+      .catch(() => {});
+  }
+
+  function promoteThirdPartySoftwareCandidate(relativePath) {
+    openThirdPartySoftwareForm(null);
+    byId('thirdPartySoftwareRelativePath').value = relativePath;
+    const extension = relativePath.split('.').pop().toLowerCase();
+    const defaultArguments = extension === 'msi' ? '/qn /norestart' : extension === 'exe' ? '/S' : '';
+    byId('thirdPartySoftwareArguments').value = defaultArguments;
+  }
+
+  function refreshThirdPartySoftwareScan() {
+    byId('thirdPartySoftwareScanButton').disabled = true;
+    fetch('/api/v1/software-repository/scan', { method: 'POST', cache: 'no-store' })
+      .then(() => loadThirdPartySoftwareDiscovered())
+      .finally(() => { byId('thirdPartySoftwareScanButton').disabled = false; });
+  }
+
   function getSoftwareGroups(clients) {
     const groups = new Map();
     clients.forEach(client => {
@@ -4522,6 +4676,7 @@
     byId('licensesView').classList.toggle('hidden', state.view !== 'licenses');
     byId('licenseKeySourcesView').classList.toggle('hidden', state.view !== 'licenseKeySources');
     byId('windowsUpdatesView').classList.toggle('hidden', state.view !== 'windowsUpdates');
+    byId('thirdPartySoftwareView').classList.toggle('hidden', state.view !== 'thirdPartySoftware');
     byId('loggingView').classList.toggle('hidden', state.view !== 'logging');
     byId('linuxServicesView').classList.toggle('hidden', state.view !== 'linuxServices');
     // Deploy: Actions shows both platforms' sections together (stacked, own
@@ -4545,6 +4700,7 @@
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
     byId('licenseKeySourcesTab').classList.toggle('active', state.view === 'licenseKeySources');
     byId('windowsUpdatesTab').classList.toggle('active', state.view === 'windowsUpdates');
+    byId('thirdPartySoftwareTab').classList.toggle('active', state.view === 'thirdPartySoftware');
     byId('loggingTab').classList.toggle('active', state.view === 'logging');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
     byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'licenses', 'licenseKeySources'].includes(state.view));
@@ -4853,6 +5009,7 @@
     if (state.view === 'licenses') loadLicenses();
     if (state.view === 'licenseKeySources') loadLicenseKeySources();
     if (state.view === 'windowsUpdates') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); }
+    if (state.view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
     if (state.view === 'logging') loadIngestionRejectionLog();
     if (state.view === 'clients' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
   });
@@ -5194,6 +5351,11 @@
   byId('windowsUpdateSaveButton').addEventListener('click', saveWindowsUpdate);
   byId('windowsUpdateCancelButton').addEventListener('click', closeWindowsUpdateForm);
   byId('windowsUpdateScanButton').addEventListener('click', refreshWindowsUpdateScan);
+  byId('thirdPartySoftwareTab').addEventListener('click', () => setView('thirdPartySoftware'));
+  byId('thirdPartySoftwareAddButton').addEventListener('click', () => openThirdPartySoftwareForm(null));
+  byId('thirdPartySoftwareSaveButton').addEventListener('click', saveThirdPartySoftware);
+  byId('thirdPartySoftwareCancelButton').addEventListener('click', closeThirdPartySoftwareForm);
+  byId('thirdPartySoftwareScanButton').addEventListener('click', refreshThirdPartySoftwareScan);
   byId('loggingTab').addEventListener('click', () => setView('logging'));
   byId('linuxServicesTab').addEventListener('click', () => setView('linuxServices'));
   byId('exportLinuxServicesBtn').addEventListener('click', exportLinuxServices);
@@ -5230,6 +5392,7 @@
   if (state.view === 'licenses') loadLicenses();
   if (state.view === 'licenseKeySources') loadLicenseKeySources();
   if (state.view === 'windowsUpdates') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); }
+  if (state.view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
   if (state.view === 'logging') loadIngestionRejectionLog();
   updateInstallFieldVisibility();
   loadInstallHistory();
