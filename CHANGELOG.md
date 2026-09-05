@@ -18,11 +18,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Collected license keys are DPAPI-encrypted at rest on ingest (`SecretProtector`, the same mechanism already protecting `WebPassword`/`Token`/`AdPassword`) and are stripped entirely - not merely masked - from the bulk `GET /api/v1/clients` listing. The reveal endpoint requires the same dashboard authentication (session cookie or Basic Auth) as every other management endpoint, never the ingestion token alone.
 
-### Changed
-
-- Client and server versions are now unified under one project-wide version number. Previously tracked independently (server was 0.54.10, client was 0.2.2) per the 2026-07-18 versioning note above - both now report 0.55.0, and will change together going forward.
+- **Windows client version bumped to 0.3.0** (independent of the server's own version above, per this project's established per-agent versioning convention - see the 2026-07-18 versioning note above) - covers the new client-side registry collection and response-cache handling this feature adds.
 
 203 self-tests (was 197), 133/133 Pester green under Windows PowerShell 5.1.
+
+### Fixed (2026-09-05)
+
+- The "License key sources" dashboard tab threw every navigation except the one starting from Dashboard itself back to Dashboard - `getInitialViewState()` (used both on page load and on every `hashchange`, i.e. on every navigation except a same-view no-op) had no case for the `#licensekeysources` hash and fell through to its `dashboard` default, silently overwriting the view `setView()` had just set. The same duplicated "load data for the current view" dispatch block exists in three places in `app.js` (`setView`, the `hashchange` listener, and the page-load bootstrap) and the tab's own `active`-class highlight is a fourth - `licenseKeySources` was missing from all but the one `setView()` already had. Added it to all five.
 
 ## [0.54.10]
 

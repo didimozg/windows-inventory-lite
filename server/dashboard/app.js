@@ -147,6 +147,7 @@
     if (hash === 'software') return { view: 'software', subview: null };
     if (hash === 'hardware' || hash === 'linux-hardware') return { view: 'hardware', subview: null };
     if (hash === 'licenses') return { view: 'licenses', subview: null };
+    if (hash === 'licensekeysources') return { view: 'licenseKeySources', subview: null };
     if (hash === 'logging') return { view: 'logging', subview: null };
     // #linux-clients / #linux are kept as aliases of the merged Clients
     // page (same backward-compat pattern as #linux-hardware above and
@@ -4321,9 +4322,10 @@
     byId('softwareTab').classList.toggle('active', state.view === 'software');
     byId('hardwareTab').classList.toggle('active', state.view === 'hardware');
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
+    byId('licenseKeySourcesTab').classList.toggle('active', state.view === 'licenseKeySources');
     byId('loggingTab').classList.toggle('active', state.view === 'logging');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
-    byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'licenses'].includes(state.view));
+    byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'licenses', 'licenseKeySources'].includes(state.view));
     byId('deployTab').classList.toggle('active', state.view === 'deploy');
     byId('settingsTab').classList.toggle('active', state.view === 'settings');
     const isInventoryView = inventoryViews.includes(state.view);
@@ -4626,6 +4628,7 @@
     if (state.view === 'deploy') loadDeploySubviewData(state.subview);
     if (state.view === 'settings') loadSettingsSubviewData(state.subview);
     if (state.view === 'licenses') loadLicenses();
+    if (state.view === 'licenseKeySources') loadLicenseKeySources();
     if (state.view === 'logging') loadIngestionRejectionLog();
     if (state.view === 'clients' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
   });
@@ -4988,6 +4991,7 @@
   if (state.view === 'deploy') loadDeploySubviewData(state.subview);
   if (state.view === 'settings') loadSettingsSubviewData(state.subview);
   if (state.view === 'licenses') loadLicenses();
+  if (state.view === 'licenseKeySources') loadLicenseKeySources();
   if (state.view === 'logging') loadIngestionRejectionLog();
   updateInstallFieldVisibility();
   loadInstallHistory();
