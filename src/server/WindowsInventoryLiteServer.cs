@@ -15761,13 +15761,35 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private static string TestWithSoftwareRepositoryIdentityRunsDirectlyWhenNoCredentialsConfigured()
         {
+            // Case 1: both username and password blank
             ServerOptions options = new ServerOptions();
             bool ranAction = false;
             int result = WithSoftwareRepositoryIdentity(options, () => { ranAction = true; return 42; });
             if (!ranAction || result != 42)
             {
-                return "expected the action to run directly (no impersonation attempted) when no credentials are configured";
+                return "expected the action to run directly (no impersonation attempted) when no credentials are configured (both blank)";
             }
+
+            // Case 2: username configured, password blank - should still run directly
+            options = new ServerOptions();
+            options.SoftwareRepositoryUsername = @"CONTOSO\svc-share";
+            ranAction = false;
+            result = WithSoftwareRepositoryIdentity(options, () => { ranAction = true; return 7; });
+            if (!ranAction || result != 7)
+            {
+                return "expected a configured username with a blank password to run the action directly, not attempt impersonation";
+            }
+
+            // Case 3: username blank, password configured - should still run directly
+            options = new ServerOptions();
+            options.SoftwareRepositoryPassword = "some-password";
+            ranAction = false;
+            result = WithSoftwareRepositoryIdentity(options, () => { ranAction = true; return 99; });
+            if (!ranAction || result != 99)
+            {
+                return "expected a configured password with a blank username to run the action directly, not attempt impersonation";
+            }
+
             return null;
         }
 
