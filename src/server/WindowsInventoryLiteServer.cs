@@ -1043,12 +1043,7 @@ namespace WindowsInventoryLite
             ResetMissedOnceSchedule();
             ReconfigureClientUpdateScheduleTimer();
             ReconfigureLinuxUpdateScheduleTimer();
-
-            lock (softwareRepositoryScanTimerLock)
-            {
-                TimeSpan interval = TimeSpan.FromMinutes(Math.Max(5, options.SoftwareShareScanIntervalMinutes));
-                softwareRepositoryScanTimer = new Timer(RunSoftwareRepositoryScanTick, null, TimeSpan.Zero, interval);
-            }
+            ReconfigureSoftwareRepositoryScanTimer();
 
             if (!httpSlot.Running && !httpsSlot.Running)
             {
@@ -2969,6 +2964,8 @@ namespace WindowsInventoryLite
             updates["SoftwareShareScanIntervalMinutes"] = scanInterval.ToString();
             SaveServerConfigValues(updates);
 
+            ReconfigureSoftwareRepositoryScanTimer();
+
             SendSoftwareRepositoryCredentialsStatus(stream);
         }
 
@@ -3092,6 +3089,24 @@ namespace WindowsInventoryLite
                     TimeSpan pollInterval = TimeSpan.FromSeconds(60);
                     linuxUpdateScheduleTimer = new Timer(RunLinuxUpdateScheduleTick, null, TimeSpan.Zero, pollInterval);
                 }
+            }
+        }
+
+        // Disposes and recreates the periodic share-scan timer - called once
+        // at startup and again whenever the settings endpoint saves a new
+        // SoftwareShareScanIntervalMinutes, so an interval edit takes effect
+        // without a service restart.
+        private void ReconfigureSoftwareRepositoryScanTimer()
+        {
+            lock (softwareRepositoryScanTimerLock)
+            {
+                if (softwareRepositoryScanTimer != null)
+                {
+                    softwareRepositoryScanTimer.Dispose();
+                    softwareRepositoryScanTimer = null;
+                }
+                TimeSpan interval = TimeSpan.FromMinutes(Math.Max(5, options.SoftwareShareScanIntervalMinutes));
+                softwareRepositoryScanTimer = new Timer(RunSoftwareRepositoryScanTick, null, TimeSpan.Zero, interval);
             }
         }
 
