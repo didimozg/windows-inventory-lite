@@ -39,6 +39,14 @@
           <button id="licenseKeySourcesTab" class="topnav-dropdown-item" type="button" role="menuitem">License key sources</button>
         </div>
       </div>
+      <div class="topnav-dropdown">
+        <button id="softwareDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Software <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
+        <div id="softwareDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
+          <button id="windowsUpdatesTab" class="topnav-dropdown-item" type="button" role="menuitem">Windows updates</button>
+          <button id="thirdPartySoftwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Third-party software</button>
+          <button id="softwareJobHistoryTab" class="topnav-dropdown-item" type="button" role="menuitem">Attempt history</button>
+        </div>
+      </div>
       <button id="deployTab" class="topnav-item" type="button">Install <span id="updatesBadge" class="nav-badge hidden">0</span><span id="linuxUpdatesBadge" class="nav-badge hidden">0</span></button>
       <button id="settingsTab" class="topnav-item" type="button">Settings</button>
       <button id="loggingTab" class="topnav-item" type="button">Logging</button>
@@ -593,6 +601,57 @@
                 </tr>
               </thead>
               <tbody id="licenseKeySourcesBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="windowsUpdatesView" class="hidden" aria-label="Windows updates">
+          <div class="view-toolbar">
+            <button id="windowsUpdateAddButton" class="primary-button" type="button">Add entry</button>
+            <button id="windowsUpdateScanButton" class="export-button" type="button">Refresh discovered files</button>
+          </div>
+          <div id="windowsUpdateDiscoveredMessage" class="pkg-message hidden"></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Discovered file</th><th>Add to catalog</th></tr></thead>
+              <tbody id="windowsUpdateDiscoveredBody"></tbody>
+            </table>
+          </div>
+          <div id="windowsUpdateForm" class="install-panel hidden" aria-label="Windows update entry">
+            <div class="license-grid">
+              <label class="license-name-field">
+                Name
+                <input id="windowsUpdateName" type="text">
+              </label>
+              <label class="license-key-field">
+                File path in share
+                <input id="windowsUpdateRelativePath" type="text" placeholder="windows-updates\kb5001716.msu">
+              </label>
+              <label class="license-comment-field">
+                Arguments
+                <input id="windowsUpdateArguments" type="text">
+              </label>
+            </div>
+            <div class="license-computers-field">
+              <label>
+                Targets (computer names, one per line, or comma/semicolon-separated)
+                <textarea id="windowsUpdateTargets" rows="4"></textarea>
+              </label>
+            </div>
+            <label><input id="windowsUpdateRequiresReboot" type="checkbox"> Requires reboot</label>
+            <label><input id="windowsUpdateEnabled" type="checkbox" checked> Enabled</label>
+            <div class="pkg-buttons license-buttons">
+              <button id="windowsUpdateSaveButton" class="primary-button" type="button">Save</button>
+              <button id="windowsUpdateCancelButton" class="export-button" type="button">Cancel</button>
+            </div>
+            <div id="windowsUpdateMessage" class="pkg-message hidden"></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Name</th><th>File path</th><th>Targets</th><th>Enabled</th><th>Edit</th><th>Delete</th></tr>
+              </thead>
+              <tbody id="windowsUpdatesBody"></tbody>
             </table>
           </div>
         </section>
