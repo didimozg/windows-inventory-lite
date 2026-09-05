@@ -10722,6 +10722,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             public bool Success;
             public string ErrorMessage;
             public DateTime ScannedAtUtc;
+            public DateTime LastSuccessfulScanUtc;
             public List<string> WindowsUpdateCandidates;
             public List<string> ThirdPartySoftwareCandidates;
 
@@ -10731,6 +10732,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 result["success"] = Success;
                 result["errorMessage"] = ErrorMessage;
                 result["scannedAt"] = ScannedAtUtc == DateTime.MinValue ? null : ScannedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                result["lastSuccessfulScanAt"] = LastSuccessfulScanUtc == DateTime.MinValue ? null : LastSuccessfulScanUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
                 result["windowsUpdateCandidates"] = WindowsUpdateCandidates ?? new List<string>();
                 result["thirdPartySoftwareCandidates"] = ThirdPartySoftwareCandidates ?? new List<string>();
                 return result;
@@ -10743,7 +10745,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // unreachable, bad credentials only discovered now per
         // WithSoftwareRepositoryIdentity's own documented lazy-validation
         // behavior, missing subfolder) does NOT clear the previous
-        // successful result - the caller decides what to keep showing.
+        // successful result - the returned ShareScanResult carries forward
+        // the last successful scan's candidate lists and
+        // LastSuccessfulScanUtc, so only the Success/ErrorMessage/
+        // ScannedAtUtc fields reflect this latest (failed) attempt.
         private ShareScanResult ScanSoftwareRepository()
         {
             ShareScanResult result = new ShareScanResult();
@@ -10753,57 +10758,69 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 result.Success = false;
                 result.ErrorMessage = "SoftwareRepositoryPath is not configured.";
-                lock (shareScanLock)
-                {
-                    lastShareScanResult = result;
-                }
-                return result;
             }
-
-            try
+            else
             {
-                List<string> windowsUpdateFiles = WithSoftwareRepositoryIdentity(options, () => ListRelativeFiles(options.SoftwareRepositoryPath, "windows-updates"));
-                List<string> thirdPartyFiles = WithSoftwareRepositoryIdentity(options, () => ListRelativeFiles(options.SoftwareRepositoryPath, "third-party-software"));
+                try
+                {
+                    List<string> windowsUpdateFiles = WithSoftwareRepositoryIdentity(options, () => ListRelativeFiles(options.SoftwareRepositoryPath, "windows-updates"));
+                    List<string> thirdPartyFiles = WithSoftwareRepositoryIdentity(options, () => ListRelativeFiles(options.SoftwareRepositoryPath, "third-party-software"));
 
-                HashSet<string> knownWindowsUpdatePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (Dictionary<string, object> entry in LoadWindowsUpdates())
-                {
-                    knownWindowsUpdatePaths.Add(GetStringValue(entry, "relativePath"));
-                }
-                HashSet<string> knownThirdPartyPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (Dictionary<string, object> entry in LoadThirdPartySoftware())
-                {
-                    knownThirdPartyPaths.Add(GetStringValue(entry, "relativePath"));
-                }
-
-                result.WindowsUpdateCandidates = new List<string>();
-                foreach (string file in windowsUpdateFiles)
-                {
-                    if (!knownWindowsUpdatePaths.Contains(file))
+                    HashSet<string> knownWindowsUpdatePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (Dictionary<string, object> entry in LoadWindowsUpdates())
                     {
-                        result.WindowsUpdateCandidates.Add(file);
+                        knownWindowsUpdatePaths.Add(GetStringValue(entry, "relativePath"));
                     }
-                }
-
-                result.ThirdPartySoftwareCandidates = new List<string>();
-                foreach (string file in thirdPartyFiles)
-                {
-                    if (!knownThirdPartyPaths.Contains(file))
+                    HashSet<string> knownThirdPartyPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (Dictionary<string, object> entry in LoadThirdPartySoftware())
                     {
-                        result.ThirdPartySoftwareCandidates.Add(file);
+                        knownThirdPartyPaths.Add(GetStringValue(entry, "relativePath"));
                     }
-                }
 
-                result.Success = true;
-            }
-            catch (Exception ex)
-            {
-                result.Success = false;
-                result.ErrorMessage = ex.Message;
+                    result.WindowsUpdateCandidates = new List<string>();
+                    foreach (string file in windowsUpdateFiles)
+                    {
+                        if (!knownWindowsUpdatePaths.Contains(file))
+                        {
+                            result.WindowsUpdateCandidates.Add(file);
+                        }
+                    }
+
+                    result.ThirdPartySoftwareCandidates = new List<string>();
+                    foreach (string file in thirdPartyFiles)
+                    {
+                        if (!knownThirdPartyPaths.Contains(file))
+                        {
+                            result.ThirdPartySoftwareCandidates.Add(file);
+                        }
+                    }
+
+                    result.Success = true;
+                }
+                catch (Exception ex)
+                {
+                    result.Success = false;
+                    result.ErrorMessage = ex.Message;
+                }
             }
 
             lock (shareScanLock)
             {
+                if (result.Success)
+                {
+                    result.LastSuccessfulScanUtc = result.ScannedAtUtc;
+                }
+                else if (lastShareScanResult != null)
+                {
+                    // A failed scan attempt must not erase the dashboard's last
+                    // known-good discovery list - only the failure/timestamp
+                    // fields reflect this latest (failed) attempt; the candidate
+                    // lists and the last-successful timestamp carry forward from
+                    // whatever the last SUCCESSFUL scan found.
+                    result.WindowsUpdateCandidates = lastShareScanResult.WindowsUpdateCandidates;
+                    result.ThirdPartySoftwareCandidates = lastShareScanResult.ThirdPartySoftwareCandidates;
+                    result.LastSuccessfulScanUtc = lastShareScanResult.LastSuccessfulScanUtc;
+                }
                 lastShareScanResult = result;
             }
             return result;
@@ -11799,6 +11816,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "WithSoftwareRepositoryIdentity runs the action directly when no credentials are configured", TestWithSoftwareRepositoryIdentityRunsDirectlyWhenNoCredentialsConfigured);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository reports failure when SoftwareRepositoryPath is not configured", TestScanSoftwareRepositoryReportsMissingConfiguration);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository finds only files not already referenced by a catalog entry's relativePath", TestScanSoftwareRepositoryFindsUncatalogedFilesOnly);
+            allPassed &= SelfTestCheck(output, "ScanSoftwareRepository preserves the last successful scan's candidates when a subsequent scan fails", TestScanSoftwareRepositoryPreservesCandidatesOnSubsequentFailure);
             return allPassed;
         }
 
@@ -16587,6 +16605,69 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (result.ThirdPartySoftwareCandidates.Count != 1 || result.ThirdPartySoftwareCandidates[0].IndexOf("new-app.exe", StringComparison.OrdinalIgnoreCase) < 0)
                 {
                     return "expected exactly one third-party-software candidate (new-app.exe)";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // Proves the fix for the bug the plan's own prose flagged: a scan
+        // that fails must not wipe out the dashboard's last known-good
+        // discovery list. The second scan is forced to fail by clearing
+        // SoftwareRepositoryPath, which drives it into the real "missing
+        // configuration" branch inside ScanSoftwareRepository itself - the
+        // exact same branch a genuinely unreachable/unconfigured share hits
+        // in production. Pointing at a merely nonexistent subfolder was
+        // deliberately NOT used here: ListRelativeFiles treats a missing
+        // subfolder as "zero files found" (see its own
+        // "if (!Directory.Exists(subfolderPath)) return result;" guard) and
+        // the scan still reports Success, so that path would not actually
+        // exercise the failure branch under test.
+        private static string TestScanSoftwareRepositoryPreservesCandidatesOnSubsequentFailure()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-share-scan-preserve-test-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-share-scan-preserve-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "windows-updates"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "third-party-software"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                File.WriteAllText(Path.Combine(shareRoot, "windows-updates", "found-me.msu"), "test");
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                InventoryServer server = new InventoryServer(options);
+
+                var firstScan = server.ScanSoftwareRepository();
+                if (!firstScan.Success || firstScan.WindowsUpdateCandidates.Count != 1)
+                {
+                    return "expected the first scan to succeed and find one candidate";
+                }
+
+                // Clear the configured path so the second scan takes the real
+                // "missing configuration" failure branch, not a contrived one.
+                options.SoftwareRepositoryPath = null;
+                var secondScan = server.ScanSoftwareRepository();
+                if (secondScan.Success)
+                {
+                    return "expected the second scan (with SoftwareRepositoryPath cleared) to fail";
+                }
+                if (secondScan.WindowsUpdateCandidates == null || secondScan.WindowsUpdateCandidates.Count != 1)
+                {
+                    return "expected the FAILED second scan to still show the first scan's candidate (preserved, not wiped)";
+                }
+                if (secondScan.ThirdPartySoftwareCandidates == null || secondScan.ThirdPartySoftwareCandidates.Count != 0)
+                {
+                    return "expected the FAILED second scan to still show the first scan's (empty) third-party-software candidates, preserved rather than defaulted";
+                }
+                if (secondScan.LastSuccessfulScanUtc != firstScan.ScannedAtUtc)
+                {
+                    return "expected LastSuccessfulScanUtc to carry forward from the last successful scan, not reset";
                 }
                 return null;
             }
