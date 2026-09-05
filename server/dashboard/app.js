@@ -194,7 +194,7 @@
 
   function loadSettingsSubviewData(subview) {
     if (subview === 'server') { loadServerSettings(); loadIngestionTokenStatus(); }
-    if (subview === 'windows') { loadWindowsSettings(); loadClientUpdateCredentials(); }
+    if (subview === 'windows') { loadWindowsSettings(); loadClientUpdateCredentials(); loadSoftwareRepositoryCredentials(); }
     if (subview === 'linux') { loadLinuxSettings(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (subview === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (subview === 'adminPassword') { loadAdminPasswordStatus(); loadLoginLockoutSettings(); }
@@ -2070,6 +2070,72 @@
       .finally(() => {
         byId('windowsCredsClearButton').disabled = false;
       });
+  }
+
+  function loadSoftwareRepositoryCredentials() {
+    fetch('/api/v1/software-repository/settings', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('softwareRepoPath').value = data.path || '';
+        byId('softwareRepoUsername').value = data.username || '';
+        byId('softwareRepoScanInterval').value = data.scanIntervalMinutes || 60;
+        applyPasswordPlaceholder('softwareRepoPassword', !!data.hasPassword, 'leave blank to keep the current one');
+      })
+      .catch(() => {});
+  }
+
+  function saveSoftwareRepositoryCredentials() {
+    const path = byId('softwareRepoPath').value.trim();
+    const username = byId('softwareRepoUsername').value.trim();
+    const password = byId('softwareRepoPassword').value;
+    const scanIntervalMinutes = Number(byId('softwareRepoScanInterval').value) || 60;
+    const messageElement = byId('softwareRepoMessage');
+
+    byId('softwareRepoSaveButton').disabled = true;
+    fetch('/api/v1/software-repository/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, username, password, scanIntervalMinutes })
+    })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(() => {
+        byId('softwareRepoPassword').value = '';
+        messageElement.className = 'pkg-message';
+        messageElement.textContent = 'Saved.';
+        messageElement.classList.remove('hidden');
+        loadSoftwareRepositoryCredentials();
+      })
+      .catch(error => {
+        messageElement.className = 'pkg-message error';
+        messageElement.textContent = `Failed to save: ${error.message}`;
+        messageElement.classList.remove('hidden');
+      })
+      .finally(() => {
+        byId('softwareRepoSaveButton').disabled = false;
+      });
+  }
+
+  function clearSoftwareRepositoryCredentials() {
+    if (!window.confirm('Delete the saved software repository credentials?')) return;
+    fetch('/api/v1/software-repository/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clear: true })
+    })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(() => loadSoftwareRepositoryCredentials())
+      .catch(error => window.alert(`Failed to clear: ${error.message}`));
   }
 
   // pollInstallJob's onComplete only fires once the whole job finishes -
@@ -4924,6 +4990,8 @@
   });
   byId('windowsCredsSaveButton').addEventListener('click', saveClientUpdateCredentials);
   byId('windowsCredsClearButton').addEventListener('click', clearClientUpdateCredentials);
+  byId('softwareRepoSaveButton').addEventListener('click', saveSoftwareRepositoryCredentials);
+  byId('softwareRepoClearButton').addEventListener('click', clearSoftwareRepositoryCredentials);
   byId('updatesPushButton').addEventListener('click', startMergedUpdatesPush);
   byId('updatesSelectAll').addEventListener('change', () => {
     const checked = byId('updatesSelectAll').checked;

@@ -298,6 +298,33 @@
             </div>
             <div id="windowsCredsMessage" class="pkg-message hidden"></div>
           </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Software repository</h2>
+            <p class="cert-hint">The network share Windows clients pull software installers and OS patches from. Leave password blank to keep the currently saved value.</p>
+            <div class="pkg-grid client-update-grid">
+              <label class="pkg-token-field">
+                Share path (UNC)
+                <input id="softwareRepoPath" type="text" placeholder="\\fileserver\software-repo">
+              </label>
+              <label class="pkg-token-field">
+                Share username
+                <input id="softwareRepoUsername" type="text" autocomplete="username" placeholder="DOMAIN\svc-share (optional)">
+              </label>
+              <label class="pkg-token-field">
+                Share password
+                <input id="softwareRepoPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current one">
+              </label>
+              <label class="pkg-token-field">
+                Scan interval (minutes)
+                <input id="softwareRepoScanInterval" type="number" min="5" max="1440" value="60">
+              </label>
+              <div class="pkg-buttons">
+                <button id="softwareRepoSaveButton" class="primary-button" type="button">Save</button>
+                <button id="softwareRepoClearButton" class="danger-button-ghost" type="button">Delete saved credentials</button>
+              </div>
+            </div>
+            <div id="softwareRepoMessage" class="pkg-message hidden"></div>
+          </div>
         </section>
 
         <section id="linuxSettingsView" class="install-panel card-glow hidden" aria-label="Linux client settings">
