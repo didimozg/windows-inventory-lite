@@ -1,9 +1,12 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Management;
 using System.Net;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.ServiceProcess;
 using System.Text;
 using System.Threading;
@@ -51,6 +54,82 @@ namespace WindowsInventoryLite
 
             ServiceBase.Run(new InventoryService(options));
             return 0;
+        }
+
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool LogonUser(string lpszUsername, string lpszDomain, string lpszPassword, int dwLogonType, int dwLogonProvider, out IntPtr phToken);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        private const int Logon32LogonNewCredentials = 9;
+        private const int Logon32ProviderWinNt50 = 3;
+
+        private static void SplitDomainUsername(string input, out string domain, out string username)
+        {
+            int separatorIndex = input.IndexOf('\\');
+            if (separatorIndex < 0)
+            {
+                domain = ".";
+                username = input;
+            }
+            else
+            {
+                domain = input.Substring(0, separatorIndex);
+                username = input.Substring(separatorIndex + 1);
+            }
+        }
+
+        // Deliberate duplicate of the server's helper of the same name: the
+        // client and the server are separate executables with no shared
+        // assembly, and this project's convention is per-file duplication
+        // rather than a shared library.
+        //
+        // LOGON32_LOGON_NEW_CREDENTIALS does not validate the credentials
+        // here - a wrong username or password still yields a "successful"
+        // token, and the failure only surfaces when the impersonated code
+        // actually touches the share. Callers must therefore treat share I/O
+        // failures inside the action as the normal way bad credentials show up.
+        private static void WithSoftwareRepositoryIdentity(string repositoryUsername, string repositoryPassword, Action action)
+        {
+            if (String.IsNullOrEmpty(repositoryUsername) || String.IsNullOrEmpty(repositoryPassword))
+            {
+                action();
+                return;
+            }
+
+            string domain;
+            string username;
+            SplitDomainUsername(repositoryUsername, out domain, out username);
+
+            IntPtr tokenHandle = IntPtr.Zero;
+            try
+            {
+                if (!LogonUser(username, domain, repositoryPassword, Logon32LogonNewCredentials, Logon32ProviderWinNt50, out tokenHandle))
+                {
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                }
+
+                using (WindowsIdentity identity = new WindowsIdentity(tokenHandle))
+                {
+                    WindowsImpersonationContext context = identity.Impersonate();
+                    try
+                    {
+                        action();
+                    }
+                    finally
+                    {
+                        context.Undo();
+                    }
+                }
+            }
+            finally
+            {
+                if (tokenHandle != IntPtr.Zero)
+                {
+                    CloseHandle(tokenHandle);
+                }
+            }
         }
 
         private sealed class InventoryService : ServiceBase
@@ -147,8 +226,203 @@ namespace WindowsInventoryLite
 
                 public void CheckAndRun()
                 {
-                    // Filled in by a later task: fetch assigned jobs, skip
-                    // already-succeeded ones, run the rest, report results.
+                    string connectionJson = FetchSoftwareRepositoryConnection();
+                    if (String.IsNullOrEmpty(connectionJson))
+                    {
+                        return;
+                    }
+
+                    JavaScriptSerializer serializer = new JavaScriptSerializer();
+                    Dictionary<string, object> connection = serializer.Deserialize<Dictionary<string, object>>(connectionJson);
+                    string repositoryPath = InventoryCollector.GetString(connection, "path");
+                    string repositoryUsername = InventoryCollector.GetString(connection, "username");
+                    string repositoryPassword = InventoryCollector.GetString(connection, "password");
+                    if (String.IsNullOrEmpty(repositoryPath))
+                    {
+                        return;
+                    }
+
+                    string jobsJson = FetchAssignedJobs();
+                    if (String.IsNullOrEmpty(jobsJson))
+                    {
+                        return;
+                    }
+
+                    Dictionary<string, object> jobsResponse = serializer.Deserialize<Dictionary<string, object>>(jobsJson);
+                    ArrayList jobs = jobsResponse != null && jobsResponse.ContainsKey("jobs") ? jobsResponse["jobs"] as ArrayList : null;
+                    if (jobs == null || jobs.Count == 0)
+                    {
+                        return;
+                    }
+
+                    HashSet<string> alreadySucceeded = LoadSoftwareJobSuccessCache();
+                    ArrayList results = new ArrayList();
+
+                    foreach (object item in jobs)
+                    {
+                        Dictionary<string, object> job = item as Dictionary<string, object>;
+                        if (job == null)
+                        {
+                            continue;
+                        }
+
+                        string id = InventoryCollector.GetString(job, "id");
+                        if (alreadySucceeded.Contains(id))
+                        {
+                            continue;
+                        }
+
+                        Dictionary<string, object> resultEntry = RunOneJob(job, repositoryPath, repositoryUsername, repositoryPassword);
+                        results.Add(resultEntry);
+
+                        if (Convert.ToBoolean(resultEntry["success"]))
+                        {
+                            alreadySucceeded.Add(id);
+                        }
+                    }
+
+                    SaveSoftwareJobSuccessCache(alreadySucceeded);
+                    PostResults(results);
+                }
+
+                // CRITICAL: Process.Start does NOT run under the calling
+                // thread's impersonation token. CreateProcess loads the
+                // target image using the PROCESS token (this service's own
+                // running identity), not the calling thread's impersonation -
+                // thread-level impersonation only affects file I/O and network
+                // calls made directly on that thread, never a newly created
+                // process. Launching straight from a UNC path INSIDE
+                // WithSoftwareRepositoryIdentity would therefore fail in
+                // exactly the case explicit share credentials exist to
+                // handle - a service identity with no access to the share.
+                //
+                // The fix: copy the installer to a local temp path WHILE
+                // impersonating (File.Copy DOES honor thread impersonation,
+                // unlike process creation), then launch that LOCAL copy AFTER
+                // impersonation has ended. The installer then runs under this
+                // service's own normal identity - which is fine, since running
+                // "as" the share account was never the goal, only READING from
+                // the share as that account was.
+                //
+                // Known MVP limitation, not fixed here: an installer that
+                // expects sibling files in its own directory (not a single
+                // self-contained exe/msi) will not find them once copied alone
+                // to a temp folder - the dashboard's "File path in share" field
+                // hint documents this constraint rather than copying whole
+                // directories, which would silently copy more than a given
+                // entry asked for.
+                private Dictionary<string, object> RunOneJob(Dictionary<string, object> job, string repositoryPath, string repositoryUsername, string repositoryPassword)
+                {
+                    string id = InventoryCollector.GetString(job, "id");
+                    string catalogType = InventoryCollector.GetString(job, "catalogType");
+                    string relativePath = InventoryCollector.GetString(job, "relativePath");
+                    string arguments = InventoryCollector.GetString(job, "arguments");
+
+                    Dictionary<string, object> resultEntry = new Dictionary<string, object>();
+                    resultEntry["id"] = id;
+                    resultEntry["catalogType"] = catalogType;
+
+                    string localCopyPath = null;
+                    try
+                    {
+                        string fullPath = Path.Combine(repositoryPath, relativePath);
+                        string tempPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + Path.GetExtension(relativePath));
+                        bool[] fileExisted = new bool[1];
+
+                        WithSoftwareRepositoryIdentity(repositoryUsername, repositoryPassword, () =>
+                        {
+                            fileExisted[0] = File.Exists(fullPath);
+                            if (!fileExisted[0])
+                            {
+                                return;
+                            }
+                            File.Copy(fullPath, tempPath, true);
+                        });
+
+                        if (!fileExisted[0])
+                        {
+                            resultEntry["success"] = false;
+                            resultEntry["exitCode"] = -1;
+                            resultEntry["errorMessage"] = "file not found: " + relativePath;
+                            return resultEntry;
+                        }
+
+                        localCopyPath = tempPath;
+
+                        ProcessStartInfo psi = new ProcessStartInfo();
+                        psi.FileName = localCopyPath;
+                        psi.Arguments = arguments ?? "";
+                        psi.UseShellExecute = false;
+                        psi.CreateNoWindow = true;
+                        int exitCode;
+                        using (Process process = Process.Start(psi))
+                        {
+                            process.WaitForExit();
+                            exitCode = process.ExitCode;
+                        }
+
+                        resultEntry["success"] = exitCode == 0;
+                        resultEntry["exitCode"] = exitCode;
+                        resultEntry["errorMessage"] = exitCode == 0 ? null : ("installer exited with code " + exitCode);
+                    }
+                    catch (Exception ex)
+                    {
+                        resultEntry["success"] = false;
+                        resultEntry["exitCode"] = -1;
+                        resultEntry["errorMessage"] = ex.Message;
+                    }
+                    finally
+                    {
+                        if (localCopyPath != null)
+                        {
+                            try { File.Delete(localCopyPath); } catch { }
+                        }
+                    }
+
+                    return resultEntry;
+                }
+
+                private string FetchSoftwareRepositoryConnection()
+                {
+                    try
+                    {
+                        return InventoryCollector.HttpGet(InventoryCollector.ToConnectionInfoUrl(options.ServerUrl), options.Token);
+                    }
+                    catch
+                    {
+                        return null;
+                    }
+                }
+
+                private string FetchAssignedJobs()
+                {
+                    try
+                    {
+                        return InventoryCollector.HttpGet(InventoryCollector.ToSoftwareJobsUrl(options.ServerUrl), options.Token);
+                    }
+                    catch
+                    {
+                        return null;
+                    }
+                }
+
+                private void PostResults(ArrayList results)
+                {
+                    try
+                    {
+                        JavaScriptSerializer serializer = new JavaScriptSerializer();
+                        Dictionary<string, object> body = new Dictionary<string, object>();
+                        body["computerName"] = Environment.MachineName;
+                        body["results"] = results;
+                        InventoryCollector.PostJson(InventoryCollector.ToSoftwareJobResultsUrl(options.ServerUrl), serializer.Serialize(body), options.Token);
+                    }
+                    catch
+                    {
+                        // A failed results POST just means the next cycle's
+                        // history is missing this batch - the success cache
+                        // was already updated locally, so nothing gets
+                        // silently re-run because of this specific failure.
+                    }
                 }
 
                 private string GetSoftwareJobSuccessCachePath()
@@ -1056,7 +1330,9 @@ namespace WindowsInventoryLite
             return result;
         }
 
-        private static string GetString(Dictionary<string, object> data, string key)
+        // internal rather than private so SoftwareJobRunner (a separate
+        // top-level class's nested type) can reuse it instead of duplicating it.
+        internal static string GetString(Dictionary<string, object> data, string key)
         {
             if (!data.ContainsKey(key) || data[key] == null)
             {
@@ -1156,7 +1432,9 @@ namespace WindowsInventoryLite
             }
         }
 
-        private static string PostJson(string url, string json, string token)
+        // internal rather than private so SoftwareJobRunner can post job
+        // results through the same request shape the inventory report uses.
+        internal static string PostJson(string url, string json, string token)
         {
             if (url.StartsWith("https:", StringComparison.OrdinalIgnoreCase))
             {
@@ -1204,6 +1482,71 @@ namespace WindowsInventoryLite
                     return reader.ReadToEnd();
                 }
             }
+        }
+
+        // Same shape as PostJson (including the TLS 1.2 opt-in explained
+        // there), minus the request body.
+        internal static string HttpGet(string url, string token)
+        {
+            if (url.StartsWith("https:", StringComparison.OrdinalIgnoreCase))
+            {
+                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
+            }
+
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            request.Method = "GET";
+            request.Timeout = 30000;
+
+            if (!String.IsNullOrEmpty(token))
+            {
+                request.Headers["X-Inventory-Token"] = token;
+            }
+
+            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+            {
+                if ((int)response.StatusCode < 200 || (int)response.StatusCode >= 300)
+                {
+                    throw new InvalidOperationException("Server returned HTTP " + (int)response.StatusCode);
+                }
+
+                using (Stream responseStream = response.GetResponseStream())
+                using (StreamReader reader = new StreamReader(responseStream, Encoding.UTF8))
+                {
+                    return reader.ReadToEnd();
+                }
+            }
+        }
+
+        // options.ServerUrl is the full URL of the inventory ingestion
+        // endpoint (the install wizard asks the admin for exactly
+        // "https://server/api/v1/inventory"), so the sibling client endpoints
+        // are reached by swapping that suffix. A ServerUrl that does not end
+        // in the expected suffix is returned untouched: the resulting request
+        // fails and the caller's catch treats it as "no work this cycle",
+        // which is preferable to guessing at a base URL.
+        private static string ToSoftwareRepositoryUrl(string inventoryUrl, string suffix)
+        {
+            const string InventorySuffix = "/api/v1/inventory";
+            if (!String.IsNullOrEmpty(inventoryUrl) && inventoryUrl.EndsWith(InventorySuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                return inventoryUrl.Substring(0, inventoryUrl.Length - InventorySuffix.Length) + suffix;
+            }
+            return inventoryUrl;
+        }
+
+        internal static string ToConnectionInfoUrl(string serverUrl)
+        {
+            return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/software-repository-connection");
+        }
+
+        internal static string ToSoftwareJobsUrl(string serverUrl)
+        {
+            return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/software-jobs?computerName=" + Uri.EscapeDataString(Environment.MachineName));
+        }
+
+        internal static string ToSoftwareJobResultsUrl(string serverUrl)
+        {
+            return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/software-jobs/results");
         }
     }
 }

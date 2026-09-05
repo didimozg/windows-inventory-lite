@@ -1678,6 +1678,10 @@ namespace WindowsInventoryLite
                     {
                         ReceiveSoftwareJobResults(stream, request);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/client/software-repository-connection")
+                    {
+                        SendSoftwareRepositoryConnectionInfo(stream, request);
+                    }
                     else if (IsBasicAuthLockedOut(request, out loginLockoutRetryAfterSeconds))
                     {
                         SendTooManyRequests(stream, loginLockoutRetryAfterSeconds);
@@ -2140,6 +2144,34 @@ namespace WindowsInventoryLite
             ackResponse["status"] = "ok";
             ackResponse["licenseKeySources"] = BuildLicenseKeySourcesForClientResponse();
             SendJson(stream, serializer.Serialize(ackResponse));
+        }
+
+        // Returns the software-repository share path and credentials to any
+        // caller holding a valid ingestion token, password included, in
+        // plaintext. Deliberate and documented: every managed client needs
+        // these credentials to read installers from the share, and a
+        // compromised client can already run arbitrary code fetched from that
+        // share - that is the feature. Knowing the password therefore does not
+        // meaningfully increase what a compromised client could already do.
+        // What it does mean is that this credential's blast radius equals the
+        // whole fleet's trust level, not just the dashboard admin's, which is
+        // the same trust level the ingestion token itself already carries.
+        private void SendSoftwareRepositoryConnectionInfo(Stream stream, RequestContext request)
+        {
+            string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
+            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
+            {
+                RecordIngestionRejection(request, "software-repository-connection", ResolveIngestionRejectionReason(token));
+                SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
+                return;
+            }
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["path"] = options.SoftwareRepositoryPath ?? "";
+            result["username"] = options.SoftwareRepositoryUsername ?? "";
+            result["password"] = options.SoftwareRepositoryPassword ?? "";
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
         }
 
         private void SendClientSoftwareJobs(Stream stream, RequestContext request)
