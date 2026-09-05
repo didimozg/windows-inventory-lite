@@ -1662,6 +1662,10 @@ namespace WindowsInventoryLite
                     {
                         ReceiveLinuxServiceStatus(stream, request);
                     }
+                    else if (request.Method == "GET" && request.Path.StartsWith("/api/v1/client/software-jobs", StringComparison.OrdinalIgnoreCase))
+                    {
+                        SendClientSoftwareJobs(stream, request);
+                    }
                     else if (IsBasicAuthLockedOut(request, out loginLockoutRetryAfterSeconds))
                     {
                         SendTooManyRequests(stream, loginLockoutRetryAfterSeconds);
@@ -2120,6 +2124,87 @@ namespace WindowsInventoryLite
             ackResponse["status"] = "ok";
             ackResponse["licenseKeySources"] = BuildLicenseKeySourcesForClientResponse();
             SendJson(stream, serializer.Serialize(ackResponse));
+        }
+
+        private void SendClientSoftwareJobs(Stream stream, RequestContext request)
+        {
+            string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
+            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
+            {
+                RecordIngestionRejection(request, "software-jobs", ResolveIngestionRejectionReason(token));
+                SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
+                return;
+            }
+
+            string computerName = null;
+            int queryStart = request.Path.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                string query = request.Path.Substring(queryStart + 1);
+                foreach (string pair in query.Split('&'))
+                {
+                    int equalsIndex = pair.IndexOf('=');
+                    if (equalsIndex > 0 && pair.Substring(0, equalsIndex) == "computerName")
+                    {
+                        computerName = Uri.UnescapeDataString(pair.Substring(equalsIndex + 1));
+                    }
+                }
+            }
+
+            if (String.IsNullOrEmpty(computerName))
+            {
+                SendText(stream, "{\"error\":\"computerName is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            ArrayList jobs = new ArrayList();
+            foreach (Dictionary<string, object> entry in LoadWindowsUpdates())
+            {
+                AppendJobIfTargeted(jobs, entry, "windowsUpdate", computerName);
+            }
+            foreach (Dictionary<string, object> entry in LoadThirdPartySoftware())
+            {
+                AppendJobIfTargeted(jobs, entry, "thirdPartySoftware", computerName);
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["jobs"] = jobs;
+            SendJson(stream, serializer.Serialize(response));
+        }
+
+        private static void AppendJobIfTargeted(ArrayList jobs, Dictionary<string, object> entry, string catalogType, string computerName)
+        {
+            bool enabled = entry.ContainsKey("enabled") && Convert.ToBoolean(entry["enabled"]);
+            if (!enabled)
+            {
+                return;
+            }
+
+            string targetsText = GetStringValue(entry, "targets");
+            ArrayList targets = ExpandInstallTargets(targetsText);
+            bool isTargeted = false;
+            foreach (string target in targets)
+            {
+                if (String.Equals(Convert.ToString(target), computerName, StringComparison.OrdinalIgnoreCase))
+                {
+                    isTargeted = true;
+                    break;
+                }
+            }
+
+            if (!isTargeted)
+            {
+                return;
+            }
+
+            Dictionary<string, object> job = new Dictionary<string, object>();
+            job["id"] = GetStringValue(entry, "id");
+            job["catalogType"] = catalogType;
+            job["relativePath"] = GetStringValue(entry, "relativePath");
+            job["arguments"] = GetStringValue(entry, "arguments");
+            job["requiresReboot"] = entry.ContainsKey("requiresReboot") && Convert.ToBoolean(entry["requiresReboot"]);
+            jobs.Add(job);
         }
 
         // Looks up one client's stored report and decrypts every
@@ -11657,6 +11742,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ExpandInstallTarget expands a full IPv4 range", TestExpandInstallTargetFullRange);
             allPassed &= SelfTestCheck(output, "ExpandInstallTarget passes through a single hostname", TestExpandInstallTargetHostname);
             allPassed &= SelfTestCheck(output, "ExpandInstallTargets de-duplicates and splits on separators", TestExpandInstallTargetsDedup);
+            allPassed &= SelfTestCheck(output, "AppendJobIfTargeted includes matching computer only", TestAppendJobIfTargetedIncludesMatchingComputerOnly);
+            allPassed &= SelfTestCheck(output, "AppendJobIfTargeted excludes disabled entries", TestAppendJobIfTargetedExcludesDisabledEntries);
             allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries WinRM first when both ports are open", TestDecideAutoDetectProtocolsBothOpen);
             allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries only WinRM when just that port is open", TestDecideAutoDetectProtocolsWinRmOnly);
             allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries only SSH when just that port is open", TestDecideAutoDetectProtocolsSshOnly);
@@ -11955,6 +12042,47 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             ArrayList result = ExpandInstallTargets("host1, host1;host2\nhost1");
             string[] expected = new string[] { "host1", "host2" };
             return CompareStringLists(expected, result);
+        }
+
+        private static string TestAppendJobIfTargetedIncludesMatchingComputerOnly()
+        {
+            ArrayList jobs = new ArrayList();
+            Dictionary<string, object> entry = new Dictionary<string, object>();
+            entry["id"] = "job-1";
+            entry["enabled"] = true;
+            entry["targets"] = "PC-001, PC-002";
+            entry["relativePath"] = @"windows-updates\test.msu";
+            entry["arguments"] = "/quiet";
+            entry["requiresReboot"] = true;
+
+            AppendJobIfTargeted(jobs, entry, "windowsUpdate", "PC-002");
+            if (jobs.Count != 1)
+            {
+                return "expected PC-002 (a listed target) to receive this job";
+            }
+
+            jobs.Clear();
+            AppendJobIfTargeted(jobs, entry, "windowsUpdate", "PC-999");
+            if (jobs.Count != 0)
+            {
+                return "expected PC-999 (not a listed target) to NOT receive this job";
+            }
+            return null;
+        }
+
+        private static string TestAppendJobIfTargetedExcludesDisabledEntries()
+        {
+            ArrayList jobs = new ArrayList();
+            Dictionary<string, object> entry = new Dictionary<string, object>();
+            entry["id"] = "job-1";
+            entry["enabled"] = false;
+            entry["targets"] = "PC-001";
+            AppendJobIfTargeted(jobs, entry, "windowsUpdate", "PC-001");
+            if (jobs.Count != 0)
+            {
+                return "expected a disabled entry to never be assigned, even to a listed target";
+            }
+            return null;
         }
 
         private static string TestDecideAutoDetectProtocolsBothOpen()
