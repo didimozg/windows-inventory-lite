@@ -196,8 +196,15 @@ namespace WindowsInventoryLite
                 }
             }
 
+            private int softwareCheckRunning;
+
             private void CheckSoftwareJobs(object state)
             {
+                if (Interlocked.CompareExchange(ref softwareCheckRunning, 1, 0) != 0)
+                {
+                    DebugLogger.Log(options, "Server", "Software job check cycle skipped - a previous cycle is still running.");
+                    return;
+                }
                 try
                 {
                     SoftwareJobRunner runner = new SoftwareJobRunner(options);
@@ -213,6 +220,10 @@ namespace WindowsInventoryLite
                     catch { }
                     DebugLogger.Log(options, "Error", ex.ToString());
                 }
+                finally
+                {
+                    Interlocked.Exchange(ref softwareCheckRunning, 0);
+                }
             }
 
             private sealed class SoftwareJobRunner
@@ -226,28 +237,13 @@ namespace WindowsInventoryLite
 
                 public void CheckAndRun()
                 {
-                    string connectionJson = FetchSoftwareRepositoryConnection();
-                    if (String.IsNullOrEmpty(connectionJson))
-                    {
-                        return;
-                    }
-
-                    JavaScriptSerializer serializer = new JavaScriptSerializer();
-                    Dictionary<string, object> connection = serializer.Deserialize<Dictionary<string, object>>(connectionJson);
-                    string repositoryPath = InventoryCollector.GetString(connection, "path");
-                    string repositoryUsername = InventoryCollector.GetString(connection, "username");
-                    string repositoryPassword = InventoryCollector.GetString(connection, "password");
-                    if (String.IsNullOrEmpty(repositoryPath))
-                    {
-                        return;
-                    }
-
                     string jobsJson = FetchAssignedJobs();
                     if (String.IsNullOrEmpty(jobsJson))
                     {
                         return;
                     }
 
+                    JavaScriptSerializer serializer = new JavaScriptSerializer();
                     Dictionary<string, object> jobsResponse = serializer.Deserialize<Dictionary<string, object>>(jobsJson);
                     ArrayList jobs = jobsResponse != null && jobsResponse.ContainsKey("jobs") ? jobsResponse["jobs"] as ArrayList : null;
                     if (jobs == null || jobs.Count == 0)
@@ -256,8 +252,52 @@ namespace WindowsInventoryLite
                     }
 
                     HashSet<string> alreadySucceeded = LoadSoftwareJobSuccessCache();
-                    ArrayList results = new ArrayList();
 
+                    // Fetching the repository connection info returns the share
+                    // password in plaintext (see SendSoftwareRepositoryConnectionInfo
+                    // on the server). Most cycles have no unfinished job, so check
+                    // the success cache BEFORE asking for the credential - this
+                    // avoids sending it across the wire and doing a share logon on
+                    // every tick when there is no actual work to do.
+                    bool hasUnfinishedJob = false;
+                    foreach (object item in jobs)
+                    {
+                        Dictionary<string, object> job = item as Dictionary<string, object>;
+                        if (job == null)
+                        {
+                            continue;
+                        }
+                        if (!alreadySucceeded.Contains(InventoryCollector.GetString(job, "id")))
+                        {
+                            hasUnfinishedJob = true;
+                            break;
+                        }
+                    }
+                    if (!hasUnfinishedJob)
+                    {
+                        return;
+                    }
+
+                    string connectionJson = FetchSoftwareRepositoryConnection();
+                    if (String.IsNullOrEmpty(connectionJson))
+                    {
+                        return;
+                    }
+
+                    Dictionary<string, object> connection = serializer.Deserialize<Dictionary<string, object>>(connectionJson);
+                    if (connection == null)
+                    {
+                        return;
+                    }
+                    string repositoryPath = InventoryCollector.GetString(connection, "path");
+                    string repositoryUsername = InventoryCollector.GetString(connection, "username");
+                    string repositoryPassword = InventoryCollector.GetString(connection, "password");
+                    if (String.IsNullOrEmpty(repositoryPath))
+                    {
+                        return;
+                    }
+
+                    ArrayList results = new ArrayList();
                     foreach (object item in jobs)
                     {
                         Dictionary<string, object> job = item as Dictionary<string, object>;
@@ -281,8 +321,11 @@ namespace WindowsInventoryLite
                         }
                     }
 
-                    SaveSoftwareJobSuccessCache(alreadySucceeded);
-                    PostResults(results);
+                    if (results.Count > 0)
+                    {
+                        SaveSoftwareJobSuccessCache(alreadySucceeded);
+                        PostResults(results);
+                    }
                 }
 
                 // CRITICAL: Process.Start does NOT run under the calling
@@ -311,6 +354,8 @@ namespace WindowsInventoryLite
                 // hint documents this constraint rather than copying whole
                 // directories, which would silently copy more than a given
                 // entry asked for.
+                private const int InstallProcessTimeoutMilliseconds = 30 * 60 * 1000;
+
                 private Dictionary<string, object> RunOneJob(Dictionary<string, object> job, string repositoryPath, string repositoryUsername, string repositoryPassword)
                 {
                     string id = InventoryCollector.GetString(job, "id");
@@ -325,45 +370,80 @@ namespace WindowsInventoryLite
                     string localCopyPath = null;
                     try
                     {
+                        if (String.IsNullOrEmpty(relativePath) || Path.IsPathRooted(relativePath))
+                        {
+                            resultEntry["success"] = false;
+                            resultEntry["exitCode"] = -1;
+                            resultEntry["errorMessage"] = "relativePath must be a non-empty path relative to the software repository: " + relativePath;
+                            return resultEntry;
+                        }
+
                         string fullPath = Path.Combine(repositoryPath, relativePath);
                         string tempPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + Path.GetExtension(relativePath));
-                        bool[] fileExisted = new bool[1];
+                        localCopyPath = tempPath;
 
-                        WithSoftwareRepositoryIdentity(repositoryUsername, repositoryPassword, () =>
+                        try
                         {
-                            fileExisted[0] = File.Exists(fullPath);
-                            if (!fileExisted[0])
+                            WithSoftwareRepositoryIdentity(repositoryUsername, repositoryPassword, () =>
                             {
-                                return;
-                            }
-                            File.Copy(fullPath, tempPath, true);
-                        });
-
-                        if (!fileExisted[0])
+                                File.Copy(fullPath, tempPath, true);
+                            });
+                        }
+                        catch (FileNotFoundException)
                         {
                             resultEntry["success"] = false;
                             resultEntry["exitCode"] = -1;
                             resultEntry["errorMessage"] = "file not found: " + relativePath;
                             return resultEntry;
                         }
-
-                        localCopyPath = tempPath;
-
-                        ProcessStartInfo psi = new ProcessStartInfo();
-                        psi.FileName = localCopyPath;
-                        psi.Arguments = arguments ?? "";
-                        psi.UseShellExecute = false;
-                        psi.CreateNoWindow = true;
-                        int exitCode;
-                        using (Process process = Process.Start(psi))
+                        catch (DirectoryNotFoundException)
                         {
-                            process.WaitForExit();
-                            exitCode = process.ExitCode;
+                            resultEntry["success"] = false;
+                            resultEntry["exitCode"] = -1;
+                            resultEntry["errorMessage"] = "file not found: " + relativePath;
+                            return resultEntry;
+                        }
+                        catch (UnauthorizedAccessException ex)
+                        {
+                            resultEntry["success"] = false;
+                            resultEntry["exitCode"] = -1;
+                            resultEntry["errorMessage"] = "access denied reading from the software repository - check the configured share credentials: " + ex.Message;
+                            return resultEntry;
                         }
 
-                        resultEntry["success"] = exitCode == 0;
-                        resultEntry["exitCode"] = exitCode;
-                        resultEntry["errorMessage"] = exitCode == 0 ? null : ("installer exited with code " + exitCode);
+                        bool isMsi = String.Equals(Path.GetExtension(relativePath), ".msi", StringComparison.OrdinalIgnoreCase);
+                        ProcessStartInfo psi = new ProcessStartInfo();
+                        if (isMsi)
+                        {
+                            psi.FileName = "msiexec.exe";
+                            psi.Arguments = "/i \"" + localCopyPath + "\" " + (arguments ?? "");
+                        }
+                        else
+                        {
+                            psi.FileName = localCopyPath;
+                            psi.Arguments = arguments ?? "";
+                        }
+                        psi.UseShellExecute = false;
+                        psi.CreateNoWindow = true;
+                        psi.WorkingDirectory = Path.GetTempPath();
+
+                        using (Process process = Process.Start(psi))
+                        {
+                            if (!process.WaitForExit(InstallProcessTimeoutMilliseconds))
+                            {
+                                try { process.Kill(); } catch { }
+                                try { process.WaitForExit(5000); } catch { }
+                                resultEntry["success"] = false;
+                                resultEntry["exitCode"] = -1;
+                                resultEntry["errorMessage"] = "installer did not exit within " + (InstallProcessTimeoutMilliseconds / 60000) + " minutes and was terminated";
+                                return resultEntry;
+                            }
+
+                            int exitCode = process.ExitCode;
+                            resultEntry["success"] = exitCode == 0;
+                            resultEntry["exitCode"] = exitCode;
+                            resultEntry["errorMessage"] = exitCode == 0 ? null : ("installer exited with code " + exitCode);
+                        }
                     }
                     catch (Exception ex)
                     {
