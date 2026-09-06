@@ -971,6 +971,17 @@ tr.stale td {
   border-radius: 8px;
 }
 
+/* .install-panel has only margin-bottom, fine everywhere it was already
+   used - a .view-toolbar (own margin-bottom) or a heading sits above it in
+   every pre-existing case. The Windows Updates / Third-Party Software
+   discovery tables put a bordered .install-panel form directly after a
+   .table-wrap (no margin of its own) for the first time, so the two sat
+   flush against each other with no gap. Matches .install-panel's own
+   margin-bottom value for visual symmetry. */
+.table-wrap + .install-panel {
+  margin-top: 18px;
+}
+
 /* Bold Card System treatment for a Deploy/Settings page-section, reusing
    Phase 1's .card-glow. A compound selector, not just adding "card-glow" to
    the class list and trusting .card-glow's own rule to win: both are
