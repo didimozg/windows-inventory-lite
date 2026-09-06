@@ -920,6 +920,16 @@ tr.stale td {
   font-size: var(--font-size-lg);
 }
 
+/* A client's expanded row can stack more than one h2+table pair (software/
+   services, then license keys if any were found) - the first one's top
+   spacing comes from .details' own padding above, but a second heading
+   sitting directly after the first table had zero gap and ran into its
+   bottom border. Only fires when a heading actually follows a table, so
+   the first (and only, when there's nothing to stack) heading is untouched. */
+.details table + h2 {
+  margin-top: 20px;
+}
+
 .nested-table {
   min-width: 0;
 }
@@ -1755,6 +1765,16 @@ h3.push-status-heading {
   background: var(--danger-bg);
   border-color: var(--danger-border);
   color: var(--danger);
+}
+
+/* Every other .pkg-message is the last element in its form/settings-block,
+   so margin-top above is the only spacing it ever needed. The discovery-scan
+   status message is the first .pkg-message placed mid-page, directly above a
+   .table-wrap that itself has no top margin - without this, the two sat
+   flush against each other with no gap. :not(:last-child) keeps every
+   other, already-correct usage untouched. */
+.pkg-message:not(:last-child) {
+  margin-bottom: 12px;
 }
 
 .cert-hint {
