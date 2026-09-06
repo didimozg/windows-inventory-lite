@@ -4366,6 +4366,13 @@
       // data-client-id below carries computerName, same convention as
       // formatDescriptionEditor's separate data-computer-name attribute.
       const clientLicenseKeys = isWindows ? (client.licenses || []) : [];
+      // "No sources configured at all" and "sources configured but this
+      // client found none" used to render identically - nothing - making
+      // "the feature never ran," "it ran and found nothing," and "it's
+      // broken" indistinguishable to an admin. Now: no sources anywhere ->
+      // stay silent (nothing to show, avoid clutter on every row); at
+      // least one source configured but this client's own report has none
+      // -> say so explicitly instead of omitting the section.
       const licenseKeysTable = clientLicenseKeys.length
         ? `<h2>${escapeHtml(client.computerName)} license keys</h2>
             <table class="nested-table">
@@ -4376,7 +4383,9 @@
                 <td><button class="link-button" type="button" data-reveal-license-key data-client-id="${escapeHtml(client.computerName)}" data-license-key-index="${index}">•••••• (show)</button></td>
               </tr>`).join('')}</tbody>
             </table>`
-        : '';
+        : (isWindows && state.licenseKeySources.length > 0
+            ? `<h2>${escapeHtml(client.computerName)} license keys</h2><p class="cert-hint">No license keys found for this client.</p>`
+            : '');
 
       const detailsHidden = state.expandedDetails.has((isWindows ? 'client:' : 'linux-client:') + clientId) ? '' : 'hidden';
       const detailsAttr = isWindows ? `data-client-details="${clientId}"` : `data-linux-client-details="${clientId}"`;
@@ -5434,6 +5443,13 @@
   if (state.view === 'logging') loadIngestionRejectionLog();
   updateInstallFieldVisibility();
   loadInstallHistory();
+  // Loaded unconditionally (not gated by state.view, same as
+  // loadInstallHistory above) so renderClientsTable's empty-state check
+  // below (state.licenseKeySources.length > 0) works correctly even when
+  // the admin has never opened the License key sources tab this session -
+  // the fetch just populates the hidden table's data with no visible
+  // effect on whatever view is actually showing.
+  loadLicenseKeySources();
   updateLinuxUpdatesAuthModeFieldsUi();
   updateUpdatesCredentialFieldVisibility();
   updateUpdatesSelectionState();
