@@ -2822,7 +2822,9 @@
     if (disablingIngestionToken && !acknowledgeIngestionTokenRisk) {
       const confirmed = window.confirm(
         "Turning this off means anyone who can reach this server's port can submit inventory reports with no token at all - "
-          + 'both /api/v1/inventory and /api/v1/linux/inventory will accept any request, unauthenticated. Continue?'
+          + 'both /api/v1/inventory and /api/v1/linux/inventory will accept any request, unauthenticated. '
+          + 'It does not affect the software-distribution endpoints (share connection info, job assignments, job results): '
+          + 'those always require a matching token, whatever this setting says. Continue?'
       );
       if (!confirmed) return;
       acknowledgeIngestionTokenRisk = true;
@@ -2977,9 +2979,13 @@
           // the token-presence-only message below would tell them.
           byId('ingestionTokenStatusText').textContent = 'No token configured, but enforcement is on - inventory ingestion is currently rejecting every request. Regenerate to set a token.';
         } else if (!data.configured) {
-          byId('ingestionTokenStatusText').textContent = 'No token configured - inventory ingestion is unauthenticated. Regenerate to set one.';
+          // The software-distribution endpoints always require a matching
+          // token (they are not governed by RequireIngestionToken), so with
+          // no token configured at all they reject every client - worth
+          // saying here, since it is otherwise a silent fleet-wide stall.
+          byId('ingestionTokenStatusText').textContent = 'No token configured - inventory ingestion is unauthenticated, and software distribution is rejecting every client request. Regenerate to set one.';
         } else if (!data.requireIngestionToken) {
-          byId('ingestionTokenStatusText').textContent = 'A token is configured, but enforcement is off - inventory ingestion currently accepts requests with no token.';
+          byId('ingestionTokenStatusText').textContent = 'A token is configured, but enforcement is off - inventory ingestion currently accepts requests with no token. Software distribution still requires this token.';
         } else {
           byId('ingestionTokenStatusText').textContent = 'A token is configured and required for inventory ingestion.';
         }

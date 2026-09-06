@@ -2159,7 +2159,16 @@ namespace WindowsInventoryLite
         private void SendSoftwareRepositoryConnectionInfo(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
+            // Always requires a real, matching token regardless of
+            // options.RequireIngestionToken - unlike basic inventory
+            // submission (whose low-sensitivity risk model that toggle was
+            // designed around: fake inventory submission, not broader
+            // access), this endpoint returns the share password in plaintext
+            // to whoever asks. There is no legitimate case for leaving it
+            // open. Passing true also makes IsIngestionTokenRejected fail
+            // closed when no Token is configured at all, so an unconfigured
+            // server rejects instead of publishing the credential.
+            if (IsIngestionTokenRejected(true, token, options.Token))
             {
                 RecordIngestionRejection(request, "software-repository-connection", ResolveIngestionRejectionReason(token));
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -2177,7 +2186,14 @@ namespace WindowsInventoryLite
         private void SendClientSoftwareJobs(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
+            // Always requires a real, matching token regardless of
+            // options.RequireIngestionToken - see
+            // SendSoftwareRepositoryConnectionInfo above for the full
+            // reasoning. This endpoint returns the fleet's job assignments
+            // for any computer name the caller names, which is a map of what
+            // is about to be executed where; that is not covered by the
+            // low-sensitivity risk model that toggle was designed around.
+            if (IsIngestionTokenRejected(true, token, options.Token))
             {
                 RecordIngestionRejection(request, "software-jobs", ResolveIngestionRejectionReason(token));
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -2258,7 +2274,14 @@ namespace WindowsInventoryLite
         private void ReceiveSoftwareJobResults(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
+            // Always requires a real, matching token regardless of
+            // options.RequireIngestionToken - see
+            // SendSoftwareRepositoryConnectionInfo above for the full
+            // reasoning. This endpoint writes into the fleet's install
+            // attempt-history log, so leaving it open lets anyone who can
+            // reach the port forge or flood the only record an admin has of
+            // what actually ran where.
+            if (IsIngestionTokenRejected(true, token, options.Token))
             {
                 RecordIngestionRejection(request, "software-job-results", ResolveIngestionRejectionReason(token));
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
