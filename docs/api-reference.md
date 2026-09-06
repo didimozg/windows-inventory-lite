@@ -1,16 +1,18 @@
 # API Reference
 
-This is a practical lookup document for the server's HTTP API, not an OpenAPI/Swagger spec. It covers the real, current route surface: 56 routes (45 exact-match paths, 11 with a parameterized path segment) - down from 53 as of v0.42.0, which removed the four separate Linux install/uninstall job routes (`/api/v1/linux-client-install`, `/linux-client-uninstall`, and their GET list/detail equivalents) in favor of the unified `/api/v1/client-install`/`/client-uninstall` pair, up again with the two session endpoints, and up again with the five license-key routes documented below (the four-route `/api/v1/license-key-sources` catalog plus the `/api/v1/clients/{computerName}/license-keys` reveal endpoint). It does not cover the static dashboard asset routes (`/`, `/app.js`, `/styles.css`, `/favicon.svg`), which serve dashboard files rather than API data.
+This is a practical lookup document for the server's HTTP API, not an OpenAPI/Swagger spec. It covers the real, current route surface: 73 routes (58 exact-match paths, 15 with a parameterized path segment) - down from 53 as of v0.42.0, which removed the four separate Linux install/uninstall job routes (`/api/v1/linux-client-install`, `/linux-client-uninstall`, and their GET list/detail equivalents) in favor of the unified `/api/v1/client-install`/`/client-uninstall` pair, up again with the two session endpoints, up again with the five license-key routes (the four-route `/api/v1/license-key-sources` catalog plus the `/api/v1/clients/{computerName}/license-keys` reveal endpoint), and up again with v0.56.0's sixteen software-distribution routes documented below. The counts were recounted from the routing chain when the v0.56.0 routes were added; the previous "45 exact-match" figure was one short of the real total at the time, so the jump from 56 to 73 is sixteen new routes plus that one-route correction. It does not cover the static dashboard asset routes (`/`, `/app.js`, `/styles.css`, `/favicon.svg`, `/brand-mark.png`), which serve dashboard files rather than API data.
 
 ## Conventions
 
 **Auth models.** Two separate models are in use, and a route uses exactly one of them:
 
-- **Basic Auth** guards the dashboard/management surface: every route below except the three inventory-ingestion endpoints and `POST /api/v1/server/login` (which checks credentials itself, before either the session-cookie or Basic Auth check would otherwise apply - see that endpoint below). It is checked once, centrally, by `IsWebRequestAuthorized` before the request reaches any handler. A missing or wrong `Authorization: Basic ...` header gets a `401` with body `Unauthorized` (plain text, not JSON) - deliberately without a `WWW-Authenticate: Basic` header, since that header is what makes a browser pop its native credential dialog and cache whatever is typed into it at the HTTP stack level, with no way to evict it later short of closing the browser (see "Session cookie" below for the supported alternative). If no admin username/password has been configured yet, this check instead falls back to restricting the route to the local machine (loopback) only.
+- **Basic Auth** guards the dashboard/management surface: every route below except the six ingestion-token endpoints (the three inventory-ingestion ones and the three software-distribution client ones, both listed under "Ingestion token" below) and `POST /api/v1/server/login` (which checks credentials itself, before either the session-cookie or Basic Auth check would otherwise apply - see that endpoint below). It is checked once, centrally, by `IsWebRequestAuthorized` before the request reaches any handler. A missing or wrong `Authorization: Basic ...` header gets a `401` with body `Unauthorized` (plain text, not JSON) - deliberately without a `WWW-Authenticate: Basic` header, since that header is what makes a browser pop its native credential dialog and cache whatever is typed into it at the HTTP stack level, with no way to evict it later short of closing the browser (see "Session cookie" below for the supported alternative). If no admin username/password has been configured yet, this check instead falls back to restricting the route to the local machine (loopback) only.
 - **Session cookie.** A `wil_session` cookie is checked by `IsWebRequestAuthorized` before Basic Auth, on every route the bullet above covers - a valid session authorizes the request with no `Authorization` header at all. It is an alternative to Basic Auth, not an additional requirement on top of it: either one alone is sufficient. `POST /api/v1/server/login` establishes a session and returns the cookie; `POST /api/v1/server/logout` invalidates it. See those two endpoints below for the full behavior.
-- **Ingestion token** guards the three inventory-ingestion endpoints only, via the `X-Inventory-Token` request header, checked inside each handler before Basic Auth would otherwise apply (these routes are dispatched before the Basic Auth check runs at all). Enforcement is controlled by the `RequireIngestionToken` server setting; when it is off, these three endpoints accept any request unauthenticated. A rejected token also gets a `401` with plain-text body `Unauthorized`, not the JSON error shape below.
+- **Ingestion token** guards the client-facing endpoints, via the `X-Inventory-Token` request header, checked inside each handler before Basic Auth would otherwise apply (these routes are dispatched before the Basic Auth check runs at all). A rejected token gets a `401` with plain-text body `Unauthorized`, not the JSON error shape below. Two groups, with different enforcement rules:
+  - The three inventory-ingestion endpoints (`POST /api/v1/inventory`, `POST /api/v1/linux/inventory`, `POST /api/v1/linux/inventory/service-status`) honor the `RequireIngestionToken` server setting; when it is off, they accept any request unauthenticated.
+  - The three software-distribution client endpoints (`GET /api/v1/client/software-jobs`, `POST /api/v1/client/software-jobs/results`, `GET /api/v1/client/software-repository-connection`, all since v0.56.0) ignore `RequireIngestionToken` and always require a real, matching token. They also fail closed when no `Token` is configured at all, so software distribution does not work on a tokenless server - deliberate, since these routes return a plaintext share credential and the fleet's job assignments. See `docs/threat-model.md`.
 
-**Cross-site request checks (v0.48.0+).** Every `POST`/`PUT`/`DELETE` route that goes through Basic Auth (i.e. every route except the three ingestion endpoints above) additionally requires: if the request has an `Origin` or `Referer` header, it must match this server's own `Host`; and if the request has a body, `Content-Type` must be `application/json` (an optional `; charset=...` suffix is fine). Both checks are skipped entirely when the corresponding header is absent - direct API automation (like the `curl` examples below) that sends neither `Origin` nor `Referer` is unaffected. A violation gets a `400` with the usual `{"error": "..."}` shape. Every `curl` example below already sends `Content-Type: application/json` on any request with a body, so none of them need updating.
+**Cross-site request checks (v0.48.0+).** Every `POST`/`PUT`/`DELETE` route that goes through Basic Auth (i.e. every route except the three ingestion endpoints above and `POST /api/v1/client/software-jobs/results`, a fourth pre-auth exemption in the same category - a client-facing route dispatched before the auth/CSRF gate, called by a real API client rather than a browser, and token-gated in its own handler) additionally requires: if the request has an `Origin` or `Referer` header, it must match this server's own `Host`; and if the request has a body, `Content-Type` must be `application/json` (an optional `; charset=...` suffix is fine). Both checks are skipped entirely when the corresponding header is absent - direct API automation (like the `curl` examples below) that sends neither `Origin` nor `Referer` is unaffected. A violation gets a `400` with the usual `{"error": "..."}` shape. Every `curl` example below already sends `Content-Type: application/json` on any request with a body, so none of them need updating.
 
 **Login lockout (v0.50.0+).** Every route that goes through Basic Auth is also subject to a per-source-IP failed-attempt lockout, checked before Basic Auth itself: once an IP has presented wrong Basic Auth credentials `LoginLockoutThreshold` times (default 10) within `LoginLockoutWindowMinutes` (default 15), every request from that IP - including one with the *correct* password - gets a `429 Too Many Requests` with a `Retry-After: <seconds>` header for `LoginLockoutDurationMinutes` (default 15). A request with no `Authorization` header at all (a browser's normal first request before it has cached credentials) never counts as a failed attempt. Configurable, and disable-able (`LoginLockoutThreshold: 0`), via Settings > Admin password > Login lockout or `POST /api/v1/server/settings`. Tracking is per source IP and in-memory only (reset by a server restart) - defense-in-depth on top of the documented network-level control (trusted management network), not a replacement for it.
 
@@ -35,6 +37,34 @@ This project does not use a structured `{"error": {"code": ..., "message": ...}}
 | POST | `/api/v1/inventory` | Ingestion token | Accept a Windows client's inventory report. |
 | POST | `/api/v1/linux/inventory` | Ingestion token | Accept a Linux client's inventory report. |
 | POST | `/api/v1/linux/inventory/service-status` | Ingestion token | Merge a service active/inactive snapshot into an existing Linux report. |
+
+### Software distribution (client to server)
+
+Ingestion token always required on these three, regardless of `RequireIngestionToken` - see "Auth models" above.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/api/v1/client/software-jobs` | Ingestion token (always) | Return the enabled catalog entries targeted at one computer name. |
+| POST | `/api/v1/client/software-jobs/results` | Ingestion token (always) | Report one cycle's install results into the attempt-history log. |
+| GET | `/api/v1/client/software-repository-connection` | Ingestion token (always) | Return the software share path and credentials the client needs to read installers. |
+
+### Software distribution (dashboard)
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/api/v1/software-repository/settings` | Basic Auth | Return the software share path, username, whether a password is stored, and the scan interval. |
+| POST | `/api/v1/software-repository/settings` | Basic Auth | Set the software share path, credentials, and scan interval. |
+| GET | `/api/v1/software-repository/scan-status` | Basic Auth | Return the last share-discovery scan's result and candidate lists. |
+| POST | `/api/v1/software-repository/scan` | Basic Auth | Run a share-discovery scan now and return its result. |
+| GET | `/api/v1/software-repository/attempt-history` | Basic Auth | Return the persisted per-client install attempt log. |
+| GET | `/api/v1/windows-updates` | Basic Auth | List the Windows Updates catalog. |
+| POST | `/api/v1/windows-updates` | Basic Auth | Add a Windows Updates catalog entry. |
+| PUT | `/api/v1/windows-updates/{id}` | Basic Auth | Update a Windows Updates catalog entry. |
+| DELETE | `/api/v1/windows-updates/{id}` | Basic Auth | Delete a Windows Updates catalog entry. |
+| GET | `/api/v1/third-party-software` | Basic Auth | List the Third-Party Software catalog. |
+| POST | `/api/v1/third-party-software` | Basic Auth | Add a Third-Party Software catalog entry. |
+| PUT | `/api/v1/third-party-software/{id}` | Basic Auth | Update a Third-Party Software catalog entry. |
+| DELETE | `/api/v1/third-party-software/{id}` | Basic Auth | Delete a Third-Party Software catalog entry. |
 
 ### Clients & inventory data
 
@@ -449,7 +479,7 @@ Returns the server's log of rejected ingestion-token attempts, most-recent-first
 
 ### POST /api/v1/server/login
 
-Establishes a server-side session with valid dashboard admin credentials. Request body: `{username, password}` (both required). Subject to the same cross-site request checks and `LoginLockoutThreshold` rate limiting as every other state-changing route (see "Cross-site request checks" and "Login lockout" under Conventions above) - unlike the three ingestion endpoints, this route is not exempt from either.
+Establishes a server-side session with valid dashboard admin credentials. Request body: `{username, password}` (both required). Subject to the same cross-site request checks and `LoginLockoutThreshold` rate limiting as every other state-changing route (see "Cross-site request checks" and "Login lockout" under Conventions above) - unlike the three ingestion endpoints and `POST /api/v1/client/software-jobs/results`, this route is not exempt from either.
 
 Success response: `200` with `Set-Cookie: wil_session=...` in response headers and `Cache-Control: no-store`. The cookie carries `HttpOnly` and `SameSite=Strict` flags. Over HTTPS, it also carries the `Secure` flag; over plain HTTP, the flag is omitted and the cookie travels in cleartext, the same as Basic Auth credentials already do. Response body: `{"status": "ok"}`.
 
@@ -528,3 +558,69 @@ curl -X POST https://server:8443/api/v1/license-key-sources \
 `{id}` is matched case-insensitively against stored records. PUT accepts the same fields as POST (all required) and preserves the original `id`/`createdAt`; response is the updated record. DELETE removes the matching record; response is `{"status": "deleted"}`. Both return `404 {"error": "license key source not found"}` for an unknown ID.
 
 All four endpoints read and write one JSON array file (`_license-key-sources/license-key-sources.json`) under a single lock, same full-array-rewrite pattern as `licenses.json`.
+
+## Software distribution
+
+Added in v0.56.0. Two admin-managed catalogs (Windows Updates, Third-Party Software) name installer files on a UNC share; targeted Windows clients poll for their assignments, copy the file locally, run it, and report the result back. The server never connects outbound to a client for this feature - the opposite direction from Deploy > Actions. See `docs/threat-model.md` for the trust boundary (the share's own write-ACL) before enabling it.
+
+### GET /api/v1/software-repository/settings
+
+Returns `{path, username, hasPassword, scanIntervalMinutes}`. The password itself is never returned here - only `hasPassword`. `username` is `null` (not `""`) when unset.
+
+### POST /api/v1/software-repository/settings
+
+Sets the share location and credentials. Body fields, all optional: `path`, `username`, `password`, `scanIntervalMinutes`, `clear`. Every omitted field keeps its current value; an omitted or empty `password` also keeps the stored one, so the dashboard can save the form without re-typing it. `clear: true` wipes username and password (leaving `path` alone). `scanIntervalMinutes` must be 5-1440 - an out-of-range or unparseable value is silently ignored and the current value kept, not rejected. The stored password is DPAPI-encrypted at rest. Saving reconfigures the background scan timer immediately. Response is the same shape as the GET.
+
+```bash
+curl -X POST https://server:8443/api/v1/software-repository/settings \
+  -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{"path":"\\\\fileserver\\software", "username":"CORP\\svc-software", "password":"...", "scanIntervalMinutes":60}'
+```
+
+### GET /api/v1/software-repository/scan-status
+
+Returns the last scan's result without starting a new one: `{success, errorMessage, scannedAt, lastSuccessfulScanAt, windowsUpdateCandidates, thirdPartySoftwareCandidates}`. The two candidate arrays hold share-relative paths of files no catalog entry's `relativePath` references yet. A failed scan does not clear them - `success`/`errorMessage`/`scannedAt` describe the latest attempt while the candidate lists and `lastSuccessfulScanAt` carry forward from the last successful one. Both timestamps are `null` before the first scan.
+
+### POST /api/v1/software-repository/scan
+
+Runs a scan synchronously and returns the same shape as the status endpoint. Takes no body. Lists `<path>\windows-updates\` and `<path>\third-party-software\`.
+
+### GET /api/v1/software-repository/attempt-history
+
+Returns `{"attempts": [...]}`, each `{timestampUtc, computerName, catalogType, entryId, success, exitCode, errorMessage}`, oldest first. `catalogType` is `windowsUpdate` or `thirdPartySoftware`. Capped at 5000 entries and 90 days, pruned on write.
+
+### GET /api/v1/windows-updates and GET /api/v1/third-party-software
+
+Return `{"windowsUpdates": [...]}` / `{"thirdPartySoftware": [...]}`, each record `{id, name, relativePath, arguments, requiresReboot, enabled, targets, createdAt, updatedAt}`.
+
+### POST /api/v1/windows-updates and POST /api/v1/third-party-software
+
+Create a catalog entry. Body: `name` and `relativePath` are required; `arguments`, `targets` default to `""`, `requiresReboot` to `false`, `enabled` to `true` when omitted. `id`, `createdAt`, and `updatedAt` are always server-generated, never client-supplied. `relativePath` is share-relative (for example `windows-updates\kb5001716.msu`) - the client rejects a rooted path at run time. Response is the created record.
+
+`targets` is the same plain delimited text `ExpandInstallTargets` parses for Deploy > Actions, but restricted here to computer names: any token that expands to something `IPAddress.TryParse` accepts is rejected with `400 {"error": "targets must be computer names - ..."}`, naming the offending value. A mixed list is rejected outright rather than partly accepted. The reason is directional - this feature matches a client's own self-reported computer name against the list, so an IP address could never match anything. Other validation: `400 {"error": "name is required"}` / `{"error": "relativePath is required"}` / `{"error": "invalid request body"}`.
+
+```bash
+curl -X POST https://server:8443/api/v1/windows-updates \
+  -u admin:password \
+  -H "Content-Type: application/json" \
+  -d '{"name":"KB5001716", "relativePath":"windows-updates\\kb5001716.msu", "arguments":"/quiet /norestart", "requiresReboot":true, "enabled":true, "targets":"PC-01, PC-02"}'
+```
+
+### PUT and DELETE /api/v1/windows-updates/{id}, /api/v1/third-party-software/{id}
+
+`{id}` is matched case-insensitively against stored records. PUT accepts the same fields and the same validation as POST, preserves `id`/`createdAt`, and sets `updatedAt` to now; response is the updated record. DELETE responds `{"status": "deleted"}`. Both return `404 {"error": "windows update entry not found"}` / `{"error": "third-party software entry not found"}` for an unknown ID.
+
+The `updatedAt` bump on PUT is load-bearing, not bookkeeping: clients cache successful runs by `id` + `updatedAt`, so editing an entry in place is what makes machines that already ran the old version run the corrected one.
+
+### GET /api/v1/client/software-jobs
+
+Client-facing. Query parameter `computerName` is required (`400 {"error": "computerName is required"}` otherwise). Returns `{"jobs": [...]}`, each `{id, updatedAt, catalogType, relativePath, arguments, requiresReboot}` - both catalogs merged, filtered to entries that are `enabled` and whose expanded `targets` contain that computer name (case-insensitive). An unknown computer name returns an empty array, not a 404.
+
+### POST /api/v1/client/software-jobs/results
+
+Client-facing. Body: `{computerName, results: [{id, catalogType, success, exitCode, errorMessage}, ...]}`. Each result is appended to the attempt-history log; `id` here is the plain catalog entry id. A missing or non-array `results` is accepted as a no-op. Response is `{"status": "ok"}`. Like the three inventory-ingestion endpoints, this route is dispatched before the auth/CSRF gate and is therefore exempt from the cross-site request and Content-Type checks (see Conventions above).
+
+### GET /api/v1/client/software-repository-connection
+
+Client-facing. Returns `{path, username, password}` with the share password **in plaintext** - the client needs it to read installers from the share. Empty strings, not `null`, when unset. This is the endpoint the "always requires a token" rule under "Auth models" exists for; read the corresponding `docs/threat-model.md` bullet, including the unresolved question about this credential crossing a plain-HTTP deployment, before deploying this feature.

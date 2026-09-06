@@ -56,6 +56,7 @@ Full parameter tables for every install/build/uninstall script, the `server-conf
 | `-ServerSharePath` | `-` | UNC path to the server drop share for direct file delivery. Optional. |
 | `-Token` | `-` | Ingestion token sent in `X-Inventory-Token`. Optional. |
 | `-IntervalHours` | `6` | Collection interval in hours (1-24). |
+| `-SoftwareCheckIntervalHours` | `6` | How often the client polls for assigned software-distribution jobs (1-24). Separate timer from `-IntervalHours`; emitted as `--software-check-interval-hours` in the service command line. |
 | `-InstallPath` | `-` | Installation folder for the client service. Default: `C:\ProgramData\WindowsInventoryLite\client-data`. |
 | `-ClientExecutablePath` | `-` | Path to the prebuilt client executable. Triggers a build if omitted. |
 | `-NoRun` | `off` | Install and configure the service without starting it. |
@@ -140,6 +141,7 @@ Full parameter tables for every install/build/uninstall script, the `server-conf
 | `-ServerUrl` | `-` | HTTP endpoint that receives client JSON reports. Mandatory. |
 | `-Token` | `-` | Ingestion token sent in `X-Inventory-Token`. Optional. |
 | `-IntervalHours` | `6` | Collection interval in hours (1-24). |
+| `-SoftwareCheckIntervalHours` | `6` | How often the client polls for assigned software-distribution jobs (1-24). Separate timer from `-IntervalHours`; emitted as `--software-check-interval-hours` in the service command line. |
 | `-InstallPath` | `-` | Installation folder for the client service. Default: `C:\ProgramData\WindowsInventoryLite\client-data`. |
 | `-PackageClientPath` | `-` | Path to the client executable in the package. Resolved from the script directory if omitted. |
 | `-Force` | `off` | Reinstall the client even if the version already matches. |
@@ -192,6 +194,9 @@ Password-based pushes additionally require `plink.exe`/`pscp.exe` (PuTTY) in `de
 - `PreferredLinuxSubnet`: optional IPv4 CIDR (for example `192.168.1.0/24`) restricting which subnet Linux client targeting considers. Default: empty (no filtering).
 - `LinuxDefaultIntervalHours`: default collection interval offered when installing a Linux client. Default: `6`, range 1-24.
 - `LinuxDefaultStatusIntervalMinutes`: default service-status poll interval for a Linux client. Default: `30`, range 1-1440.
+- `SoftwareRepositoryPath`: UNC path or local directory holding the software-distribution share. Clients read installers from `<path>\windows-updates\` and `<path>\third-party-software\`; the server scans the same two subfolders for discovery candidates. Empty by default, which disables the feature. Adjustable on Software > Settings.
+- `SoftwareRepositoryUsername` and `SoftwareRepositoryPassword`: optional credentials the client impersonates to read that share. `SoftwareRepositoryPassword` is DPAPI-encrypted at rest, like `WebPassword`/`Token`/`AdPassword`. Left empty, the client falls back to its own service identity. Note that the password is returned in plaintext to any client holding a valid ingestion token - see `docs/threat-model.md`.
+- `SoftwareShareScanIntervalMinutes`: how often the server rescans the software share for files no catalog entry references yet. Default: `60`, range 5-1440. Adjustable on Software > Settings.
 - `LinuxDefaultInstallPath`: default installation directory offered when installing a Linux client. Default: `/opt/windows-inventory-lite`. Must be a real subdirectory under `/opt/`, with no `.`/`..` path segment - as of v0.54.7 a value outside `/opt/` (previously accepted if it just had two path segments, e.g. `/home/svc/wil`) is rejected; re-point any such existing value under `/opt/` and reinstall affected Linux clients.
 
 ## Uninstall commands
