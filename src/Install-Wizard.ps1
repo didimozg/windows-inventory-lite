@@ -450,6 +450,16 @@ function ConvertFrom-ClientBinPath {
         $params['IntervalHours'] = [int]$Matches[1]
     }
 
+    # Matched separately, and unambiguously: the shorter '--interval-hours'
+    # pattern above needs two literal dashes immediately before
+    # 'interval-hours', which '--software-check-interval-hours' does not
+    # provide (it has 'check-' there), so neither flag can capture the
+    # other's value. Without this, a wizard-driven upgrade would silently
+    # drop a customized software-check interval back to the default.
+    if ($BinPath -match '--software-check-interval-hours\s+(\d+)') {
+        $params['SoftwareCheckIntervalHours'] = [int]$Matches[1]
+    }
+
     if ($BinPath -match '^"((?:[^"\\]|\\.)*)"') {
         $exePath = $Matches[1] -replace '\\"', '"'
         $installPath = Split-Path -Parent $exePath
@@ -514,6 +524,7 @@ $installClientQuestions = @(
     @{ Name = 'ServerSharePath'; Prompt = 'Server share path for client updates (leave blank to skip)'; Type = 'String'; Mandatory = $false }
     @{ Name = 'Token'; Prompt = 'Inventory ingestion token (leave blank if the server has none configured)'; Type = 'SecureString'; Mandatory = $false }
     @{ Name = 'IntervalHours'; Prompt = 'Collection interval in hours'; Type = 'Int'; Default = '6'; Mandatory = $false }
+    @{ Name = 'SoftwareCheckIntervalHours'; Prompt = 'Software distribution check interval in hours'; Type = 'Int'; Default = '6'; Mandatory = $false }
     @{ Name = 'InstallPath'; Prompt = 'Client install path (leave blank for default)'; Type = 'String'; Mandatory = $false }
     @{ Name = 'NoRun'; Prompt = 'Skip starting the service immediately after install'; Type = 'Switch' }
 )

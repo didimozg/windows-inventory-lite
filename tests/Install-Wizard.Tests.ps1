@@ -217,6 +217,23 @@ Describe 'Windows Inventory Lite Install Wizard' {
         $result['InstallPath'] | Should -Be 'C:\ProgramData\WindowsInventoryLite\client-data'
     }
 
+    It 'ConvertFrom-ClientBinPath preserves --software-check-interval-hours without confusing it for --interval-hours' {
+        $binPath = '"C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory" --interval-hours 6 --software-check-interval-hours 12 --output "C:\ProgramData\WindowsInventoryLite\client-data" --debug-log-path "C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug.log"'
+
+        $result = ConvertFrom-ClientBinPath -BinPath $binPath
+
+        $result['IntervalHours'] | Should -Be 6
+        $result['SoftwareCheckIntervalHours'] | Should -Be 12
+    }
+
+    It 'ConvertFrom-ClientBinPath leaves SoftwareCheckIntervalHours unset on a pre-v0.56.0 binPath' {
+        $binPath = '"C:\client\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory" --interval-hours 6 --output "C:\client" --debug-log-path "C:\client\debug.log"'
+
+        $result = ConvertFrom-ClientBinPath -BinPath $binPath
+
+        $result.ContainsKey('SoftwareCheckIntervalHours') | Should -Be $false
+    }
+
     It 'ConvertFrom-ClientBinPath un-escapes an embedded backslash-quote inside a value' {
         $binPath = '"C:\client\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory" --interval-hours 6 --token "has\"quote" --output "C:\client" --debug-log-path "C:\client\debug.log"'
 

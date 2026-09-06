@@ -21,6 +21,17 @@ Describe 'Windows Inventory Lite Install-Client client-data layout' {
         $command | Should -Match '--debug-log-path "C:\\ProgramData\\WindowsInventoryLite\\client-data\\_logs\\debug-client\.log"'
     }
 
+    It 'Get-ClientServiceCommand emits --software-check-interval-hours alongside --interval-hours' {
+        $command = Get-ClientServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SoftwareHours 12 -SharePath '' -SharedToken '' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
+        $command | Should -Match '--interval-hours 6'
+        $command | Should -Match '--software-check-interval-hours 12'
+    }
+
+    It 'Get-ClientServiceCommand defaults --software-check-interval-hours to 6 when not supplied' {
+        $command = Get-ClientServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharePath '' -SharedToken '' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
+        $command | Should -Match '--software-check-interval-hours 6'
+    }
+
     It 'Get-ClientServiceCommand still includes --share and --token when provided' {
         $command = Get-ClientServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharePath '\\server\drop' -SharedToken 'abc123' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
         $command | Should -Match '--share "\\\\server\\drop"'

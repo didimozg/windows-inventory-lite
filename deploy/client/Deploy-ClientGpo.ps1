@@ -14,6 +14,14 @@ param(
     [ValidateRange(1, 24)]
     [int]$IntervalHours = 6,
 
+    # How often the client polls for assigned software-distribution jobs
+    # (Windows Updates / Third-Party Software catalogs). Independent of
+    # -IntervalHours: the client runs the two on separate timers. Default
+    # matches the client binary's own default.
+    [Parameter()]
+    [ValidateRange(1, 24)]
+    [int]$SoftwareCheckIntervalHours = 6,
+
     [Parameter()]
     [ValidateNotNullOrEmpty()]
     [string]$InstallPath,
@@ -229,12 +237,13 @@ function Get-DesiredServiceCommand {
         [string]$ServicePath,
         [string]$Url,
         [int]$Hours,
+        [int]$SoftwareHours = 6,
         [string]$SharedToken,
         [string]$OutputDirectory,
         [string]$DebugLogPath
     )
 
-    $command = '"' + (ConvertTo-ServiceArgValue $ServicePath) + '" --server-url "' + (ConvertTo-ServiceArgValue $Url) + '" --interval-hours ' + $Hours
+    $command = '"' + (ConvertTo-ServiceArgValue $ServicePath) + '" --server-url "' + (ConvertTo-ServiceArgValue $Url) + '" --interval-hours ' + $Hours + ' --software-check-interval-hours ' + $SoftwareHours
     if ($SharedToken) {
         $command += ' --token "' + (ConvertTo-ServiceArgValue $SharedToken) + '"'
     }
@@ -346,7 +355,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     $debugLogPath = Join-Path -Path $InstallPath -ChildPath '_logs\debug-client.log'
     $packageVersion = Get-ExeVersion -Path $PackageClientPath
     $installedVersion = Get-InstalledVersion -InstallDirectory $InstallPath
-    $desiredCommand = Get-DesiredServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SharedToken $Token -OutputDirectory $InstallPath -DebugLogPath $debugLogPath
+    $desiredCommand = Get-DesiredServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SoftwareHours $SoftwareCheckIntervalHours -SharedToken $Token -OutputDirectory $InstallPath -DebugLogPath $debugLogPath
     $currentCommand = Get-ServiceBinaryPath
     $serviceExists = Test-ServiceExists
     $needsInstall = $Force -or (-not $serviceExists) -or ($packageVersion -ne $installedVersion) -or ($currentCommand -ne $desiredCommand)

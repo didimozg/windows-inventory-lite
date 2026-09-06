@@ -21,6 +21,17 @@ Describe 'Windows Inventory Lite Deploy-ClientGpo client-data layout' {
         $command | Should -Match '--debug-log-path "C:\\ProgramData\\WindowsInventoryLite\\client-data\\_logs\\debug-client\.log"'
     }
 
+    It 'Get-DesiredServiceCommand emits --software-check-interval-hours alongside --interval-hours' {
+        $command = Get-DesiredServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SoftwareHours 12 -SharedToken '' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
+        $command | Should -Match '--interval-hours 6'
+        $command | Should -Match '--software-check-interval-hours 12'
+    }
+
+    It 'Get-DesiredServiceCommand defaults --software-check-interval-hours to 6 when not supplied' {
+        $command = Get-DesiredServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharedToken '' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
+        $command | Should -Match '--software-check-interval-hours 6'
+    }
+
     It 'Get-DesiredServiceCommand differs between the legacy bare-root path and the new client-data path, so an already-installed client is detected as needing reinstall' {
         $legacyCommand = Get-DesiredServiceCommand -ServicePath 'C:\ProgramData\WindowsInventoryLite\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharedToken '' -OutputDirectory 'C:\ProgramData\WindowsInventoryLite' -DebugLogPath 'C:\ProgramData\WindowsInventoryLite\_logs\debug-client.log'
         $newCommand = Get-DesiredServiceCommand -ServicePath 'C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharedToken '' -OutputDirectory 'C:\ProgramData\WindowsInventoryLite\client-data' -DebugLogPath 'C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug-client.log'

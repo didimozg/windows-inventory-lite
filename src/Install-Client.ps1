@@ -18,6 +18,14 @@ param(
     [ValidateRange(1, 24)]
     [int]$IntervalHours = 6,
 
+    # How often the client polls for assigned software-distribution jobs
+    # (Windows Updates / Third-Party Software catalogs). Independent of
+    # -IntervalHours: the client runs the two on separate timers. Default
+    # matches the client binary's own default.
+    [Parameter()]
+    [ValidateRange(1, 24)]
+    [int]$SoftwareCheckIntervalHours = 6,
+
     [Parameter()]
     [ValidateNotNullOrEmpty()]
     [string]$InstallPath,
@@ -158,13 +166,14 @@ function Get-ClientServiceCommand {
         [string]$ServicePath,
         [string]$Url,
         [int]$Hours,
+        [int]$SoftwareHours = 6,
         [string]$SharePath,
         [string]$SharedToken,
         [string]$OutputDirectory,
         [string]$DebugLogPath
     )
 
-    $command = '"' + (ConvertTo-ServiceArgValue $ServicePath) + '" --server-url "' + (ConvertTo-ServiceArgValue $Url) + '" --interval-hours ' + $Hours
+    $command = '"' + (ConvertTo-ServiceArgValue $ServicePath) + '" --server-url "' + (ConvertTo-ServiceArgValue $Url) + '" --interval-hours ' + $Hours + ' --software-check-interval-hours ' + $SoftwareHours
     if ($SharePath) {
         $command += ' --share "' + (ConvertTo-ServiceArgValue $SharePath) + '"'
     }
@@ -267,7 +276,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     Copy-Item -LiteralPath $ClientExecutablePath -Destination $servicePath -Force
     $clientVersion = (& $servicePath --version 2>&1 | Select-Object -First 1)
 
-    $serviceCommand = Get-ClientServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SharePath $ServerSharePath -SharedToken $Token -OutputDirectory $InstallPath -DebugLogPath $debugLogPath
+    $serviceCommand = Get-ClientServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SoftwareHours $SoftwareCheckIntervalHours -SharePath $ServerSharePath -SharedToken $Token -OutputDirectory $InstallPath -DebugLogPath $debugLogPath
 
     Invoke-ServiceCreate -ServiceName $serviceName -BinPath $serviceCommand -DisplayName 'Windows Inventory Lite' -FailureMessage "Failed to create service. Run PowerShell as Administrator." | Out-Null
     Invoke-ServiceControl -Arguments @('description', $serviceName, "Collects Windows, Office, activation, and software inventory for Windows Inventory Lite. Version $clientVersion.") -FailureMessage "Failed to set service description." | Out-Null
