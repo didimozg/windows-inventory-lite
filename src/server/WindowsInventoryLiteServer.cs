@@ -10815,6 +10815,25 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 SendText(stream, "{\"error\":\"relativePath is required\"}", "application/json; charset=utf-8", 400);
                 return;
             }
+            // Deploy > Actions feeds the same delimited target text into an
+            // outbound WinRM/SSH connection, where an IP or IP range is
+            // exactly right. This feature is the opposite direction: the
+            // client polls and asks what is assigned to its own reported
+            // computer name, so an expanded IP token can never equal a
+            // computer name and the entry would silently reach zero machines
+            // forever. Reject it at save time instead.
+            if (!String.IsNullOrEmpty(targets))
+            {
+                foreach (string expandedTarget in ExpandInstallTargets(targets))
+                {
+                    IPAddress parsedIp;
+                    if (IPAddress.TryParse(expandedTarget, out parsedIp))
+                    {
+                        SendText(stream, "{\"error\":\"targets must be computer names - this feature assigns jobs by the client's own reported computer name, not by connecting to an IP, so an IP address or range will never match any client: " + expandedTarget + "\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+            }
 
             string nowUtc = DateTime.UtcNow.ToString("o");
             Dictionary<string, object> record = new Dictionary<string, object>();
@@ -10874,6 +10893,18 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 SendText(stream, "{\"error\":\"relativePath is required\"}", "application/json; charset=utf-8", 400);
                 return;
+            }
+            if (!String.IsNullOrEmpty(targets))
+            {
+                foreach (string expandedTarget in ExpandInstallTargets(targets))
+                {
+                    IPAddress parsedIp;
+                    if (IPAddress.TryParse(expandedTarget, out parsedIp))
+                    {
+                        SendText(stream, "{\"error\":\"targets must be computer names - this feature assigns jobs by the client's own reported computer name, not by connecting to an IP, so an IP address or range will never match any client: " + expandedTarget + "\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
             }
 
             lock (windowsUpdatesLock)
@@ -11054,6 +11085,18 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 SendText(stream, "{\"error\":\"relativePath is required\"}", "application/json; charset=utf-8", 400);
                 return;
             }
+            if (!String.IsNullOrEmpty(targets))
+            {
+                foreach (string expandedTarget in ExpandInstallTargets(targets))
+                {
+                    IPAddress parsedIp;
+                    if (IPAddress.TryParse(expandedTarget, out parsedIp))
+                    {
+                        SendText(stream, "{\"error\":\"targets must be computer names - this feature assigns jobs by the client's own reported computer name, not by connecting to an IP, so an IP address or range will never match any client: " + expandedTarget + "\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+            }
 
             string nowUtc = DateTime.UtcNow.ToString("o");
             Dictionary<string, object> record = new Dictionary<string, object>();
@@ -11113,6 +11156,18 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 SendText(stream, "{\"error\":\"relativePath is required\"}", "application/json; charset=utf-8", 400);
                 return;
+            }
+            if (!String.IsNullOrEmpty(targets))
+            {
+                foreach (string expandedTarget in ExpandInstallTargets(targets))
+                {
+                    IPAddress parsedIp;
+                    if (IPAddress.TryParse(expandedTarget, out parsedIp))
+                    {
+                        SendText(stream, "{\"error\":\"targets must be computer names - this feature assigns jobs by the client's own reported computer name, not by connecting to an IP, so an IP address or range will never match any client: " + expandedTarget + "\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
             }
 
             lock (thirdPartySoftwareLock)
