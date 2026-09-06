@@ -3714,6 +3714,7 @@ namespace WindowsInventoryLite
             string winRmPassword = "";
             bool force = false;
             bool addToTrustedHosts = false;
+            int softwareCheckIntervalHours = 6;
             if (needsWinRm)
             {
                 winRmUsername = Convert.ToString(payload.ContainsKey("username") ? payload["username"] : "");
@@ -3776,6 +3777,17 @@ namespace WindowsInventoryLite
                 }
                 force = payload.ContainsKey("force") && Convert.ToBoolean(payload["force"]);
                 addToTrustedHosts = payload.ContainsKey("addToTrustedHosts") && Convert.ToBoolean(payload["addToTrustedHosts"]);
+                // Deploy > Actions has no field for this until now - a
+                // remotely pushed Windows client always got the client's
+                // own hardcoded 6-hour default. Same silent-clamp-to-default
+                // convention as the software-repository scan interval
+                // (Task 1 of the software-distribution plan) rather than
+                // rejecting the whole job with a 400 over one bad field.
+                int parsedSoftwareCheckIntervalHours = GetIntValue(payload, "softwareCheckIntervalHours", 6);
+                if (parsedSoftwareCheckIntervalHours >= 1 && parsedSoftwareCheckIntervalHours <= 24)
+                {
+                    softwareCheckIntervalHours = parsedSoftwareCheckIntervalHours;
+                }
             }
 
             string sshAuthMode = "credentials";
@@ -4053,6 +4065,7 @@ namespace WindowsInventoryLite
             job.InstallPath = installPath;
             job.TrustNewHostKeys = trustNewHostKeys;
             job.RetentionDays = retentionDays;
+            job.SoftwareCheckIntervalHours = softwareCheckIntervalHours;
 
             lock (installJobsLock)
             {
@@ -4196,6 +4209,7 @@ namespace WindowsInventoryLite
                     job.Username, job.Password, job.Force, job.AddToTrustedHosts,
                     job.SshAuthMode, job.SshUsername, job.SshPassword, job.SshKeyPath, job.TrustNewHostKeys,
                     job.IntervalHours, job.StatusIntervalMinutes, job.InstallPath,
+                    job.SoftwareCheckIntervalHours,
                     AutoDetectProbeTimeoutMs);
                 lock (installJobsLock)
                 {
@@ -4800,7 +4814,7 @@ namespace WindowsInventoryLite
         // transport, so it doesn't protect against something actively
         // attached as a debugger - but that already implies far deeper
         // compromise than reading a process list.
-        private Dictionary<string, object> RunClientInstallTarget(string target, string serverUrl, string token, string username, string password, bool force, bool addToTrustedHosts)
+        private Dictionary<string, object> RunClientInstallTarget(string target, string serverUrl, string token, string username, string password, bool force, bool addToTrustedHosts, int softwareCheckIntervalHours)
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["target"] = target;
@@ -4824,7 +4838,7 @@ namespace WindowsInventoryLite
             string commandBody = "[Console]::OutputEncoding = [System.Text.Encoding]::Default; $OutputEncoding = [Console]::OutputEncoding; "
                 + BuildCredentialReaderSnippet(hasCredential)
                 + "& " + QuotePowerShellLiteral(options.WinRmInstallerPath) + " "
-                + BuildPowerShellInstallArguments(target, serverUrl, token, hasCredential, force, addToTrustedHosts, options.ClientPackagePath);
+                + BuildPowerShellInstallArguments(target, serverUrl, token, hasCredential, force, addToTrustedHosts, options.ClientPackagePath, softwareCheckIntervalHours);
 
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = "powershell.exe";
@@ -5907,6 +5921,7 @@ namespace WindowsInventoryLite
             string winRmUsername, string winRmPassword, bool force, bool addToTrustedHosts,
             string sshAuthMode, string sshUsername, string sshPassword, string sshKeyPath, bool trustNewHostKeys,
             int intervalHours, int statusIntervalMinutes, string installPath,
+            int softwareCheckIntervalHours,
             int probeTimeoutMs)
         {
             bool winRmReachable = false;
@@ -5939,7 +5954,7 @@ namespace WindowsInventoryLite
                 {
                     attemptResult = action == "uninstall"
                         ? RunClientUninstallTarget(target, winRmUsername, winRmPassword, addToTrustedHosts)
-                        : RunClientInstallTarget(target, serverUrl, token, winRmUsername, winRmPassword, force, addToTrustedHosts);
+                        : RunClientInstallTarget(target, serverUrl, token, winRmUsername, winRmPassword, force, addToTrustedHosts, softwareCheckIntervalHours);
                 }
                 else
                 {
@@ -6047,7 +6062,7 @@ namespace WindowsInventoryLite
                 + "$__wilCredential = New-Object System.Management.Automation.PSCredential($__wilUser, (ConvertTo-SecureString -String $__wilPass -AsPlainText -Force)); ";
         }
 
-        private static string BuildPowerShellInstallArguments(string target, string serverUrl, string token, bool hasCredential, bool force, bool addToTrustedHosts, string packagePath)
+        private static string BuildPowerShellInstallArguments(string target, string serverUrl, string token, bool hasCredential, bool force, bool addToTrustedHosts, string packagePath, int softwareCheckIntervalHours)
         {
             StringBuilder builder = new StringBuilder();
             builder.Append("-ComputerName ").Append(QuotePowerShellLiteral(target));
@@ -6056,6 +6071,7 @@ namespace WindowsInventoryLite
             {
                 builder.Append(" -Token ").Append(QuotePowerShellLiteral(token));
             }
+            builder.Append(" -SoftwareCheckIntervalHours ").Append(softwareCheckIntervalHours);
             builder.Append(" -PackagePath ").Append(QuotePowerShellLiteral(packagePath));
             if (hasCredential)
             {
@@ -7442,6 +7458,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             public string InstallPath;
             public bool TrustNewHostKeys;
             public int RetentionDays;
+            public int SoftwareCheckIntervalHours;
 
             public Dictionary<string, object> ToDictionary()
             {
@@ -12196,6 +12213,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "NeedsMigration flags a plaintext value", TestNeedsMigrationPlaintextValue);
             allPassed &= SelfTestCheck(output, "NeedsMigration does not flag an already-encrypted or empty value", TestNeedsMigrationAlreadyEncryptedOrEmpty);
             allPassed &= SelfTestCheck(output, "BuildPowerShellInstallArguments includes -Token when a token is set, omits it when empty", TestBuildPowerShellInstallArgumentsIncludesToken);
+            allPassed &= SelfTestCheck(output, "BuildPowerShellInstallArguments includes -SoftwareCheckIntervalHours", TestBuildPowerShellInstallArgumentsIncludesSoftwareCheckIntervalHours);
             allPassed &= SelfTestCheck(output, "GenerateCmdLines rejects serverUrl/token/packageSharePath containing batch-unsafe characters", TestGenerateCmdLinesRejectsUnsafeCharacters);
             allPassed &= SelfTestCheck(output, "ValidatePosixShellSafe rejects POSIX shell metacharacters", TestValidatePosixShellSafeRejectsUnsafeCharacters);
             allPassed &= SelfTestCheck(output, "ValidatePosixShellSafe accepts safe values including null/empty", TestValidatePosixShellSafeAcceptsSafeValues);
@@ -14485,16 +14503,26 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // regenerating the token, reinstalling via the UI doesn't help."
         private static string TestBuildPowerShellInstallArgumentsIncludesToken()
         {
-            string argsWithToken = BuildPowerShellInstallArguments("PC-001", "https://server/api/v1/inventory", "real-token-value", false, false, false, @"C:\package");
+            string argsWithToken = BuildPowerShellInstallArguments("PC-001", "https://server/api/v1/inventory", "real-token-value", false, false, false, @"C:\package", 6);
             if (!argsWithToken.Contains("-Token 'real-token-value'"))
             {
                 return "expected -Token 'real-token-value' in the built arguments, got: " + argsWithToken;
             }
 
-            string argsWithoutToken = BuildPowerShellInstallArguments("PC-001", "https://server/api/v1/inventory", "", false, false, false, @"C:\package");
+            string argsWithoutToken = BuildPowerShellInstallArguments("PC-001", "https://server/api/v1/inventory", "", false, false, false, @"C:\package", 6);
             if (argsWithoutToken.Contains("-Token"))
             {
                 return "expected no -Token when the token is empty, got: " + argsWithoutToken;
+            }
+            return null;
+        }
+
+        private static string TestBuildPowerShellInstallArgumentsIncludesSoftwareCheckIntervalHours()
+        {
+            string args = BuildPowerShellInstallArguments("PC-001", "https://server/api/v1/inventory", "", false, false, false, @"C:\package", 3);
+            if (!args.Contains("-SoftwareCheckIntervalHours 3"))
+            {
+                return "expected -SoftwareCheckIntervalHours 3 in the built arguments, got: " + args;
             }
             return null;
         }

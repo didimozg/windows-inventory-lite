@@ -19,6 +19,10 @@ param(
     [int]$IntervalHours = 6,
 
     [Parameter()]
+    [ValidateRange(1, 24)]
+    [int]$SoftwareCheckIntervalHours = 6,
+
+    [Parameter()]
     [ValidateNotNullOrEmpty()]
     [string]$PackagePath,
 
@@ -239,44 +243,56 @@ function Invoke-RemoteDeploy {
         [string]$RemoteClientPath
     )
 
-    Invoke-Command -Session $Session -ScriptBlock {
-        param(
-            [string]$DeployPath,
-            [string]$ClientPath,
-            [string]$Url,
-            [int]$Hours,
-            [string]$SharedToken,
-            [bool]$ForceInstall
-        )
+    Invoke-Command -Session $Session -ScriptBlock $script:RemoteDeployScriptBlock -ArgumentList $RemoteDeployPath, $RemoteClientPath, $ServerUrl, $IntervalHours, $SoftwareCheckIntervalHours, $Token, ([bool]$Force)
+}
 
-        $arguments = @(
-            '-NoProfile',
-            '-ExecutionPolicy',
-            'Bypass',
-            '-File',
-            $DeployPath,
-            '-ServerUrl',
-            $Url,
-            '-IntervalHours',
-            ([string]$Hours),
-            '-PackageClientPath',
-            $ClientPath
-        )
+# Defined as its own script-scope scriptblock (not inline at the
+# Invoke-Command call site above) so Pester can invoke it directly with a
+# fake set of parameters to verify the constructed argument list, the same
+# testable-scriptblock pattern RemoveRemotePackageScriptBlock below already
+# uses - Invoke-Command's own remoting/param-binding can't be exercised
+# without a real session, but the argument-building logic inside it can be
+# tested on its own.
+$script:RemoteDeployScriptBlock = {
+    param(
+        [string]$DeployPath,
+        [string]$ClientPath,
+        [string]$Url,
+        [int]$Hours,
+        [int]$SoftwareHours,
+        [string]$SharedToken,
+        [bool]$ForceInstall
+    )
 
-        if ($SharedToken) {
-            $arguments += '-Token'
-            $arguments += $SharedToken
-        }
+    $arguments = @(
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        $DeployPath,
+        '-ServerUrl',
+        $Url,
+        '-IntervalHours',
+        ([string]$Hours),
+        '-SoftwareCheckIntervalHours',
+        ([string]$SoftwareHours),
+        '-PackageClientPath',
+        $ClientPath
+    )
 
-        if ($ForceInstall) {
-            $arguments += '-Force'
-        }
+    if ($SharedToken) {
+        $arguments += '-Token'
+        $arguments += $SharedToken
+    }
 
-        & powershell.exe @arguments
-        if ($LASTEXITCODE -ne 0) {
-            throw "Remote deploy script failed with exit code $LASTEXITCODE."
-        }
-    } -ArgumentList $RemoteDeployPath, $RemoteClientPath, $ServerUrl, $IntervalHours, $Token, ([bool]$Force)
+    if ($ForceInstall) {
+        $arguments += '-Force'
+    }
+
+    & powershell.exe @arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Remote deploy script failed with exit code $LASTEXITCODE."
+    }
 }
 
 # Defined as a script-scope scriptblock variable (not an inline literal at

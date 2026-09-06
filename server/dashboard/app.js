@@ -1600,6 +1600,7 @@
     const password = (mode !== 'force-linux' && winRmAuthMode === 'manual') ? byId('installPassword').value : '';
     const force = byId('installForce').checked;
     const addToTrustedHosts = byId('installTrustedHosts').checked;
+    const softwareCheckIntervalHours = Number(byId('installSoftwareCheckIntervalHours').value) || 6;
     const sshAuthMode = byId('installSshAuthMode').value;
     const sshUsername = (mode !== 'force-windows' && sshAuthMode !== 'global') ? byId('installSshUsername').value.trim() : '';
     const sshPassword = (mode !== 'force-windows' && sshAuthMode === 'manual') ? byId('installSshPassword').value : '';
@@ -1626,7 +1627,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets, mode, serverUrl, winRmAuthMode, username, password, force, addToTrustedHosts, sshAuthMode, sshUsername, sshPassword, intervalHours, statusIntervalMinutes, trustNewHostKeys, acknowledgeHostKeyRisk })
+      body: JSON.stringify({ targets, mode, serverUrl, winRmAuthMode, username, password, force, addToTrustedHosts, softwareCheckIntervalHours, sshAuthMode, sshUsername, sshPassword, intervalHours, statusIntervalMinutes, trustNewHostKeys, acknowledgeHostKeyRisk })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
       .then(({ ok, status, data }) => {
