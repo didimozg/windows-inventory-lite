@@ -267,7 +267,7 @@ namespace WindowsInventoryLite
                         {
                             continue;
                         }
-                        if (!alreadySucceeded.Contains(InventoryCollector.GetString(job, "id")))
+                        if (!alreadySucceeded.Contains(BuildJobCacheKey(job)))
                         {
                             hasUnfinishedJob = true;
                             break;
@@ -306,8 +306,8 @@ namespace WindowsInventoryLite
                             continue;
                         }
 
-                        string id = InventoryCollector.GetString(job, "id");
-                        if (alreadySucceeded.Contains(id))
+                        string cacheKey = BuildJobCacheKey(job);
+                        if (alreadySucceeded.Contains(cacheKey))
                         {
                             continue;
                         }
@@ -317,7 +317,7 @@ namespace WindowsInventoryLite
 
                         if (Convert.ToBoolean(resultEntry["success"]))
                         {
-                            alreadySucceeded.Add(id);
+                            alreadySucceeded.Add(cacheKey);
                         }
                     }
 
@@ -326,6 +326,24 @@ namespace WindowsInventoryLite
                         SaveSoftwareJobSuccessCache(alreadySucceeded);
                         PostResults(results);
                     }
+                }
+
+                // The success cache is keyed on the catalog entry's id AND
+                // its server-side updatedAt, not the id alone. Editing an
+                // entry (PUT /api/v1/windows-updates/<id> and the
+                // third-party equivalent) mutates relativePath/arguments in
+                // place and keeps the id, so an id-only key would make a
+                // machine that already succeeded on the OLD version skip the
+                // corrected one forever, with no error anywhere. The server
+                // bumps updatedAt on every edit, so a composite key retries
+                // exactly the edited entries and nothing else. Only used for
+                // this local bookkeeping - the id reported back to the
+                // server's attempt history stays the real catalog entry id.
+                private static string BuildJobCacheKey(Dictionary<string, object> job)
+                {
+                    string id = InventoryCollector.GetString(job, "id");
+                    string updatedAt = InventoryCollector.GetString(job, "updatedAt");
+                    return id + "|" + (updatedAt ?? "");
                 }
 
                 // CRITICAL: Process.Start does NOT run under the calling

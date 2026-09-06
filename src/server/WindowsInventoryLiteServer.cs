@@ -2222,13 +2222,19 @@ namespace WindowsInventoryLite
             }
 
             ArrayList jobs = new ArrayList();
-            foreach (Dictionary<string, object> entry in LoadWindowsUpdates())
+            lock (windowsUpdatesLock)
             {
-                AppendJobIfTargeted(jobs, entry, "windowsUpdate", computerName);
+                foreach (Dictionary<string, object> entry in LoadWindowsUpdates())
+                {
+                    AppendJobIfTargeted(jobs, entry, "windowsUpdate", computerName);
+                }
             }
-            foreach (Dictionary<string, object> entry in LoadThirdPartySoftware())
+            lock (thirdPartySoftwareLock)
             {
-                AppendJobIfTargeted(jobs, entry, "thirdPartySoftware", computerName);
+                foreach (Dictionary<string, object> entry in LoadThirdPartySoftware())
+                {
+                    AppendJobIfTargeted(jobs, entry, "thirdPartySoftware", computerName);
+                }
             }
 
             JavaScriptSerializer serializer = CreateJsonSerializer();
@@ -2264,6 +2270,12 @@ namespace WindowsInventoryLite
 
             Dictionary<string, object> job = new Dictionary<string, object>();
             job["id"] = GetStringValue(entry, "id");
+            // The client caches successful runs by id + updatedAt, not id
+            // alone - an admin editing an entry in place (new relativePath,
+            // corrected arguments) keeps the same id but bumps updatedAt,
+            // and that bump is what makes an already-succeeded machine run
+            // the corrected entry instead of silently skipping it.
+            job["updatedAt"] = GetStringValue(entry, "updatedAt");
             job["catalogType"] = catalogType;
             job["relativePath"] = GetStringValue(entry, "relativePath");
             job["arguments"] = GetStringValue(entry, "arguments");
