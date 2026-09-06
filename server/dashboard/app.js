@@ -3673,7 +3673,7 @@
     openWindowsUpdateForm(null);
     byId('windowsUpdateRelativePath').value = relativePath;
     const extension = relativePath.split('.').pop().toLowerCase();
-    const defaultArguments = extension === 'msu' ? '/quiet /norestart' : extension === 'cab' ? '' : '';
+    const defaultArguments = extension === 'msi' ? '/qn /norestart' : extension === 'msu' ? '/quiet /norestart' : extension === 'exe' ? '/S' : '';
     byId('windowsUpdateArguments').value = defaultArguments;
   }
 

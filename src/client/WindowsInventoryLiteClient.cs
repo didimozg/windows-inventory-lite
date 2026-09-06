@@ -411,12 +411,31 @@ namespace WindowsInventoryLite
                             return resultEntry;
                         }
 
-                        bool isMsi = String.Equals(Path.GetExtension(relativePath), ".msi", StringComparison.OrdinalIgnoreCase);
+                        // UseShellExecute=false means CreateProcess loads
+                        // FileName as a PE image, so only a real executable can
+                        // be launched directly. Every other packaging format
+                        // needs its own host process: .msi -> msiexec.exe,
+                        // .msu (a cabinet the Windows Update stack installs)
+                        // -> wusa.exe, .cab -> dism.exe. Without this dispatch
+                        // an .msu/.cab entry - the Windows Updates catalog's
+                        // own designed content - fails with "not a valid
+                        // application for this OS platform" on every attempt.
+                        string extension = Path.GetExtension(relativePath);
                         ProcessStartInfo psi = new ProcessStartInfo();
-                        if (isMsi)
+                        if (String.Equals(extension, ".msi", StringComparison.OrdinalIgnoreCase))
                         {
                             psi.FileName = "msiexec.exe";
                             psi.Arguments = "/i \"" + localCopyPath + "\" " + (arguments ?? "");
+                        }
+                        else if (String.Equals(extension, ".msu", StringComparison.OrdinalIgnoreCase))
+                        {
+                            psi.FileName = "wusa.exe";
+                            psi.Arguments = "\"" + localCopyPath + "\" " + (arguments ?? "");
+                        }
+                        else if (String.Equals(extension, ".cab", StringComparison.OrdinalIgnoreCase))
+                        {
+                            psi.FileName = "dism.exe";
+                            psi.Arguments = "/online /add-package /packagepath:\"" + localCopyPath + "\" " + (arguments ?? "");
                         }
                         else
                         {
