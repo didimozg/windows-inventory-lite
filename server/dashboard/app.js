@@ -12,6 +12,20 @@
   const state = {
     clients: [], linuxClients: [], ...getInitialViewState(), installJobId: null, installPollTimer: null, installJobs: [],
     updateJobId: null, updatePollTimer: null,
+    // Keyed "platform|target" (matches a row checkbox's own dataset), not
+    // DOM checkbox state - renderMergedUpdatesTable rebuilds updatesBody's
+    // innerHTML from scratch on every page change/sort/poll refresh, which
+    // would otherwise silently drop a selection made on a page that isn't
+    // the one currently rendered. Persists across pagination so "select all
+    // N matching" can span every outdated client, not just the current page.
+    selectedUpdates: new Set(),
+    // Every "platform|target" key currently matching the Updates table's
+    // filter/sort, refreshed on every renderMergedUpdatesTable call -
+    // lets updateUpdatesSelectAllUi tell "all of this page selected" apart
+    // from "all matching rows across every page selected" without needing
+    // the full entries array threaded into a plain per-checkbox change
+    // handler.
+    updatesAllMatchingKeys: [],
     // Baselined from the first client-updates poll response, then compared
     // on every later one - lets an open dashboard tab pick up a scheduled
     // (server-initiated) push it never itself requested. null until baselined.
@@ -1723,6 +1737,12 @@
     if (entries.length === 0) {
       byId('updatesBody').innerHTML = '<tr><td colspan="6" class="empty">Every reporting client is up to date.</td></tr>';
       byId('updatesPager').innerHTML = '';
+      // Nothing outdated left to select - clear rather than leave stale
+      // keys around for a computer name that could reappear later once it
+      // falls out of date again.
+      state.selectedUpdates.clear();
+      state.updatesAllMatchingKeys = [];
+      updateUpdatesSelectAllUi();
       updateUpdatesSelectionState();
       return;
     }
@@ -1731,24 +1751,35 @@
     const sorted = applySort(entries, e => updateSortValue(e, sortKey), sortDir);
     const { items: pageItems, page, totalPages } = paginate(sorted, state.page.updates, state.pageSize.updates);
     state.page.updates = page;
+    state.updatesAllMatchingKeys = sorted.map(entry => updateRowKey(entry.platform, entry.platform === 'windows' ? entry.computerName : (entry.target || entry.hostname)));
 
     byId('updatesBody').innerHTML = pageItems.map(entry => {
       const isWindows = entry.platform === 'windows';
       const target = isWindows ? entry.computerName : (entry.target || entry.hostname);
       const availableVersion = isWindows ? formatAvailableVersion(windowsData) : `v${escapeHtml(linuxData.currentVersion)}`;
       const collectedAt = isWindows ? entry.collectedAt : entry.sourceUpdatedAt;
+      const checked = state.selectedUpdates.has(updateRowKey(entry.platform, target)) ? ' checked' : '';
       return `<tr>
         <td>${escapeHtml(entry.computerName || entry.hostname)}</td>
         <td>${isWindows ? escapeHtml(entry.domain) : '—'}</td>
         <td>${escapeHtml(entry.clientVersion || 'Unknown')}</td>
         <td>${availableVersion}</td>
         <td>${escapeHtml(formatDateTime(collectedAt))}</td>
-        <td><input type="checkbox" class="updates-row-checkbox" data-platform="${entry.platform}" data-target="${escapeHtml(target)}"></td>
+        <td><input type="checkbox" class="updates-row-checkbox" data-platform="${entry.platform}" data-target="${escapeHtml(target)}"${checked}></td>
       </tr>`;
     }).join('');
 
     renderPager('updatesPager', 'updates', page, totalPages, renderMergedUpdatesTable);
+    updateUpdatesSelectAllUi();
     updateUpdatesSelectionState();
+  }
+
+  // "platform|target" - the same identity a row checkbox's own dataset
+  // carries, and the key state.selectedUpdates is keyed on. A plain "|" join
+  // is safe here: platform is always the literal 'windows' or 'linux', never
+  // attacker- or admin-influenced text that could itself contain "|".
+  function updateRowKey(platform, target) {
+    return `${platform}|${target}`;
   }
 
   function loadLinuxClientUpdates() {
@@ -2174,8 +2205,54 @@
       return !completedTargets.has(target);
     });
     if (remaining.length === data.updates.length) return;
+    completedTargets.forEach(target => state.selectedUpdates.delete(updateRowKey(platform, target)));
     data.updates = remaining;
     data.outdatedCount = remaining.length;
+    renderMergedUpdatesTable();
+  }
+
+  // Reflects state.selectedUpdates onto the header checkbox and the
+  // "select all matching" hint below the pager. Reads the current page's
+  // keys straight from the live checkboxes (not from a captured pageItems
+  // array) and the full matching set from state.updatesAllMatchingKeys
+  // (refreshed on every full render, see renderMergedUpdatesTable) so this
+  // can also run after a single checkbox's own change - without forcing a
+  // full table re-render just to keep the header/hint in sync, which would
+  // otherwise steal focus from the checkbox the user just clicked.
+  function updateUpdatesSelectAllUi() {
+    const pageKeys = Array.from(document.querySelectorAll('.updates-row-checkbox')).map(cb => updateRowKey(cb.dataset.platform, cb.dataset.target));
+    const allKeys = state.updatesAllMatchingKeys || [];
+    const selectAllCheckbox = byId('updatesSelectAll');
+    const pageSelectedCount = pageKeys.filter(key => state.selectedUpdates.has(key)).length;
+    selectAllCheckbox.checked = pageKeys.length > 0 && pageSelectedCount === pageKeys.length;
+    selectAllCheckbox.indeterminate = pageSelectedCount > 0 && pageSelectedCount < pageKeys.length;
+
+    const hint = byId('updatesSelectAllMatchingHint');
+    const totalSelectedCount = allKeys.filter(key => state.selectedUpdates.has(key)).length;
+    if (allKeys.length <= pageKeys.length) {
+      // Everything fits on one page - the per-page "select all" checkbox
+      // already covers "select all matching", nothing more to offer.
+      hint.classList.add('hidden');
+    } else if (totalSelectedCount === allKeys.length) {
+      hint.innerHTML = `All ${allKeys.length} matching selected. <button class="link-button" type="button" id="updatesClearSelectionButton">Clear selection</button>`;
+      hint.classList.remove('hidden');
+      byId('updatesClearSelectionButton').addEventListener('click', clearUpdatesSelection);
+    } else if (selectAllCheckbox.checked) {
+      hint.innerHTML = `All ${pageKeys.length} on this page selected. <button class="link-button" type="button" id="updatesSelectAllMatchingButton">Select all ${allKeys.length} matching</button>`;
+      hint.classList.remove('hidden');
+      byId('updatesSelectAllMatchingButton').addEventListener('click', selectAllMatchingUpdates);
+    } else {
+      hint.classList.add('hidden');
+    }
+  }
+
+  function selectAllMatchingUpdates() {
+    (state.updatesAllMatchingKeys || []).forEach(key => state.selectedUpdates.add(key));
+    renderMergedUpdatesTable();
+  }
+
+  function clearUpdatesSelection() {
+    state.selectedUpdates.clear();
     renderMergedUpdatesTable();
   }
 
@@ -2184,7 +2261,10 @@
   // checked - "trust new host keys" isn't left checked without its
   // acknowledgement checkbox (mirrors Deploy > Actions' own pairing rule).
   function updateUpdatesSelectionState() {
-    const anyChecked = document.querySelectorAll('.updates-row-checkbox:checked').length > 0;
+    // state.selectedUpdates, not a DOM query - the whole point of this
+    // feature is a selection that can span pages the current render
+    // doesn't have checkboxes for at all.
+    const anyChecked = state.selectedUpdates.size > 0;
     const trustChecked = byId('linuxUpdatesTrustNewHostKeys').checked;
     const acknowledgeChecked = byId('linuxUpdatesAcknowledgeHostKeyRisk').checked;
     byId('updatesPushButton').disabled = !anyChecked || (trustChecked && !acknowledgeChecked);
@@ -2198,9 +2278,16 @@
   // source and its own status/poll target - so a mixed selection needs no
   // extra UI, just two ordinary pushes running side by side.
   function startMergedUpdatesPush() {
-    const checked = Array.from(document.querySelectorAll('.updates-row-checkbox:checked'));
-    const windowsTargets = checked.filter(cb => cb.dataset.platform === 'windows').map(cb => cb.dataset.target);
-    const linuxTargets = checked.filter(cb => cb.dataset.platform === 'linux').map(cb => cb.dataset.target);
+    // state.selectedUpdates so a "select all N matching" selection spanning
+    // pages this render never put a checkbox on the page for is included -
+    // a plain DOM query here would silently drop everything except whatever
+    // happens to be the currently-rendered page.
+    const selected = Array.from(state.selectedUpdates).map(key => {
+      const separatorIndex = key.indexOf('|');
+      return { platform: key.slice(0, separatorIndex), target: key.slice(separatorIndex + 1) };
+    });
+    const windowsTargets = selected.filter(entry => entry.platform === 'windows').map(entry => entry.target);
+    const linuxTargets = selected.filter(entry => entry.platform === 'linux').map(entry => entry.target);
     if (windowsTargets.length === 0 && linuxTargets.length === 0) return;
 
     byId('updatesPushButton').disabled = true;
@@ -5360,12 +5447,32 @@
   byId('softwareRepoClearButton').addEventListener('click', clearSoftwareRepositoryCredentials);
   byId('updatesPushButton').addEventListener('click', startMergedUpdatesPush);
   byId('updatesSelectAll').addEventListener('change', () => {
+    // Only ever toggles the CURRENT page's rows - "select every matching
+    // row across every page" is the separate, explicit "select all N
+    // matching" link in the hint below the pager (updateUpdatesSelectAllUi),
+    // not something this header checkbox does implicitly.
     const checked = byId('updatesSelectAll').checked;
-    document.querySelectorAll('.updates-row-checkbox').forEach(checkbox => { checkbox.checked = checked; });
+    document.querySelectorAll('.updates-row-checkbox').forEach(checkbox => {
+      checkbox.checked = checked;
+      const key = updateRowKey(checkbox.dataset.platform, checkbox.dataset.target);
+      if (checked) {
+        state.selectedUpdates.add(key);
+      } else {
+        state.selectedUpdates.delete(key);
+      }
+    });
+    updateUpdatesSelectAllUi();
     updateUpdatesSelectionState();
   });
   document.addEventListener('change', event => {
     if (event.target.classList.contains('updates-row-checkbox')) {
+      const key = updateRowKey(event.target.dataset.platform, event.target.dataset.target);
+      if (event.target.checked) {
+        state.selectedUpdates.add(key);
+      } else {
+        state.selectedUpdates.delete(key);
+      }
+      updateUpdatesSelectAllUi();
       updateUpdatesSelectionState();
     }
   });
