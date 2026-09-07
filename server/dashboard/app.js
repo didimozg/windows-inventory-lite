@@ -163,8 +163,8 @@
     if (hash === 'clients') return { view: 'clients', subview: null };
     if (hash === 'software') return { view: 'software', subview: null };
     if (hash === 'hardware' || hash === 'linux-hardware') return { view: 'hardware', subview: null };
-    if (hash === 'licenses') return { view: 'licenses', subview: null };
-    if (hash === 'licensekeysources') return { view: 'licenseKeySources', subview: null };
+    if (hash === 'licenses') return { view: 'licenses', subview: 'catalog' };
+    if (hash === 'licensekeysources') return { view: 'licenses', subview: 'sources' };
     if (hash === 'windowsupdates') return { view: 'windowsUpdates', subview: null };
     if (hash === 'thirdpartysoftware') return { view: 'thirdPartySoftware', subview: null };
     if (hash === 'softwarejobhistory') return { view: 'softwareJobHistory', subview: null };
@@ -201,6 +201,7 @@
       if (subview === 'linux') return 'settings-linux';
       return 'settings-server';
     }
+    if (view === 'licenses') return subview === 'sources' ? 'licensekeysources' : subview === 'keys' ? 'licenses-keys' : 'licenses';
     if (view === 'linuxServices') return 'linux-services';
     return view;
   }
@@ -210,6 +211,11 @@
     if (subview === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
     if (subview === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
     if (subview === 'updates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
+  }
+
+  function loadLicensesSubviewData(subview) {
+    if (subview === 'catalog') loadLicenses();
+    if (subview === 'sources') loadLicenseKeySources();
   }
 
   function loadSettingsSubviewData(subview) {
@@ -231,8 +237,7 @@
     render();
     if (view === 'deploy') loadDeploySubviewData(state.subview);
     if (view === 'settings') loadSettingsSubviewData(state.subview);
-    if (view === 'licenses') loadLicenses();
-    if (view === 'licenseKeySources') loadLicenseKeySources();
+    if (view === 'licenses') loadLicensesSubviewData(state.subview);
     if (view === 'windowsUpdates') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); }
     if (view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
     if (view === 'softwareJobHistory') loadSoftwareJobHistory();
@@ -262,6 +267,13 @@
     byId('settingsSubtabCertificate').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'certificate'));
     byId('settingsSubtabAdminPassword').classList.toggle('active', state.view === 'settings' && state.subview === 'adminPassword');
     byId('settingsSubtabAdminPassword').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'adminPassword'));
+    byId('licensesSubtabs').classList.toggle('hidden', state.view !== 'licenses');
+    byId('licensesSubtabCatalog').classList.toggle('active', state.view === 'licenses' && state.subview === 'catalog');
+    byId('licensesSubtabCatalog').setAttribute('aria-selected', String(state.view === 'licenses' && state.subview === 'catalog'));
+    byId('licensesSubtabSources').classList.toggle('active', state.view === 'licenses' && state.subview === 'sources');
+    byId('licensesSubtabSources').setAttribute('aria-selected', String(state.view === 'licenses' && state.subview === 'sources'));
+    byId('licensesSubtabKeys').classList.toggle('active', state.view === 'licenses' && state.subview === 'keys');
+    byId('licensesSubtabKeys').setAttribute('aria-selected', String(state.view === 'licenses' && state.subview === 'keys'));
   }
 
   function text(value) {
@@ -4808,8 +4820,8 @@
     byId('clientsView').classList.toggle('hidden', state.view !== 'clients');
     byId('softwareView').classList.toggle('hidden', state.view !== 'software');
     byId('hardwareView').classList.toggle('hidden', state.view !== 'hardware');
-    byId('licensesView').classList.toggle('hidden', state.view !== 'licenses');
-    byId('licenseKeySourcesView').classList.toggle('hidden', state.view !== 'licenseKeySources');
+    byId('licensesView').classList.toggle('hidden', !(state.view === 'licenses' && state.subview === 'catalog'));
+    byId('licenseKeySourcesView').classList.toggle('hidden', !(state.view === 'licenses' && state.subview === 'sources'));
     byId('windowsUpdatesView').classList.toggle('hidden', state.view !== 'windowsUpdates');
     byId('thirdPartySoftwareView').classList.toggle('hidden', state.view !== 'thirdPartySoftware');
     byId('softwareJobHistoryView').classList.toggle('hidden', state.view !== 'softwareJobHistory');
@@ -4834,13 +4846,12 @@
     byId('softwareTab').classList.toggle('active', state.view === 'software');
     byId('hardwareTab').classList.toggle('active', state.view === 'hardware');
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
-    byId('licenseKeySourcesTab').classList.toggle('active', state.view === 'licenseKeySources');
     byId('windowsUpdatesTab').classList.toggle('active', state.view === 'windowsUpdates');
     byId('thirdPartySoftwareTab').classList.toggle('active', state.view === 'thirdPartySoftware');
     byId('softwareJobHistoryTab').classList.toggle('active', state.view === 'softwareJobHistory');
     byId('loggingTab').classList.toggle('active', state.view === 'logging');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
-    byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'licenses', 'licenseKeySources'].includes(state.view));
+    byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware'].includes(state.view));
     byId('softwareDropdownButton').classList.toggle('active', ['windowsUpdates', 'thirdPartySoftware', 'softwareJobHistory'].includes(state.view));
     byId('deployTab').classList.toggle('active', state.view === 'deploy');
     byId('settingsTab').classList.toggle('active', state.view === 'settings');
@@ -5145,8 +5156,7 @@
     render();
     if (state.view === 'deploy') loadDeploySubviewData(state.subview);
     if (state.view === 'settings') loadSettingsSubviewData(state.subview);
-    if (state.view === 'licenses') loadLicenses();
-    if (state.view === 'licenseKeySources') loadLicenseKeySources();
+    if (state.view === 'licenses') loadLicensesSubviewData(state.subview);
     if (state.view === 'windowsUpdates') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); }
     if (state.view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
     if (state.view === 'softwareJobHistory') loadSoftwareJobHistory();
@@ -5377,6 +5387,9 @@
   byId('settingsSubtabLinux').addEventListener('click', () => setView('settings', 'linux'));
   byId('settingsSubtabCertificate').addEventListener('click', () => setView('settings', 'certificate'));
   byId('settingsSubtabAdminPassword').addEventListener('click', () => setView('settings', 'adminPassword'));
+  byId('licensesSubtabCatalog').addEventListener('click', () => setView('licenses', 'catalog'));
+  byId('licensesSubtabSources').addEventListener('click', () => setView('licenses', 'sources'));
+  byId('licensesSubtabKeys').addEventListener('click', () => setView('licenses', 'keys'));
   byId('deployTab').addEventListener('click', () => setView('deploy', 'actions'));
   byId('settingsTab').addEventListener('click', () => setView('settings', 'server'));
 
@@ -5501,8 +5514,7 @@
   byId('updatesScheduleSaveButton').addEventListener('click', saveClientUpdateSchedule);
   byId('certUploadButton').addEventListener('click', uploadCertificate);
   byId('certDeleteButton').addEventListener('click', deleteCertificate);
-  byId('licensesTab').addEventListener('click', () => setView('licenses'));
-  byId('licenseKeySourcesTab').addEventListener('click', () => setView('licenseKeySources'));
+  byId('licensesTab').addEventListener('click', () => setView('licenses', 'catalog'));
   byId('licenseKeySourceAddButton').addEventListener('click', () => openLicenseKeySourceForm(null));
   byId('licenseKeySourceSaveButton').addEventListener('click', saveLicenseKeySource);
   byId('licenseKeySourceCancelButton').addEventListener('click', closeLicenseKeySourceForm);
@@ -5550,8 +5562,7 @@
   updateThemeToggle();
   if (state.view === 'deploy') loadDeploySubviewData(state.subview);
   if (state.view === 'settings') loadSettingsSubviewData(state.subview);
-  if (state.view === 'licenses') loadLicenses();
-  if (state.view === 'licenseKeySources') loadLicenseKeySources();
+  if (state.view === 'licenses') loadLicensesSubviewData(state.subview);
   if (state.view === 'windowsUpdates') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); }
   if (state.view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
   if (state.view === 'softwareJobHistory') loadSoftwareJobHistory();

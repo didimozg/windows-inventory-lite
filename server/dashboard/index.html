@@ -35,8 +35,6 @@
           <button id="softwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Software (Windows)</button>
           <button id="linuxServicesTab" class="topnav-dropdown-item" type="button" role="menuitem">Services (Linux)</button>
           <button id="hardwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Hardware</button>
-          <button id="licensesTab" class="topnav-dropdown-item" type="button" role="menuitem">Licenses</button>
-          <button id="licenseKeySourcesTab" class="topnav-dropdown-item" type="button" role="menuitem">License key sources</button>
         </div>
       </div>
       <div class="topnav-dropdown">
@@ -48,6 +46,7 @@
         </div>
       </div>
       <button id="deployTab" class="topnav-item" type="button">Install <span id="updatesBadge" class="nav-badge hidden">0</span><span id="linuxUpdatesBadge" class="nav-badge hidden">0</span></button>
+      <button id="licensesTab" class="topnav-item" type="button">Licenses</button>
       <button id="settingsTab" class="topnav-item" type="button">Settings</button>
       <button id="loggingTab" class="topnav-item" type="button">Logging</button>
       <div class="topnav-spacer"></div>
@@ -502,6 +501,12 @@
             <div id="loginLockoutMessage" class="pkg-message hidden"></div>
           </div>
         </section>
+
+        <div id="licensesSubtabs" class="subtab-strip hidden" role="tablist" aria-label="License sections">
+          <button id="licensesSubtabCatalog" class="subtab-item" role="tab" type="button">Catalog</button>
+          <button id="licensesSubtabSources" class="subtab-item" role="tab" type="button">Sources</button>
+          <button id="licensesSubtabKeys" class="subtab-item" role="tab" type="button">Keys</button>
+        </div>
 
         <section id="licensesView" class="hidden" aria-label="License inventory">
           <div class="view-toolbar">
