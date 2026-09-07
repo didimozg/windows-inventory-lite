@@ -91,7 +91,7 @@
 
           <div class="dashboard-card card-glow">
             <h2 class="settings-block-title">Hardware</h2>
-            <div class="summary dash-single-stat">
+            <div id="dashUsbTile" class="summary dash-single-stat">
               <div class="card-glow"><span id="dashUsbCount">0</span><small>Computers with USB storage</small></div>
             </div>
             <div class="dash-chart-grid">
@@ -133,6 +133,13 @@
               </label>
             </div>
             <p class="cert-hint">How long Client actions/Client updates push job logs (Deploy &gt; Actions) are kept before being cleaned up automatically.</p>
+            <div class="pkg-grid general-grid">
+              <label class="check-label">
+                <input id="generalShowUsbStorageIndicator" type="checkbox" checked>
+                Show USB storage indicator (Dashboard tile and Clients badge)
+              </label>
+            </div>
+            <p class="cert-hint">Clients always report USB storage regardless of this setting - it only controls whether the Dashboard and Clients table surface it.</p>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Network</h2>

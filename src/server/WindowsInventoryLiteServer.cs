@@ -23,7 +23,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.56.0";
+        internal const string ProductVersion = "0.57.1";
 
         private static int Main(string[] args)
         {
@@ -166,6 +166,12 @@ namespace WindowsInventoryLite
         public int HstsMaxAgeHours;
         public string CertificateThumbprint;
         public int StaleHours;
+        // Dashboard-only display toggle - the client still always collects
+        // and reports hasUsbStorage regardless of this setting, so history
+        // (see ComputeStickyUsbStorage) is never lost across a future
+        // off/on flip. Default true (existing behavior unchanged) - an
+        // admin who doesn't want it tracked/shown turns it off.
+        public bool ShowUsbStorageIndicator;
         public bool ConsoleMode;
         public bool ShowVersion;
         // AD sync is opt-in and off by default - deployments without AD, or
@@ -230,6 +236,7 @@ namespace WindowsInventoryLite
             ServerOptions options = new ServerOptions();
             options.Port = 8080;
             options.EnableHttp = true;
+            options.ShowUsbStorageIndicator = true;
             options.HttpsPort = 8443;
             options.Address = IPAddress.Any;
             options.DataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"WindowsInventoryLite\server");
@@ -538,6 +545,19 @@ namespace WindowsInventoryLite
                     if (enableHttpText != null)
                     {
                         options.EnableHttp = String.Equals(enableHttpText, "true", StringComparison.OrdinalIgnoreCase);
+                    }
+                }
+                if (options.ShowUsbStorageIndicator)
+                {
+                    // != null, not just String.Equals(...) - this defaults
+                    // true like EnableHttp above (not false, like
+                    // UseHttps/HstsEnabled), so a config file that simply
+                    // doesn't have this key yet (every install predating
+                    // this setting) must not silently read as "off."
+                    string showUsbStorageIndicatorText = GetConfigString(config, "ShowUsbStorageIndicator");
+                    if (showUsbStorageIndicatorText != null)
+                    {
+                        options.ShowUsbStorageIndicator = String.Equals(showUsbStorageIndicatorText, "true", StringComparison.OrdinalIgnoreCase);
                     }
                 }
                 if (!options.AdSyncEnabled)
@@ -1405,6 +1425,17 @@ namespace WindowsInventoryLite
             job.Force = false;
             job.AddToTrustedHosts = false;
             job.RetentionDays = options.InstallLogRetentionDays;
+            // No saved "software check interval" setting exists for this
+            // unattended path to read back (unlike the Linux schedule above,
+            // which persists intervalHours in linux-package-settings.json) -
+            // left unset here, this stayed at int's default of 0 and
+            // BuildPowerShellInstallArguments passed that straight through
+            // as "-SoftwareCheckIntervalHours 0", which fails
+            // Install-ClientWinRM.ps1's [ValidateRange(1, 24)] and aborts
+            // the whole scheduled push. Same default-6 StartClientAction's
+            // interactive payload parsing falls back to when nothing else
+            // is configured.
+            job.SoftwareCheckIntervalHours = 6;
 
             lock (installJobsLock)
             {
@@ -2129,10 +2160,13 @@ namespace WindowsInventoryLite
                 }
             }
             AdSyncFields adFields = ComputeAdSyncFields(computerName, previous);
+            bool newlyReportedUsbStorage = inventory.ContainsKey("hasUsbStorage") && Convert.ToBoolean(inventory["hasUsbStorage"]);
+            bool stickyUsbStorage = ComputeStickyUsbStorage(previous, newlyReportedUsbStorage);
 
             lock (reportFileLock)
             {
                 ApplyAdSyncFields(inventory, adFields);
+                inventory["hasUsbStorage"] = stickyUsbStorage;
                 EncryptInventoryLicenseKeys(inventory, options);
                 inventory["lastIngestSourceIp"] = request.RemoteAddress != null ? request.RemoteAddress.ToString() : null;
 
@@ -2642,6 +2676,27 @@ namespace WindowsInventoryLite
                 fields.SyncedAt = previous["adSyncedAt"];
             }
             return fields;
+        }
+
+        // The client recomputes hasUsbStorage fresh on every single report
+        // (a live WMI disk enumeration - see WindowsInventoryLiteClient.cs),
+        // so unplugging the drive before the NEXT report used to silently
+        // erase the fact this computer was ever seen with one, the moment
+        // that report landed - the Dashboard's "Computers with USB storage"
+        // tile and per-client badge both read this as "ever seen," not
+        // "currently plugged in," which the fresh-overwrite behavior did
+        // not honor. Same carry-forward shape as ComputeAdSyncFields above
+        // (read `previous`, let a `true` already on record win over a
+        // `false` reported now) - once true, stays true; a Linux report or
+        // an old report predating this field simply has no key at all,
+        // which ContainsKey below treats the same as false, not a throw.
+        private static bool ComputeStickyUsbStorage(Dictionary<string, object> previous, bool newlyReported)
+        {
+            if (newlyReported)
+            {
+                return true;
+            }
+            return previous != null && previous.ContainsKey("hasUsbStorage") && Convert.ToBoolean(previous["hasUsbStorage"]);
         }
 
         // Merges a previously computed AdSyncFields onto `inventory`. Pure,
@@ -6955,6 +7010,7 @@ namespace WindowsInventoryLite
             index["clientCount"] = clients.Count;
             index["staleHours"] = options.StaleHours;
             index["adDescriptionSyncEnabled"] = options.AdDescriptionSyncEnabled;
+            index["showUsbStorageIndicator"] = options.ShowUsbStorageIndicator;
             index["clients"] = clients;
             return serializer.Serialize(index);
         }
@@ -8455,6 +8511,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         {
             Dictionary<string, object> result = BuildCertificateStatusPayload();
             result["staleHours"] = options.StaleHours;
+            result["showUsbStorageIndicator"] = options.ShowUsbStorageIndicator;
             result["port"] = options.Port;
             result["enableHttp"] = options.EnableHttp;
             result["httpsPort"] = options.HttpsPort;
@@ -8703,6 +8760,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 options.HstsEnabled = Convert.ToBoolean(payload["hstsEnabled"]);
                 updates["HstsEnabled"] = options.HstsEnabled ? "true" : "false";
+            }
+
+            if (payload.ContainsKey("showUsbStorageIndicator"))
+            {
+                options.ShowUsbStorageIndicator = Convert.ToBoolean(payload["showUsbStorageIndicator"]);
+                updates["ShowUsbStorageIndicator"] = options.ShowUsbStorageIndicator ? "true" : "false";
             }
 
             if (payload.ContainsKey("hstsMaxAgeHours"))
@@ -12185,6 +12248,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "SendLogoutResult removes the session from the server-side store", TestSendLogoutResultRemovesSessionFromStore);
             allPassed &= SelfTestCheck(output, "SendLogoutResult is idempotent when no session cookie is present", TestSendLogoutResultIsIdempotentWithNoSessionCookie);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings validates sessionLifetimeHours is between 1 and 720", TestConfigureServerSettingsValidatesSessionLifetimeHours);
+            allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips showUsbStorageIndicator", TestConfigureServerSettingsRoundTripsShowUsbStorageIndicator);
             allPassed &= SelfTestCheck(output, "SendUnauthorized serves the embedded login page for a browser navigation to /, with no WWW-Authenticate", TestSendUnauthorizedServesLoginPageForBrowserNavigation);
             allPassed &= SelfTestCheck(output, "SendUnauthorized keeps the plain-text 401 body for API routes", TestSendUnauthorizedServesPlainTextForApiRequests);
             allPassed &= SelfTestCheck(output, "SendDashboardImage returns 404 with no body when the file is missing", TestSendDashboardImageReturns404WhenFileMissing);
@@ -12293,6 +12357,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "RequiresIngestionTokenRiskAcknowledgment only fires on an actual on-to-off transition without prior acknowledgment", TestRequiresIngestionTokenRiskAcknowledgmentOnlyWhenTurningEnforcementOff);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields is a no-op for a brand-new computer with sync disabled", TestComputeAdSyncFieldsNoOpForNewComputerWhenSyncDisabled);
+            allPassed &= SelfTestCheck(output, "ComputeStickyUsbStorage stays true once set, even when not reported again", TestComputeStickyUsbStorageStaysTrueOnceSetEvenWhenNotReportedAgain);
+            allPassed &= SelfTestCheck(output, "ComputeStickyUsbStorage is false for a new computer never seen with one", TestComputeStickyUsbStorageFalseForNewComputerNeverSeenWithOne);
+            allPassed &= SelfTestCheck(output, "ComputeStickyUsbStorage is true when newly reported, regardless of previous", TestComputeStickyUsbStorageTrueWhenNewlyReportedRegardlessOfPrevious);
+            allPassed &= SelfTestCheck(output, "ComputeStickyUsbStorage treats a missing previous field as false, not a throw", TestComputeStickyUsbStorageTreatsMissingPreviousFieldAsFalse);
             allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
             allPassed &= SelfTestCheck(output, "IsValidRegistryHiveName accepts only HKEY_LOCAL_MACHINE/HKEY_CURRENT_USER", TestIsValidRegistryHiveNameAcceptsOnlyKnownHives);
             allPassed &= SelfTestCheck(output, "License key sources CRUD storage round-trips through disk", TestLicenseKeySourcesCrudRoundTrip);
@@ -13221,6 +13289,44 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (options.SessionLifetimeHours != 24)
             {
                 return "expected options.SessionLifetimeHours to be updated to 24";
+            }
+
+            return null;
+        }
+
+        private static string TestConfigureServerSettingsRoundTripsShowUsbStorageIndicator()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.EnableHttp = true;
+            options.ShowUsbStorageIndicator = true;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-showusbstorageindicator-" + Guid.NewGuid().ToString("N"));
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Path = "/api/v1/server/settings";
+            request.Headers = new Dictionary<string, string>();
+            request.Body = "{\"showUsbStorageIndicator\":false}";
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.ConfigureServerSettings(stream, request);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("200 OK"))
+                {
+                    return "expected showUsbStorageIndicator:false to be accepted, got: " + response;
+                }
+                if (!response.Contains("\"showUsbStorageIndicator\":false"))
+                {
+                    return "expected the response body to reflect showUsbStorageIndicator:false, got: " + response;
+                }
+            }
+
+            if (options.ShowUsbStorageIndicator)
+            {
+                return "expected options.ShowUsbStorageIndicator to be updated to false";
             }
 
             return null;
@@ -15439,6 +15545,63 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (fields.Applicable)
             {
                 return "expected Applicable=false for a brand-new computer (nothing to carry forward), got true";
+            }
+            return null;
+        }
+
+        private static string TestComputeStickyUsbStorageStaysTrueOnceSetEvenWhenNotReportedAgain()
+        {
+            Dictionary<string, object> previous = new Dictionary<string, object>();
+            previous["hasUsbStorage"] = true;
+
+            bool result = ComputeStickyUsbStorage(previous, false);
+            if (!result)
+            {
+                return "expected hasUsbStorage to stay true once previously recorded, even when this report says false";
+            }
+            return null;
+        }
+
+        private static string TestComputeStickyUsbStorageFalseForNewComputerNeverSeenWithOne()
+        {
+            bool result = ComputeStickyUsbStorage(null, false);
+            if (result)
+            {
+                return "expected hasUsbStorage to be false for a brand-new computer with no previous report and none reported now";
+            }
+            return null;
+        }
+
+        private static string TestComputeStickyUsbStorageTrueWhenNewlyReportedRegardlessOfPrevious()
+        {
+            bool resultNoPrevious = ComputeStickyUsbStorage(null, true);
+            if (!resultNoPrevious)
+            {
+                return "expected hasUsbStorage to be true when newly reported, even with no previous report";
+            }
+
+            Dictionary<string, object> previous = new Dictionary<string, object>();
+            previous["hasUsbStorage"] = false;
+            bool resultWithPrevious = ComputeStickyUsbStorage(previous, true);
+            if (!resultWithPrevious)
+            {
+                return "expected hasUsbStorage to be true when newly reported, even if the previous report said false";
+            }
+            return null;
+        }
+
+        private static string TestComputeStickyUsbStorageTreatsMissingPreviousFieldAsFalse()
+        {
+            // A previous report from before this field existed, or from a
+            // Linux client (which never sends it at all) - ContainsKey is
+            // false, must not throw or default to true.
+            Dictionary<string, object> previous = new Dictionary<string, object>();
+            previous["computerName"] = "SOME-PC";
+
+            bool result = ComputeStickyUsbStorage(previous, false);
+            if (result)
+            {
+                return "expected false when the previous report has no hasUsbStorage key at all";
             }
             return null;
         }

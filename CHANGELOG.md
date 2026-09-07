@@ -6,6 +6,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.57.1]
+
+### Fixed
+
+- **Scheduled WinRM client-update push failed every time with a `ParameterBindingValidationException` on `SoftwareCheckIntervalHours`.** `StartScheduledClientUpdatePush` (the unattended push `RunClientUpdateScheduleTick` fires on its own schedule) built its `InstallJob` without ever setting `SoftwareCheckIntervalHours`, leaving it at C#'s `int` default of `0` - which `Install-ClientWinRM.ps1`'s `[ValidateRange(1, 24)]` rejects outright, aborting the whole scheduled job before it could push anything. A manual push from Deploy > Actions was never affected (its payload-parsing path already defaults this to 6). Fixed by explicitly defaulting to 6 here too, matching the sibling Linux scheduled-push function's existing `int intervalHours = 6;` pattern. 221 self-tests (unchanged), 141/141 Pester green.
+
+## [0.57.0]
+
+### Added
+
+- **USB storage indicator admin toggle**: new Settings > Server > Inventory checkbox ("Show USB storage indicator", default on). When off, the Dashboard's "Computers with USB storage" tile is hidden, the per-client USB badge is suppressed in the Clients table, and the CSV export column is blanked (header stays). The client keeps reporting `hasUsbStorage` regardless of the setting, so history is not lost across a toggle flip. Backed by `ServerOptions.ShowUsbStorageIndicator`, echoed in `GET/POST /api/v1/server/settings` and `/api/v1/clients`.
+- **WinRM push-install can now set the software-check interval**: `Install-ClientWinRM.ps1` gained a `-SoftwareCheckIntervalHours` parameter (default 6), threaded through a new field on the Deploy > Actions install form all the way to the constructed remote command line.
+- **Deploy > Updates "select all across pages"**: selection now persists in a `state.selectedUpdates` Set keyed by platform+target, so it survives pagination/sorting/poll refreshes; a hint below the pager offers "Select all N matching" once a fully-selected page has more rows elsewhere.
+
+### Fixed
+
+- **USB storage indicator no longer resets to "no" when the drive is unplugged.** `client.hasUsbStorage` was recomputed live on every report with no memory of earlier collections; a new `ComputeStickyUsbStorage` (same carry-forward pattern as `ComputeAdSyncFields`) now keeps a `true` recorded once from flipping back to `false` on its own.
+- **License keys tab now shows an explicit empty state** ("No license keys found for this client") instead of silently rendering nothing when a client has none.
+- Three CSS spacing gaps where a margin rule had only ever accounted for one side, and a new adjacent element on the Windows Updates/Third-Party Software tabs exposed it: the discovery-scan status message running into the table below it, a second stacked heading (license keys) running into the table above it, and the discovery table running into the catalog form below it.
+
+221 self-tests (was 215), 141/141 Pester green under Windows PowerShell 5.1 (was 139).
+
 ## [0.56.0]
 
 ### Added

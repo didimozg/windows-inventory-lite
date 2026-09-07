@@ -34,6 +34,7 @@
     clientUpdates: null,
     certificateStatus: null, certificateHistory: [],
     staleHours: 48,
+    showUsbStorageIndicator: true,
     licenses: [], editingLicenseId: null, licenseFormComputers: [],
     licenseKeySources: [], editingLicenseKeySourceId: null,
     windowsUpdates: [], editingWindowsUpdateId: null,
@@ -861,7 +862,7 @@
           formatDateTime(c.collectedAt || c.sourceUpdatedAt),
           isStale(c) ? 'Yes' : 'No',
           (isWindows ? cpu.name : cpu.model) || '', ramText, disksText,
-          isWindows ? (c.hasUsbStorage ? 'Yes' : 'No') : '',
+          (isWindows && state.showUsbStorageIndicator) ? (c.hasUsbStorage ? 'Yes' : 'No') : '',
           state.adDescriptionSyncEnabled ? (c.adSyncStatus === 'not-found' ? 'Not found in AD' : c.adSyncStatus === 'error' ? 'AD unreachable' : (c.adDescription || '')) : (c.adDescription || '')
         ];
       })
@@ -2771,6 +2772,8 @@
       })
       .then(data => {
         byId('generalStaleHours').value = data.staleHours || 48;
+        byId('generalShowUsbStorageIndicator').checked = data.showUsbStorageIndicator !== false;
+        state.showUsbStorageIndicator = data.showUsbStorageIndicator !== false;
         byId('generalIngestionRejectionLogRetentionDays').value = data.ingestionRejectionLogRetentionDays || 30;
         byId('generalIngestionRejectionLogMaxEntries').value = data.ingestionRejectionLogMaxEntries || 5000;
         byId('generalInstallLogRetentionDays').value = data.installLogRetentionDays || 30;
@@ -2882,6 +2885,7 @@
 
   function saveServerSettings(acknowledgeRisks, confirmedDisruption, acknowledgeIngestionTokenRisk) {
     const staleHours = Number.parseInt(byId('generalStaleHours').value, 10) || 48;
+    const showUsbStorageIndicator = byId('generalShowUsbStorageIndicator').checked;
     const ingestionRejectionLogRetentionDays = Number.parseInt(byId('generalIngestionRejectionLogRetentionDays').value, 10) || 30;
     const ingestionRejectionLogMaxEntries = Number.parseInt(byId('generalIngestionRejectionLogMaxEntries').value, 10) || 5000;
     const installLogRetentionDays = Number.parseInt(byId('generalInstallLogRetentionDays').value, 10) || 30;
@@ -2926,7 +2930,7 @@
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        staleHours, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, hstsEnabled, hstsMaxAgeHours, ingestionRejectionLogRetentionDays, ingestionRejectionLogMaxEntries, requireIngestionToken,
+        staleHours, showUsbStorageIndicator, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, hstsEnabled, hstsMaxAgeHours, ingestionRejectionLogRetentionDays, ingestionRejectionLogMaxEntries, requireIngestionToken,
         acknowledgeRisks: !!acknowledgeRisks, acknowledgeIngestionTokenRisk: !!acknowledgeIngestionTokenRisk,
         debugLogEnabled: byId('generalDebugLogEnabled').checked
       })
@@ -2948,6 +2952,7 @@
           throw new Error(data.error || 'Save failed');
         }
         state.staleHours = data.staleHours || 48;
+        state.showUsbStorageIndicator = data.showUsbStorageIndicator !== false;
         state.generalLoadedPort = data.port || 8080;
         state.generalLoadedEnableHttp = data.enableHttp !== false;
         renderDashboardTiles();
@@ -4288,6 +4293,7 @@
     byId('dashStaleLabel').textContent = `Stale >${state.staleHours}h`;
     byId('dashStaleTile').classList.toggle('tile-alert', dashStaleCount > 0);
     byId('dashLicenseCount').textContent = state.licenses.length;
+    byId('dashUsbTile').classList.toggle('hidden', !state.showUsbStorageIndicator);
     byId('dashUsbCount').textContent = allClients.filter(client => client.hasUsbStorage).length;
     renderBarChart('dashOsChart', getOsVersionBreakdown(allClients, 5));
     renderBarChart('dashCpuChart', getTopCpuModels(allClients, 4));
@@ -4360,7 +4366,7 @@
       // hasUsbStorage / isStale / lastInstalledAtUtc are all platform-
       // agnostic (the Dashboard's USB and Stale tiles already read them off
       // getAllClients()), so these two badges need no platform branch.
-      const usbBadge = client.hasUsbStorage ? ' <span class="usb-badge">USB</span>' : '';
+      const usbBadge = (state.showUsbStorageIndicator && client.hasUsbStorage) ? ' <span class="usb-badge">USB</span>' : '';
       // Windows only, and only when actually reported - piping an absent
       // domain through escapeHtml would print the literal word "Unknown"
       // under every Linux row (same reasoning as hardwareComputerItem).
@@ -4932,6 +4938,7 @@
         state.clients = stampClientPlatform(data.clients || [], 'windows');
         state.staleHours = data.staleHours || 48;
         state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
+        state.showUsbStorageIndicator = data.showUsbStorageIndicator !== false;
         byId('generatedAt').textContent = `Generated: ${formatDateTime(data.generatedAt)}`;
         byId('serverVersionBadge').textContent = `Server: v${text(data.serverVersion)}`;
         render();
@@ -5014,6 +5021,7 @@
       state.clients = stampClientPlatform(data.clients || [], 'windows');
       state.staleHours = data.staleHours || 48;
       state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
+      state.showUsbStorageIndicator = data.showUsbStorageIndicator !== false;
       lastClientsFingerprint = computeClientsFingerprint(state.clients);
       byId('generatedAt').textContent = `Generated: ${formatDateTime(data.generatedAt)}`;
       byId('serverVersionBadge').textContent = `Server: v${text(data.serverVersion)}`;
