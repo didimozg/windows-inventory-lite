@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.58.0]
+
+### Added
+
+- **Licenses reorganized into its own top-level section with Catalog/Sources/Keys subtabs**, mirroring the Install section's Actions/Updates/Package pattern. "Licenses" (the manual catalog) and "License key sources" (the registry-location catalog) moved out of the Fleet dropdown into Catalog and Sources respectively - old bookmarks (`#licenses`, `#licensekeysources`) still resolve to the right subtab. New third subtab, **Keys**, lists every license key collected across the whole fleet in one sortable, paginated table (Computer/Product/Source/Key) - previously visible only one client at a time, buried inside that client's own expanded row on the Clients page. Reveal-on-demand per row, reusing the exact same decrypt-on-click endpoint and security model the per-client view already used - no new server endpoint, no change to how keys are encrypted or stored.
+
 ## [0.57.1]
 
 ### Fixed
