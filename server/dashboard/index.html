@@ -617,6 +617,24 @@
           </div>
         </section>
 
+        <section id="licensesKeysView" class="hidden" aria-label="Collected license keys">
+          <p class="cert-hint">Every license key collected across the fleet. Each key stays hidden until revealed - the real value is decrypted and fetched only when you click "show" on that row.</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th data-sort-table="licensesKeys" data-sort-key="computer" class="sortable">Computer</th>
+                  <th data-sort-table="licensesKeys" data-sort-key="product" class="sortable">Product</th>
+                  <th data-sort-table="licensesKeys" data-sort-key="source" class="sortable">Source</th>
+                  <th>Key</th>
+                </tr>
+              </thead>
+              <tbody id="licensesKeysBody"></tbody>
+            </table>
+          </div>
+          <div id="licensesKeysPager" class="pager"></div>
+        </section>
+
         <section id="windowsUpdatesView" class="hidden" aria-label="Windows updates">
           <div class="view-toolbar">
             <button id="windowsUpdateAddButton" class="primary-button" type="button">Add entry</button>

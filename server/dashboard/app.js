@@ -59,6 +59,7 @@
       hwRam: { key: 'totalMb', dir: -1 },
       licenses: { key: 'name', dir: 1 },
       licenseKeySources: { key: 'product', dir: 1 },
+      licensesKeys: { key: 'computer', dir: 1 },
       linuxServices: { key: 'name', dir: 1 },
       ingestionRejections: { key: 'timestampUtc', dir: -1 },
       // Sorts the merged Deploy > Updates table (Windows + Linux outdated
@@ -66,14 +67,14 @@
       // table above.
       updates: { key: 'computerName', dir: 1 }
     },
-    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxServices: 1, updates: 1, ingestionRejections: 1 },
+    page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxServices: 1, updates: 1, ingestionRejections: 1, licensesKeys: 1 },
     // clients/software start at a reasonable fallback and are corrected to
     // the real viewport-fitting value the first time their table becomes
     // visible (see computeLiveRowsPerPage/recalculateActivePagination).
     // hwCpu/hwDisk/hwRam are fixed (see HW_PAGE_SIZE) - the three Hardware
     // sub-tables render stacked in one view and are rarely large enough to
     // need viewport-adaptive sizing.
-    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20, linuxServices: 20, updates: 20, ingestionRejections: 20 },
+    pageSize: { clients: 20, software: 20, hwCpu: 20, hwDisk: 20, hwRam: 20, linuxServices: 20, updates: 20, ingestionRejections: 20, licensesKeys: 20 },
     // Prefixed keys ('client:'/'software:'/'hw:' + id) so the three
     // separate data-*-details attribute namespaces can't collide in one
     // Set. Drives each render function's initial hidden/visible class for
@@ -4665,6 +4666,32 @@
       });
   }
 
+  // Fleet-wide row list for the Licenses > Keys subtab. `index` is this
+  // license's position inside THIS client's own `licenses` array - the
+  // reveal button needs it to pick the right entry out of
+  // GET /api/v1/clients/{computerName}/license-keys's own `licenses` array,
+  // which is the same array, so the indices always line up (matching by
+  // product name instead would break if one client has two entries with
+  // the same product string).
+  function flattenClientLicenseKeys(clients) {
+    const rows = [];
+    clients.forEach(client => {
+      (client.licenses || []).forEach((item, index) => {
+        rows.push({ computer: client.computerName, product: item.product, source: item.source, index });
+      });
+    });
+    return rows;
+  }
+
+  function licensesKeySortValue(row, key) {
+    switch (key) {
+      case 'computer': return (row.computer || '').toLowerCase();
+      case 'product': return (row.product || '').toLowerCase();
+      case 'source': return (row.source || '').toLowerCase();
+      default: return '';
+    }
+  }
+
   function ingestionRejectionSortValue(entry, key) {
     switch (key) {
       case 'timestampUtc': return new Date(entry.timestampUtc || 0).getTime();
@@ -4673,6 +4700,24 @@
       case 'reason': return (entry.reason || '').toLowerCase();
       default: return '';
     }
+  }
+
+  function renderLicensesKeysTable() {
+    const rows = flattenClientLicenseKeys(state.clients);
+    const { key: sortKey, dir: sortDir } = state.sort.licensesKeys;
+    const sorted = applySort(rows, row => licensesKeySortValue(row, sortKey), sortDir);
+    const { items: pageItems, page, totalPages } = paginate(sorted, state.page.licensesKeys, state.pageSize.licensesKeys);
+    state.page.licensesKeys = page;
+
+    const tableRows = pageItems.map(row => `<tr>
+        <td>${escapeHtml(row.computer)}</td>
+        <td>${escapeHtml(row.product)}</td>
+        <td class="mono">${escapeHtml(row.source)}</td>
+        <td><button class="link-button" type="button" data-reveal-license-key data-client-id="${escapeHtml(row.computer)}" data-license-key-index="${row.index}">•••••• (show)</button></td>
+      </tr>`);
+
+    byId('licensesKeysBody').innerHTML = tableRows.join('') || '<tr><td colspan="4" class="empty">No license keys collected yet.</td></tr>';
+    renderPager('licensesKeysPager', 'licensesKeys', page, totalPages, () => renderLicensesKeysTable());
   }
 
   function renderIngestionRejectionsTable() {
@@ -4815,6 +4860,7 @@
     renderSoftwareTable(state.clients);
     renderFilteredHardwarePage();
     renderLicenses();
+    renderLicensesKeysTable();
     renderIngestionRejectionsTable();
     populateSoftwareDatalists();
     byId('dashboardView').classList.toggle('hidden', state.view !== 'dashboard');
@@ -4823,6 +4869,7 @@
     byId('hardwareView').classList.toggle('hidden', state.view !== 'hardware');
     byId('licensesView').classList.toggle('hidden', !(state.view === 'licenses' && state.subview === 'catalog'));
     byId('licenseKeySourcesView').classList.toggle('hidden', !(state.view === 'licenses' && state.subview === 'sources'));
+    byId('licensesKeysView').classList.toggle('hidden', !(state.view === 'licenses' && state.subview === 'keys'));
     byId('windowsUpdatesView').classList.toggle('hidden', state.view !== 'windowsUpdates');
     byId('thirdPartySoftwareView').classList.toggle('hidden', state.view !== 'thirdPartySoftware');
     byId('softwareJobHistoryView').classList.toggle('hidden', state.view !== 'softwareJobHistory');
