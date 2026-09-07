@@ -35,6 +35,7 @@
     certificateStatus: null, certificateHistory: [],
     staleHours: 48,
     showUsbStorageIndicator: true,
+    clientsLoadFailed: false,
     licenses: [], editingLicenseId: null, licenseFormComputers: [],
     licenseKeySources: [], editingLicenseKeySourceId: null,
     windowsUpdates: [], editingWindowsUpdateId: null,
@@ -3413,7 +3414,7 @@
   // matching record for editing. Only reachable when a match already exists -
   // renderSoftwareTable only shows the License button in that case.
   function openLicenseForSoftware(name, version) {
-    setView('licenses');
+    setView('licenses', 'catalog');
     fetch('/api/v1/licenses', { cache: 'no-store' })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -4716,7 +4717,9 @@
         <td><button class="link-button" type="button" data-reveal-license-key data-client-id="${escapeHtml(row.computer)}" data-license-key-index="${row.index}">•••••• (show)</button></td>
       </tr>`);
 
-    byId('licensesKeysBody').innerHTML = tableRows.join('') || '<tr><td colspan="4" class="empty">No license keys collected yet.</td></tr>';
+    byId('licensesKeysBody').innerHTML = tableRows.join('') || (state.clientsLoadFailed
+      ? '<tr><td colspan="4" class="empty">License keys are not available: the fleet inventory failed to load.</td></tr>'
+      : '<tr><td colspan="4" class="empty">No license keys collected yet.</td></tr>');
     renderPager('licensesKeysPager', 'licensesKeys', page, totalPages, () => renderLicensesKeysTable());
   }
 
@@ -4991,6 +4994,7 @@
         return response.json();
       })
       .then(data => {
+        state.clientsLoadFailed = false;
         const fingerprint = computeClientsFingerprint(data.clients || []);
         if (fingerprint === lastClientsFingerprint) return;
         lastClientsFingerprint = fingerprint;
@@ -5004,6 +5008,7 @@
         flashGeneratedAt();
       })
       .catch(() => {
+        state.clientsLoadFailed = true;
         // Silent - see function comment above.
       });
 
@@ -5077,6 +5082,7 @@
       return response.json();
     })
     .then(data => {
+      state.clientsLoadFailed = false;
       state.clients = stampClientPlatform(data.clients || [], 'windows');
       state.staleHours = data.staleHours || 48;
       state.adDescriptionSyncEnabled = !!data.adDescriptionSyncEnabled;
@@ -5087,6 +5093,7 @@
       render();
     })
     .catch(error => {
+      state.clientsLoadFailed = true;
       byId('generatedAt').textContent = `Inventory index is not available: ${error.message}`;
       render();
     })
