@@ -165,6 +165,7 @@
     if (hash === 'hardware' || hash === 'linux-hardware') return { view: 'hardware', subview: null };
     if (hash === 'licenses') return { view: 'licenses', subview: 'catalog' };
     if (hash === 'licensekeysources') return { view: 'licenses', subview: 'sources' };
+    if (hash === 'licenses-keys') return { view: 'licenses', subview: 'keys' };
     if (hash === 'windowsupdates') return { view: 'windowsUpdates', subview: null };
     if (hash === 'thirdpartysoftware') return { view: 'thirdPartySoftware', subview: null };
     if (hash === 'softwarejobhistory') return { view: 'softwareJobHistory', subview: null };
