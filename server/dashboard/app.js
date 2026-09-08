@@ -1146,8 +1146,8 @@
     });
   }
 
-  // The single "Saved client action logs" card at the bottom of Deploy >
-  // Actions. Every job (Windows, Linux, or mixed "auto" targets) now comes
+  // The single "Saved client action logs" card in Logging > Installs.
+  // Every job (Windows, Linux, or mixed "auto" targets) now comes
   // from one list (state.installJobs, populated by loadInstallHistory) -
   // each job's own `mode` field labels its row, newest job first.
   function renderMergedInstallHistory() {
@@ -5640,8 +5640,7 @@
   if (state.view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
   if (state.view === 'logging') loadLoggingSubviewData(state.subview);
   updateInstallFieldVisibility();
-  // Loaded unconditionally (not gated by state.view, same as
-  // loadInstallHistory above) so renderClientsTable's empty-state check
+  // Loaded unconditionally so renderClientsTable's empty-state check
   // below (state.licenseKeySources.length > 0) works correctly even when
   // the admin has never opened the License key sources tab this session -
   // the fetch just populates the hidden table's data with no visible

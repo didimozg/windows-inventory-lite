@@ -143,7 +143,7 @@ namespace WindowsInventoryLite
         // session stays valid (sliding - see IsWebRequestAuthorized's
         // session-cookie branch), not anything Basic-Auth-related.
         public int SessionLifetimeHours;
-        // Dashboard-only (Settings > Server > Ingestion Token), no
+        // Dashboard-only (Settings > Server > Log retention), no
         // Install-Server.ps1 CLI flag - same reasoning as
         // LoginLockoutThreshold above. Governs the rejected-ingestion-
         // attempt log (see IngestionRejectionEntry/RecordIngestionRejection),

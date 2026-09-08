@@ -187,7 +187,8 @@ Password-based pushes additionally require `plink.exe`/`pscp.exe` (PuTTY) in `de
 - `HttpsPort`: HTTPS listener port, independent of `ListenPrefix`. Default: `8443`.
 - `EnableHttp`: whether the plain HTTP listener runs at all. Default: `true`.
 - `HstsEnabled` and `HstsMaxAgeHours`: opt-in `Strict-Transport-Security` header on HTTPS responses. Defaults: `false`, `24` (range 1-8760). Adjustable on Settings > Server > HTTPS.
-- `IngestionRejectionLogRetentionDays` and `IngestionRejectionLogMaxEntries`: retention for the log of rejected ingestion-token attempts. Defaults: `30` (range 1-3650), `5000` (range 100-100000). Adjustable on Settings > Server > Ingestion Token.
+- `IngestionRejectionLogRetentionDays` and `IngestionRejectionLogMaxEntries`: retention for the log of rejected ingestion-token attempts. Defaults: `30` (range 1-3650), `5000` (range 100-100000). Adjustable on Settings > Server > Log retention.
+- `SoftwareJobAttemptLogRetentionDays` and `SoftwareJobAttemptLogMaxEntries`: retention for the software job attempt-history log. Defaults: `90` (range 1-3650), `5000` (range 100-100000). Adjustable on Settings > Server > Log retention.
 - `AdDescriptionSyncEnabled`: whether AD sync also updates each client's description field. Default mirrors `AdSyncEnabled` unless explicitly set.
 - `AdUseServiceIdentity`: whether AD sync runs as the service account instead of `AdUsername`/`AdPassword`. Default: `true`.
 - `AdComputerImportOUs`: newline-separated Organizational Unit DNs to search when importing computers from AD.
