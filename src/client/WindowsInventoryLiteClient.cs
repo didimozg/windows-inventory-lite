@@ -164,10 +164,44 @@ namespace WindowsInventoryLite
                     softwareCheckTimer.Dispose();
                     softwareCheckTimer = null;
                 }
+                // Disposing the timers above only stops FUTURE ticks - an
+                // already-running Collect()/CheckSoftwareJobs() callback
+                // (the latter can legitimately be mid-install, up to
+                // InstallProcessTimeoutMilliseconds = 30 minutes) keeps
+                // running in the background after this method returns. If
+                // the SCM's own stop timeout then kills the process, an
+                // in-progress installer can be terminated mid-install. This
+                // wait covers the common case (a normal collection cycle
+                // finishing up) within a budget safely under the SCM's
+                // default ~30-second stop timeout; it does not - and, short
+                // of periodically calling RequestAdditionalTime to hold the
+                // SCM off for the full up-to-30-minute installer window,
+                // cannot - guarantee survival of a stop that lands in the
+                // middle of an actual install.
+                DateTime waitUntil = DateTime.UtcNow.AddSeconds(25);
+                while ((Interlocked.CompareExchange(ref collectRunning, 0, 0) != 0 ||
+                        Interlocked.CompareExchange(ref softwareCheckRunning, 0, 0) != 0) &&
+                       DateTime.UtcNow < waitUntil)
+                {
+                    Thread.Sleep(250);
+                }
             }
+
+            private int collectRunning;
 
             private void Collect(object state)
             {
+                // Same reentrancy guard as softwareCheckRunning below - a
+                // System.Threading.Timer fires on schedule regardless of
+                // whether the previous callback finished, and a slow/hung
+                // WMI provider (no timeout is set on these queries) could
+                // otherwise let two Collect() cycles overlap and race on
+                // the same output file.
+                if (Interlocked.CompareExchange(ref collectRunning, 1, 0) != 0)
+                {
+                    DebugLogger.Log(options, "Server", "Collection cycle skipped - a previous cycle is still running.");
+                    return;
+                }
                 try
                 {
                     InventoryCollector collector = new InventoryCollector(options);
@@ -193,6 +227,10 @@ namespace WindowsInventoryLite
                     }
                     catch { }
                     DebugLogger.Log(options, "Error", ex.ToString());
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref collectRunning, 0);
                 }
             }
 
@@ -396,7 +434,37 @@ namespace WindowsInventoryLite
                             return resultEntry;
                         }
 
-                        string fullPath = Path.Combine(repositoryPath, relativePath);
+                        // IsPathRooted above only rejects an absolute/UNC
+                        // relativePath - it does nothing about ".." segments,
+                        // which Path.Combine does not resolve. Canonicalize
+                        // with GetFullPath (a purely lexical operation, no
+                        // filesystem access) and confirm the result still
+                        // falls under the ONE subfolder this catalogType is
+                        // allowed to read from, so a crafted "..\..\x" cannot
+                        // reach anything else the repository account can see
+                        // - e.g. a general file share reused for this feature
+                        // rather than a dedicated, narrowly-scoped one.
+                        string expectedSubfolder =
+                            String.Equals(catalogType, "windowsUpdate", StringComparison.OrdinalIgnoreCase) ? "windows-updates" :
+                            String.Equals(catalogType, "thirdPartySoftware", StringComparison.OrdinalIgnoreCase) ? "third-party-software" :
+                            null;
+                        if (expectedSubfolder == null)
+                        {
+                            resultEntry["success"] = false;
+                            resultEntry["exitCode"] = -1;
+                            resultEntry["errorMessage"] = "unrecognized catalogType: " + catalogType;
+                            return resultEntry;
+                        }
+
+                        string fullPath = Path.GetFullPath(Path.Combine(repositoryPath, relativePath));
+                        string expectedPrefix = Path.GetFullPath(Path.Combine(repositoryPath, expectedSubfolder)) + Path.DirectorySeparatorChar;
+                        if (!fullPath.StartsWith(expectedPrefix, StringComparison.OrdinalIgnoreCase))
+                        {
+                            resultEntry["success"] = false;
+                            resultEntry["exitCode"] = -1;
+                            resultEntry["errorMessage"] = "relativePath must stay within the " + expectedSubfolder + " subfolder of the software repository: " + relativePath;
+                            return resultEntry;
+                        }
                         string tempPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + Path.GetExtension(relativePath));
                         localCopyPath = tempPath;
 
@@ -592,7 +660,12 @@ namespace WindowsInventoryLite
                         string json = serializer.Serialize(list);
                         string path = GetSoftwareJobSuccessCachePath();
                         string directory = Path.GetDirectoryName(path);
-                        if (!Directory.Exists(directory))
+                        // Same GetDirectoryName-returns-"" gap as WriteText -
+                        // caught by this method's own try/catch either way,
+                        // but worth the same guard so the cache actually
+                        // gets written under a relative OutputPath instead
+                        // of silently failing every cycle.
+                        if (!String.IsNullOrEmpty(directory) && !Directory.Exists(directory))
                         {
                             Directory.CreateDirectory(directory);
                         }
@@ -813,10 +886,17 @@ namespace WindowsInventoryLite
             result["model"] = GetString(computer, "Model");
             result["serialNumber"] = GetString(bios, "SerialNumber");
             result["os"] = GetOperatingSystem();
-            result["office"] = GetOfficeVersion();
+            // Computed once and reused for both fields - GetOfficeVersion's
+            // own ClickToRun-fallback used to call GetInstalledSoftware()
+            // again internally, unconditionally, so --skip-software never
+            // actually skipped software enumeration on a non-ClickToRun
+            // Office install (or no Office at all), and every normal cycle
+            // walked the same two uninstall-registry hives twice.
+            ArrayList installedSoftware = options.SkipSoftware ? new ArrayList() : GetInstalledSoftware();
+            result["office"] = GetOfficeVersion(installedSoftware);
             result["activation"] = GetActivation();
             result["licenses"] = GetLicenseKeys();
-            result["software"] = options.SkipSoftware ? new ArrayList() : GetInstalledSoftware();
+            result["software"] = installedSoftware;
 
             result["cpu"] = GetCpu();
             ArrayList ramModules = GetRamModules();
@@ -892,15 +972,20 @@ namespace WindowsInventoryLite
             {
                 ManagementScope scope = new ManagementScope(@"root\Microsoft\Windows\Storage");
                 ObjectQuery msftQuery = new ObjectQuery("SELECT DeviceId, MediaType FROM MSFT_PhysicalDisk");
-                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(scope, msftQuery))
+                EnumerationOptions enumOptions = new EnumerationOptions();
+                enumOptions.Timeout = TimeSpan.FromSeconds(60);
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(scope, msftQuery, enumOptions))
                 {
                     foreach (ManagementObject item in searcher.Get())
                     {
-                        string deviceId = item["DeviceId"] != null ? Convert.ToString(item["DeviceId"]) : null;
-                        int mediaType = item["MediaType"] != null ? Convert.ToInt32(item["MediaType"]) : 0;
-                        if (!String.IsNullOrEmpty(deviceId))
+                        using (item)
                         {
-                            msftMediaTypes[deviceId] = mediaType;
+                            string deviceId = item["DeviceId"] != null ? Convert.ToString(item["DeviceId"]) : null;
+                            int mediaType = item["MediaType"] != null ? Convert.ToInt32(item["MediaType"]) : 0;
+                            if (!String.IsNullOrEmpty(deviceId))
+                            {
+                                msftMediaTypes[deviceId] = mediaType;
+                            }
                         }
                     }
                 }
@@ -1171,28 +1256,39 @@ namespace WindowsInventoryLite
 
         private Dictionary<string, object> GetActivation()
         {
+            // Queried once and evaluated against both matches below - the
+            // Windows and Office activation checks used to each run this
+            // same WMI query independently.
+            string query = "SELECT Name, ApplicationID, LicenseStatus, PartialProductKey FROM SoftwareLicensingProduct WHERE PartialProductKey IS NOT NULL";
+            ArrayList products = QueryList(query, "root\\cimv2");
+
             Dictionary<string, object> result = new Dictionary<string, object>();
-            result["windows"] = GetActivationState(true);
-            result["office"] = GetActivationState(false);
+            result["windows"] = GetActivationState(true, products);
+            result["office"] = GetActivationState(false, products);
             return result;
         }
 
-        private Dictionary<string, object> GetActivationState(bool windows)
+        private Dictionary<string, object> GetActivationState(bool windows, ArrayList products)
         {
-            string query = "SELECT Name, ApplicationID, LicenseStatus, PartialProductKey FROM SoftwareLicensingProduct WHERE PartialProductKey IS NOT NULL";
-            ArrayList products = QueryList(query, "root\\cimv2");
             Dictionary<string, object> result = new Dictionary<string, object>();
 
             foreach (Dictionary<string, object> product in products)
             {
+                // Name/ApplicationID come back null on a real machine whose
+                // SoftwareLicensingProduct rows don't populate every column
+                // (seen on some OEM/eval/Server Core licensing states) - a
+                // bare .IndexOf/.Equals on either threw NullReferenceException
+                // and lost this entire product's evaluation (and, since this
+                // isn't wrapped by the caller, the whole report cycle).
                 string name = GetString(product, "Name");
                 string applicationId = GetString(product, "ApplicationID");
                 bool match = windows
-                    ? name.IndexOf("Windows", StringComparison.OrdinalIgnoreCase) >= 0
-                    : applicationId.Equals("0ff1ce15-a989-479d-af46-f275c6370663", StringComparison.OrdinalIgnoreCase) ||
-                      name.IndexOf("Office", StringComparison.OrdinalIgnoreCase) >= 0;
+                    ? name != null && name.IndexOf("Windows", StringComparison.OrdinalIgnoreCase) >= 0
+                    : (applicationId != null && applicationId.Equals("0ff1ce15-a989-479d-af46-f275c6370663", StringComparison.OrdinalIgnoreCase)) ||
+                      (name != null && name.IndexOf("Office", StringComparison.OrdinalIgnoreCase) >= 0);
 
-                if (match && Convert.ToInt32(product["LicenseStatus"]) == 1)
+                object licenseStatus = product.ContainsKey("LicenseStatus") ? product["LicenseStatus"] : null;
+                if (match && Convert.ToInt32(licenseStatus) == 1)
                 {
                     result["activated"] = true;
                     result["product"] = name;
@@ -1233,7 +1329,8 @@ namespace WindowsInventoryLite
 
                 foreach (Dictionary<string, object> product in officeLegacyProducts)
                 {
-                    if (Convert.ToInt32(product["LicenseStatus"]) == 1)
+                    object legacyLicenseStatus = product.ContainsKey("LicenseStatus") ? product["LicenseStatus"] : null;
+                    if (Convert.ToInt32(legacyLicenseStatus) == 1)
                     {
                         result["activated"] = true;
                         result["product"] = "Microsoft Office 2010";
@@ -1247,7 +1344,7 @@ namespace WindowsInventoryLite
             return result;
         }
 
-        private Dictionary<string, object> GetOfficeVersion()
+        private Dictionary<string, object> GetOfficeVersion(ArrayList installedSoftware)
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
             string version = ReadRegistryString(Registry.LocalMachine, @"Software\Microsoft\Office\ClickToRun\Configuration", "VersionToReport");
@@ -1261,7 +1358,7 @@ namespace WindowsInventoryLite
                 return result;
             }
 
-            foreach (Dictionary<string, object> software in GetInstalledSoftware())
+            foreach (Dictionary<string, object> software in installedSoftware)
             {
                 string name = GetString(software, "name");
                 if (name.IndexOf("Microsoft Office", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -1300,40 +1397,52 @@ namespace WindowsInventoryLite
 
                 foreach (string subKeyName in uninstall.GetSubKeyNames())
                 {
-                    using (RegistryKey item = uninstall.OpenSubKey(subKeyName))
+                    // One subkey's own ACL/data can be broken (an orphaned
+                    // SID, a corrupted value) without the rest of the hive
+                    // being affected - an unhandled exception here used to
+                    // abort this whole method (and, since neither caller
+                    // wraps it, the entire report cycle) over a single bad
+                    // entry. Skip just that one entry instead.
+                    try
                     {
-                        if (item == null)
+                        using (RegistryKey item = uninstall.OpenSubKey(subKeyName))
                         {
-                            continue;
-                        }
+                            if (item == null)
+                            {
+                                continue;
+                            }
 
-                        string displayName = Convert.ToString(item.GetValue("DisplayName", ""));
-                        if (String.IsNullOrEmpty(displayName))
-                        {
-                            continue;
-                        }
+                            string displayName = Convert.ToString(item.GetValue("DisplayName", ""));
+                            if (String.IsNullOrEmpty(displayName))
+                            {
+                                continue;
+                            }
 
-                        if (!IsVisibleSoftwareEntry(item))
-                        {
-                            continue;
-                        }
+                            if (!IsVisibleSoftwareEntry(item))
+                            {
+                                continue;
+                            }
 
-                        string displayVersion = Convert.ToString(item.GetValue("DisplayVersion", ""));
-                        string publisher = Convert.ToString(item.GetValue("Publisher", ""));
-                        string installDate = FormatInstallDate(Convert.ToString(item.GetValue("InstallDate", "")));
-                        string key = (displayName + "|" + displayVersion + "|" + publisher).ToLowerInvariant();
-                        if (seen.ContainsKey(key))
-                        {
-                            continue;
-                        }
-                        seen[key] = true;
+                            string displayVersion = Convert.ToString(item.GetValue("DisplayVersion", ""));
+                            string publisher = Convert.ToString(item.GetValue("Publisher", ""));
+                            string installDate = FormatInstallDate(Convert.ToString(item.GetValue("InstallDate", "")));
+                            string key = (displayName + "|" + displayVersion + "|" + publisher).ToLowerInvariant();
+                            if (seen.ContainsKey(key))
+                            {
+                                continue;
+                            }
+                            seen[key] = true;
 
-                        Dictionary<string, object> software = new Dictionary<string, object>();
-                        software["name"] = displayName;
-                        software["version"] = displayVersion;
-                        software["publisher"] = publisher;
-                        software["installDate"] = installDate;
-                        result.Add(software);
+                            Dictionary<string, object> software = new Dictionary<string, object>();
+                            software["name"] = displayName;
+                            software["version"] = displayVersion;
+                            software["publisher"] = publisher;
+                            software["installDate"] = installDate;
+                            result.Add(software);
+                        }
+                    }
+                    catch
+                    {
                     }
                 }
             }
@@ -1427,16 +1536,32 @@ namespace WindowsInventoryLite
             {
                 ManagementScope scope = new ManagementScope(new ManagementPath(wmiNamespace));
                 scope.Connect();
-                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(scope, new ObjectQuery(query)))
+                // A bounded timeout (WMI's semisynchronous enumeration mode -
+                // MoveNext throws ManagementException instead of blocking
+                // forever) so a hung/misbehaving WMI provider can't wedge
+                // this cycle indefinitely; caught by the try/catch below
+                // like any other query failure.
+                EnumerationOptions enumOptions = new EnumerationOptions();
+                enumOptions.Timeout = TimeSpan.FromSeconds(60);
+                using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(scope, new ObjectQuery(query), enumOptions))
                 {
+                    // The searcher's own using disposes itself, but each
+                    // ManagementObject it yields holds a separate COM RCW
+                    // that isn't - undisposed, these accumulate for the
+                    // life of this always-on service across every
+                    // collection cycle until GC finalizers eventually
+                    // catch up.
                     foreach (ManagementObject item in searcher.Get())
                     {
-                        Dictionary<string, object> row = new Dictionary<string, object>();
-                        foreach (PropertyData property in item.Properties)
+                        using (item)
                         {
-                            row[property.Name] = property.Value;
+                            Dictionary<string, object> row = new Dictionary<string, object>();
+                            foreach (PropertyData property in item.Properties)
+                            {
+                                row[property.Name] = property.Value;
+                            }
+                            result.Add(row);
                         }
-                        result.Add(row);
                     }
                 }
             }
@@ -1476,7 +1601,12 @@ namespace WindowsInventoryLite
         private static void WriteText(string path, string value)
         {
             string directory = Path.GetDirectoryName(path);
-            if (!Directory.Exists(directory))
+            // GetDirectoryName returns "" (not null) for a bare filename
+            // with no directory component (e.g. --output report.json) -
+            // Directory.CreateDirectory("") throws ArgumentException, which
+            // used to abort every single collection cycle permanently for
+            // that configuration. Same guard DebugLogger.Log already uses.
+            if (!String.IsNullOrEmpty(directory) && !Directory.Exists(directory))
             {
                 Directory.CreateDirectory(directory);
             }
