@@ -982,6 +982,26 @@ tr.stale td {
   margin-top: 18px;
 }
 
+/* Reported live (screenshot): the discovery table and the catalog table
+   below the form sat flush against each other with zero gap. Root cause is
+   distinct from the rule above - windowsUpdateForm/thirdPartySoftwareForm
+   default to hidden, and a display:none element contributes no margin at
+   all, so .install-panel's own margin-bottom (and the rule above) only
+   help while the form is actually open. Collapsed (the common case - a
+   user opens this tab without clicking "Add entry"), nothing sits between
+   the two .table-wrap boxes' own zero margins. Scoped to the exact
+   3-element chain (table, form, table) rather than a bare
+   ".install-panel + .table-wrap", so it does not also touch
+   licenseForm/licenseKeySourceForm - those are preceded by a
+   .view-toolbar, which already has its own unconditional margin-bottom
+   regardless of the form's state, so they never had this zero-gap problem.
+   When the form IS open, this 18px margin-top collapses with the form's
+   own 18px margin-bottom (adjoining sibling margins, not additive), so the
+   already-correct open-form spacing is unchanged. */
+.table-wrap + .install-panel + .table-wrap {
+  margin-top: 18px;
+}
+
 /* Bold Card System treatment for a Deploy/Settings page-section, reusing
    Phase 1's .card-glow. A compound selector, not just adding "card-glow" to
    the class list and trusting .card-glow's own rule to win: both are
