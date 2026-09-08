@@ -1408,10 +1408,26 @@ namespace WindowsInventoryLite
                     continue;
                 }
                 string computerName = GetStringValue(client, "computerName");
-                if (!String.IsNullOrEmpty(computerName))
+                if (String.IsNullOrEmpty(computerName))
                 {
-                    targets.Add(computerName);
+                    continue;
                 }
+                // computerName is client-reported (see ReceiveInventory),
+                // so it is attacker-influenced on a compromised managed
+                // host - the sibling Linux scheduled push already validates
+                // its own target this same way (GetLinuxClientUpdateTarget's
+                // own comment). Without this, a report with a crafted
+                // computerName would make this WinRM push authenticate the
+                // saved Client-update (or AD sync) account against a host
+                // the attacker controls. Skip rather than fail the whole
+                // scheduled push - one bad record must not stop the rest of
+                // the fleet from updating.
+                if (!IsValidSshTarget(computerName))
+                {
+                    DebugLogger.Log(options, "Schedule", "Scheduled Windows client update push skipped one target: '" + DebugLogger.SanitizeForLog(computerName) + "' is not a valid hostname or IPv4 address.");
+                    continue;
+                }
+                targets.Add(computerName);
             }
             if (targets.Count == 0)
             {
@@ -6687,8 +6703,23 @@ namespace WindowsInventoryLite
         // (CryptographicOperations.FixedTimeEquals is .NET Core 2.1+ only).
         private static bool FixedTimeEquals(string a, string b)
         {
-            byte[] aBytes = Encoding.UTF8.GetBytes(a ?? "");
-            byte[] bBytes = Encoding.UTF8.GetBytes(b ?? "");
+            // null is not the same credential as "" - a null WebPassword
+            // means SecretProtector.Unprotect failed to decrypt the stored
+            // DPAPI blob (e.g. a server migrated/rebuilt with a different
+            // machine key), not "no password is set". Coercing both to ""
+            // below made a null stored password match a supplied EMPTY
+            // password - a full Basic Auth bypass the instant DPAPI decrypt
+            // ever fails for WebPassword, since WebUsername (not encrypted)
+            // survives and keeps the loopback-only "unconfigured" fallback
+            // in IsWebRequestAuthorized from ever triggering. Either side
+            // being null (the credential is broken/absent) must never
+            // compare equal to anything, including another null.
+            if (a == null || b == null)
+            {
+                return false;
+            }
+            byte[] aBytes = Encoding.UTF8.GetBytes(a);
+            byte[] bBytes = Encoding.UTF8.GetBytes(b);
             int length = Math.Max(aBytes.Length, bBytes.Length);
             int diff = aBytes.Length ^ bBytes.Length;
             for (int i = 0; i < length; i++)
@@ -9387,7 +9418,24 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return;
             }
 
-            bool alreadyConfigured = !String.IsNullOrEmpty(options.WebUsername) && !String.IsNullOrEmpty(options.WebPassword);
+            // Checking WebUsername alone (not WebPassword too) as the
+            // "already configured" signal: WebUsername is never DPAPI-
+            // encrypted so it can't go null from a decrypt failure, but
+            // WebPassword can (SecretProtector.Unprotect returns null on
+            // failure - e.g. a server migrated to a machine with a
+            // different DPAPI key). The old check treated that null
+            // exactly like "no admin ever configured yet" and skipped the
+            // current-password gate below entirely, letting anyone set a
+            // brand new admin password with no proof of the old one. Now
+            // a null WebPassword still requires a currentPassword match -
+            // which FixedTimeEquals correctly can never grant against a
+            // null stored value, forcing a real console-level recovery
+            // instead of a silent bypass. This branch is presently
+            // unreachable for a null WebPassword by any REMOTE caller
+            // anyway, since IsWebRequestAuthorized's own FixedTimeEquals
+            // check already rejects every request once WebPassword is
+            // null - this fix is defense in depth, not the only barrier.
+            bool alreadyConfigured = !String.IsNullOrEmpty(options.WebUsername);
             string newUsername = Convert.ToString(payload.ContainsKey("newUsername") ? payload["newUsername"] : "").Trim();
             string newPassword = Convert.ToString(payload.ContainsKey("newPassword") ? payload["newPassword"] : "");
 
@@ -12924,6 +12972,22 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (FixedTimeEquals(null, "x"))
             {
                 return "expected null vs non-empty to not match";
+            }
+            // The actual vulnerability this function once had: a null
+            // stored credential (SecretProtector.Unprotect failed to
+            // decrypt) must never match a supplied empty password, even
+            // though both encode to a zero-length byte array.
+            if (FixedTimeEquals("", null))
+            {
+                return "expected a supplied empty password to NOT match a null (decrypt-failed) stored password";
+            }
+            if (FixedTimeEquals(null, ""))
+            {
+                return "expected a null supplied value to NOT match an empty stored value";
+            }
+            if (FixedTimeEquals(null, null))
+            {
+                return "expected two nulls to NOT match - null means 'broken/absent', never a valid credential";
             }
             return null;
         }
