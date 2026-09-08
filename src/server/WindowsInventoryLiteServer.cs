@@ -938,6 +938,20 @@ namespace WindowsInventoryLite
         // request handling. See QueueReverseDnsLookup.
         private const int MaxConcurrentReverseDnsLookups = 20;
         private int reverseDnsLookupsInFlight;
+        // Same reasoning as MaxConcurrentReverseDnsLookups above, applied to
+        // ComputeAdSyncFields' live AD lookup - a single lookup can block its
+        // caller's thread for up to ~15s (AdLookupService.LdapTimeoutSeconds),
+        // and a never-seen computerName always reaches it unconditionally
+        // (no ShouldSyncAd staleness gate applies, since there is no previous
+        // sync timestamp to check). Inventory reports need no ingestion token
+        // by default (RequireIngestionToken is off until configured), so an
+        // unauthenticated caller could otherwise name an unbounded number of
+        // distinct fake computerNames to tie up request-handling threads and
+        // flood the domain controller with lookups. A much lower cap than the
+        // DNS one: each lookup is ~7x slower and a real DC deserves more
+        // protection than a public resolver.
+        private const int MaxConcurrentAdLookups = 5;
+        private int adLookupsInFlight;
         // Lets an open dashboard tab notice a server-initiated (scheduled)
         // push exists at all - a scheduled push never goes through any HTTP
         // request the browser makes, so without this the browser has no way
@@ -2358,6 +2372,13 @@ namespace WindowsInventoryLite
             jobs.Add(job);
         }
 
+        // Bounds on an otherwise-trusted (ingestion-token-gated) but still
+        // client-supplied payload: without these, any token holder could
+        // flood the persisted software-job-attempts log with an oversized
+        // results array or an arbitrarily long errorMessage per entry.
+        private const int MaxSoftwareJobResultsPerRequest = 500;
+        private const int MaxSoftwareJobErrorMessageLength = 2000;
+
         private void ReceiveSoftwareJobResults(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
@@ -2392,7 +2413,21 @@ namespace WindowsInventoryLite
             }
 
             string computerName = NormalizeReportIdentifier(payload.ContainsKey("computerName") ? Convert.ToString(payload["computerName"]) : null);
+            if (IsReportIdentifierTooLong(computerName))
+            {
+                DebugLogger.Log(options, "Client", "Rejected software job results: computerName exceeds " + MaxReportIdentifierLength + " characters");
+                SendText(stream, "{\"error\":\"computerName is too long\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
             ArrayList results = payload.ContainsKey("results") ? payload["results"] as ArrayList : null;
+            if (results != null && results.Count > MaxSoftwareJobResultsPerRequest)
+            {
+                DebugLogger.Log(options, "Client", "Rejected software job results: results array exceeds " + MaxSoftwareJobResultsPerRequest + " entries");
+                SendText(stream, "{\"error\":\"too many results\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
             if (results != null)
             {
                 foreach (object item in results)
@@ -2403,15 +2438,32 @@ namespace WindowsInventoryLite
                         continue;
                     }
 
-                    SoftwareJobAttempt attempt = new SoftwareJobAttempt();
-                    attempt.TimestampUtc = DateTime.UtcNow;
-                    attempt.ComputerName = computerName;
-                    attempt.CatalogType = GetStringValue(resultEntry, "catalogType");
-                    attempt.EntryId = GetStringValue(resultEntry, "id");
-                    attempt.Success = resultEntry.ContainsKey("success") && Convert.ToBoolean(resultEntry["success"]);
-                    attempt.ExitCode = resultEntry.ContainsKey("exitCode") ? Convert.ToInt32(resultEntry["exitCode"]) : -1;
-                    attempt.ErrorMessage = resultEntry.ContainsKey("errorMessage") ? GetStringValue(resultEntry, "errorMessage") : null;
-                    RecordSoftwareJobAttempt(attempt);
+                    // A single malformed entry (e.g. "success"/"exitCode" sent
+                    // as the wrong JSON type) used to throw out of this loop
+                    // entirely, dropping every other entry in the same batch
+                    // and turning the whole request into a 500. Skip just the
+                    // bad entry instead.
+                    try
+                    {
+                        SoftwareJobAttempt attempt = new SoftwareJobAttempt();
+                        attempt.TimestampUtc = DateTime.UtcNow;
+                        attempt.ComputerName = computerName;
+                        attempt.CatalogType = GetStringValue(resultEntry, "catalogType");
+                        attempt.EntryId = GetStringValue(resultEntry, "id");
+                        attempt.Success = resultEntry.ContainsKey("success") && Convert.ToBoolean(resultEntry["success"]);
+                        attempt.ExitCode = resultEntry.ContainsKey("exitCode") ? Convert.ToInt32(resultEntry["exitCode"]) : -1;
+                        string errorMessage = resultEntry.ContainsKey("errorMessage") ? GetStringValue(resultEntry, "errorMessage") : null;
+                        if (errorMessage != null && errorMessage.Length > MaxSoftwareJobErrorMessageLength)
+                        {
+                            errorMessage = errorMessage.Substring(0, MaxSoftwareJobErrorMessageLength);
+                        }
+                        attempt.ErrorMessage = errorMessage;
+                        RecordSoftwareJobAttempt(attempt);
+                    }
+                    catch (Exception ex)
+                    {
+                        DebugLogger.Log(options, "Client", "Skipped one malformed software job result entry: " + ex.Message);
+                    }
                 }
             }
 
@@ -2698,7 +2750,36 @@ namespace WindowsInventoryLite
                 return fields;
             }
 
-            AdLookupResult result = AdLookupService.LookupComputerDescription(computerName, options);
+            // Exceeding the cap fails closed exactly like
+            // QueueReverseDnsLookup: skip this attempt rather than block a
+            // 6th+ concurrent thread in the live lookup below. Not advancing
+            // the sync timestamp means the next report or sweep tick simply
+            // retries - identical in effect to a transient AD-unreachable
+            // error, which this code already tolerates and recovers from.
+            if (Interlocked.Increment(ref adLookupsInFlight) > MaxConcurrentAdLookups)
+            {
+                Interlocked.Decrement(ref adLookupsInFlight);
+                fields.Status = "error";
+                if (previous != null && previous.ContainsKey("adDescription"))
+                {
+                    fields.Description = previous["adDescription"];
+                }
+                if (previous != null && previous.ContainsKey("adSyncedAt"))
+                {
+                    fields.SyncedAt = previous["adSyncedAt"];
+                }
+                return fields;
+            }
+
+            AdLookupResult result;
+            try
+            {
+                result = AdLookupService.LookupComputerDescription(computerName, options);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref adLookupsInFlight);
+            }
             fields.Description = result.Description;
             fields.Status = result.Status;
             if (result.Status != "error")
@@ -4711,6 +4792,34 @@ namespace WindowsInventoryLite
             return RunLinuxSshProcess(commandBody, authMode, username, password, keyPath, result);
         }
 
+        // Reading stdout then stderr sequentially via ReadToEnd() can deadlock:
+        // if the child fills the OS pipe buffer on the stream we haven't
+        // started reading yet (typically stderr, while we're still blocked in
+        // ReadToEnd() on stdout) before it exits, the child blocks writing and
+        // we block reading - neither side makes progress. A verbose plink.exe/
+        // PowerShell failure is exactly the kind of output that can hit this.
+        // Draining both streams via the OutputDataReceived/ErrorDataReceived
+        // events (available since .NET 2.0, no async/await needed) reads both
+        // concurrently regardless of which one the child fills first.
+        private static void ReadProcessStreamsWithoutDeadlock(Process process, out string output, out string error)
+        {
+            StringBuilder outputBuilder = new StringBuilder();
+            StringBuilder errorBuilder = new StringBuilder();
+            process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e)
+            {
+                if (e.Data != null) { outputBuilder.AppendLine(e.Data); }
+            };
+            process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e)
+            {
+                if (e.Data != null) { errorBuilder.AppendLine(e.Data); }
+            };
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            process.WaitForExit();
+            output = outputBuilder.ToString();
+            error = errorBuilder.ToString();
+        }
+
         private static Dictionary<string, object> RunLinuxSshProcess(string commandBody, string authMode, string username, string password, string keyPath, Dictionary<string, object> result)
         {
             ProcessStartInfo startInfo = new ProcessStartInfo();
@@ -4729,9 +4838,8 @@ namespace WindowsInventoryLite
                     process.StandardInput.WriteLine(username);
                     process.StandardInput.WriteLine(authMode == "key" ? keyPath : password);
                     process.StandardInput.Close();
-                    string output = process.StandardOutput.ReadToEnd();
-                    string error = process.StandardError.ReadToEnd();
-                    process.WaitForExit();
+                    string output, error;
+                    ReadProcessStreamsWithoutDeadlock(process, out output, out error);
                     result["exitCode"] = process.ExitCode;
                     result["output"] = output;
                     result["error"] = error;
@@ -4931,16 +5039,17 @@ namespace WindowsInventoryLite
             }
 
             bool hasCredential = !String.IsNullOrEmpty(username) && !String.IsNullOrEmpty(password);
+            bool hasToken = !String.IsNullOrEmpty(token);
             string commandBody = "[Console]::OutputEncoding = [System.Text.Encoding]::Default; $OutputEncoding = [Console]::OutputEncoding; "
-                + BuildCredentialReaderSnippet(hasCredential)
+                + BuildCredentialReaderSnippet(hasCredential, hasToken)
                 + "& " + QuotePowerShellLiteral(options.WinRmInstallerPath) + " "
-                + BuildPowerShellInstallArguments(target, serverUrl, token, hasCredential, force, addToTrustedHosts, options.ClientPackagePath, softwareCheckIntervalHours);
+                + BuildPowerShellInstallArguments(target, serverUrl, hasToken, hasCredential, force, addToTrustedHosts, options.ClientPackagePath, softwareCheckIntervalHours);
 
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = "powershell.exe";
             startInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command " + QuoteArgument(commandBody);
             startInfo.UseShellExecute = false;
-            startInfo.RedirectStandardInput = hasCredential;
+            startInfo.RedirectStandardInput = hasCredential || hasToken;
             startInfo.RedirectStandardOutput = true;
             startInfo.RedirectStandardError = true;
             startInfo.CreateNoWindow = true;
@@ -4949,15 +5058,23 @@ namespace WindowsInventoryLite
             {
                 using (Process process = Process.Start(startInfo))
                 {
+                    // Must match BuildCredentialReaderSnippet's read order:
+                    // token line first, then username/password.
+                    if (hasToken)
+                    {
+                        process.StandardInput.WriteLine(token);
+                    }
                     if (hasCredential)
                     {
                         process.StandardInput.WriteLine(username);
                         process.StandardInput.WriteLine(password);
+                    }
+                    if (hasCredential || hasToken)
+                    {
                         process.StandardInput.Close();
                     }
-                    string output = process.StandardOutput.ReadToEnd();
-                    string error = process.StandardError.ReadToEnd();
-                    process.WaitForExit();
+                    string output, error;
+                    ReadProcessStreamsWithoutDeadlock(process, out output, out error);
                     result["exitCode"] = process.ExitCode;
                     result["output"] = output;
                     result["error"] = error;
@@ -4991,7 +5108,7 @@ namespace WindowsInventoryLite
 
             bool hasCredential = !String.IsNullOrEmpty(username) && !String.IsNullOrEmpty(password);
             string commandBody = "[Console]::OutputEncoding = [System.Text.Encoding]::Default; $OutputEncoding = [Console]::OutputEncoding; "
-                + BuildCredentialReaderSnippet(hasCredential)
+                + BuildCredentialReaderSnippet(hasCredential, false)
                 + "& " + QuotePowerShellLiteral(options.WinRmUninstallerPath) + " "
                 + BuildPowerShellUninstallArguments(target, hasCredential, addToTrustedHosts);
 
@@ -5014,9 +5131,8 @@ namespace WindowsInventoryLite
                         process.StandardInput.WriteLine(password);
                         process.StandardInput.Close();
                     }
-                    string output = process.StandardOutput.ReadToEnd();
-                    string error = process.StandardError.ReadToEnd();
-                    process.WaitForExit();
+                    string output, error;
+                    ReadProcessStreamsWithoutDeadlock(process, out output, out error);
                     result["exitCode"] = process.ExitCode;
                     result["output"] = output;
                     result["error"] = error;
@@ -6148,24 +6264,36 @@ namespace WindowsInventoryLite
         // nothing to escape or inject through it. $__wilCredential is picked
         // up by name in BuildPowerShellInstallArguments/
         // BuildPowerShellUninstallArguments below when hasCredential is true.
-        private static string BuildCredentialReaderSnippet(bool hasCredential)
+        // $__wilToken is read the same way (over stdin, never on the command
+        // line) when hasToken is true - the ingestion token used to be passed
+        // as a literal -Token '<value>' argument to this child powershell.exe
+        // process, visible in this SERVER machine's own process list
+        // (Get-Process/WMI Win32_Process.CommandLine) for as long as the
+        // install/uninstall runs, contradicting this project's own documented
+        // posture that credentials never go on a child process command line.
+        private static string BuildCredentialReaderSnippet(bool hasCredential, bool hasToken)
         {
-            if (!hasCredential)
+            StringBuilder builder = new StringBuilder();
+            if (hasToken)
             {
-                return "";
+                builder.Append("$__wilToken = [Console]::In.ReadLine(); ");
             }
-            return "$__wilUser = [Console]::In.ReadLine(); $__wilPass = [Console]::In.ReadLine(); "
-                + "$__wilCredential = New-Object System.Management.Automation.PSCredential($__wilUser, (ConvertTo-SecureString -String $__wilPass -AsPlainText -Force)); ";
+            if (hasCredential)
+            {
+                builder.Append("$__wilUser = [Console]::In.ReadLine(); $__wilPass = [Console]::In.ReadLine(); ");
+                builder.Append("$__wilCredential = New-Object System.Management.Automation.PSCredential($__wilUser, (ConvertTo-SecureString -String $__wilPass -AsPlainText -Force)); ");
+            }
+            return builder.ToString();
         }
 
-        private static string BuildPowerShellInstallArguments(string target, string serverUrl, string token, bool hasCredential, bool force, bool addToTrustedHosts, string packagePath, int softwareCheckIntervalHours)
+        private static string BuildPowerShellInstallArguments(string target, string serverUrl, bool hasToken, bool hasCredential, bool force, bool addToTrustedHosts, string packagePath, int softwareCheckIntervalHours)
         {
             StringBuilder builder = new StringBuilder();
             builder.Append("-ComputerName ").Append(QuotePowerShellLiteral(target));
             builder.Append(" -ServerUrl ").Append(QuotePowerShellLiteral(serverUrl));
-            if (!String.IsNullOrEmpty(token))
+            if (hasToken)
             {
-                builder.Append(" -Token ").Append(QuotePowerShellLiteral(token));
+                builder.Append(" -Token $__wilToken");
             }
             builder.Append(" -SoftwareCheckIntervalHours ").Append(softwareCheckIntervalHours);
             builder.Append(" -PackagePath ").Append(QuotePowerShellLiteral(packagePath));
@@ -10959,6 +11087,35 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendJson(stream, serializer.Serialize(response));
         }
 
+        // Mirrors WindowsInventoryLiteClient.cs's RunOneJob fix (the client
+        // already rejects a relativePath that escapes its catalog-type
+        // subfolder before combining it with the repository path). Validating
+        // here too, at save time, stops a malformed or maliciously-crafted
+        // entry (e.g. via a compromised admin session) from ever being
+        // stored, instead of relying solely on the client's own check as the
+        // only line of defense. A throwaway root is used for the canonicalize-
+        // then-prefix-check (the same technique the client uses against its
+        // real repository path) since SoftwareRepositoryPath may not even be
+        // configured yet when a catalog entry is created.
+        private static bool IsValidCatalogRelativePath(string relativePath, string expectedSubfolder)
+        {
+            if (String.IsNullOrEmpty(relativePath) || Path.IsPathRooted(relativePath))
+            {
+                return false;
+            }
+            try
+            {
+                const string dummyRoot = @"C:\__wil-catalog-path-check__";
+                string fullPath = Path.GetFullPath(Path.Combine(dummyRoot, relativePath));
+                string expectedPrefix = Path.GetFullPath(Path.Combine(dummyRoot, expectedSubfolder)) + Path.DirectorySeparatorChar;
+                return fullPath.StartsWith(expectedPrefix, StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private void CreateWindowsUpdate(Stream stream, RequestContext request)
         {
             JavaScriptSerializer serializer = CreateJsonSerializer();
@@ -10992,6 +11149,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (String.IsNullOrEmpty(relativePath))
             {
                 SendText(stream, "{\"error\":\"relativePath is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            if (!IsValidCatalogRelativePath(relativePath, "windows-updates"))
+            {
+                SendText(stream, "{\"error\":\"relativePath must be a path inside the windows-updates subfolder, with no .. traversal outside it\"}", "application/json; charset=utf-8", 400);
                 return;
             }
             // Deploy > Actions feeds the same delimited target text into an
@@ -11071,6 +11233,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (String.IsNullOrEmpty(relativePath))
             {
                 SendText(stream, "{\"error\":\"relativePath is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            if (!IsValidCatalogRelativePath(relativePath, "windows-updates"))
+            {
+                SendText(stream, "{\"error\":\"relativePath must be a path inside the windows-updates subfolder, with no .. traversal outside it\"}", "application/json; charset=utf-8", 400);
                 return;
             }
             if (!String.IsNullOrEmpty(targets))
@@ -11264,6 +11431,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 SendText(stream, "{\"error\":\"relativePath is required\"}", "application/json; charset=utf-8", 400);
                 return;
             }
+            if (!IsValidCatalogRelativePath(relativePath, "third-party-software"))
+            {
+                SendText(stream, "{\"error\":\"relativePath must be a path inside the third-party-software subfolder, with no .. traversal outside it\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
             if (!String.IsNullOrEmpty(targets))
             {
                 foreach (string expandedTarget in ExpandInstallTargets(targets))
@@ -11334,6 +11506,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (String.IsNullOrEmpty(relativePath))
             {
                 SendText(stream, "{\"error\":\"relativePath is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            if (!IsValidCatalogRelativePath(relativePath, "third-party-software"))
+            {
+                SendText(stream, "{\"error\":\"relativePath must be a path inside the third-party-software subfolder, with no .. traversal outside it\"}", "application/json; charset=utf-8", 400);
                 return;
             }
             if (!String.IsNullOrEmpty(targets))
@@ -11464,14 +11641,20 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     List<string> thirdPartyFiles = WithSoftwareRepositoryIdentity(options, () => ListRelativeFiles(options.SoftwareRepositoryPath, "third-party-software"));
 
                     HashSet<string> knownWindowsUpdatePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (Dictionary<string, object> entry in LoadWindowsUpdates())
+                    lock (windowsUpdatesLock)
                     {
-                        knownWindowsUpdatePaths.Add(GetStringValue(entry, "relativePath"));
+                        foreach (Dictionary<string, object> entry in LoadWindowsUpdates())
+                        {
+                            knownWindowsUpdatePaths.Add(GetStringValue(entry, "relativePath"));
+                        }
                     }
                     HashSet<string> knownThirdPartyPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (Dictionary<string, object> entry in LoadThirdPartySoftware())
+                    lock (thirdPartySoftwareLock)
                     {
-                        knownThirdPartyPaths.Add(GetStringValue(entry, "relativePath"));
+                        foreach (Dictionary<string, object> entry in LoadThirdPartySoftware())
+                        {
+                            knownThirdPartyPaths.Add(GetStringValue(entry, "relativePath"));
+                        }
                     }
 
                     result.WindowsUpdateCandidates = new List<string>();
@@ -12378,6 +12561,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "NeedsMigration does not flag an already-encrypted or empty value", TestNeedsMigrationAlreadyEncryptedOrEmpty);
             allPassed &= SelfTestCheck(output, "BuildPowerShellInstallArguments includes -Token when a token is set, omits it when empty", TestBuildPowerShellInstallArgumentsIncludesToken);
             allPassed &= SelfTestCheck(output, "BuildPowerShellInstallArguments includes -SoftwareCheckIntervalHours", TestBuildPowerShellInstallArgumentsIncludesSoftwareCheckIntervalHours);
+            allPassed &= SelfTestCheck(output, "BuildCredentialReaderSnippet reads the ingestion token via stdin, never on the command line", TestBuildCredentialReaderSnippetReadsTokenViaStdinNotCommandLine);
             allPassed &= SelfTestCheck(output, "GenerateCmdLines rejects serverUrl/token/packageSharePath containing batch-unsafe characters", TestGenerateCmdLinesRejectsUnsafeCharacters);
             allPassed &= SelfTestCheck(output, "ValidatePosixShellSafe rejects POSIX shell metacharacters", TestValidatePosixShellSafeRejectsUnsafeCharacters);
             allPassed &= SelfTestCheck(output, "ValidatePosixShellSafe accepts safe values including null/empty", TestValidatePosixShellSafeAcceptsSafeValues);
@@ -12481,6 +12665,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "IsValidSshTarget rejects shell-injection shapes, flag-lookalikes, and empty values", TestIsValidSshTargetRejectsInjectionAndEmpty);
             allPassed &= SelfTestCheck(output, "IsValidLinuxInstallPath accepts a real multi-segment absolute path", TestIsValidLinuxInstallPathAcceptsMultiSegmentPath);
             allPassed &= SelfTestCheck(output, "IsValidLinuxInstallPath rejects a bare top-level directory, a relative path, and empty/null", TestIsValidLinuxInstallPathRejectsTopLevelAndInvalid);
+            allPassed &= SelfTestCheck(output, "IsValidCatalogRelativePath accepts a path inside the right subfolder, rejects traversal and other subfolders", TestIsValidCatalogRelativePathAcceptsCorrectSubfolderRejectsEverythingElse);
             allPassed &= SelfTestCheck(output, "IsValidLinuxInstallPath rejects .. and . traversal even inside an /opt/ path", TestIsValidLinuxInstallPathRejectsTraversal);
             allPassed &= SelfTestCheck(output, "GenerateRandomToken returns a 64-character lowercase hex string, different each call", TestGenerateRandomTokenShape);
             allPassed &= SelfTestCheck(output, "Ingestion token configured-state reflects whether options.Token is set", TestSendIngestionTokenStatusReflectsConfiguredState);
@@ -14765,26 +14950,55 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // regenerating the token, reinstalling via the UI doesn't help."
         private static string TestBuildPowerShellInstallArgumentsIncludesToken()
         {
-            string argsWithToken = BuildPowerShellInstallArguments("PC-001", "https://server/api/v1/inventory", "real-token-value", false, false, false, @"C:\package", 6);
-            if (!argsWithToken.Contains("-Token 'real-token-value'"))
+            string argsWithToken = BuildPowerShellInstallArguments("PC-001", "https://server/api/v1/inventory", true, false, false, false, @"C:\package", 6);
+            if (!argsWithToken.Contains("-Token $__wilToken"))
             {
-                return "expected -Token 'real-token-value' in the built arguments, got: " + argsWithToken;
+                return "expected -Token $__wilToken in the built arguments, got: " + argsWithToken;
             }
 
-            string argsWithoutToken = BuildPowerShellInstallArguments("PC-001", "https://server/api/v1/inventory", "", false, false, false, @"C:\package", 6);
+            string argsWithoutToken = BuildPowerShellInstallArguments("PC-001", "https://server/api/v1/inventory", false, false, false, false, @"C:\package", 6);
             if (argsWithoutToken.Contains("-Token"))
             {
-                return "expected no -Token when the token is empty, got: " + argsWithoutToken;
+                return "expected no -Token when hasToken is false, got: " + argsWithoutToken;
             }
             return null;
         }
 
         private static string TestBuildPowerShellInstallArgumentsIncludesSoftwareCheckIntervalHours()
         {
-            string args = BuildPowerShellInstallArguments("PC-001", "https://server/api/v1/inventory", "", false, false, false, @"C:\package", 3);
+            string args = BuildPowerShellInstallArguments("PC-001", "https://server/api/v1/inventory", false, false, false, false, @"C:\package", 3);
             if (!args.Contains("-SoftwareCheckIntervalHours 3"))
             {
                 return "expected -SoftwareCheckIntervalHours 3 in the built arguments, got: " + args;
+            }
+            return null;
+        }
+
+        // The real ingestion token must NEVER appear as a literal on the
+        // built command line - it travels over the child process's stdin
+        // pipe instead (see BuildCredentialReaderSnippet), the same way
+        // credentials already do. This is the actual security property the
+        // fix (moving from a literal -Token '<value>' argument to a $__wilToken
+        // variable read via stdin) is for - the two tests above only check
+        // the argument shape, not that a real secret value is absent.
+        private static string TestBuildCredentialReaderSnippetReadsTokenViaStdinNotCommandLine()
+        {
+            string snippetWithToken = BuildCredentialReaderSnippet(false, true);
+            if (!snippetWithToken.Contains("$__wilToken = [Console]::In.ReadLine()"))
+            {
+                return "expected the token to be read from stdin via $__wilToken, got: " + snippetWithToken;
+            }
+
+            string argsWithRealSecret = BuildPowerShellInstallArguments("PC-001", "https://server/api/v1/inventory", true, false, false, false, @"C:\package", 6);
+            if (argsWithRealSecret.Contains("super-secret-token-value"))
+            {
+                return "a real token value should never be able to reach the built command line at all";
+            }
+
+            string snippetWithNeither = BuildCredentialReaderSnippet(false, false);
+            if (snippetWithNeither.Length != 0)
+            {
+                return "expected an empty snippet when neither a credential nor a token is present, got: " + snippetWithNeither;
             }
             return null;
         }
@@ -16421,6 +16635,46 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (IsValidLinuxInstallPath(path))
                 {
                     return "expected path '" + path + "' to be rejected, but IsValidLinuxInstallPath accepted it";
+                }
+            }
+            return null;
+        }
+
+        // Server-side counterpart of WindowsInventoryLiteClient.cs's RunOneJob
+        // path-traversal fix - CreateWindowsUpdate/UpdateWindowsUpdate/
+        // CreateThirdPartySoftware/UpdateThirdPartySoftware all call this
+        // before storing a catalog entry.
+        private static string TestIsValidCatalogRelativePathAcceptsCorrectSubfolderRejectsEverythingElse()
+        {
+            if (!IsValidCatalogRelativePath(@"windows-updates\test.msu", "windows-updates"))
+            {
+                return "expected a real path inside the windows-updates subfolder to be accepted";
+            }
+            if (!IsValidCatalogRelativePath("windows-updates/nested/test.msu", "windows-updates"))
+            {
+                return "expected forward slashes to be accepted the same as backslashes";
+            }
+
+            // A lone "." segment is harmless (Path.GetFullPath collapses it
+            // away without escaping the subfolder) and is deliberately
+            // accepted, exactly like the client's own equivalent check -
+            // only ".." (actual traversal) and an absolute/wrong-subfolder
+            // path are rejected.
+            if (!IsValidCatalogRelativePath(@"windows-updates\.\test.msu", "windows-updates"))
+            {
+                return "expected a harmless '.' segment to still be accepted as long as it stays inside the subfolder";
+            }
+
+            string[] invalid = {
+                null, "", "test.msu", @"third-party-software\setup.exe",
+                @"windows-updates\..\..\etc\evil.exe", @"..\windows-updates\test.msu",
+                @"C:\windows-updates\test.msu"
+            };
+            foreach (string relativePath in invalid)
+            {
+                if (IsValidCatalogRelativePath(relativePath, "windows-updates"))
+                {
+                    return "expected '" + relativePath + "' to be rejected for the windows-updates subfolder, but it was accepted";
                 }
             }
             return null;
