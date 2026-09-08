@@ -2792,6 +2792,8 @@
         byId('generalIngestionRejectionLogRetentionDays').value = data.ingestionRejectionLogRetentionDays || 30;
         byId('generalIngestionRejectionLogMaxEntries').value = data.ingestionRejectionLogMaxEntries || 5000;
         byId('generalInstallLogRetentionDays').value = data.installLogRetentionDays || 30;
+        byId('generalSoftwareJobAttemptLogRetentionDays').value = data.softwareJobAttemptLogRetentionDays || 90;
+        byId('generalSoftwareJobAttemptLogMaxEntries').value = data.softwareJobAttemptLogMaxEntries || 5000;
         byId('generalPort').value = data.port || 8080;
         byId('generalEnableHttp').checked = data.enableHttp !== false;
         byId('generalHttpsPort').value = data.httpsPort || 8443;
@@ -2904,6 +2906,8 @@
     const ingestionRejectionLogRetentionDays = Number.parseInt(byId('generalIngestionRejectionLogRetentionDays').value, 10) || 30;
     const ingestionRejectionLogMaxEntries = Number.parseInt(byId('generalIngestionRejectionLogMaxEntries').value, 10) || 5000;
     const installLogRetentionDays = Number.parseInt(byId('generalInstallLogRetentionDays').value, 10) || 30;
+    const softwareJobAttemptLogRetentionDays = Number.parseInt(byId('generalSoftwareJobAttemptLogRetentionDays').value, 10) || 90;
+    const softwareJobAttemptLogMaxEntries = Number.parseInt(byId('generalSoftwareJobAttemptLogMaxEntries').value, 10) || 5000;
     const port = Number.parseInt(byId('generalPort').value, 10) || 8080;
     const enableHttp = byId('generalEnableHttp').checked;
     const httpsPort = Number.parseInt(byId('generalHttpsPort').value, 10) || 8443;
@@ -2945,7 +2949,7 @@
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        staleHours, showUsbStorageIndicator, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, hstsEnabled, hstsMaxAgeHours, ingestionRejectionLogRetentionDays, ingestionRejectionLogMaxEntries, requireIngestionToken,
+        staleHours, showUsbStorageIndicator, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, hstsEnabled, hstsMaxAgeHours, ingestionRejectionLogRetentionDays, ingestionRejectionLogMaxEntries, softwareJobAttemptLogRetentionDays, softwareJobAttemptLogMaxEntries, requireIngestionToken,
         acknowledgeRisks: !!acknowledgeRisks, acknowledgeIngestionTokenRisk: !!acknowledgeIngestionTokenRisk,
         debugLogEnabled: byId('generalDebugLogEnabled').checked
       })

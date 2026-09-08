@@ -126,12 +126,7 @@
                 Stale threshold (hours)
                 <input id="generalStaleHours" type="number" min="1" max="8760" value="48">
               </label>
-              <label class="pkg-token-field">
-                Client action log retention (days)
-                <input id="generalInstallLogRetentionDays" type="number" min="1" max="3650" value="30">
-              </label>
             </div>
-            <p class="cert-hint">How long Client actions/Client updates push job logs (Deploy &gt; Actions) are kept before being cleaned up automatically.</p>
             <div class="pkg-grid general-grid">
               <label class="check-label">
                 <input id="generalShowUsbStorageIndicator" type="checkbox" checked>
@@ -194,16 +189,34 @@
               <button id="ingestionTokenRegenerateButton" class="danger-button" type="button">Regenerate</button>
             </div>
             <div id="ingestionTokenMessage" class="pkg-message hidden"></div>
+          </div>
+          <div class="settings-block">
+            <h2 class="settings-block-title">Log retention</h2>
             <div class="pkg-grid general-grid">
               <label class="pkg-token-field">
-                Rejection log retention (days)
+                Client action log retention (days)
+                <input id="generalInstallLogRetentionDays" type="number" min="1" max="3650" value="30">
+              </label>
+              <label class="pkg-token-field">
+                Ingestion rejection log retention (days)
                 <input id="generalIngestionRejectionLogRetentionDays" type="number" min="1" max="3650" value="30">
               </label>
               <label class="pkg-token-field">
-                Rejection log max entries
-                <input id="generalIngestionRejectionLogMaxEntries" type="number" min="100" max="100000" value="5000">
+                Software job log retention (days)
+                <input id="generalSoftwareJobAttemptLogRetentionDays" type="number" min="1" max="3650" value="90">
               </label>
             </div>
+            <div class="pkg-grid general-grid">
+              <label class="pkg-token-field">
+                Ingestion rejection log max entries
+                <input id="generalIngestionRejectionLogMaxEntries" type="number" min="100" max="100000" value="5000">
+              </label>
+              <label class="pkg-token-field">
+                Software job log max entries
+                <input id="generalSoftwareJobAttemptLogMaxEntries" type="number" min="100" max="100000" value="5000">
+              </label>
+            </div>
+            <p class="cert-hint">How long each Logging tab's history (Installs / Ingestion / Software) is kept before being cleaned up automatically.</p>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Diagnostics</h2>
