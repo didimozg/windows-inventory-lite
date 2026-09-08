@@ -14,6 +14,17 @@ param(
     [ValidateRange(1, 24)]
     [int]$IntervalHours = 6,
 
+    # How often the deployed client polls for assigned software-distribution
+    # jobs (Windows Updates / Third-Party Software catalogs) - independent
+    # of -IntervalHours. Default matches Deploy-ClientGpo.ps1's own default,
+    # which this script's generated .cmd otherwise had no way to override:
+    # every GPO package built here silently used 6 regardless of what an
+    # admin configured elsewhere (the WinRM push path already exposes this
+    # via Install-ClientWinRM.ps1/the wizard).
+    [Parameter()]
+    [ValidateRange(1, 24)]
+    [int]$SoftwareCheckIntervalHours = 6,
+
     [Parameter()]
     [ValidateNotNullOrEmpty()]
     [string]$OutputPath,
@@ -114,10 +125,11 @@ $lines = @(
     ('set PACKAGE_ROOT={0}' -f $escapedPackageSharePath),
     ('set SERVER_URL={0}' -f $escapedServerUrl),
     ('set INTERVAL_HOURS={0}' -f $IntervalHours),
+    ('set SOFTWARE_CHECK_INTERVAL_HOURS={0}' -f $SoftwareCheckIntervalHours),
     'set DEPLOY_SCRIPT=%PACKAGE_ROOT%\Deploy-ClientGpo.ps1',
     'set WAIT_SECONDS=90',
     '',
-    'set ARGS=-ServerUrl "%SERVER_URL%" -IntervalHours %INTERVAL_HOURS%'
+    'set ARGS=-ServerUrl "%SERVER_URL%" -IntervalHours %INTERVAL_HOURS% -SoftwareCheckIntervalHours %SOFTWARE_CHECK_INTERVAL_HOURS%'
 )
 
 if ($Token) {

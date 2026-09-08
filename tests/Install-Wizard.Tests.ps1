@@ -62,6 +62,59 @@ Describe 'Windows Inventory Lite Install Wizard' {
         $params['ComputerName'] | Should -Be @('PC1', 'PC2', 'PC3')
     }
 
+    # Install-ClientWinRM.ps1 supports -SoftwareCheckIntervalHours (the
+    # software-distribution job poll interval, independent of
+    # -IntervalHours), but this flow had no question for it at all - every
+    # WinRM push silently used the target script's own default regardless of
+    # what an admin wanted.
+    It 'Deploy client to remote machines (WinRM) flow threads a non-default SoftwareCheckIntervalHours answer through' {
+        Mock Read-WizardAnswer {
+            param($Prompt, $Default, [switch]$Mandatory, [switch]$Secure)
+            if ($Prompt -like 'Target computer names*') { return 'PC1' }
+            if ($Prompt -like 'Server URL*') { return 'https://example.local/api/v1/inventory' }
+            if ($Prompt -like 'Software-distribution job poll interval*') { return '3' }
+            return $null
+        }
+
+        $params = Read-WizardAnswers -Questions $installClientWinRMQuestions
+        $params['SoftwareCheckIntervalHours'] | Should -Be 3
+    }
+
+    # Install-ClientWinRM.ps1 declares -CredentialPassword as
+    # [System.Security.SecureString] (unlike -Token, which is [string] on
+    # the same script) and $params is splatted directly at it - a plain
+    # [string] value throws ParameterBindingValidationException at
+    # invocation time. Blank/default answers never reach this path (they
+    # short-circuit before $params[$question.Name] is even set), which is
+    # exactly why this bug went unnoticed until a real credential password
+    # was typed in this specific flow.
+    It 'Deploy client to remote machines (WinRM) flow binds CredentialPassword as a real SecureString, not a string' {
+        Mock Read-WizardAnswer {
+            param($Prompt, $Default, [switch]$Mandatory, [switch]$Secure)
+            if ($Prompt -like 'Target computer names*') { return 'PC1' }
+            if ($Prompt -like 'Server URL*') { return 'https://example.local/api/v1/inventory' }
+            if ($Prompt -like 'Inventory ingestion token*') { return 'a-real-token' }
+            if ($Prompt -like 'Credential password*') { return 'p@ssw0rd' }
+            return $null
+        }
+
+        $params = Read-WizardAnswers -Questions $installClientWinRMQuestions
+        $params['CredentialPassword'] | Should -BeOfType [System.Security.SecureString]
+
+        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($params['CredentialPassword'])
+        try {
+            [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr) | Should -Be 'p@ssw0rd'
+        }
+        finally {
+            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
+
+        # -Token is [string] on this same target script (Install-ClientWinRM.ps1) -
+        # confirms the fix is scoped to CredentialPassword only, not applied
+        # blanket to every SecureString-typed question.
+        $params['Token'] | Should -BeOfType [string]
+    }
+
     It 'Uninstall server flow passes RemoveData when confirmed' {
         Mock Read-WizardAnswer { return 'y' }
 
@@ -85,6 +138,21 @@ Describe 'Windows Inventory Lite Install Wizard' {
 
         $params = Read-WizardAnswers -Questions $uninstallClientWinRMQuestions
         $params['ComputerName'] | Should -Be @('TESTPC')
+    }
+
+    # Same fix as the install-side WinRM test above, applied to
+    # Uninstall-ClientWinRM.ps1's own -CredentialPassword parameter, also
+    # declared [System.Security.SecureString].
+    It 'Uninstall client (remote, WinRM) flow binds CredentialPassword as a real SecureString, not a string' {
+        Mock Read-WizardAnswer {
+            param($Prompt, $Default, [switch]$Mandatory, [switch]$Secure)
+            if ($Prompt -like 'Target computer names*') { return 'TESTPC' }
+            if ($Prompt -like 'Credential password*') { return 'p@ssw0rd' }
+            return $null
+        }
+
+        $params = Read-WizardAnswers -Questions $uninstallClientWinRMQuestions
+        $params['CredentialPassword'] | Should -BeOfType [System.Security.SecureString]
     }
 
     It 'Format-WizardCommand never prints a secret value in cleartext' {

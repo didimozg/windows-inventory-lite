@@ -174,7 +174,18 @@ function Get-ExeVersion {
     }
 
     try {
-        return ((& $Path --version 2>&1 | Select-Object -First 1) -as [string]).Trim()
+        # 2>$null, not 2>&1: $ErrorActionPreference = 'Stop' (set script-wide,
+        # above) plus 2>&1 is the exact combination Install-ClientDebianSSH.ps1
+        # documents turning harmless native-command stderr text into a
+        # terminating error on some PowerShell engine versions (see
+        # Invoke-NativeAllowingStderr there). Get-ExeVersion only needs
+        # stdout - if this ever silently returned $null instead of the real
+        # version, $packageVersion would never equal $installedVersion,
+        # forcing $needsInstall = $true on every run. Discarding stderr
+        # entirely removes that risk outright, which is simpler than routing
+        # through Invoke-NativeAllowingStderr (that helper exists for a case
+        # that DOES need the stderr text).
+        return ((& $Path --version 2>$null | Select-Object -First 1) -as [string]).Trim()
     }
     catch {
         return $null

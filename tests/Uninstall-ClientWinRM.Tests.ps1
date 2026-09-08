@@ -55,4 +55,21 @@ Describe 'Windows Inventory Lite Uninstall-ClientWinRM safety guard' {
         $traversalPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\..\..\Windows'
         { & $script:RemoveClientScriptBlock -ServiceName 'nonexistent-service-for-test' -ClientInstallPath $traversalPath } | Should -Throw '*is not a real subdirectory of*'
     }
+
+    # Add-TargetToTrustedHosts/Remove-TargetFromTrustedHosts mutate the real
+    # WSMan:\localhost\Client\TrustedHosts on whatever machine runs this test
+    # (no per-test-sandboxable equivalent exists), so only the pure,
+    # side-effect-free validation this fix added is covered here - same
+    # reasoning as Install-ClientWinRM.Tests.ps1's equivalent test.
+    It 'Test-ValidTrustedHostsEntry accepts a plain hostname or IPv4 literal' {
+        Test-ValidTrustedHostsEntry -TargetComputer 'PC-001' | Should -Be $true
+        Test-ValidTrustedHostsEntry -TargetComputer '192.168.1.10' | Should -Be $true
+    }
+
+    It 'Test-ValidTrustedHostsEntry rejects a comma, wildcard, whitespace, or empty value' {
+        $invalid = @('PC-001,*', 'good,evil', '*', 'PC?', 'PC 001', '', $null)
+        foreach ($value in $invalid) {
+            Test-ValidTrustedHostsEntry -TargetComputer $value | Should -Be $false
+        }
+    }
 }

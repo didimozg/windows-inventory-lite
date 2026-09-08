@@ -579,6 +579,25 @@ if (-not $LinuxClientPackagePath) {
     }
 }
 
+# Validated HERE, immediately after every one of these six is fully
+# resolved (explicit parameter, saved config, or default) and before ANY
+# destructive step below (legacy/existing service stop+delete, overwriting
+# the previous install's exe/dashboard/WinRM+SSH scripts via Copy-Item).
+# This used to be validated only much later, right before building the
+# sc.exe binPath string - meaning a shell-unsafe value reached here only
+# after the old service was already deleted and the old install already
+# overwritten, so the thrown error left a half-installed, non-functional
+# server with no way back except a fresh install with a corrected value.
+# None of these six variables are reassigned anywhere between this point
+# and the destructive block, so validating this early guards the exact
+# values that block will actually use.
+Test-BatchSafeValue -Value $DataPath -FieldName 'DataPath'
+Test-BatchSafeValue -Value $ContentPath -FieldName 'ContentPath'
+Test-BatchSafeValue -Value $ClientPackagePath -FieldName 'ClientPackagePath'
+Test-BatchSafeValue -Value $LinuxClientPackagePath -FieldName 'LinuxClientPackagePath'
+Test-BatchSafeValue -Value $ConfigPath -FieldName 'ConfigPath'
+Test-BatchSafeValue -Value $InstallPath -FieldName 'InstallPath'
+
 if (-not $LinuxClientBinarySourcePath) {
     $projectRoot = Split-Path -Parent $PSScriptRoot
     $defaultLinuxClientBinarySourcePath = Join-Path -Path $projectRoot -ChildPath 'build\wil-linux-client'
@@ -1093,18 +1112,15 @@ function Set-RestrictedFileAcl {
 # silently revert to whatever port was set at install time. The server reads
 # ListenPrefix/HttpsPort/EnableHttp from --config on every startup instead,
 # same as WebUsername, UseHttps, and the other dashboard-only settings.
-# Validated HERE, not at the top of the script: every one of these paths can be
-# reassigned from the saved server-config.json between the top of the script and
-# this point (see the "if (-not $DataPath)" blocks and friends above), so
-# validating on entry would guard values that no longer exist by the time they
-# are interpolated into the sc.exe binPath below. $LinuxClientPackagePath was
-# never on this list at all.
-Test-BatchSafeValue -Value $DataPath -FieldName 'DataPath'
-Test-BatchSafeValue -Value $ContentPath -FieldName 'ContentPath'
-Test-BatchSafeValue -Value $ClientPackagePath -FieldName 'ClientPackagePath'
-Test-BatchSafeValue -Value $LinuxClientPackagePath -FieldName 'LinuxClientPackagePath'
-Test-BatchSafeValue -Value $ConfigPath -FieldName 'ConfigPath'
-Test-BatchSafeValue -Value $InstallPath -FieldName 'InstallPath'
+# DataPath/ContentPath/ClientPackagePath/LinuxClientPackagePath/ConfigPath/
+# InstallPath are already validated well above, right after each is fully
+# resolved and before the destructive service-delete/Copy-Item block - see
+# that comment for why validating this late used to leave a half-installed
+# server on a bad value. WinRmInstallerPath/WinRmUninstallerPath/
+# LinuxSshInstallerPath/LinuxSshUninstallerPath are validated here because
+# they do not exist as variables until just above (each is InstallPath, an
+# already-validated safe path, plus a hardcoded literal filename) - still
+# checked explicitly rather than relying on that reasoning silently holding.
 Test-BatchSafeValue -Value $winRmInstallerPath -FieldName 'WinRmInstallerPath'
 Test-BatchSafeValue -Value $winRmUninstallerPath -FieldName 'WinRmUninstallerPath'
 Test-BatchSafeValue -Value $linuxSshInstallerPath -FieldName 'LinuxSshInstallerPath'

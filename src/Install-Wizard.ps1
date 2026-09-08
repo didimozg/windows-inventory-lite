@@ -114,6 +114,26 @@ function Read-WizardAnswers {
             continue
         }
 
+        # Type = 'SecureString' only ever meant "prompt with hidden input" -
+        # every target script parameter it feeds (Install-Server.ps1's
+        # -WebPassword/-Token/..., Install-Client.ps1's -Token,
+        # Install-ClientWinRM.ps1's -Token) is itself declared [string], so
+        # the plain-text $answer from above is correct for them as-is.
+        # -CredentialPassword on Install-ClientWinRM.ps1/
+        # Uninstall-ClientWinRM.ps1 is the one exception: it is declared
+        # [System.Security.SecureString] there, and $params is splatted
+        # directly at that script - a plain [string] is rejected outright
+        # with a ParameterBindingValidationException, since PowerShell has no
+        # implicit string-to-SecureString conversion. This previously broke
+        # every WinRM flow (menu options 3 and 6) the moment a real
+        # credential password was typed - blank/default answers never hit it,
+        # since they short-circuit via the check above and never reach here.
+        # BindAsSecureString marks just those two question definitions below.
+        if ($question.Type -eq 'SecureString' -and $question['BindAsSecureString']) {
+            $params[$question.Name] = ConvertTo-SecureString -String $answer -AsPlainText -Force
+            continue
+        }
+
         $params[$question.Name] = switch ($question.Type) {
             'StringArray' { @($answer -split ',\s*') }
             default { $answer }
@@ -576,8 +596,9 @@ $installClientWinRMQuestions = @(
     @{ Name = 'ServerUrl'; Prompt = 'Server URL (e.g. https://server.domain.local/api/v1/inventory)'; Type = 'String'; Mandatory = $true }
     @{ Name = 'Token'; Prompt = 'Inventory ingestion token (leave blank if the server has none configured)'; Type = 'SecureString'; Mandatory = $false }
     @{ Name = 'IntervalHours'; Prompt = 'Collection interval in hours'; Type = 'Int'; Default = '6'; Mandatory = $false }
+    @{ Name = 'SoftwareCheckIntervalHours'; Prompt = 'Software-distribution job poll interval in hours'; Type = 'Int'; Default = '6'; Mandatory = $false }
     @{ Name = 'CredentialUsername'; Prompt = 'Credential username (leave blank to use current user context)'; Type = 'String'; Mandatory = $false }
-    @{ Name = 'CredentialPassword'; Prompt = 'Credential password (leave blank to use current user context)'; Type = 'SecureString'; Mandatory = $false }
+    @{ Name = 'CredentialPassword'; Prompt = 'Credential password (leave blank to use current user context)'; Type = 'SecureString'; Mandatory = $false; BindAsSecureString = $true }
     @{ Name = 'AddToTrustedHosts'; Prompt = 'Add target computers to WinRM TrustedHosts (needed for non-domain-joined or workgroup targets)'; Type = 'Switch' }
     @{ Name = 'Force'; Prompt = 'Overwrite an already-installed client on the target machines'; Type = 'Switch' }
 )
@@ -593,7 +614,7 @@ $uninstallClientQuestions = @(
 $uninstallClientWinRMQuestions = @(
     @{ Name = 'ComputerName'; Prompt = 'Target computer names (comma-separated)'; Type = 'StringArray'; Mandatory = $true }
     @{ Name = 'CredentialUsername'; Prompt = 'Credential username (leave blank to use current user context)'; Type = 'String'; Mandatory = $false }
-    @{ Name = 'CredentialPassword'; Prompt = 'Credential password (leave blank to use current user context)'; Type = 'SecureString'; Mandatory = $false }
+    @{ Name = 'CredentialPassword'; Prompt = 'Credential password (leave blank to use current user context)'; Type = 'SecureString'; Mandatory = $false; BindAsSecureString = $true }
     @{ Name = 'AddToTrustedHosts'; Prompt = 'Add target computers to WinRM TrustedHosts (needed for non-domain-joined or workgroup targets)'; Type = 'Switch' }
 )
 

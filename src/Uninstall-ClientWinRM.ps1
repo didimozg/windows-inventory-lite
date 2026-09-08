@@ -81,8 +81,31 @@ function New-InventorySession {
     return New-PSSession -ComputerName $TargetComputer
 }
 
+# TrustedHosts is itself a comma-delimited list, and WSMan treats * and ? as
+# wildcards - a $TargetComputer containing any of these could inject an
+# unintended additional entry (including a bare * that trusts every host
+# WinRM will ever connect to from this machine) instead of being added as
+# the single literal hostname/IP this function assumes. $TargetComputer is
+# already computer-name-shaped by the time a server-driven push reaches
+# here, but this script can also run standalone with an operator-typed
+# -ComputerName, so it is validated again here rather than trusted blindly.
+function Test-ValidTrustedHostsEntry {
+    param([string]$TargetComputer)
+    return [bool]($TargetComputer -and ($TargetComputer -notmatch '[,*?\s]'))
+}
+
+# Returns $true only when this call actually added a new entry - the
+# caller uses that to know which entries it is responsible for removing
+# again once this run's work is done (Remove-TargetFromTrustedHosts below).
+# An entry that was already present (including a pre-existing "*") is left
+# alone entirely, both here and on removal - this function only ever
+# manages entries it itself created.
 function Add-TargetToTrustedHosts {
     param([string]$TargetComputer)
+
+    if (-not (Test-ValidTrustedHostsEntry -TargetComputer $TargetComputer)) {
+        throw "TargetComputer '$TargetComputer' contains a character not allowed in a WinRM TrustedHosts entry (comma, wildcard, or whitespace)."
+    }
 
     $current = ''
     try {
@@ -94,7 +117,7 @@ function Add-TargetToTrustedHosts {
     }
 
     if ($current -eq '*') {
-        return
+        return $false
     }
 
     $items = @()
@@ -104,11 +127,39 @@ function Add-TargetToTrustedHosts {
 
     foreach ($item in $items) {
         if ($item -ieq $TargetComputer) {
-            return
+            return $false
         }
     }
 
     $items += $TargetComputer
+    Set-Item -LiteralPath WSMan:\localhost\Client\TrustedHosts -Value ($items -join ',') -Force | Out-Null
+    return $true
+}
+
+# Undoes exactly one prior Add-TargetToTrustedHosts call for the same
+# TargetComputer - called only for entries this script's own run added
+# (see the $addedTrustedHosts tracking below), never for whatever was
+# already configured before this run started. Trusting a WinRM target is a
+# standing widening of this machine's attack surface (no mutual auth the
+# way domain/Kerberos targets get), so it should not outlive the single
+# uninstall operation that needed it.
+function Remove-TargetFromTrustedHosts {
+    param([string]$TargetComputer)
+
+    $current = ''
+    try {
+        $item = Get-Item -LiteralPath WSMan:\localhost\Client\TrustedHosts -ErrorAction Stop
+        $current = [string]$item.Value
+    }
+    catch {
+        return
+    }
+
+    if (-not $current -or $current -eq '*') {
+        return
+    }
+
+    $items = @($current.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -ine $TargetComputer })
     Set-Item -LiteralPath WSMan:\localhost\Client\TrustedHosts -Value ($items -join ',') -Force | Out-Null
 }
 
@@ -215,13 +266,21 @@ $script:RemoveClientScriptBlock = {
 # attempting a real WinRM connection - same technique used in
 # src\Install-Client.ps1 and deploy\client\Deploy-ClientGpo.ps1.
 if ($MyInvocation.InvocationName -ne '.') {
+    # Entries this run itself adds to TrustedHosts - removed again once every
+    # target has been attempted (see the cleanup after the loop below), so
+    # trusting a workgroup/non-domain target does not outlive this one
+    # uninstall. Never includes anything already configured before this run.
+    $addedTrustedHosts = @()
+
     foreach ($computer in $ComputerName) {
         $session = $null
         try {
             Write-Host "Connecting: $computer"
             if ($AddToTrustedHosts -or ($Credential -and (Test-IpAddress -Value $computer))) {
                 Write-Host "Adding TrustedHosts entry: $computer"
-                Add-TargetToTrustedHosts -TargetComputer $computer
+                if (Add-TargetToTrustedHosts -TargetComputer $computer) {
+                    $addedTrustedHosts += $computer
+                }
             }
 
             $session = New-InventorySession -TargetComputer $computer
@@ -247,6 +306,10 @@ if ($MyInvocation.InvocationName -ne '.') {
                 Remove-PSSession -Session $session
             }
         }
+    }
+
+    foreach ($addedTarget in $addedTrustedHosts) {
+        Remove-TargetFromTrustedHosts -TargetComputer $addedTarget
     }
 
     if ($hadFailure) {

@@ -43,6 +43,27 @@ Describe 'Windows Inventory Lite Deploy-ClientGpo client-data layout' {
         $legacyCommand | Should -Not -Be $newCommand
     }
 
+    # Get-ExeVersion switched from 2>&1 to 2>$null: $ErrorActionPreference =
+    # 'Stop' (set script-wide in Deploy-ClientGpo.ps1) combined with 2>&1 is
+    # documented elsewhere in this project (Install-ClientDebianSSH.ps1's
+    # Invoke-NativeAllowingStderr) as turning harmless native-command stderr
+    # text into a terminating error on some PowerShell engine versions - a
+    # returned $null here would make $packageVersion never equal
+    # $installedVersion, forcing a reinstall on every run. This fixture
+    # proves the fix: a real version on stdout plus a harmless stderr banner,
+    # clean exit code, and Get-ExeVersion still returns the real version.
+    It 'Get-ExeVersion returns the real version even when the target also writes harmless text to stderr' {
+        $fixturePath = Join-Path -Path $TestDrive -ChildPath 'fake-client-with-stderr-noise.cmd'
+        Set-Content -LiteralPath $fixturePath -Value @(
+            '@echo off'
+            'echo 1.2.3-test'
+            'echo harmless stderr banner from a hypothetical AV/EDR hook 1>&2'
+            'exit /b 0'
+        )
+
+        Get-ExeVersion -Path $fixturePath | Should -Be '1.2.3-test'
+    }
+
     It 'Get-ServiceEnvironmentToken returns an empty string when no Environment value is set' {
         $registryRoot = 'TestRegistry:\Services'
         $serviceName = 'FakeServiceNoToken'

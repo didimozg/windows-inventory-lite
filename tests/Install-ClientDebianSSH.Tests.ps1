@@ -364,6 +364,39 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
             $env = New-SystemdEnvFile -Directory $dir -SharedToken 'secret-token'
             (Get-Content -LiteralPath $env.EnvPath -Raw).TrimEnd("`n") | Should -Be 'WIL_INGESTION_TOKEN=secret-token'
         }
+
+        # This file holds the ingestion token in plaintext on the LOCAL
+        # machine running this script - same class of secret as the plink
+        # -pwfile Invoke-PlinkWithPasswordFile already restricts, and this
+        # fix applies that identical ACL treatment here (protect + grant
+        # FullControl to only the current user, instead of inheriting
+        # whatever $Directory's own ACL happens to be).
+        It 'restricts the env file to only the current user, protected from inheritance' {
+            $dir = Join-Path -Path $TestDrive -ChildPath 'env-file-acl'
+            New-Item -Path $dir -ItemType Directory -Force | Out-Null
+            $env = New-SystemdEnvFile -Directory $dir -SharedToken 'secret-token'
+
+            $acl = Get-Acl -LiteralPath $env.EnvPath
+            $acl.AreAccessRulesProtected | Should -BeTrue
+            $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+            $identities = $acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]) }
+            $identities | Should -Contain $currentUser
+        }
+
+        # Install-ClientDebianSSHInstallTarget's finally block calls
+        # Clear-TempPasswordFile on this specific file before the staging
+        # directory's blanket recursive cleanup - proven directly here since
+        # exercising that through the full install flow would need a real
+        # or heavily mocked SSH connection.
+        It 'the env file is a valid target for the same secure-delete Clear-TempPasswordFile already gives the plink password file' {
+            $dir = Join-Path -Path $TestDrive -ChildPath 'env-file-delete'
+            New-Item -Path $dir -ItemType Directory -Force | Out-Null
+            $env = New-SystemdEnvFile -Directory $dir -SharedToken 'secret-token'
+
+            Clear-TempPasswordFile -Path $env.EnvPath
+
+            Test-Path -LiteralPath $env.EnvPath | Should -BeFalse
+        }
     }
 
     Context 'Format-SshKeyscanFailureMessage' {

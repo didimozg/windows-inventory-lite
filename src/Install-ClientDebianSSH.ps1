@@ -251,8 +251,15 @@ WantedBy=timers.target
 # Writes the mode-600 counterpart to the unit files' EnvironmentFile= line.
 # The 600 mode is applied on the TARGET host by the install command chain -
 # this only stages the content locally. Must stay byte-for-byte in sync with
-# GenerateSystemdEnvFileLines (WindowsInventoryLiteServer.cs). Pure function
-# of its parameters apart from the file write, same as its siblings above.
+# GenerateSystemdEnvFileLines (WindowsInventoryLiteServer.cs).
+# This file holds the ingestion token in plaintext on the LOCAL machine
+# running this script, same class of secret as the plink -pwfile
+# Invoke-PlinkWithPasswordFile restricts - so it gets the identical
+# ACL-before-content treatment here (protect + grant FullControl to only
+# the current user), rather than sitting at whatever ACL $Directory
+# happens to inherit. The caller is responsible for the matching secure
+# delete once this file is no longer needed (Clear-TempPasswordFile, the
+# same helper the plink password file already uses).
 function New-SystemdEnvFile {
     param(
         [string]$Directory,
@@ -262,6 +269,14 @@ function New-SystemdEnvFile {
     Test-PosixShellSafe -Value $SharedToken -FieldName 'Token'
 
     $envPath = Join-Path -Path $Directory -ChildPath 'wil-linux-client.env'
+    New-Item -Path $envPath -ItemType File -Force | Out-Null
+    $acl = Get-Acl -LiteralPath $envPath
+    $acl.SetAccessRuleProtection($true, $false)
+    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($currentUser, 'FullControl', 'Allow')
+    $acl.AddAccessRule($rule)
+    Set-Acl -LiteralPath $envPath -AclObject $acl
+
     [System.IO.File]::WriteAllText($envPath, "WIL_INGESTION_TOKEN=$SharedToken`n", (New-Object System.Text.UTF8Encoding($false)))
     return @{ EnvPath = $envPath }
 }
@@ -706,12 +721,18 @@ if ($MyInvocation.InvocationName -ne '.') {
     $hadFailure = $false
     $stagingDir = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ([System.Guid]::NewGuid().ToString())
     New-Item -Path $stagingDir -ItemType Directory -Force | Out-Null
+    # Declared here, not inside the try block below: under Set-StrictMode
+    # -Version 2.0 (set script-wide), the finally block's own `if
+    # ($envFile)` check would itself throw VariableNotFoundStrict - masking
+    # whatever real error triggered the finally in the first place - if an
+    # exception happened to strike before the try block's own assignment to
+    # $envFile was reached.
+    $envFile = $null
     try {
         $units = New-SystemdUnitFiles -Directory $stagingDir -InstallDirectory $InstallPath -Url $ServerUrl -SharedToken $Token -Hours $IntervalHours
         $statusUrl = $ServerUrl.TrimEnd('/') + '/service-status'
         $statusUnits = New-SystemdStatusUnitFiles -Directory $stagingDir -InstallDirectory $InstallPath -Url $statusUrl -SharedToken $Token -Minutes $StatusIntervalMinutes
 
-        $envFile = $null
         if ($Token) {
             $envFile = New-SystemdEnvFile -Directory $stagingDir -SharedToken $Token
         }
@@ -801,6 +822,16 @@ if ($MyInvocation.InvocationName -ne '.') {
         }
     }
     finally {
+        # Same overwrite-then-delete treatment as the plink password file
+        # (Clear-TempPasswordFile) - the ingestion token in this specific
+        # file is the only genuinely sensitive content anywhere in
+        # $stagingDir (the systemd unit files never embed it, by design),
+        # so it alone gets the loud-on-failure secure delete before the
+        # blanket recursive cleanup below silently sweeps up everything
+        # else.
+        if ($envFile) {
+            Clear-TempPasswordFile -Path $envFile.EnvPath
+        }
         Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
