@@ -42,7 +42,6 @@
         <div id="softwareDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
           <button id="windowsUpdatesTab" class="topnav-dropdown-item" type="button" role="menuitem">Windows updates</button>
           <button id="thirdPartySoftwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Third-party software</button>
-          <button id="softwareJobHistoryTab" class="topnav-dropdown-item" type="button" role="menuitem">Attempt history</button>
         </div>
       </div>
       <button id="deployTab" class="topnav-item" type="button">Install <span id="updatesBadge" class="nav-badge hidden">0</span><span id="linuxUpdatesBadge" class="nav-badge hidden">0</span></button>
@@ -750,19 +749,14 @@
           </div>
         </section>
 
-        <section id="softwareJobHistoryView" class="hidden" aria-label="Software job attempt history">
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr><th>Time</th><th>Computer</th><th>Type</th><th>Entry</th><th>Result</th><th>Exit code</th><th>Error</th></tr>
-              </thead>
-              <tbody id="softwareJobHistoryBody"></tbody>
-            </table>
-          </div>
-        </section>
+        <div id="loggingSubtabs" class="subtab-strip hidden" role="tablist" aria-label="Logging sections">
+          <button id="loggingSubtabIngestion" class="subtab-item" role="tab" type="button">Ingestion</button>
+          <button id="loggingSubtabInstalls" class="subtab-item" role="tab" type="button">Installs</button>
+          <button id="loggingSubtabSoftware" class="subtab-item" role="tab" type="button">Software</button>
+        </div>
 
         <section id="loggingView" class="hidden" aria-label="Ingestion rejection log">
-          <p class="cert-hint">Requests to the inventory-ingestion endpoints rejected for a missing or wrong token. Correlated to a known client by source IP when that IP matches the client's most recent successful report - a best-effort heuristic, not a guarantee (see Settings &gt; Server &gt; Ingestion Token for retention settings).</p>
+          <p class="cert-hint">Requests to the inventory-ingestion endpoints rejected for a missing or wrong token. Correlated to a known client by source IP when that IP matches the client's most recent successful report - a best-effort heuristic, not a guarantee (see Settings &gt; Server &gt; Log retention for retention settings).</p>
           <div class="table-wrap">
             <table>
               <thead>
@@ -779,6 +773,21 @@
             </table>
           </div>
           <div id="ingestionRejectionsPager" class="pager"></div>
+        </section>
+
+        <section id="installHistoryView" class="install-panel card-glow hidden" aria-label="Saved client action logs">
+          <div id="installHistory" class="install-history empty">No saved client action logs.</div>
+        </section>
+
+        <section id="softwareJobHistoryView" class="hidden" aria-label="Software job attempt history">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Time</th><th>Computer</th><th>Type</th><th>Entry</th><th>Result</th><th>Exit code</th><th>Error</th></tr>
+              </thead>
+              <tbody id="softwareJobHistoryBody"></tbody>
+            </table>
+          </div>
         </section>
 
         <section id="linuxServicesView" class="hidden" aria-label="Linux services inventory">
@@ -1097,10 +1106,6 @@
             </div>
           </div>
           <div id="installStatus" class="install-status empty">No install job started.</div>
-        </section>
-
-        <section id="installHistoryView" class="install-panel card-glow hidden" aria-label="Saved client action logs">
-          <div id="installHistory" class="install-history empty">No saved client action logs.</div>
         </section>
 
         <section id="clientsView" aria-label="Client inventory">
