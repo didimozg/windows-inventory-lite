@@ -18,7 +18,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLiteClient";
-        internal const string ProductVersion = "0.4.0";
+        internal const string ProductVersion = "0.4.1";
 
         private static int Main(string[] args)
         {
@@ -763,6 +763,20 @@ namespace WindowsInventoryLite
                 {
                     options.DebugLogPath = args[++i];
                 }
+            }
+
+            // A service's WIL_INGESTION_TOKEN environment variable (set via the
+            // HKLM\SYSTEM\...\Services\<name>\Environment registry value, which
+            // the SCM injects at process start) takes priority over --token.
+            // This mirrors the Linux client's ResolveIngestionToken (main.go) -
+            // both keep the token off the process command line, which is
+            // readable by any authenticated local user via `sc qc`/Win32_Service
+            // on Windows or /proc/<pid>/cmdline on Linux. --token still works
+            // for a standalone/manual run with no service environment.
+            string environmentToken = Environment.GetEnvironmentVariable("WIL_INGESTION_TOKEN");
+            if (!String.IsNullOrEmpty(environmentToken))
+            {
+                options.Token = environmentToken;
             }
 
             return options;

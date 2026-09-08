@@ -168,22 +168,61 @@ function Get-ClientServiceCommand {
         [int]$Hours,
         [int]$SoftwareHours = 6,
         [string]$SharePath,
-        [string]$SharedToken,
         [string]$OutputDirectory,
         [string]$DebugLogPath
     )
 
+    # The ingestion token is deliberately NOT accepted as a parameter here: it
+    # goes into the service's registry Environment value (see
+    # Set-ServiceEnvironmentToken) instead of this command line. A binPath=
+    # argument ends up in HKLM\SYSTEM\CurrentControlSet\Services\<name>\ImagePath,
+    # which `sc qc <name>` / Win32_Service.PathName expose to any authenticated
+    # local user - the same class of exposure the Linux client's EnvironmentFile
+    # switch (New-SystemdEnvFile, Install-ClientDebianSSH.ps1) already avoids.
     $command = '"' + (ConvertTo-ServiceArgValue $ServicePath) + '" --server-url "' + (ConvertTo-ServiceArgValue $Url) + '" --interval-hours ' + $Hours + ' --software-check-interval-hours ' + $SoftwareHours
     if ($SharePath) {
         $command += ' --share "' + (ConvertTo-ServiceArgValue $SharePath) + '"'
-    }
-    if ($SharedToken) {
-        $command += ' --token "' + (ConvertTo-ServiceArgValue $SharedToken) + '"'
     }
     $command += ' --output "' + (ConvertTo-ServiceArgValue $OutputDirectory) + '"'
     $command += ' --debug-log-path "' + (ConvertTo-ServiceArgValue $DebugLogPath) + '"'
 
     return $command
+}
+
+# Writes the ingestion token into the service's own registry Environment
+# value (HKLM\SYSTEM\CurrentControlSet\Services\<name>\Environment, a
+# REG_MULTI_SZ the Service Control Manager injects into the process
+# environment at start) instead of the service command line. This is the
+# Windows-native equivalent of the Linux client's mode-600 EnvironmentFile
+# (New-SystemdEnvFile / Install-ClientDebianSSH.ps1): HKLM\SYSTEM is
+# writable/readable only by Administrators and SYSTEM by default, so no
+# separate ACL step is needed here. `sc.exe create` (Invoke-ServiceCreate)
+# does not expose a way to set this value itself, so it is written directly
+# to the registry right after the service key exists. An empty/absent token
+# clears any stale value a previous install may have left (relevant on a
+# reinstall over an existing service key: sc.exe delete removes the whole
+# key including this value, so this only matters if create-without-delete
+# is ever used, but explicit is safer than relying on that assumption).
+# -ServiceRegistryRoot defaults to the real Services key but is overridable
+# so Pester can point this at a scratch HKCU key instead of writing into
+# live HKLM\SYSTEM\CurrentControlSet\Services during a test run.
+function Set-ServiceEnvironmentToken {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ServiceName,
+
+        [string]$SharedToken,
+
+        [string]$ServiceRegistryRoot = 'HKLM:\SYSTEM\CurrentControlSet\Services'
+    )
+
+    $servicePath = Join-Path -Path $ServiceRegistryRoot -ChildPath $ServiceName
+    if ($SharedToken) {
+        Set-ItemProperty -LiteralPath $servicePath -Name 'Environment' -Value @('WIL_INGESTION_TOKEN=' + $SharedToken) -Type MultiString
+    }
+    else {
+        Remove-ItemProperty -LiteralPath $servicePath -Name 'Environment' -ErrorAction SilentlyContinue
+    }
 }
 
 # Deletes the pre-client-data-layout exe/version marker from the shared
@@ -220,6 +259,31 @@ function Remove-LegacyClientFiles {
     }
 }
 
+# $InstallPath used to be created with plain New-Item and left at whatever
+# ACL %ProgramData% inherits, which on a real machine grants BUILTIN\Users
+# create-file rights and CREATOR OWNER full control of anything a non-admin
+# user places there - a local-user-to-SYSTEM file/DLL-planting path, since
+# this client runs as LocalSystem by default (see Invoke-ServiceCreate).
+# ContainerInherit + ObjectInherit make files/subfolders created here LATER
+# (debug logs, local report cache) inherit the same restriction instead of
+# picking up whatever weaker default DACL Windows would otherwise apply at
+# creation time. Applied on every run, not only when the directory is first
+# created, so an upgrade over a directory an earlier vulnerable version of
+# this script left with weak permissions gets corrected too.
+function Set-RestrictedDirectoryAcl {
+    param([string]$DirectoryPath)
+    $adminSid  = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+    $systemSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+    $acl = Get-Acl -LiteralPath $DirectoryPath
+    $acl.SetAccessRuleProtection($true, $false)
+    $inheritFlags = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    $adminRule  = New-Object System.Security.AccessControl.FileSystemAccessRule($adminSid, 'FullControl', $inheritFlags, [System.Security.AccessControl.PropagationFlags]::None, 'Allow')
+    $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule($systemSid, 'FullControl', $inheritFlags, [System.Security.AccessControl.PropagationFlags]::None, 'Allow')
+    $acl.AddAccessRule($adminRule)
+    $acl.AddAccessRule($systemRule)
+    Set-Acl -LiteralPath $DirectoryPath -AclObject $acl
+}
+
 # Wrapped so Pester can dot-source this file (". $ScriptPath -ServerUrl ...")
 # to load Get-ClientServiceCommand/Remove-LegacyClientFiles for direct
 # unit testing without performing a real install - same technique used in
@@ -250,6 +314,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     if (-not (Test-Path -LiteralPath $InstallPath)) {
         New-Item -Path $InstallPath -ItemType Directory -Force | Out-Null
     }
+    Set-RestrictedDirectoryAcl -DirectoryPath $InstallPath
 
     foreach ($legacyName in @('WindowsLicenseInventoryClient', 'WindowsLicenseInventory')) {
         $null = & sc.exe query $legacyName 2>&1
@@ -276,9 +341,10 @@ if ($MyInvocation.InvocationName -ne '.') {
     Copy-Item -LiteralPath $ClientExecutablePath -Destination $servicePath -Force
     $clientVersion = (& $servicePath --version 2>&1 | Select-Object -First 1)
 
-    $serviceCommand = Get-ClientServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SoftwareHours $SoftwareCheckIntervalHours -SharePath $ServerSharePath -SharedToken $Token -OutputDirectory $InstallPath -DebugLogPath $debugLogPath
+    $serviceCommand = Get-ClientServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SoftwareHours $SoftwareCheckIntervalHours -SharePath $ServerSharePath -OutputDirectory $InstallPath -DebugLogPath $debugLogPath
 
     Invoke-ServiceCreate -ServiceName $serviceName -BinPath $serviceCommand -DisplayName 'Windows Inventory Lite' -FailureMessage "Failed to create service. Run PowerShell as Administrator." | Out-Null
+    Set-ServiceEnvironmentToken -ServiceName $serviceName -SharedToken $Token
     Invoke-ServiceControl -Arguments @('description', $serviceName, "Collects Windows, Office, activation, and software inventory for Windows Inventory Lite. Version $clientVersion.") -FailureMessage "Failed to set service description." | Out-Null
     Write-Host "Service created: $serviceName"
     Write-Host "Client version: $clientVersion"

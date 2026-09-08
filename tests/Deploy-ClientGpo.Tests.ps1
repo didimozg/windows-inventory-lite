@@ -16,26 +16,55 @@ Describe 'Windows Inventory Lite Deploy-ClientGpo client-data layout' {
     }
 
     It 'Get-DesiredServiceCommand embeds --output and --debug-log-path' {
-        $command = Get-DesiredServiceCommand -ServicePath 'C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharedToken '' -OutputDirectory 'C:\ProgramData\WindowsInventoryLite\client-data' -DebugLogPath 'C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug-client.log'
+        $command = Get-DesiredServiceCommand -ServicePath 'C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -OutputDirectory 'C:\ProgramData\WindowsInventoryLite\client-data' -DebugLogPath 'C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug-client.log'
         $command | Should -Match '--output "C:\\ProgramData\\WindowsInventoryLite\\client-data"'
         $command | Should -Match '--debug-log-path "C:\\ProgramData\\WindowsInventoryLite\\client-data\\_logs\\debug-client\.log"'
     }
 
     It 'Get-DesiredServiceCommand emits --software-check-interval-hours alongside --interval-hours' {
-        $command = Get-DesiredServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SoftwareHours 12 -SharedToken '' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
+        $command = Get-DesiredServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SoftwareHours 12 -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
         $command | Should -Match '--interval-hours 6'
         $command | Should -Match '--software-check-interval-hours 12'
     }
 
     It 'Get-DesiredServiceCommand defaults --software-check-interval-hours to 6 when not supplied' {
-        $command = Get-DesiredServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharedToken '' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
+        $command = Get-DesiredServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
         $command | Should -Match '--software-check-interval-hours 6'
     }
 
+    It 'Get-DesiredServiceCommand never embeds the ingestion token on the command line' {
+        $command = Get-DesiredServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
+        $command | Should -Not -Match '--token'
+    }
+
     It 'Get-DesiredServiceCommand differs between the legacy bare-root path and the new client-data path, so an already-installed client is detected as needing reinstall' {
-        $legacyCommand = Get-DesiredServiceCommand -ServicePath 'C:\ProgramData\WindowsInventoryLite\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharedToken '' -OutputDirectory 'C:\ProgramData\WindowsInventoryLite' -DebugLogPath 'C:\ProgramData\WindowsInventoryLite\_logs\debug-client.log'
-        $newCommand = Get-DesiredServiceCommand -ServicePath 'C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharedToken '' -OutputDirectory 'C:\ProgramData\WindowsInventoryLite\client-data' -DebugLogPath 'C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug-client.log'
+        $legacyCommand = Get-DesiredServiceCommand -ServicePath 'C:\ProgramData\WindowsInventoryLite\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -OutputDirectory 'C:\ProgramData\WindowsInventoryLite' -DebugLogPath 'C:\ProgramData\WindowsInventoryLite\_logs\debug-client.log'
+        $newCommand = Get-DesiredServiceCommand -ServicePath 'C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -OutputDirectory 'C:\ProgramData\WindowsInventoryLite\client-data' -DebugLogPath 'C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug-client.log'
         $legacyCommand | Should -Not -Be $newCommand
+    }
+
+    It 'Get-ServiceEnvironmentToken returns an empty string when no Environment value is set' {
+        $registryRoot = 'TestRegistry:\Services'
+        $serviceName = 'FakeServiceNoToken'
+        New-Item -Path (Join-Path -Path $registryRoot -ChildPath $serviceName) -Force | Out-Null
+        Get-ServiceEnvironmentToken -ServiceName $serviceName -ServiceRegistryRoot $registryRoot | Should -Be ''
+    }
+
+    It 'Set-ServiceEnvironmentToken then Get-ServiceEnvironmentToken round-trips the token' {
+        $registryRoot = 'TestRegistry:\Services'
+        $serviceName = 'FakeServiceRoundTrip'
+        New-Item -Path (Join-Path -Path $registryRoot -ChildPath $serviceName) -Force | Out-Null
+        Set-ServiceEnvironmentToken -ServiceName $serviceName -SharedToken 'abc123' -ServiceRegistryRoot $registryRoot
+        Get-ServiceEnvironmentToken -ServiceName $serviceName -ServiceRegistryRoot $registryRoot | Should -Be 'abc123'
+    }
+
+    It 'Set-ServiceEnvironmentToken with an empty token clears a previously-set value' {
+        $registryRoot = 'TestRegistry:\Services'
+        $serviceName = 'FakeServiceClearToken'
+        New-Item -Path (Join-Path -Path $registryRoot -ChildPath $serviceName) -Force | Out-Null
+        Set-ServiceEnvironmentToken -ServiceName $serviceName -SharedToken 'abc123' -ServiceRegistryRoot $registryRoot
+        Set-ServiceEnvironmentToken -ServiceName $serviceName -SharedToken '' -ServiceRegistryRoot $registryRoot
+        Get-ServiceEnvironmentToken -ServiceName $serviceName -ServiceRegistryRoot $registryRoot | Should -Be ''
     }
 
     It 'Remove-LegacyClientFiles deletes the old bare-root exe and client-version.txt when the new path differs' {

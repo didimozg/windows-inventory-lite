@@ -16,26 +16,60 @@ Describe 'Windows Inventory Lite Install-Client client-data layout' {
     }
 
     It 'Get-ClientServiceCommand embeds --output and --debug-log-path' {
-        $command = Get-ClientServiceCommand -ServicePath 'C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharePath '' -SharedToken '' -OutputDirectory 'C:\ProgramData\WindowsInventoryLite\client-data' -DebugLogPath 'C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug-client.log'
+        $command = Get-ClientServiceCommand -ServicePath 'C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharePath '' -OutputDirectory 'C:\ProgramData\WindowsInventoryLite\client-data' -DebugLogPath 'C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug-client.log'
         $command | Should -Match '--output "C:\\ProgramData\\WindowsInventoryLite\\client-data"'
         $command | Should -Match '--debug-log-path "C:\\ProgramData\\WindowsInventoryLite\\client-data\\_logs\\debug-client\.log"'
     }
 
     It 'Get-ClientServiceCommand emits --software-check-interval-hours alongside --interval-hours' {
-        $command = Get-ClientServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SoftwareHours 12 -SharePath '' -SharedToken '' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
+        $command = Get-ClientServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SoftwareHours 12 -SharePath '' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
         $command | Should -Match '--interval-hours 6'
         $command | Should -Match '--software-check-interval-hours 12'
     }
 
     It 'Get-ClientServiceCommand defaults --software-check-interval-hours to 6 when not supplied' {
-        $command = Get-ClientServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharePath '' -SharedToken '' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
+        $command = Get-ClientServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharePath '' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
         $command | Should -Match '--software-check-interval-hours 6'
     }
 
-    It 'Get-ClientServiceCommand still includes --share and --token when provided' {
-        $command = Get-ClientServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharePath '\\server\drop' -SharedToken 'abc123' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
+    It 'Get-ClientServiceCommand still includes --share when provided' {
+        $command = Get-ClientServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharePath '\\server\drop' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
         $command | Should -Match '--share "\\\\server\\drop"'
-        $command | Should -Match '--token "abc123"'
+    }
+
+    It 'Get-ClientServiceCommand never embeds the ingestion token on the command line' {
+        $command = Get-ClientServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharePath '' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
+        $command | Should -Not -Match '--token'
+    }
+
+    It 'Set-ServiceEnvironmentToken writes WIL_INGESTION_TOKEN to the Environment value' {
+        # TestRegistry: is a Pester-managed scratch registry key, torn down
+        # automatically after this test - real HKLM\SYSTEM is never touched.
+        $registryRoot = 'TestRegistry:\Services'
+        $serviceName = 'FakeService1'
+        New-Item -Path (Join-Path -Path $registryRoot -ChildPath $serviceName) -Force | Out-Null
+        Set-ServiceEnvironmentToken -ServiceName $serviceName -SharedToken 'abc123' -ServiceRegistryRoot $registryRoot
+        $environment = (Get-ItemProperty -LiteralPath (Join-Path -Path $registryRoot -ChildPath $serviceName) -Name 'Environment').Environment
+        $environment | Should -Contain 'WIL_INGESTION_TOKEN=abc123'
+    }
+
+    It 'Set-ServiceEnvironmentToken removes the Environment value when the token is empty' {
+        $registryRoot = 'TestRegistry:\Services'
+        $serviceName = 'FakeService2'
+        New-Item -Path (Join-Path -Path $registryRoot -ChildPath $serviceName) -Force | Out-Null
+        Set-ServiceEnvironmentToken -ServiceName $serviceName -SharedToken 'abc123' -ServiceRegistryRoot $registryRoot
+        Set-ServiceEnvironmentToken -ServiceName $serviceName -SharedToken '' -ServiceRegistryRoot $registryRoot
+        # Not using Get-ItemProperty's -Name filter: asking it for a value
+        # that no longer exists throws under this project's Set-StrictMode
+        # -Version 2.0 + $ErrorActionPreference = 'Stop', ignoring
+        # -ErrorAction SilentlyContinue (confirmed live) - see
+        # Get-ServiceEnvironmentToken's comment in Deploy-ClientGpo.ps1.
+        $item = Get-ItemProperty -LiteralPath (Join-Path -Path $registryRoot -ChildPath $serviceName) -ErrorAction SilentlyContinue
+        $environment = $null
+        if ($item -and $item.PSObject.Properties['Environment']) {
+            $environment = $item.Environment
+        }
+        $environment | Should -BeNullOrEmpty
     }
 
     It 'Remove-LegacyClientFiles deletes the old bare-root exe and client-version.txt when the new path differs' {

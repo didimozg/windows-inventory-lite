@@ -139,13 +139,13 @@ Describe 'Windows Inventory Lite Install-Server config and validation helpers' {
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseInput($scriptContent, [ref]$tokens, [ref]$errors)
-        $targetNames = @('Write-ServerConfig', 'Set-RestrictedFileAcl', 'ConvertTo-JsonString', 'Test-BatchSafeValue')
+        $targetNames = @('Write-ServerConfig', 'Set-RestrictedFileAcl', 'Set-RestrictedDirectoryAcl', 'ConvertTo-JsonString', 'Test-BatchSafeValue')
         $functionAsts = $ast.FindAll({
             param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $targetNames -contains $node.Name
         }, $true)
-        if ($functionAsts.Count -ne 4) {
-            throw "Expected to find Write-ServerConfig, Set-RestrictedFileAcl, ConvertTo-JsonString, and Test-BatchSafeValue in Install-Server.ps1, found $($functionAsts.Count)"
+        if ($functionAsts.Count -ne 5) {
+            throw "Expected to find Write-ServerConfig, Set-RestrictedFileAcl, Set-RestrictedDirectoryAcl, ConvertTo-JsonString, and Test-BatchSafeValue in Install-Server.ps1, found $($functionAsts.Count)"
         }
         foreach ($functionAst in $functionAsts) {
             . ([scriptblock]::Create($functionAst.Extent.Text))
@@ -196,6 +196,68 @@ Describe 'Windows Inventory Lite Install-Server config and validation helpers' {
                 Set-RestrictedFileAcl -FilePath $scratchPath
                 $scratchAcl = Get-Acl -LiteralPath $scratchPath
                 $scratchAcl.AreAccessRulesProtected | Should -BeTrue
+            }
+        }
+    }
+
+    Context 'Set-RestrictedDirectoryAcl' {
+        It 'restricts a directory to Administrators and SYSTEM with inheritance so later-created children pick it up' {
+            # Unlike Set-RestrictedFileAcl's test above, applying the ACL itself
+            # succeeds for a non-admin caller here too: the object owner (whoever
+            # just created the directory) always retains the right to change its
+            # own DACL, confirmed live. What elevation actually gates is whether
+            # a FURTHER write into the now-restricted directory succeeds
+            # afterward - Administrators/SYSTEM can, this test process (if
+            # non-admin) cannot - so only that second assertion branches.
+            #
+            # Two things this test must not do, both confirmed live: compare
+            # identity names as literal strings (SYSTEM's display name is
+            # locale-specific - this machine resolved it to Cyrillic, not
+            # "NT AUTHORITY\SYSTEM" - exactly the reason Set-RestrictedDirectoryAcl
+            # itself uses WellKnownSidType instead of names), and leave the
+            # directory's ACL in its restricted state at the end - Pester's own
+            # TestDrive teardown enumerates and deletes everything under
+            # $TestDrive as this same non-admin identity, which a still-protected
+            # directory blocks, failing the whole run. The owner's standing right
+            # to rewrite their own object's DACL (proven by Set-RestrictedDirectoryAcl
+            # succeeding above) is what makes restoring access in `finally` possible.
+            $isElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+            $adminSid  = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+            $systemSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+            $dirPath = Join-Path -Path $TestDrive -ChildPath 'restricted-dir'
+            New-Item -Path $dirPath -ItemType Directory -Force | Out-Null
+
+            try {
+                Set-RestrictedDirectoryAcl -DirectoryPath $dirPath
+
+                $acl = Get-Acl -LiteralPath $dirPath
+                $acl.AreAccessRulesProtected | Should -BeTrue
+                $sids = $acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]) }
+                $sids | Should -Contain $adminSid
+                $sids | Should -Contain $systemSid
+                foreach ($rule in $acl.Access) {
+                    $rule.InheritanceFlags | Should -Be ([System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit')
+                }
+
+                if (-not $isElevated) {
+                    # Proves the restriction actually blocks writes, not just that
+                    # the ACL object looks right - this is the exact local-user
+                    # file-planting path the finding described being closed.
+                    # -ErrorAction Stop is required: Set-Content's own default
+                    # is 'Continue', so a permission-denied failure would
+                    # otherwise just print a non-terminating error and Should
+                    # -Throw would see nothing thrown (confirmed live).
+                    { Set-Content -LiteralPath (Join-Path -Path $dirPath -ChildPath 'planted.txt') -Value 'x' -ErrorAction Stop } | Should -Throw
+                }
+            }
+            finally {
+                # Restoring via Set-Acl's SetAccessRuleProtection(false, true)
+                # threw PrivilegeNotHeldException ("SeSecurityPrivilege") for
+                # this non-admin owner (confirmed live) - icacls /reset does
+                # the same "give this item back its parent's inherited ACL"
+                # job without needing that privilege, since it never touches
+                # the SACL machinery Set-Acl's .NET API goes through.
+                icacls $dirPath /reset /Q | Out-Null
             }
         }
     }

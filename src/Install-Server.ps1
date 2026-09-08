@@ -879,10 +879,38 @@ elseif (-not (Test-Path -LiteralPath $ClientNet40ExecutablePath)) {
     & (Join-Path -Path $PSScriptRoot -ChildPath 'Build-Client.ps1') -OutputPath $ClientNet40ExecutablePath -TargetFramework Net40
 }
 
+# These directories used to be created with plain New-Item and left at
+# whatever ACL %ProgramData% inherits, which on a real machine grants
+# BUILTIN\Users create-file rights and CREATOR OWNER full control of anything
+# a non-admin user places there - a local-user-to-SYSTEM file/DLL-planting
+# path, since this server runs as LocalSystem by default. Unlike
+# Set-RestrictedFileAcl (below), these rules carry ContainerInherit +
+# ObjectInherit so files and subfolders created inside the directory LATER
+# (catalog uploads, client reports, dashboard content) inherit the same
+# restriction instead of picking up whatever weaker default DACL Windows
+# would otherwise apply at creation time. Applied on every run, not only
+# when the directory is first created, so an upgrade over a directory an
+# earlier vulnerable version of this script left with weak permissions gets
+# corrected too.
+function Set-RestrictedDirectoryAcl {
+    param([string]$DirectoryPath)
+    $adminSid  = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+    $systemSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+    $acl = Get-Acl -LiteralPath $DirectoryPath
+    $acl.SetAccessRuleProtection($true, $false)
+    $inheritFlags = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    $adminRule  = New-Object System.Security.AccessControl.FileSystemAccessRule($adminSid, 'FullControl', $inheritFlags, [System.Security.AccessControl.PropagationFlags]::None, 'Allow')
+    $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule($systemSid, 'FullControl', $inheritFlags, [System.Security.AccessControl.PropagationFlags]::None, 'Allow')
+    $acl.AddAccessRule($adminRule)
+    $acl.AddAccessRule($systemRule)
+    Set-Acl -LiteralPath $DirectoryPath -AclObject $acl
+}
+
 foreach ($path in @($InstallPath, $DataPath, $ContentPath, $ClientPackagePath, $LinuxClientPackagePath)) {
     if (-not (Test-Path -LiteralPath $path)) {
         New-Item -Path $path -ItemType Directory -Force | Out-Null
     }
+    Set-RestrictedDirectoryAcl -DirectoryPath $path
 }
 
 foreach ($legacyName in @('WindowsLicenseInventoryServer', 'WindowsLicenseInventory')) {

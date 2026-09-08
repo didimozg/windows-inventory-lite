@@ -37,7 +37,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-# ServerUrl/Token end up embedded in the sc.exe command line Invoke-ServiceCreate
+# ServerUrl ends up embedded in the sc.exe command line Invoke-ServiceCreate
 # builds below and runs via cmd.exe /c - the surrounding double quotes do NOT
 # protect &, |, <, >, ^ from being parsed as live cmd.exe operators (a well-known
 # cmd.exe quoting quirk), so an unvalidated value here is a command-injection
@@ -45,7 +45,9 @@ $ErrorActionPreference = 'Stop'
 # the calling server's own privileged WinRM/service account). Reject the same
 # characters New-ClientGpoPackage.ps1's Test-BatchSafeValue already rejects for
 # the GPO .cmd generation path - this script is the other place those same
-# values eventually land.
+# values eventually land. Token no longer reaches the command line (see
+# Set-ServiceEnvironmentToken) but is still checked here as defense in depth,
+# since it is still written into a registry value derived from this string.
 function Test-BatchSafeValue {
     param([string]$Value, [string]$FieldName)
     if ([string]::IsNullOrEmpty($Value)) { return }
@@ -238,19 +240,89 @@ function Get-DesiredServiceCommand {
         [string]$Url,
         [int]$Hours,
         [int]$SoftwareHours = 6,
-        [string]$SharedToken,
         [string]$OutputDirectory,
         [string]$DebugLogPath
     )
 
+    # The ingestion token is deliberately NOT accepted as a parameter here: it
+    # goes into the service's registry Environment value (see
+    # Get/Set-ServiceEnvironmentToken below) instead of this command line. A
+    # binPath= argument ends up in HKLM\SYSTEM\CurrentControlSet\Services\<name>\
+    # ImagePath, which `sc qc <name>` / Win32_Service.PathName expose to any
+    # authenticated local user - the same class of exposure the Linux client's
+    # EnvironmentFile switch (New-SystemdEnvFile, Install-ClientDebianSSH.ps1)
+    # already avoids.
     $command = '"' + (ConvertTo-ServiceArgValue $ServicePath) + '" --server-url "' + (ConvertTo-ServiceArgValue $Url) + '" --interval-hours ' + $Hours + ' --software-check-interval-hours ' + $SoftwareHours
-    if ($SharedToken) {
-        $command += ' --token "' + (ConvertTo-ServiceArgValue $SharedToken) + '"'
-    }
     $command += ' --output "' + (ConvertTo-ServiceArgValue $OutputDirectory) + '"'
     $command += ' --debug-log-path "' + (ConvertTo-ServiceArgValue $DebugLogPath) + '"'
 
     return $command
+}
+
+# Reads back the ingestion token currently set on the service's registry
+# Environment value, normalized to '' (never $null) so callers can compare
+# it directly against a possibly-unbound -Token parameter without a
+# null/empty-string mismatch producing a false "changed" result on every run
+# where no token is configured at all (the common case per this project's
+# own default-off RequireIngestionToken posture).
+# -ServiceRegistryRoot defaults to the real Services key but is overridable
+# so Pester can point this at a scratch HKCU key instead of writing into
+# live HKLM\SYSTEM\CurrentControlSet\Services during a test run.
+function Get-ServiceEnvironmentToken {
+    param(
+        [string]$ServiceName,
+        [string]$ServiceRegistryRoot = 'HKLM:\SYSTEM\CurrentControlSet\Services'
+    )
+
+    # Deliberately not using Get-ItemProperty's own -Name filter: asking it
+    # for a named value that does not exist on the key throws a
+    # PropertyNotFoundException that ignores -ErrorAction SilentlyContinue
+    # under this project's Set-StrictMode -Version 2.0 + $ErrorActionPreference
+    # = 'Stop' combination (confirmed live - a fresh service key with no
+    # Environment value yet, the normal case before any token is ever
+    # configured, threw here instead of returning empty). Reading the whole
+    # item and checking for the property's presence on the returned object
+    # sidesteps that provider quirk entirely.
+    $servicePath = Join-Path -Path $ServiceRegistryRoot -ChildPath $ServiceName
+    $item = Get-ItemProperty -LiteralPath $servicePath -ErrorAction SilentlyContinue
+    if (-not $item -or -not $item.PSObject.Properties['Environment']) {
+        return ''
+    }
+    $environment = $item.Environment
+    if (-not $environment) {
+        return ''
+    }
+    foreach ($line in $environment) {
+        if ($line -like 'WIL_INGESTION_TOKEN=*') {
+            return $line.Substring('WIL_INGESTION_TOKEN='.Length)
+        }
+    }
+    return ''
+}
+
+# Writes the ingestion token into the service's own registry Environment
+# value (a REG_MULTI_SZ the Service Control Manager injects into the process
+# environment at start) instead of the service command line - see
+# Get-DesiredServiceCommand's comment above for why. HKLM\SYSTEM is
+# writable/readable only by Administrators and SYSTEM by default, so no
+# separate ACL step is needed here.
+function Set-ServiceEnvironmentToken {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ServiceName,
+
+        [string]$SharedToken,
+
+        [string]$ServiceRegistryRoot = 'HKLM:\SYSTEM\CurrentControlSet\Services'
+    )
+
+    $servicePath = Join-Path -Path $ServiceRegistryRoot -ChildPath $ServiceName
+    if ($SharedToken) {
+        Set-ItemProperty -LiteralPath $servicePath -Name 'Environment' -Value @('WIL_INGESTION_TOKEN=' + $SharedToken) -Type MultiString
+    }
+    else {
+        Remove-ItemProperty -LiteralPath $servicePath -Name 'Environment' -ErrorAction SilentlyContinue
+    }
 }
 
 # Deletes the pre-client-data-layout exe/version marker from the shared
@@ -288,6 +360,31 @@ function Remove-LegacyClientFiles {
         Write-DeployLog "Removing legacy client-version.txt: $legacyVersionPath"
         Remove-Item -LiteralPath $legacyVersionPath -Force
     }
+}
+
+# $InstallPath used to be created with plain New-Item and left at whatever
+# ACL %ProgramData% inherits, which on a real machine grants BUILTIN\Users
+# create-file rights and CREATOR OWNER full control of anything a non-admin
+# user places there - a local-user-to-SYSTEM file/DLL-planting path, since
+# this client runs as LocalSystem by default. ContainerInherit + ObjectInherit
+# make files/subfolders created here LATER (debug logs, local report cache)
+# inherit the same restriction instead of picking up whatever weaker default
+# DACL Windows would otherwise apply at creation time. Applied on every run,
+# not only when the directory is first created, so a re-run of this GPO
+# script over a directory an earlier vulnerable version left with weak
+# permissions gets corrected too.
+function Set-RestrictedDirectoryAcl {
+    param([string]$DirectoryPath)
+    $adminSid  = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+    $systemSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+    $acl = Get-Acl -LiteralPath $DirectoryPath
+    $acl.SetAccessRuleProtection($true, $false)
+    $inheritFlags = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    $adminRule  = New-Object System.Security.AccessControl.FileSystemAccessRule($adminSid, 'FullControl', $inheritFlags, [System.Security.AccessControl.PropagationFlags]::None, 'Allow')
+    $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule($systemSid, 'FullControl', $inheritFlags, [System.Security.AccessControl.PropagationFlags]::None, 'Allow')
+    $acl.AddAccessRule($adminRule)
+    $acl.AddAccessRule($systemRule)
+    Set-Acl -LiteralPath $DirectoryPath -AclObject $acl
 }
 
 function Test-Administrator {
@@ -350,12 +447,13 @@ if ($MyInvocation.InvocationName -ne '.') {
     if (-not (Test-Path -LiteralPath $InstallPath)) {
         New-Item -Path $InstallPath -ItemType Directory -Force | Out-Null
     }
+    Set-RestrictedDirectoryAcl -DirectoryPath $InstallPath
 
     $servicePath = Join-Path -Path $InstallPath -ChildPath 'WindowsInventoryLiteClient.exe'
     $debugLogPath = Join-Path -Path $InstallPath -ChildPath '_logs\debug-client.log'
     $packageVersion = Get-ExeVersion -Path $PackageClientPath
     $installedVersion = Get-InstalledVersion -InstallDirectory $InstallPath
-    $desiredCommand = Get-DesiredServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SoftwareHours $SoftwareCheckIntervalHours -SharedToken $Token -OutputDirectory $InstallPath -DebugLogPath $debugLogPath
+    $desiredCommand = Get-DesiredServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SoftwareHours $SoftwareCheckIntervalHours -OutputDirectory $InstallPath -DebugLogPath $debugLogPath
     $currentCommand = Get-ServiceBinaryPath
     $serviceExists = Test-ServiceExists
     $needsInstall = $Force -or (-not $serviceExists) -or ($packageVersion -ne $installedVersion) -or ($currentCommand -ne $desiredCommand)
@@ -366,6 +464,13 @@ if ($MyInvocation.InvocationName -ne '.') {
 
     if (-not $needsInstall) {
         Write-DeployLog "Client service is already current."
+        # The token lives in the registry Environment value, not the binPath=
+        # command compared above, so a token-only rotation would otherwise go
+        # unnoticed here and never reach the service.
+        if ((Get-ServiceEnvironmentToken -ServiceName $ServiceName) -ne [string]$Token) {
+            Write-DeployLog "Updating ingestion token for existing service."
+            Set-ServiceEnvironmentToken -ServiceName $ServiceName -SharedToken $Token
+        }
         $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
         if ($service -and $service.Status -ne 'Running') {
             Invoke-ServiceControl -Arguments @('start', $ServiceName) -FailureMessage 'Failed to start existing service.' | Out-Null
@@ -404,6 +509,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     Save-InstalledVersion -InstallDirectory $InstallPath -Version $installedVersion
 
     Invoke-ServiceCreate -ServiceName $ServiceName -BinPath $desiredCommand -DisplayName 'Windows Inventory Lite' -FailureMessage 'Failed to create service.' | Out-Null
+    Set-ServiceEnvironmentToken -ServiceName $ServiceName -SharedToken $Token
     Invoke-ServiceControl -Arguments @('description', $ServiceName, "Collects Windows, Office, activation, and software inventory for Windows Inventory Lite. Version $installedVersion.") -FailureMessage 'Failed to set service description.' | Out-Null
     Invoke-ServiceControl -Arguments @('start', $ServiceName) -FailureMessage 'Failed to start service.' | Out-Null
 
