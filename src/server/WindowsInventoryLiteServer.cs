@@ -151,6 +151,13 @@ namespace WindowsInventoryLite
         public int IngestionRejectionLogRetentionDays;
         public int IngestionRejectionLogMaxEntries;
         public int InstallLogRetentionDays;
+        // Dashboard-only (Settings > Server > Log retention), no
+        // Install-Server.ps1 CLI flag - same reasoning as
+        // IngestionRejectionLogRetentionDays above. Governs
+        // softwareJobAttemptLog (see SoftwareJobAttempt /
+        // RecordSoftwareJobAttempt), previously two hardcoded constants.
+        public int SoftwareJobAttemptLogRetentionDays;
+        public int SoftwareJobAttemptLogMaxEntries;
         public string ConfigPath;
         // The certificate is resolved from the LocalMachine\My store by thumbprint
         // (see InventoryServer.FindCertificateByThumbprint). Install-Server.ps1 can
@@ -271,6 +278,8 @@ namespace WindowsInventoryLite
             options.HstsMaxAgeHours = 24;
             options.IngestionRejectionLogRetentionDays = 30;
             options.IngestionRejectionLogMaxEntries = 5000;
+            options.SoftwareJobAttemptLogRetentionDays = 90;
+            options.SoftwareJobAttemptLogMaxEntries = 5000;
             options.SoftwareShareScanIntervalMinutes = 60;
 
             for (int i = 0; i < args.Length; i++)
@@ -697,6 +706,24 @@ namespace WindowsInventoryLite
                         options.IngestionRejectionLogMaxEntries = ingestionRejectionMaxEntriesFromConfig;
                     }
                 }
+                if (options.SoftwareJobAttemptLogRetentionDays == 90)
+                {
+                    string softwareJobAttemptRetentionText = GetConfigString(config, "SoftwareJobAttemptLogRetentionDays");
+                    int softwareJobAttemptRetentionFromConfig;
+                    if (!String.IsNullOrEmpty(softwareJobAttemptRetentionText) && Int32.TryParse(softwareJobAttemptRetentionText, out softwareJobAttemptRetentionFromConfig) && softwareJobAttemptRetentionFromConfig >= 1 && softwareJobAttemptRetentionFromConfig <= 3650)
+                    {
+                        options.SoftwareJobAttemptLogRetentionDays = softwareJobAttemptRetentionFromConfig;
+                    }
+                }
+                if (options.SoftwareJobAttemptLogMaxEntries == 5000)
+                {
+                    string softwareJobAttemptMaxEntriesText = GetConfigString(config, "SoftwareJobAttemptLogMaxEntries");
+                    int softwareJobAttemptMaxEntriesFromConfig;
+                    if (!String.IsNullOrEmpty(softwareJobAttemptMaxEntriesText) && Int32.TryParse(softwareJobAttemptMaxEntriesText, out softwareJobAttemptMaxEntriesFromConfig) && softwareJobAttemptMaxEntriesFromConfig >= 100 && softwareJobAttemptMaxEntriesFromConfig <= 100000)
+                    {
+                        options.SoftwareJobAttemptLogMaxEntries = softwareJobAttemptMaxEntriesFromConfig;
+                    }
+                }
                 if (String.IsNullOrEmpty(options.ClientUpdateUsername))
                 {
                     options.ClientUpdateUsername = GetConfigString(config, "ClientUpdateUsername");
@@ -897,8 +924,6 @@ namespace WindowsInventoryLite
         // append-with-amortized-prune shape as ingestionRejectionLog above.
         private readonly object softwareJobAttemptLogLock = new object();
         private readonly List<SoftwareJobAttempt> softwareJobAttemptLog = new List<SoftwareJobAttempt>();
-        private const int SoftwareJobAttemptLogMaxEntries = 5000;
-        private const int SoftwareJobAttemptLogRetentionDays = 90;
         // IP -> resolved PTR hostname, or null for "resolution attempted,
         // no result" (still cached, so a non-resolving IP is never
         // retried). Cleared entirely (not partially evicted) if it exceeds
@@ -5271,7 +5296,7 @@ namespace WindowsInventoryLite
                 // must never crash server startup).
                 try
                 {
-                    List<SoftwareJobAttempt> pruned = PruneSoftwareJobAttempts(softwareJobAttemptLog, DateTime.UtcNow, SoftwareJobAttemptLogRetentionDays, SoftwareJobAttemptLogMaxEntries);
+                    List<SoftwareJobAttempt> pruned = PruneSoftwareJobAttempts(softwareJobAttemptLog, DateTime.UtcNow, options.SoftwareJobAttemptLogRetentionDays, options.SoftwareJobAttemptLogMaxEntries);
                     if (pruned.Count != softwareJobAttemptLog.Count)
                     {
                         softwareJobAttemptLog.Clear();
@@ -5301,12 +5326,12 @@ namespace WindowsInventoryLite
                 }
                 File.AppendAllText(path, serializer.Serialize(entry.ToDictionary()) + Environment.NewLine, new UTF8Encoding(false));
 
-                int slack = Math.Max(SoftwareJobAttemptLogMaxEntries / 10, 50);
+                int slack = Math.Max(options.SoftwareJobAttemptLogMaxEntries / 10, 50);
                 bool oldestEntryAgedOut = softwareJobAttemptLog.Count > 0
-                    && softwareJobAttemptLog[0].TimestampUtc < DateTime.UtcNow.AddDays(-SoftwareJobAttemptLogRetentionDays);
-                if (softwareJobAttemptLog.Count > SoftwareJobAttemptLogMaxEntries + slack || oldestEntryAgedOut)
+                    && softwareJobAttemptLog[0].TimestampUtc < DateTime.UtcNow.AddDays(-options.SoftwareJobAttemptLogRetentionDays);
+                if (softwareJobAttemptLog.Count > options.SoftwareJobAttemptLogMaxEntries + slack || oldestEntryAgedOut)
                 {
-                    List<SoftwareJobAttempt> pruned = PruneSoftwareJobAttempts(softwareJobAttemptLog, DateTime.UtcNow, SoftwareJobAttemptLogRetentionDays, SoftwareJobAttemptLogMaxEntries);
+                    List<SoftwareJobAttempt> pruned = PruneSoftwareJobAttempts(softwareJobAttemptLog, DateTime.UtcNow, options.SoftwareJobAttemptLogRetentionDays, options.SoftwareJobAttemptLogMaxEntries);
                     if (pruned.Count != softwareJobAttemptLog.Count)
                     {
                         softwareJobAttemptLog.Clear();
@@ -8542,6 +8567,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             result["ingestionRejectionLogRetentionDays"] = options.IngestionRejectionLogRetentionDays;
             result["ingestionRejectionLogMaxEntries"] = options.IngestionRejectionLogMaxEntries;
             result["installLogRetentionDays"] = options.InstallLogRetentionDays;
+            result["softwareJobAttemptLogRetentionDays"] = options.SoftwareJobAttemptLogRetentionDays;
+            result["softwareJobAttemptLogMaxEntries"] = options.SoftwareJobAttemptLogMaxEntries;
             result["debugLogEnabled"] = options.DebugLogEnabled;
             result["debugLogPath"] = DebugLogger.ResolvePath(options);
             JavaScriptSerializer serializer = CreateJsonSerializer();
@@ -8962,6 +8989,30 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 }
                 options.IngestionRejectionLogMaxEntries = ingestionRejectionLogMaxEntries;
                 updates["IngestionRejectionLogMaxEntries"] = ingestionRejectionLogMaxEntries.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("softwareJobAttemptLogRetentionDays"))
+            {
+                int softwareJobAttemptLogRetentionDays;
+                if (!Int32.TryParse(Convert.ToString(payload["softwareJobAttemptLogRetentionDays"]), out softwareJobAttemptLogRetentionDays) || softwareJobAttemptLogRetentionDays < 1 || softwareJobAttemptLogRetentionDays > 3650)
+                {
+                    SendText(stream, "{\"error\":\"softwareJobAttemptLogRetentionDays must be between 1 and 3650\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.SoftwareJobAttemptLogRetentionDays = softwareJobAttemptLogRetentionDays;
+                updates["SoftwareJobAttemptLogRetentionDays"] = softwareJobAttemptLogRetentionDays.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("softwareJobAttemptLogMaxEntries"))
+            {
+                int softwareJobAttemptLogMaxEntries;
+                if (!Int32.TryParse(Convert.ToString(payload["softwareJobAttemptLogMaxEntries"]), out softwareJobAttemptLogMaxEntries) || softwareJobAttemptLogMaxEntries < 100 || softwareJobAttemptLogMaxEntries > 100000)
+                {
+                    SendText(stream, "{\"error\":\"softwareJobAttemptLogMaxEntries must be between 100 and 100000\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.SoftwareJobAttemptLogMaxEntries = softwareJobAttemptLogMaxEntries;
+                updates["SoftwareJobAttemptLogMaxEntries"] = softwareJobAttemptLogMaxEntries.ToString(System.Globalization.CultureInfo.InvariantCulture);
             }
 
             if (payload.ContainsKey("debugLogEnabled"))
@@ -12248,6 +12299,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "SendLogoutResult removes the session from the server-side store", TestSendLogoutResultRemovesSessionFromStore);
             allPassed &= SelfTestCheck(output, "SendLogoutResult is idempotent when no session cookie is present", TestSendLogoutResultIsIdempotentWithNoSessionCookie);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings validates sessionLifetimeHours is between 1 and 720", TestConfigureServerSettingsValidatesSessionLifetimeHours);
+            allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips softwareJobAttemptLogRetentionDays/MaxEntries", TestConfigureServerSettingsRoundTripsSoftwareJobAttemptLogRetention);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips showUsbStorageIndicator", TestConfigureServerSettingsRoundTripsShowUsbStorageIndicator);
             allPassed &= SelfTestCheck(output, "SendUnauthorized serves the embedded login page for a browser navigation to /, with no WWW-Authenticate", TestSendUnauthorizedServesLoginPageForBrowserNavigation);
             allPassed &= SelfTestCheck(output, "SendUnauthorized keeps the plain-text 401 body for API routes", TestSendUnauthorizedServesPlainTextForApiRequests);
@@ -13294,6 +13346,44 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return null;
         }
 
+        private static string TestConfigureServerSettingsRoundTripsSoftwareJobAttemptLogRetention()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.EnableHttp = true;
+            options.SoftwareJobAttemptLogRetentionDays = 90;
+            options.SoftwareJobAttemptLogMaxEntries = 5000;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-softwarejobattemptretention-" + Guid.NewGuid().ToString("N"));
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Path = "/api/v1/server/settings";
+            request.Headers = new Dictionary<string, string>();
+            request.Body = "{\"softwareJobAttemptLogRetentionDays\":45,\"softwareJobAttemptLogMaxEntries\":2000}";
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.ConfigureServerSettings(stream, request);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("200 OK"))
+                {
+                    return "expected softwareJobAttemptLogRetentionDays/MaxEntries to be accepted, got: " + response;
+                }
+                if (!response.Contains("\"softwareJobAttemptLogRetentionDays\":45") || !response.Contains("\"softwareJobAttemptLogMaxEntries\":2000"))
+                {
+                    return "expected the response body to reflect the new values, got: " + response;
+                }
+            }
+
+            if (options.SoftwareJobAttemptLogRetentionDays != 45 || options.SoftwareJobAttemptLogMaxEntries != 2000)
+            {
+                return "expected the live options object to be updated, got retentionDays=" + options.SoftwareJobAttemptLogRetentionDays + " maxEntries=" + options.SoftwareJobAttemptLogMaxEntries;
+            }
+            return null;
+        }
+
         private static string TestConfigureServerSettingsRoundTripsShowUsbStorageIndicator()
         {
             ServerOptions options = new ServerOptions();
@@ -13989,6 +14079,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 ServerOptions options = new ServerOptions();
                 options.DataPath = dataPath;
+                options.SoftwareJobAttemptLogRetentionDays = 90;
+                options.SoftwareJobAttemptLogMaxEntries = 5000;
                 InventoryServer server = new InventoryServer(options);
 
                 SoftwareJobAttempt attempt = new SoftwareJobAttempt();
