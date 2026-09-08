@@ -23,7 +23,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.59.3";
+        internal const string ProductVersion = "0.59.4";
 
         private static int Main(string[] args)
         {
@@ -2231,7 +2231,22 @@ namespace WindowsInventoryLite
             DebugLogger.Log(options, "Client", "Inventory report accepted from '" + DebugLogger.SanitizeForLog(computerName) + "'");
             Dictionary<string, object> ackResponse = new Dictionary<string, object>();
             ackResponse["status"] = "ok";
-            ackResponse["licenseKeySources"] = BuildLicenseKeySourcesForClientResponse();
+            // The basic report-acceptance gate above deliberately honors the
+            // admin-toggleable RequireIngestionToken (fake inventory
+            // submission is accepted as low-sensitivity risk when no token
+            // is configured - see the software-distribution endpoints'
+            // documented reasoning). The license-key-source catalog piggybacked
+            // onto this same response is not part of that low-sensitivity risk
+            // model - it is fleet-wide admin-defined metadata about where to
+            // find real product keys - so it always requires a real, matching
+            // token regardless of that toggle, same as
+            // SendSoftwareRepositoryConnectionInfo/SendClientSoftwareJobs. A
+            // caller with no valid token still gets its report accepted; it
+            // just never receives this catalog.
+            if (!IsIngestionTokenRejected(true, token, options.Token))
+            {
+                ackResponse["licenseKeySources"] = BuildLicenseKeySourcesForClientResponse();
+            }
             SendJson(stream, serializer.Serialize(ackResponse));
         }
 
@@ -2491,6 +2506,12 @@ namespace WindowsInventoryLite
         // licenses[].key in it. Returns null for an unknown computer name
         // (the HTTP handler below maps that to a 404) rather than an empty
         // list, so the two cases stay distinguishable.
+        // Deliberately reads the report file without reportFileLock, same
+        // as LoadClientReports - a torn/partial read (racing a concurrent
+        // ReceiveInventory write for the same computer) just fails to
+        // deserialize and returns null here, which the caller already
+        // treats as "not found". Self-healing: nothing is corrupted, and
+        // the next call after the write settles reads the real report.
         internal List<Dictionary<string, object>> GetDecryptedLicenseKeysForClient(string computerName)
         {
             string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
@@ -3948,7 +3969,7 @@ namespace WindowsInventoryLite
                     string adCredentialError;
                     if (!TryResolveAdSyncCredentials(useAdCredentials, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref winRmUsername, ref winRmPassword, out adCredentialError))
                     {
-                        SendText(stream, "{\"error\":\"" + adCredentialError.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                        SendJsonError(stream, adCredentialError, 400);
                         return;
                     }
                 }
@@ -4050,7 +4071,7 @@ namespace WindowsInventoryLite
                     string adCredentialError;
                     if (!TryResolveAdSyncCredentials(useAd, options.AdSyncEnabled, options.AdUseServiceIdentity, options.AdUsername, options.AdPassword, ref sshUsername, ref sshPassword, out adCredentialError))
                     {
-                        SendText(stream, "{\"error\":\"" + adCredentialError.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                        SendJsonError(stream, adCredentialError, 400);
                         return;
                     }
                     if (String.IsNullOrEmpty(sshUsername) || String.IsNullOrEmpty(sshPassword))
@@ -4176,7 +4197,7 @@ namespace WindowsInventoryLite
             }
             catch (ArgumentException ex)
             {
-                SendText(stream, "{\"error\":\"" + ex.Message.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                SendJsonError(stream, ex.Message, 400);
                 return;
             }
             if (needsSsh)
@@ -4184,7 +4205,7 @@ namespace WindowsInventoryLite
                 string pushValidationError;
                 if (!TryValidateLinuxPushValues(serverUrl, token, installPath, out pushValidationError))
                 {
-                    SendText(stream, "{\"error\":\"" + pushValidationError.Replace("\\", "\\\\").Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                    SendJsonError(stream, pushValidationError, 400);
                     return;
                 }
             }
@@ -4475,7 +4496,7 @@ namespace WindowsInventoryLite
             }
             catch (ArgumentException ex)
             {
-                SendText(stream, "{\"error\":\"" + ex.Message.Replace("\\", "\\\\").Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                SendJsonError(stream, ex.Message, 400);
                 return;
             }
 
@@ -5446,42 +5467,56 @@ namespace WindowsInventoryLite
         private void RecordSoftwareJobAttempt(SoftwareJobAttempt entry)
         {
             JavaScriptSerializer serializer = CreateJsonSerializer();
-            lock (softwareJobAttemptLogLock)
+            try
             {
-                softwareJobAttemptLog.Add(entry);
-
-                string path = GetSoftwareJobAttemptLogPath();
-                string directory = Path.GetDirectoryName(path);
-                if (!String.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+                lock (softwareJobAttemptLogLock)
                 {
-                    Directory.CreateDirectory(directory);
-                }
-                File.AppendAllText(path, serializer.Serialize(entry.ToDictionary()) + Environment.NewLine, new UTF8Encoding(false));
+                    softwareJobAttemptLog.Add(entry);
 
-                int slack = Math.Max(options.SoftwareJobAttemptLogMaxEntries / 10, 50);
-                bool oldestEntryAgedOut = softwareJobAttemptLog.Count > 0
-                    && softwareJobAttemptLog[0].TimestampUtc < DateTime.UtcNow.AddDays(-options.SoftwareJobAttemptLogRetentionDays);
-                if (softwareJobAttemptLog.Count > options.SoftwareJobAttemptLogMaxEntries + slack || oldestEntryAgedOut)
-                {
-                    List<SoftwareJobAttempt> pruned = PruneSoftwareJobAttempts(softwareJobAttemptLog, DateTime.UtcNow, options.SoftwareJobAttemptLogRetentionDays, options.SoftwareJobAttemptLogMaxEntries);
-                    if (pruned.Count != softwareJobAttemptLog.Count)
+                    string path = GetSoftwareJobAttemptLogPath();
+                    string directory = Path.GetDirectoryName(path);
+                    if (!String.IsNullOrEmpty(directory) && !Directory.Exists(directory))
                     {
-                        softwareJobAttemptLog.Clear();
-                        softwareJobAttemptLog.AddRange(pruned);
-                        List<Dictionary<string, object>> serializable = new List<Dictionary<string, object>>();
-                        foreach (SoftwareJobAttempt attempt in softwareJobAttemptLog)
+                        Directory.CreateDirectory(directory);
+                    }
+                    File.AppendAllText(path, serializer.Serialize(entry.ToDictionary()) + Environment.NewLine, new UTF8Encoding(false));
+
+                    int slack = Math.Max(options.SoftwareJobAttemptLogMaxEntries / 10, 50);
+                    bool oldestEntryAgedOut = softwareJobAttemptLog.Count > 0
+                        && softwareJobAttemptLog[0].TimestampUtc < DateTime.UtcNow.AddDays(-options.SoftwareJobAttemptLogRetentionDays);
+                    if (softwareJobAttemptLog.Count > options.SoftwareJobAttemptLogMaxEntries + slack || oldestEntryAgedOut)
+                    {
+                        List<SoftwareJobAttempt> pruned = PruneSoftwareJobAttempts(softwareJobAttemptLog, DateTime.UtcNow, options.SoftwareJobAttemptLogRetentionDays, options.SoftwareJobAttemptLogMaxEntries);
+                        if (pruned.Count != softwareJobAttemptLog.Count)
                         {
-                            serializable.Add(attempt.ToDictionary());
+                            softwareJobAttemptLog.Clear();
+                            softwareJobAttemptLog.AddRange(pruned);
+                            List<Dictionary<string, object>> serializable = new List<Dictionary<string, object>>();
+                            foreach (SoftwareJobAttempt attempt in softwareJobAttemptLog)
+                            {
+                                serializable.Add(attempt.ToDictionary());
+                            }
+                            StringBuilder rewritten = new StringBuilder();
+                            foreach (Dictionary<string, object> record in serializable)
+                            {
+                                rewritten.Append(serializer.Serialize(record));
+                                rewritten.Append(Environment.NewLine);
+                            }
+                            File.WriteAllText(path, rewritten.ToString(), new UTF8Encoding(false));
                         }
-                        StringBuilder rewritten = new StringBuilder();
-                        foreach (Dictionary<string, object> record in serializable)
-                        {
-                            rewritten.Append(serializer.Serialize(record));
-                            rewritten.Append(Environment.NewLine);
-                        }
-                        File.WriteAllText(path, rewritten.ToString(), new UTF8Encoding(false));
                     }
                 }
+            }
+            catch (Exception ex)
+            {
+                // Same reasoning as RecordIngestionRejection's own try/catch:
+                // disk I/O here (full disk, ACL drift, a sharing violation)
+                // must not propagate out through ReceiveSoftwareJobResults
+                // and turn an otherwise-successful ingestion into a 500 plus
+                // a stack trace in the Windows Event Log. Recording an
+                // attempt is a best-effort diagnostic write, not something
+                // the caller's success response should depend on.
+                DebugLogger.Log(options, "Error", "RecordSoftwareJobAttempt failed to persist a software job attempt: " + ex.Message);
             }
         }
 
@@ -5874,6 +5909,25 @@ namespace WindowsInventoryLite
                 }
             }
             return result;
+        }
+
+        // Each parsed line is concatenated directly into an LDAP ADsPath
+        // ("LDAP://" + organizationalUnitDn, see AdLookupService.SearchOneRoot)
+        // with no escaping. ADsPath syntax is "LDAP://server/DN" - a value
+        // containing "/" could redirect that path to an attacker-controlled
+        // server instead of the intended domain, relaying this server's AD
+        // service identity or explicit AD credentials to it. A real DN never
+        // contains a literal "/" (it is a reserved DN special character that
+        // any AD tooling would emit as \2f, never bare), so rejecting it
+        // outright costs no legitimate value. Also requires at least one
+        // "=" so a value that is not DN-shaped at all is caught here, at
+        // save time, rather than surfacing as an opaque AD connection
+        // failure later.
+        private static bool IsValidOrganizationalUnitDn(string organizationalUnitDn)
+        {
+            return !String.IsNullOrEmpty(organizationalUnitDn)
+                && organizationalUnitDn.IndexOfAny(new char[] { '/', '\0' }) < 0
+                && organizationalUnitDn.Contains("=");
         }
 
         private static ArrayList ExpandInstallTargets(string input)
@@ -7309,6 +7363,23 @@ namespace WindowsInventoryLite
             SendText(stream, json, "application/json; charset=utf-8", 200);
         }
 
+        // Several call sites used to build a JSON error body by hand -
+        // "{\"error\":\"" + message + "\"}" - with ad hoc (and inconsistent:
+        // some escaped only embedded quotes, some also backslashes, some
+        // neither) escaping instead of going through the JSON serializer
+        // every other response in this file already uses. A message
+        // containing an unescaped quote or backslash (an AD/WinRM/SSH error
+        // string, or admin-supplied catalog text) produced invalid JSON.
+        // Centralizing on the real serializer removes the whole class of
+        // escaping bugs at once.
+        private void SendJsonError(Stream stream, string message, int statusCode)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> body = new Dictionary<string, object>();
+            body["error"] = message;
+            SendText(stream, serializer.Serialize(body), "application/json; charset=utf-8", statusCode);
+        }
+
         // HSTS is opt-in (off by default, see ServerOptions.HstsEnabled) and
         // only ever added to a response actually served over the HTTPS
         // listener - "stream is SslStream" is exactly how HandleClient
@@ -7902,12 +7973,17 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
             catch (ArgumentException ex)
             {
-                SendText(stream, "{\"error\":\"" + ex.Message.Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                SendJsonError(stream, ex.Message, 400);
                 return;
             }
 
             string cmdPath = Path.Combine(options.ClientPackagePath, "Install-ClientGpo.cmd");
             File.WriteAllLines(cmdPath, cmdLines, Encoding.ASCII);
+            // Holds the ingestion token in plaintext (GenerateCmdLines embeds
+            // it in a "set ARGS=... -Token '<value>'" line) - same reasoning
+            // as ConfigureLinuxClientPackage's wil-linux-client.env/
+            // linux-package-settings.json calls.
+            ApplyRestrictedConfigAcl(cmdPath);
 
             string deployInBin = Path.Combine(Path.GetDirectoryName(options.WinRmInstallerPath), "Deploy-ClientGpo.ps1");
             string deployInPackage = Path.Combine(options.ClientPackagePath, "Deploy-ClientGpo.ps1");
@@ -8099,7 +8175,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
             catch (ArgumentException ex)
             {
-                SendText(stream, "{\"error\":\"" + ex.Message.Replace("\\", "\\\\").Replace("\"", "'") + "\"}", "application/json; charset=utf-8", 400);
+                SendJsonError(stream, ex.Message, 400);
                 return;
             }
 
@@ -8125,6 +8201,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (!String.IsNullOrEmpty(token))
             {
                 File.WriteAllText(envFilePath, String.Join("\n", envFileLines) + "\n", new UTF8Encoding(false));
+                // Holds the ingestion token in plaintext, same class of
+                // secret as server-config.json/licenses.json - unlike those
+                // two, this file (and linux-package-settings.json below) sat
+                // at whatever ACL LinuxClientPackagePath happened to inherit.
+                ApplyRestrictedConfigAcl(envFilePath);
             }
             else if (File.Exists(envFilePath))
             {
@@ -8139,7 +8220,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             settingsToSave["intervalHours"] = intervalHours;
             settingsToSave["statusIntervalMinutes"] = statusIntervalMinutes;
             settingsToSave["installPath"] = installPath;
-            File.WriteAllText(Path.Combine(options.LinuxClientPackagePath, "linux-package-settings.json"), serializer.Serialize(settingsToSave), new UTF8Encoding(false));
+            string packageSettingsFilePath = Path.Combine(options.LinuxClientPackagePath, "linux-package-settings.json");
+            File.WriteAllText(packageSettingsFilePath, serializer.Serialize(settingsToSave), new UTF8Encoding(false));
+            // Holds the ingestion token in plaintext (settingsToSave["token"]
+            // above) - same reasoning as wil-linux-client.env's own
+            // ApplyRestrictedConfigAcl call just above.
+            ApplyRestrictedConfigAcl(packageSettingsFilePath);
 
             SendLinuxClientPackageStatus(stream);
         }
@@ -8442,7 +8528,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             CertificateUpload upload = ParseCertificateUpload(request.Body);
             if (upload.Error != null)
             {
-                SendText(stream, "{\"error\":\"" + upload.Error + "\"}", "application/json; charset=utf-8", 400);
+                SendJsonError(stream, upload.Error, 400);
                 return;
             }
 
@@ -8451,7 +8537,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             X509Certificate2 imported = ImportCertificateIntoStore(upload.PfxBytes, upload.Password, out importError, out isServerError);
             if (imported == null)
             {
-                SendText(stream, "{\"error\":\"" + importError + "\"}", "application/json; charset=utf-8", isServerError ? 500 : 400);
+                SendJsonError(stream, importError, isServerError ? 500 : 400);
                 return;
             }
 
@@ -8908,7 +8994,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     string httpsError = ApplySlotState(httpsSlot, true, options.HttpsPort, desiredHttpsPort, true);
                     if (httpsError != null)
                     {
-                        SendText(stream, "{\"error\":\"HTTPS: " + httpsError + "\"}", "application/json; charset=utf-8", 400);
+                        SendJsonError(stream, "HTTPS: " + httpsError, 400);
                         return;
                     }
                 }
@@ -8928,7 +9014,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 string httpError = ApplySlotState(httpSlot, desiredEnableHttp, options.Port, desiredHttpPort, false);
                 if (httpError != null)
                 {
-                    SendText(stream, "{\"error\":\"HTTP: " + httpError + "\"}", "application/json; charset=utf-8", 400);
+                    SendJsonError(stream, "HTTP: " + httpError, 400);
                     return;
                 }
                 options.Port = desiredHttpPort;
@@ -9008,6 +9094,16 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     return;
                 }
 
+                string adComputerImportOUs = payload.ContainsKey("adComputerImportOUs") ? Convert.ToString(payload["adComputerImportOUs"]) : options.AdComputerImportOUs;
+                foreach (string organizationalUnitDn in ParseAdComputerImportOUs(adComputerImportOUs))
+                {
+                    if (!IsValidOrganizationalUnitDn(organizationalUnitDn))
+                    {
+                        SendJsonError(stream, "Each line of adComputerImportOUs must be a Distinguished Name (e.g. OU=Workstations,DC=example,DC=com) with no '/' character: '" + organizationalUnitDn + "'", 400);
+                        return;
+                    }
+                }
+
                 options.AdSyncEnabled = adSyncEnabled;
                 options.AdDescriptionSyncEnabled = adDescriptionSyncEnabled;
                 options.AdSyncMode = adSyncMode;
@@ -9016,7 +9112,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 options.AdUseServiceIdentity = adUseServiceIdentity;
                 options.AdUsername = adUsername;
                 options.AdPassword = adPassword;
-                options.AdComputerImportOUs = payload.ContainsKey("adComputerImportOUs") ? Convert.ToString(payload["adComputerImportOUs"]) : options.AdComputerImportOUs;
+                options.AdComputerImportOUs = adComputerImportOUs;
                 ReconfigureAdSyncTimer();
 
                 updates["AdSyncEnabled"] = options.AdSyncEnabled ? "true" : "false";
@@ -10810,6 +10906,31 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 || String.Equals(hive, "HKEY_CURRENT_USER", StringComparison.OrdinalIgnoreCase);
         }
 
+        // registryHive is restricted to a fixed set (IsValidRegistryHiveName
+        // above), but registryPath/valueName were accepted as any non-empty
+        // string - this catalog fans out to every managed client
+        // (RegistryKey.OpenSubKey/GetValue there), so a control character or
+        // an unreasonably long value here would reach every machine in the
+        // fleet. Not an attempt to restrict WHICH registry values an admin
+        // can point this at (that is the feature, and admin config is
+        // already a trusted boundary elsewhere in this project) - only
+        // rejects shapes no real registry path or value name ever has.
+        private static bool IsValidRegistryPathOrValueName(string value)
+        {
+            if (String.IsNullOrEmpty(value) || value.Length > 1024)
+            {
+                return false;
+            }
+            foreach (char c in value)
+            {
+                if (c < 0x20)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         private static string ExtractLicenseKeySourceId(string path)
         {
             const string prefix = "/api/v1/license-key-sources/";
@@ -10869,14 +10990,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 SendText(stream, "{\"error\":\"registryHive must be HKEY_LOCAL_MACHINE or HKEY_CURRENT_USER\"}", "application/json; charset=utf-8", 400);
                 return;
             }
-            if (String.IsNullOrEmpty(registryPath))
+            if (!IsValidRegistryPathOrValueName(registryPath))
             {
-                SendText(stream, "{\"error\":\"registryPath is required\"}", "application/json; charset=utf-8", 400);
+                SendText(stream, "{\"error\":\"registryPath is required and must not contain control characters or exceed 1024 characters\"}", "application/json; charset=utf-8", 400);
                 return;
             }
-            if (String.IsNullOrEmpty(valueName))
+            if (!IsValidRegistryPathOrValueName(valueName))
             {
-                SendText(stream, "{\"error\":\"valueName is required\"}", "application/json; charset=utf-8", 400);
+                SendText(stream, "{\"error\":\"valueName is required and must not contain control characters or exceed 1024 characters\"}", "application/json; charset=utf-8", 400);
                 return;
             }
 
@@ -10935,14 +11056,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 SendText(stream, "{\"error\":\"registryHive must be HKEY_LOCAL_MACHINE or HKEY_CURRENT_USER\"}", "application/json; charset=utf-8", 400);
                 return;
             }
-            if (String.IsNullOrEmpty(registryPath))
+            if (!IsValidRegistryPathOrValueName(registryPath))
             {
-                SendText(stream, "{\"error\":\"registryPath is required\"}", "application/json; charset=utf-8", 400);
+                SendText(stream, "{\"error\":\"registryPath is required and must not contain control characters or exceed 1024 characters\"}", "application/json; charset=utf-8", 400);
                 return;
             }
-            if (String.IsNullOrEmpty(valueName))
+            if (!IsValidRegistryPathOrValueName(valueName))
             {
-                SendText(stream, "{\"error\":\"valueName is required\"}", "application/json; charset=utf-8", 400);
+                SendText(stream, "{\"error\":\"valueName is required and must not contain control characters or exceed 1024 characters\"}", "application/json; charset=utf-8", 400);
                 return;
             }
 
@@ -11170,7 +11291,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     IPAddress parsedIp;
                     if (IPAddress.TryParse(expandedTarget, out parsedIp))
                     {
-                        SendText(stream, "{\"error\":\"targets must be computer names - this feature assigns jobs by the client's own reported computer name, not by connecting to an IP, so an IP address or range will never match any client: " + expandedTarget + "\"}", "application/json; charset=utf-8", 400);
+                        SendJsonError(stream, "targets must be computer names - this feature assigns jobs by the client's own reported computer name, not by connecting to an IP, so an IP address or range will never match any client: " + expandedTarget, 400);
                         return;
                     }
                 }
@@ -11247,7 +11368,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     IPAddress parsedIp;
                     if (IPAddress.TryParse(expandedTarget, out parsedIp))
                     {
-                        SendText(stream, "{\"error\":\"targets must be computer names - this feature assigns jobs by the client's own reported computer name, not by connecting to an IP, so an IP address or range will never match any client: " + expandedTarget + "\"}", "application/json; charset=utf-8", 400);
+                        SendJsonError(stream, "targets must be computer names - this feature assigns jobs by the client's own reported computer name, not by connecting to an IP, so an IP address or range will never match any client: " + expandedTarget, 400);
                         return;
                     }
                 }
@@ -11443,7 +11564,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     IPAddress parsedIp;
                     if (IPAddress.TryParse(expandedTarget, out parsedIp))
                     {
-                        SendText(stream, "{\"error\":\"targets must be computer names - this feature assigns jobs by the client's own reported computer name, not by connecting to an IP, so an IP address or range will never match any client: " + expandedTarget + "\"}", "application/json; charset=utf-8", 400);
+                        SendJsonError(stream, "targets must be computer names - this feature assigns jobs by the client's own reported computer name, not by connecting to an IP, so an IP address or range will never match any client: " + expandedTarget, 400);
                         return;
                     }
                 }
@@ -11520,7 +11641,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     IPAddress parsedIp;
                     if (IPAddress.TryParse(expandedTarget, out parsedIp))
                     {
-                        SendText(stream, "{\"error\":\"targets must be computer names - this feature assigns jobs by the client's own reported computer name, not by connecting to an IP, so an IP address or range will never match any client: " + expandedTarget + "\"}", "application/json; charset=utf-8", 400);
+                        SendJsonError(stream, "targets must be computer names - this feature assigns jobs by the client's own reported computer name, not by connecting to an IP, so an IP address or range will never match any client: " + expandedTarget, 400);
                         return;
                     }
                 }
@@ -12509,6 +12630,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ToLinuxServerUrl leaves blank and unrecognized-shape values unchanged", TestToLinuxServerUrlLeavesBlankAndCustomValuesUnchanged);
             allPassed &= SelfTestCheck(output, "ParseAdComputerImportOUs splits on newlines only, not commas", TestParseAdComputerImportOUsSplitsOnNewlinesOnly);
             allPassed &= SelfTestCheck(output, "ParseAdComputerImportOUs treats blank input as an empty OU list", TestParseAdComputerImportOUsEmptyMeansWholeDomain);
+            allPassed &= SelfTestCheck(output, "IsValidOrganizationalUnitDn rejects a slash (LDAP ADsPath server redirect) and non-DN-shaped values", TestIsValidOrganizationalUnitDnRejectsSlashAndNonDnShapes);
             allPassed &= SelfTestCheck(output, "BuildZip produces a structurally valid archive", TestBuildZipStructure);
             allPassed &= SelfTestCheck(output, "BuildZip stamps entries with the real current date, not a hardcoded placeholder", TestBuildZipUsesRealDate);
             allPassed &= SelfTestCheck(output, "NormalizeThumbprint strips separators and uppercases", TestNormalizeThumbprint);
@@ -12647,6 +12769,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ComputeStickyUsbStorage treats a missing previous field as false, not a throw", TestComputeStickyUsbStorageTreatsMissingPreviousFieldAsFalse);
             allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
             allPassed &= SelfTestCheck(output, "IsValidRegistryHiveName accepts only HKEY_LOCAL_MACHINE/HKEY_CURRENT_USER", TestIsValidRegistryHiveNameAcceptsOnlyKnownHives);
+            allPassed &= SelfTestCheck(output, "IsValidRegistryPathOrValueName rejects control characters and oversized input", TestIsValidRegistryPathOrValueNameRejectsControlCharsAndOversizedInput);
             allPassed &= SelfTestCheck(output, "License key sources CRUD storage round-trips through disk", TestLicenseKeySourcesCrudRoundTrip);
             allPassed &= SelfTestCheck(output, "Windows updates catalog CRUD storage round-trips through disk", TestWindowsUpdatesCrudRoundTrip);
             allPassed &= SelfTestCheck(output, "Third-party software catalog CRUD storage round-trips through disk", TestThirdPartySoftwareCrudRoundTrip);
@@ -12994,6 +13117,26 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (result.Count != 0)
             {
                 return "expected a blank/whitespace-only input to produce zero OUs, got " + result.Count;
+            }
+            return null;
+        }
+
+        // Each parsed OU line is concatenated into "LDAP://" + line with no
+        // further escaping (AdLookupService.SearchOneRoot) - a "/" could
+        // redirect that ADsPath to a different LDAP server than intended.
+        private static string TestIsValidOrganizationalUnitDnRejectsSlashAndNonDnShapes()
+        {
+            if (!IsValidOrganizationalUnitDn("OU=Workstations,OU=Site1,DC=corp,DC=example,DC=com"))
+            {
+                return "expected a real DN to be accepted";
+            }
+            string[] invalid = { null, "", "not-a-dn", "OU=Workstations/DC=evil.example.com,DC=com", "evil.example.com/DC=corp,DC=com" };
+            foreach (string value in invalid)
+            {
+                if (IsValidOrganizationalUnitDn(value))
+                {
+                    return "expected '" + value + "' to be rejected, but IsValidOrganizationalUnitDn accepted it";
+                }
             }
             return null;
         }
@@ -16051,6 +16194,35 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (IsValidRegistryHiveName(""))
             {
                 return "expected an empty string to be rejected";
+            }
+            return null;
+        }
+
+        private static string TestIsValidRegistryPathOrValueNameRejectsControlCharsAndOversizedInput()
+        {
+            if (!IsValidRegistryPathOrValueName(@"SOFTWARE\Vendor\Product"))
+            {
+                return "expected a normal registry path to be accepted";
+            }
+            if (IsValidRegistryPathOrValueName(null) || IsValidRegistryPathOrValueName(""))
+            {
+                return "expected null/empty to be rejected";
+            }
+            if (IsValidRegistryPathOrValueName("SOFTWARE\0Vendor"))
+            {
+                return "expected an embedded NUL character to be rejected";
+            }
+            if (IsValidRegistryPathOrValueName("SOFTWARE\r\nVendor"))
+            {
+                return "expected an embedded line break to be rejected";
+            }
+            if (IsValidRegistryPathOrValueName(new string('a', 1025)))
+            {
+                return "expected a value over 1024 characters to be rejected";
+            }
+            if (!IsValidRegistryPathOrValueName(new string('a', 1024)))
+            {
+                return "expected a value at exactly 1024 characters to be accepted";
             }
             return null;
         }

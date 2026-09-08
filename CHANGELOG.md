@@ -6,6 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.59.4]
+
+### Fixed
+
+- `RecordSoftwareJobAttempt` lacked the try/catch its sibling `RecordIngestionRejection` already has - a disk error (full disk, ACL drift, sharing violation) could propagate out through `ReceiveSoftwareJobResults` and turn an otherwise-successful ingestion into a 500 plus a full stack trace in the Windows Event Log. Now wrapped identically: logged and swallowed, since recording an attempt is a best-effort diagnostic write.
+- Several JSON error-response bodies were hand-built via string concatenation (`"{\"error\":\"" + message + "\"}"`) with inconsistent, partial escaping - some replaced only embedded quotes, two call sites (an upload error and a package-import error) escaped nothing at all. A message containing an unescaped quote or backslash (an AD/WinRM/SSH error string, or admin-supplied catalog text) produced invalid JSON. New `SendJsonError` helper routes every one of these 15 call sites through the real JSON serializer instead.
+
+### Security
+
+- **Ingestion-token-bearing files the server generates (`Install-ClientGpo.cmd`, the Linux client package's `wil-linux-client.env` and `linux-package-settings.json`) had no ACL restriction**, unlike `server-config.json`/`licenses.json`. All three now get the same `ApplyRestrictedConfigAcl` treatment right after being written.
+- **The license-key-source catalog piggybacked onto every `POST /api/v1/inventory` response was gated only by the admin-toggleable `RequireIngestionToken`** - when that toggle is off (accepted as low-risk for fake inventory submission, per this project's documented threat model), any caller received the full fleet-wide catalog of where to look for real product keys. Now always requires a real, matching token regardless of the toggle, same as `SendSoftwareRepositoryConnectionInfo`/`SendClientSoftwareJobs` - a report with no valid token is still accepted, it just never receives this catalog. Live-verified against a scratch server.
+- **`AdComputerImportOUs` (admin-configured Distinguished Names) was concatenated directly into an LDAP ADsPath** (`"LDAP://" + organizationalUnitDn`) with no validation - a value containing `/` could redirect that path to a different LDAP server than intended (ADsPath syntax is `LDAP://server/DN`), relaying this server's AD service identity or explicit credentials to it. New `IsValidOrganizationalUnitDn` rejects `/` and non-DN-shaped values at save time. Live-verified.
+- **License key sources' `registryPath`/`valueName` accepted any non-empty string** - this catalog fans out to every managed client (`RegistryKey.OpenSubKey`/`GetValue` there), so a control character or unreasonably long value would reach the whole fleet. New `IsValidRegistryPathOrValueName` rejects control characters and caps length at 1024; `registryHive` was already restricted. Not an attempt to restrict which registry values an admin can point this at - that is the feature. Live-verified.
+- Added a comment documenting why `GetDecryptedLicenseKeysForClient`'s unlocked report-file read is intentional and self-healing (same established pattern as elsewhere in this file) - no code change, since a torn/partial read here already just returns `null`, which the caller already treats as "not found."
+
+226 self-tests (was 224), 161/161 Pester green under Windows PowerShell 5.1 (unchanged).
+
 ## [0.59.3]
 
 ### Fixed
