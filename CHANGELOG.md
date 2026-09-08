@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.59.0]
+
+### Added
+
+- **Logging consolidated into one section with Ingestion/Installs/Software subtabs.** The ingestion-rejection log (formerly the sole occupant of the top-level "Logging" tab), "Saved client action logs" (formerly embedded under Deploy > Actions), and "Software job attempt history" (formerly a Software-dropdown item) are now three subtabs under "Logging" - old bookmarks (`#logging`, `#softwarejobhistory`) still resolve to the right subtab. `installStatus`/`updatesStatus`/`linuxUpdatesStatus` (live in-session push feedback) are unaffected and stay where they are.
+- **All three logs' retention settings consolidated into one Settings > Server "Log retention" block.** The software-job-attempt log's retention (previously hardcoded at 90 days / 5000 entries) is now admin-configurable, same defaults, via two new `ServerOptions` fields and the corresponding `GET`/`POST /api/v1/server/settings` fields.
+
+222 self-tests (was 221).
+
 ## [0.58.0]
 
 ### Added
