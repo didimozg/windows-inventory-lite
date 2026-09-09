@@ -1205,8 +1205,8 @@
 
     document.querySelectorAll('[data-action-job]').forEach(button => {
       button.addEventListener('click', () => {
-        state.installJobId = button.dataset.actionJob;
-        pollInstallJob(state.installJobId);
+        state.installHistorySelectedJobId = button.dataset.actionJob;
+        pollInstallJob(state.installHistorySelectedJobId);
       });
     });
   }
@@ -1339,7 +1339,7 @@
       });
   }
 
-  function trustHostKeyAndRetry(host, fingerprint, statusElementId) {
+  function trustHostKeyAndRetry(host, fingerprint) {
     fetch('/api/v1/linux-client-install/trust-host-key', {
       method: 'POST',
       cache: 'no-store',
@@ -1368,12 +1368,14 @@
       .then(({ ok, status, data }) => {
         if (!ok) throw new Error(data.error || `HTTP ${status}`);
         state.installJobId = data.jobId;
+        state.installHistorySelectedJobId = state.installJobId;
         if (state.installPollTimer) window.clearInterval(state.installPollTimer);
         pollInstallJob(state.installJobId);
         state.installPollTimer = window.setInterval(() => pollInstallJob(state.installJobId), 3000);
+        updateLoggingBadge();
       })
       .catch(error => {
-        byId(statusElementId).textContent = `Trust and retry failed: ${error.message}`;
+        byId('installHistoryJobDetail').textContent = `Trust and retry failed: ${error.message}`;
       });
   }
 
@@ -1699,8 +1701,6 @@
     }
 
     byId('installButton').disabled = true;
-    byId('installStatus').classList.add('empty');
-    byId('installStatus').textContent = `Starting ${action} job...`;
 
     fetch(action === 'uninstall' ? '/api/v1/client-uninstall' : '/api/v1/client-install', {
       method: 'POST',
@@ -1715,12 +1715,14 @@
       })
       .then(data => {
         state.installJobId = data.jobId;
+        state.installHistorySelectedJobId = state.installJobId;
         if (state.installPollTimer) window.clearInterval(state.installPollTimer);
         pollInstallJob(state.installJobId);
         state.installPollTimer = window.setInterval(() => pollInstallJob(state.installJobId), 3000);
+        updateLoggingBadge();
       })
       .catch(error => {
-        byId('installStatus').textContent = `Failed to start ${action} job: ${error.message}`;
+        window.alert(`Failed to start ${action} job: ${error.message}`);
       })
       .finally(() => {
         byId('installButton').disabled = false;
@@ -1990,8 +1992,10 @@
       state.knownScheduledJobId = scheduledJobId;
       if (state.view === 'deploy' && state.subview === 'updates' && !state.updatePollTimer) {
         state.updateJobId = scheduledJobId;
-        pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows'));
-        state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows')), 3000);
+        state.installHistorySelectedJobId = state.updateJobId;
+        pollInstallJob(state.updateJobId, () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows'));
+        state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows')), 3000);
+        updateLoggingBadge();
       }
     }
   }
@@ -2362,8 +2366,6 @@
       const winRmAuthMode = byId('updatesWinRmAuthMode').value;
       const username = winRmAuthMode === 'manual' ? byId('updatesUsername').value.trim() : '';
       const password = winRmAuthMode === 'manual' ? byId('updatesPassword').value : '';
-      byId('updatesStatus').classList.add('empty');
-      byId('updatesStatus').textContent = 'Starting update job...';
       fetch('/api/v1/client-install', {
         method: 'POST',
         cache: 'no-store',
@@ -2374,12 +2376,14 @@
         .then(({ ok, status, data }) => {
           if (!ok) throw new Error(data.error || `HTTP ${status}`);
           state.updateJobId = data.jobId;
+          state.installHistorySelectedJobId = state.updateJobId;
           if (state.updatePollTimer) window.clearInterval(state.updatePollTimer);
-          pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows'));
-          state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, 'updatesStatus', () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows')), 3000);
+          pollInstallJob(state.updateJobId, () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows'));
+          state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows')), 3000);
+          updateLoggingBadge();
         })
         .catch(error => {
-          byId('updatesStatus').textContent = `Failed to start update job: ${error.message}`;
+          window.alert(`Failed to start update job: ${error.message}`);
         })
         .finally(updateUpdatesSelectionState);
     }
@@ -2390,8 +2394,6 @@
       const sshPassword = sshAuthMode === 'manual' ? byId('linuxUpdatesPassword').value : '';
       const trustNewHostKeys = byId('linuxUpdatesTrustNewHostKeys').checked;
       const acknowledgeHostKeyRisk = byId('linuxUpdatesAcknowledgeHostKeyRisk').checked;
-      byId('linuxUpdatesStatus').classList.add('empty');
-      byId('linuxUpdatesStatus').textContent = 'Starting update job...';
       fetch('/api/v1/client-install', {
         method: 'POST',
         cache: 'no-store',
@@ -2402,12 +2404,14 @@
         .then(({ ok, status, data }) => {
           if (!ok) throw new Error(data.error || `HTTP ${status}`);
           state.linuxUpdatesJobId = data.jobId;
+          state.installHistorySelectedJobId = state.linuxUpdatesJobId;
           if (state.linuxUpdatesPollTimer) window.clearInterval(state.linuxUpdatesPollTimer);
-          pollInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', () => loadLinuxClientUpdates(), 'linuxUpdatesPollTimer', job => pruneCompletedUpdateTargets(job, 'linux'));
-          state.linuxUpdatesPollTimer = window.setInterval(() => pollInstallJob(state.linuxUpdatesJobId, 'linuxUpdatesStatus', () => loadLinuxClientUpdates(), 'linuxUpdatesPollTimer', job => pruneCompletedUpdateTargets(job, 'linux')), 3000);
+          pollInstallJob(state.linuxUpdatesJobId, () => loadLinuxClientUpdates(), 'linuxUpdatesPollTimer', job => pruneCompletedUpdateTargets(job, 'linux'));
+          state.linuxUpdatesPollTimer = window.setInterval(() => pollInstallJob(state.linuxUpdatesJobId, () => loadLinuxClientUpdates(), 'linuxUpdatesPollTimer', job => pruneCompletedUpdateTargets(job, 'linux')), 3000);
+          updateLoggingBadge();
         })
         .catch(error => {
-          byId('linuxUpdatesStatus').textContent = `Failed to start update job: ${error.message}`;
+          window.alert(`Failed to start update job: ${error.message}`);
         })
         .finally(updateUpdatesSelectionState);
     }
