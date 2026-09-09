@@ -2299,6 +2299,28 @@ namespace WindowsInventoryLite
             DebugLogger.Log(options, "Client", "Inventory report accepted from '" + DebugLogger.SanitizeForLog(computerName) + "'");
             Dictionary<string, object> ackResponse = new Dictionary<string, object>();
             ackResponse["status"] = "ok";
+            // intervalHours/softwareCheckIntervalHours are not gated on a
+            // valid token - the fleet-wide interval defaults are not
+            // sensitive. ingestionToken (the actual secret) is deliberately
+            // NOT decided by AuthenticatedWithPreviousToken alone here: that
+            // helper's "not the current token, therefore it must have been
+            // the previous one" reasoning is only sound once a strict,
+            // unconditional token check has already accepted the request
+            // (see its own comment). The gate above this method used to
+            // reach here is options.RequireIngestionToken, which an admin
+            // can explicitly turn off while a real token stays configured -
+            // in that mode this method is reached with no token, or a
+            // garbage one, at all. Deciding "not current == previous" there
+            // would hand the real, current secret token to that
+            // unauthenticated caller, who could then replay it against
+            // endpoints that always require a real token (e.g.
+            // SendSoftwareRepositoryConnectionInfo, SendClientSoftwareJobs).
+            // So ingestionToken is only ever populated from inside the
+            // strict, unconditional check below, alongside licenseKeySources.
+            Dictionary<string, object> configResponse = new Dictionary<string, object>();
+            configResponse["intervalHours"] = options.WindowsDefaultIntervalHours;
+            configResponse["softwareCheckIntervalHours"] = options.WindowsDefaultSoftwareCheckIntervalHours;
+            ackResponse["config"] = configResponse;
             // The basic report-acceptance gate above deliberately honors the
             // admin-toggleable RequireIngestionToken (fake inventory
             // submission is accepted as low-sensitivity risk when no token
@@ -2314,6 +2336,10 @@ namespace WindowsInventoryLite
             if (!IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
             {
                 ackResponse["licenseKeySources"] = BuildLicenseKeySourcesForClientResponse();
+                if (AuthenticatedWithPreviousToken(token, options.Token))
+                {
+                    configResponse["ingestionToken"] = options.Token;
+                }
             }
             SendJson(stream, serializer.Serialize(ackResponse));
         }
@@ -3129,7 +3155,26 @@ namespace WindowsInventoryLite
                 File.WriteAllText(path, json, new UTF8Encoding(false));
             }
             DebugLogger.Log(options, "Client", "Linux inventory report accepted from '" + DebugLogger.SanitizeForLog(hostname) + "'");
-            SendJson(stream, "{\"status\":\"ok\"}");
+
+            Dictionary<string, object> ackResponse = new Dictionary<string, object>();
+            ackResponse["status"] = "ok";
+            Dictionary<string, object> configResponse = new Dictionary<string, object>();
+            configResponse["intervalHours"] = options.LinuxDefaultIntervalHours;
+            configResponse["statusIntervalMinutes"] = options.LinuxDefaultStatusIntervalMinutes;
+            ackResponse["config"] = configResponse;
+            // ingestionToken is populated only from inside a strict,
+            // unconditional token check, not from AuthenticatedWithPreviousToken
+            // alone - see the matching comment in ReceiveInventory. This
+            // endpoint's own gate above uses the admin-toggleable
+            // options.RequireIngestionToken, which can accept an
+            // unauthenticated (no or garbage token) request while a real
+            // token stays configured; without this guard that caller would
+            // receive the real, current secret token in this field.
+            if (!IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)) && AuthenticatedWithPreviousToken(token, options.Token))
+            {
+                configResponse["ingestionToken"] = options.Token;
+            }
+            SendJson(stream, serializer.Serialize(ackResponse));
         }
 
         private void ReceiveLinuxServiceStatus(Stream stream, RequestContext request)
@@ -12919,6 +12964,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected rejects the previous token once its overlap window expires", TestIsIngestionTokenRejectedRejectsPreviousTokenAfterOverlapExpires);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected rejects an unrelated token even during an active overlap window", TestIsIngestionTokenRejectedRejectsUnrelatedTokenEvenDuringOverlapWindow);
             allPassed &= SelfTestCheck(output, "AuthenticatedWithPreviousToken distinguishes the current token from any other accepted one", TestAuthenticatedWithPreviousTokenDetectsNonCurrentToken);
+            allPassed &= SelfTestCheck(output, "ReceiveInventory's ack includes a config object with the current Windows defaults", TestReceiveInventoryIncludesConfigWithCurrentDefaults);
+            allPassed &= SelfTestCheck(output, "ReceiveInventory's ack includes the new token when the request authenticated with the previous one", TestReceiveInventoryIncludesNewTokenWhenAuthenticatedWithPreviousToken);
             allPassed &= SelfTestCheck(output, "RegenerateIngestionToken sets PreviousToken/PreviousTokenExpiresUtc when an overlap window is configured", TestRegenerateIngestionTokenSetsPreviousTokenWhenOverlapConfigured);
             allPassed &= SelfTestCheck(output, "RegenerateIngestionToken leaves PreviousToken empty when TokenOverlapHours is 0", TestRegenerateIngestionTokenSkipsPreviousTokenWhenOverlapIsZero);
             allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected ignores non-state-changing methods", TestIsCrossSiteRequestRejectedIgnoresNonStateChangingMethods);
@@ -16195,6 +16242,82 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return "expected true when the supplied token does not match the current one";
             }
             return null;
+        }
+
+        private static string TestReceiveInventoryIncludesConfigWithCurrentDefaults()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-inventoryconfig-" + Guid.NewGuid().ToString("N"));
+            options.Token = "shared-secret";
+            options.WindowsDefaultIntervalHours = 9;
+            options.WindowsDefaultSoftwareCheckIntervalHours = 4;
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "shared-secret";
+                request.Body = "{\"computerName\":\"TEST-PC\"}";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveInventory(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("\"intervalHours\":9", StringComparison.Ordinal) < 0 || responseText.IndexOf("\"softwareCheckIntervalHours\":4", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the ack's config object to carry the current WindowsDefaultIntervalHours/WindowsDefaultSoftwareCheckIntervalHours, got: " + responseText;
+                }
+                if (responseText.IndexOf("\"ingestionToken\"", StringComparison.Ordinal) >= 0)
+                {
+                    return "expected no ingestionToken field when the request already used the current token, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveInventoryIncludesNewTokenWhenAuthenticatedWithPreviousToken()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-inventoryprevtoken-" + Guid.NewGuid().ToString("N"));
+            options.Token = "new-token";
+            options.PreviousToken = "old-token";
+            options.PreviousTokenExpiresUtc = DateTime.UtcNow.AddHours(1).ToString("yyyy-MM-ddTHH:mm:ssZ");
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "old-token";
+                request.Body = "{\"computerName\":\"TEST-PC\"}";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveInventory(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("\"ingestionToken\":\"new-token\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the ack's config object to include the new token when the request authenticated with the previous one, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
         }
 
         private static string TestRegenerateIngestionTokenSetsPreviousTokenWhenOverlapConfigured()
