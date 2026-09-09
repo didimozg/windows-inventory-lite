@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.59.6]
+
+### Fixed
+
+- **The software job attempt history table showed a raw catalog entry ID instead of the software/update's name**, with no way to look one up. `SoftwareJobAttempt` now carries a new `EntryName` field, snapshotted from the matching catalog entry's current `name` at the moment `ReceiveSoftwareJobResults` records the attempt (not resolved later at display time - the entry can be renamed or deleted afterward). A new `LookupCatalogEntryName` helper does the lookup against `LoadWindowsUpdates()`/`LoadThirdPartySoftware()`; a missing/deleted entry at record time falls back to `"(deleted entry)"`. Attempt records logged before this fix have a blank `entryName` (not the `"(deleted entry)"` claim, which would be false for them) - the dashboard falls back to showing the raw entry ID in that case, same as before this fix shipped.
+
+230 self-tests (was 226), 166/166 Pester green under Windows PowerShell 5.1 (unchanged).
+
 ## [0.59.5]
 
 A fresh, explicitly-scoped review of the PowerShell scripts (the list of PowerShell Minor findings from the original whole-project review did not survive a context compaction - see `docs/backlog.md`) found 9 Minor issues plus 2 that turned out to be more serious than Minor. All 11 fixed here.

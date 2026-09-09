@@ -3966,7 +3966,7 @@
             <td>${escapeHtml(a.timestampUtc)}</td>
             <td>${escapeHtml(a.computerName)}</td>
             <td>${escapeHtml(a.catalogType)}</td>
-            <td class="mono">${escapeHtml(a.entryId)}</td>
+            <td>${escapeHtml(a.entryName || a.entryId)}</td>
             <td>${a.success ? 'Success' : 'Failed'}</td>
             <td>${escapeHtml(String(a.exitCode))}</td>
             <td>${escapeHtml(a.errorMessage || '')}</td>

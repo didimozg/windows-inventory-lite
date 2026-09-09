@@ -23,7 +23,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.59.5";
+        internal const string ProductVersion = "0.59.6";
 
         private static int Main(string[] args)
         {
@@ -2465,6 +2465,8 @@ namespace WindowsInventoryLite
                         attempt.ComputerName = computerName;
                         attempt.CatalogType = GetStringValue(resultEntry, "catalogType");
                         attempt.EntryId = GetStringValue(resultEntry, "id");
+                        string entryName = LookupCatalogEntryName(attempt.CatalogType, attempt.EntryId);
+                        attempt.EntryName = String.IsNullOrEmpty(entryName) ? "(deleted entry)" : entryName;
                         attempt.Success = resultEntry.ContainsKey("success") && Convert.ToBoolean(resultEntry["success"]);
                         attempt.ExitCode = resultEntry.ContainsKey("exitCode") ? Convert.ToInt32(resultEntry["exitCode"]) : -1;
                         string errorMessage = resultEntry.ContainsKey("errorMessage") ? GetStringValue(resultEntry, "errorMessage") : null;
@@ -5428,6 +5430,14 @@ namespace WindowsInventoryLite
                         entry.ComputerName = GetStringValue(raw, "computerName");
                         entry.CatalogType = GetStringValue(raw, "catalogType");
                         entry.EntryId = GetStringValue(raw, "entryId");
+                        // Blank, not "(deleted entry)", for a line recorded
+                        // before this field existed - that phrase is a
+                        // positive claim ("we looked this id up and it was
+                        // gone"), which is not what an old, pre-this-fix line
+                        // actually means. The dashboard falls back to
+                        // showing the raw id when this is blank, same as
+                        // before this fix shipped.
+                        entry.EntryName = GetStringValue(raw, "entryName");
                         entry.Success = raw.ContainsKey("success") && Convert.ToBoolean(raw["success"]);
                         entry.ExitCode = raw.ContainsKey("exitCode") ? Convert.ToInt32(raw["exitCode"]) : -1;
                         entry.ErrorMessage = GetStringValue(raw, "errorMessage");
@@ -7725,6 +7735,15 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             public string ComputerName;
             public string CatalogType;
             public string EntryId;
+            // Snapshotted from the catalog entry's own name at the moment this
+            // attempt is recorded (ReceiveSoftwareJobResults), not resolved
+            // later at display time - a catalog entry can be renamed or
+            // deleted after an attempt runs, and the history should show what
+            // the entry was actually called when the attempt happened, not
+            // whatever it is called (or whether it still exists) now. Never
+            // null: "(deleted entry)" when no matching entry was found at
+            // record time.
+            public string EntryName;
             public bool Success;
             public int ExitCode;
             public string ErrorMessage;
@@ -7736,6 +7755,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 result["computerName"] = ComputerName;
                 result["catalogType"] = CatalogType;
                 result["entryId"] = EntryId;
+                result["entryName"] = EntryName;
                 result["success"] = Success;
                 result["exitCode"] = ExitCode;
                 result["errorMessage"] = ErrorMessage;
@@ -11491,6 +11511,41 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             File.WriteAllText(GetThirdPartySoftwareFilePath(), json, new UTF8Encoding(false));
         }
 
+        // Snapshots the catalog entry's current name for a software job attempt
+        // record (see SoftwareJobAttempt.EntryName) - looked up once, at the
+        // moment the attempt is recorded, never re-resolved later.
+        private string LookupCatalogEntryName(string catalogType, string entryId)
+        {
+            List<Dictionary<string, object>> entries;
+            if (String.Equals(catalogType, "windowsUpdate", StringComparison.OrdinalIgnoreCase))
+            {
+                lock (windowsUpdatesLock)
+                {
+                    entries = LoadWindowsUpdates();
+                }
+            }
+            else if (String.Equals(catalogType, "thirdPartySoftware", StringComparison.OrdinalIgnoreCase))
+            {
+                lock (thirdPartySoftwareLock)
+                {
+                    entries = LoadThirdPartySoftware();
+                }
+            }
+            else
+            {
+                return null;
+            }
+
+            foreach (Dictionary<string, object> entry in entries)
+            {
+                if (String.Equals(GetStringValue(entry, "id"), entryId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return GetStringValue(entry, "name");
+                }
+            }
+            return null;
+        }
+
         private static string ExtractThirdPartySoftwareId(string path)
         {
             const string prefix = "/api/v1/third-party-software/";
@@ -12753,6 +12808,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "RecordIngestionRejection still enforces day-based retention continuously even when the count-based batch gate never trips", TestRecordIngestionRejectionEnforcesRetentionContinuously);
             allPassed &= SelfTestCheck(output, "PruneSoftwareJobAttempts keeps the newest entries within a count cap", TestPruneSoftwareJobAttemptsKeepsNewestWithinCap);
             allPassed &= SelfTestCheck(output, "RecordSoftwareJobAttempt appends the entry to the software-job-attempts.jsonl log file", TestRecordSoftwareJobAttemptAppendsToLogFile);
+            allPassed &= SelfTestCheck(output, "LookupCatalogEntryName returns the matching catalog entry's current name", TestLookupCatalogEntryNameFindsMatchingEntry);
+            allPassed &= SelfTestCheck(output, "LookupCatalogEntryName returns null for an entry id that is not in the catalog", TestLookupCatalogEntryNameReturnsNullWhenMissing);
+            allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobResults snapshots the catalog entry's name onto the recorded attempt", TestReceiveSoftwareJobResultsSnapshotsEntryName);
+            allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobResults falls back to '(deleted entry)' when the catalog entry no longer exists", TestReceiveSoftwareJobResultsFallsBackToDeletedEntryLabel);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue returns null when no log entry matches the client's IP", TestComputeClientTokenIssueNoMatch);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue ignores a matching-IP rejection older than the client's last report", TestComputeClientTokenIssueStaleRejectionIgnored);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue flags a matching-IP rejection newer than the client's last report", TestComputeClientTokenIssueRecentRejectionFlagged);
@@ -14499,6 +14558,142 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestLookupCatalogEntryNameFindsMatchingEntry()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-lookup-entry-name-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                List<Dictionary<string, object>> updates = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "kb-123";
+                entry["name"] = "KB5000001 Security Update";
+                updates.Add(entry);
+                server.SaveWindowsUpdates(updates);
+
+                string name = server.LookupCatalogEntryName("windowsUpdate", "kb-123");
+                if (name != "KB5000001 Security Update")
+                {
+                    return "expected the matching windows-update entry's name to be returned, got '" + name + "'";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestLookupCatalogEntryNameReturnsNullWhenMissing()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-lookup-entry-name-missing-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                string name = server.LookupCatalogEntryName("windowsUpdate", "does-not-exist");
+                if (name != null)
+                {
+                    return "expected null for an entry id absent from an empty catalog, got '" + name + "'";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveSoftwareJobResultsSnapshotsEntryName()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-job-results-entryname-test-" + Guid.NewGuid().ToString("N"));
+            options.Token = "shared-secret";
+            options.SoftwareJobAttemptLogRetentionDays = 90;
+            options.SoftwareJobAttemptLogMaxEntries = 5000;
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> updates = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "kb-123";
+                entry["name"] = "KB5000001 Security Update";
+                updates.Add(entry);
+                server.SaveWindowsUpdates(updates);
+
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/software-repository/job-results";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "shared-secret";
+                request.Body = "{\"computerName\":\"TEST-PC\",\"results\":[{\"catalogType\":\"windowsUpdate\",\"id\":\"kb-123\",\"success\":true,\"exitCode\":0}]}";
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveSoftwareJobResults(stream, request);
+                }
+
+                if (server.softwareJobAttemptLog.Count != 1)
+                {
+                    return "expected exactly one recorded attempt, got " + server.softwareJobAttemptLog.Count;
+                }
+                if (server.softwareJobAttemptLog[0].EntryName != "KB5000001 Security Update")
+                {
+                    return "expected the recorded attempt's EntryName to be snapshotted from the matching catalog entry, got '" + server.softwareJobAttemptLog[0].EntryName + "'";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveSoftwareJobResultsFallsBackToDeletedEntryLabel()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-job-results-deletedentry-test-" + Guid.NewGuid().ToString("N"));
+            options.Token = "shared-secret";
+            options.SoftwareJobAttemptLogRetentionDays = 90;
+            options.SoftwareJobAttemptLogMaxEntries = 5000;
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/software-repository/job-results";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "shared-secret";
+                request.Body = "{\"computerName\":\"TEST-PC\",\"results\":[{\"catalogType\":\"thirdPartySoftware\",\"id\":\"no-such-entry\",\"success\":false,\"exitCode\":1}]}";
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveSoftwareJobResults(stream, request);
+                }
+
+                if (server.softwareJobAttemptLog.Count != 1)
+                {
+                    return "expected exactly one recorded attempt, got " + server.softwareJobAttemptLog.Count;
+                }
+                if (server.softwareJobAttemptLog[0].EntryName != "(deleted entry)")
+                {
+                    return "expected the recorded attempt's EntryName to fall back to '(deleted entry)' when no catalog entry matches, got '" + server.softwareJobAttemptLog[0].EntryName + "'";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
             }
         }
 
