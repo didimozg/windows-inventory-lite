@@ -6,6 +6,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.59.5]
+
+A fresh, explicitly-scoped review of the PowerShell scripts (the list of PowerShell Minor findings from the original whole-project review did not survive a context compaction - see `docs/backlog.md`) found 9 Minor issues plus 2 that turned out to be more serious than Minor. All 11 fixed here.
+
+### Fixed
+
+- **`Install-Wizard.ps1`'s "Install client (local) → Just refresh" silently wiped a configured ingestion token.** `ConvertFrom-ClientBinPath` reconstructs install parameters by parsing the existing service's `binPath=`, including a `--token` flag - but the token moved off the binPath into the service's registry Environment value in an earlier fix in this same series, so that parsing can never find it anymore. Calling `Install-Client.ps1` with no `-Token` unconditionally calls `Set-ServiceEnvironmentToken` with an empty value, which removes the existing token. New `Get-ServiceEnvironmentToken` (mirroring `Deploy-ClientGpo.ps1`'s own) recovers the current token from the registry separately when the binPath has none.
+- **Sibling instances of the `2>&1` + `$ErrorActionPreference='Stop'` bug already fixed in `Deploy-ClientGpo.ps1`'s `Get-ExeVersion`**: `Install-Server.ps1` (3 call sites) and `Install-Client.ps1` (1 call site) had the identical unguarded `--version 2>&1` pattern, with no try/catch - worse than the already-fixed instance, since by that point the previous service/exe is already gone. Switched to `2>$null`.
+- `Deploy-ClientGpo.ps1`'s directory ACL restriction ran *after* the script's first log write, which itself creates the `Logs\` subdirectory - NTFS does not retroactively apply a newly-added inheritable ACE to an already-existing child, so the log directory (and every log file in it) stayed under the weak inherited `%ProgramData%` ACL forever. Moved the ACL restriction earlier, before any log write.
+- `Uninstall-ClientWinRM.ps1`'s `RemoveClientScriptBlock` captured `sc.exe delete`'s output but dropped it from the thrown error message, unlike every other `sc.exe`-wrapping helper in this codebase.
+- `Install-Server.ps1`: `-CertificatePfxPath` without `-CertificatePfxPassword` produced an opaque PowerShell parameter-binding exception instead of a clear message.
+- `Build-Client.ps1`/`Build-Server.ps1` never checked for an empty `.cs` source list before invoking `csc.exe`, producing a bare compiler usage error instead of a clear "no source files found" message.
+- `Install-ClientDebianSSH.ps1`/`Uninstall-ClientDebianSSH.ps1` compared `-CredentialUsername` against `'root'` case-insensitively (`-eq`), even though Linux usernames are case-sensitive. Switched to `-ceq`.
+- `Uninstall-Client.ps1`'s two `sc.exe query` existence-checks were missing `2>&1`, unlike every other such check in this codebase (style consistency only, not a functional bug).
+
+### Security
+
+- **`Install-ClientWinRM.ps1`'s `RemoteDeployScriptBlock` passed the ingestion token as a literal `-Token` argument to a `powershell.exe` process it spawns *on the remote target*** - visible via `Get-Process`/WMI `Win32_Process.CommandLine` on that machine for the run's duration. Now set as a `WIL_INGESTION_TOKEN` environment variable on the parent process instead (inherited by the spawned child automatically); `Deploy-ClientGpo.ps1` reads it as a fallback when `-Token` is not supplied, with an explicit `-Token` still taking priority.
+- `New-ClientGpoPackage.ps1`'s generated `Install-ClientGpo.cmd` embeds the ingestion token in plaintext (`-Token "..."`) but had no ACL restriction, unlike the server's own equivalent generator (`GenerateCmdLines`, already hardened with `ApplyRestrictedConfigAcl`). New `Set-RestrictedFileAcl` (Administrators+SYSTEM+the identity running the build) applied to the generated file.
+- `Install-ClientWinRM.ps1`/`Uninstall-ClientWinRM.ps1`'s TrustedHosts cleanup (added in the previous fix in this series) ran only after the full per-target loop completed, with no top-level try/finally - an interrupted run (Ctrl+C, a killed session) left added entries behind indefinitely. Now wrapped so cleanup always runs.
+
+226 self-tests (unchanged - no C# touched in this release), 166/166 Pester green under Windows PowerShell 5.1 (was 161).
+
 ## [0.59.4]
 
 ### Fixed

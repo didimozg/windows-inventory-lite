@@ -55,4 +55,21 @@ Describe 'Windows Inventory Lite New-ClientGpoPackage generated .cmd content' {
         $cmdContent = Get-Content -LiteralPath (Join-Path -Path $outputPath -ChildPath 'Install-ClientGpo.cmd') -Raw
         $cmdContent | Should -Match 'set SOFTWARE_CHECK_INTERVAL_HOURS=6'
     }
+
+    # Install-ClientGpo.cmd embeds the ingestion token in plaintext
+    # (-Token "...") when one is configured, same as the server's own
+    # equivalent generator (WindowsInventoryLiteServer.cs's GenerateCmdLines),
+    # which already gets ApplyRestrictedConfigAcl. This script's own output
+    # had no ACL restriction at all until this fix.
+    It 'restricts the generated .cmd to the current identity plus Administrators/SYSTEM' {
+        $outputPath = Join-Path -Path $TestDrive -ChildPath 'pkg-acl'
+        & $script:ScriptPath -ServerUrl 'https://server/api/v1/inventory' -Token 'real-secret-token' -OutputPath $outputPath -ClientNet35Path $script:FakeClientNet35Path -ClientNet40Path $script:FakeClientNet40Path
+
+        $cmdPath = Join-Path -Path $outputPath -ChildPath 'Install-ClientGpo.cmd'
+        $acl = Get-Acl -LiteralPath $cmdPath
+        $acl.AreAccessRulesProtected | Should -BeTrue
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $sids = $acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]) }
+        $sids | Should -Contain $currentUser
+    }
 }

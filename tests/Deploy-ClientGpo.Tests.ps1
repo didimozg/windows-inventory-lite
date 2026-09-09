@@ -15,6 +15,46 @@ Describe 'Windows Inventory Lite Deploy-ClientGpo client-data layout' {
         { . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory' -InstallPath 'C:\ProgramData\WindowsInventoryLite\client-data' } | Should -Not -Throw
     }
 
+    # Install-ClientWinRM.ps1's RemoteDeployScriptBlock sets this on the
+    # remote powershell.exe process it spawns instead of passing -Token
+    # directly (see that script's own fix/test) - this is the receiving
+    # side of that fix.
+    It 'falls back to WIL_INGESTION_TOKEN when -Token is not supplied' {
+        $originalToken = $env:WIL_INGESTION_TOKEN
+        try {
+            $env:WIL_INGESTION_TOKEN = 'token-from-environment'
+            . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory'
+            $Token | Should -Be 'token-from-environment'
+        }
+        finally {
+            if ($null -eq $originalToken) {
+                Remove-Item Env:\WIL_INGESTION_TOKEN -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:WIL_INGESTION_TOKEN = $originalToken
+            }
+            . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory'
+        }
+    }
+
+    It 'prefers an explicit -Token over WIL_INGESTION_TOKEN' {
+        $originalToken = $env:WIL_INGESTION_TOKEN
+        try {
+            $env:WIL_INGESTION_TOKEN = 'token-from-environment'
+            . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory' -Token 'explicit-token'
+            $Token | Should -Be 'explicit-token'
+        }
+        finally {
+            if ($null -eq $originalToken) {
+                Remove-Item Env:\WIL_INGESTION_TOKEN -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:WIL_INGESTION_TOKEN = $originalToken
+            }
+            . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory'
+        }
+    }
+
     It 'Get-DesiredServiceCommand embeds --output and --debug-log-path' {
         $command = Get-DesiredServiceCommand -ServicePath 'C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -OutputDirectory 'C:\ProgramData\WindowsInventoryLite\client-data' -DebugLogPath 'C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug-client.log'
         $command | Should -Match '--output "C:\\ProgramData\\WindowsInventoryLite\\client-data"'

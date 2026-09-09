@@ -6,8 +6,17 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$ServerUrl,
 
+    # No [ValidateNotNullOrEmpty()] here, unlike every other optional string
+    # parameter below - PowerShell re-validates a parameter's own attributes
+    # on EVERY assignment to that variable within the script, not just at
+    # initial binding, and this one is reassigned further down (the
+    # WIL_INGESTION_TOKEN environment fallback) when no -Token was
+    # supplied - confirmed live: that fallback threw
+    # ValidationMetadataException on every run with neither set, since
+    # $env:WIL_INGESTION_TOKEN resolves to an empty value in that case.
+    # Test-BatchSafeValue already treats null/empty as "nothing to check"
+    # on its own, so the attribute was never load-bearing here.
     [Parameter()]
-    [ValidateNotNullOrEmpty()]
     [string]$Token,
 
     [Parameter()]
@@ -56,6 +65,19 @@ function Test-BatchSafeValue {
         throw "$FieldName contains a character that is not allowed here (double quote, &, |, <, >, ^, or a line break)."
     }
 }
+# Falls back to WIL_INGESTION_TOKEN when -Token is not supplied - lets
+# Install-ClientWinRM.ps1's RemoteDeployScriptBlock set the token as an
+# environment variable on the remote powershell.exe process it spawns to
+# run this script, instead of passing it as a literal -Token argument,
+# which would otherwise be visible via Get-Process/WMI Win32_Process.CommandLine
+# on that REMOTE target for the run's duration - the same class of exposure
+# already closed for the Windows client service's own ImagePath and for the
+# server's own child-process invocations. An explicit -Token still wins, so
+# manual/standalone invocation is unaffected.
+if (-not $Token) {
+    $Token = $env:WIL_INGESTION_TOKEN
+}
+
 Test-BatchSafeValue -Value $ServerUrl -FieldName 'ServerUrl'
 Test-BatchSafeValue -Value $Token -FieldName 'Token'
 Test-BatchSafeValue -Value $InstallPath -FieldName 'InstallPath'
@@ -442,6 +464,20 @@ if ($MyInvocation.InvocationName -ne '.') {
 
     $LogPath = Join-Path -Path $InstallPath -ChildPath 'Logs\gpo-deploy.log'
 
+    # Created and ACL-restricted BEFORE the first Write-DeployLog call below,
+    # which otherwise creates $InstallPath\Logs itself (see Write-DeployLog)
+    # while $InstallPath still sits at whatever ACL %ProgramData% inherits on
+    # a fresh install. ContainerInherit/ObjectInherit only protects children
+    # created AFTER Set-RestrictedDirectoryAcl runs - NTFS does not
+    # retroactively cascade a newly-added inheritable ACE onto a directory
+    # that already existed, so Logs\ (and gpo-deploy.log inside it) would
+    # otherwise stay under the weak inherited ACL forever, on every
+    # subsequent run too.
+    if (-not (Test-Path -LiteralPath $InstallPath)) {
+        New-Item -Path $InstallPath -ItemType Directory -Force | Out-Null
+    }
+    Set-RestrictedDirectoryAcl -DirectoryPath $InstallPath
+
     if (-not $PackageClientPath) {
         $PackageClientPath = Get-DefaultPackageClientPath
     }
@@ -454,11 +490,6 @@ if ($MyInvocation.InvocationName -ne '.') {
     if (-not (Test-Administrator)) {
         throw 'Administrator rights are required to install or update the WindowsInventoryLite service. Use a Computer Startup Script GPO, not a User Logon Script, or run PowerShell as Administrator for manual testing.'
     }
-
-    if (-not (Test-Path -LiteralPath $InstallPath)) {
-        New-Item -Path $InstallPath -ItemType Directory -Force | Out-Null
-    }
-    Set-RestrictedDirectoryAcl -DirectoryPath $InstallPath
 
     $servicePath = Join-Path -Path $InstallPath -ChildPath 'WindowsInventoryLiteClient.exe'
     $debugLogPath = Join-Path -Path $InstallPath -ChildPath '_logs\debug-client.log'

@@ -13,6 +13,9 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $serverDir = Join-Path -Path $PSScriptRoot -ChildPath 'server'
 $serverSources = @(Get-ChildItem -Path $serverDir -Filter '*.cs' | ForEach-Object { $_.FullName })
+if ($serverSources.Count -eq 0) {
+    throw "No .cs files found in $serverDir - nothing to compile."
+}
 
 if (-not $OutputPath) {
     $OutputPath = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteServer.exe'

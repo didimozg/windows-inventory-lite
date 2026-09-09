@@ -331,13 +331,20 @@ $script:RemoteDeployScriptBlock = {
         $ClientPath
     )
 
-    if ($SharedToken) {
-        $arguments += '-Token'
-        $arguments += $SharedToken
-    }
-
     if ($ForceInstall) {
         $arguments += '-Force'
+    }
+
+    # Set as an environment variable on this process rather than passed as
+    # -Token, which the child powershell.exe below would otherwise expose
+    # via Get-Process/WMI Win32_Process.CommandLine to anyone locally
+    # observing this REMOTE target for the run's duration (this whole
+    # scriptblock executes there, via Invoke-Command). Deploy-ClientGpo.ps1
+    # reads WIL_INGESTION_TOKEN as a fallback when -Token is not supplied -
+    # child processes inherit their parent's environment by default, so the
+    # spawned powershell.exe picks this up automatically.
+    if ($SharedToken) {
+        $env:WIL_INGESTION_TOKEN = $SharedToken
     }
 
     & powershell.exe @arguments
@@ -386,57 +393,64 @@ if ($MyInvocation.InvocationName -ne '.') {
     # Never includes anything that was already configured before this run.
     $addedTrustedHosts = @()
 
-    foreach ($computer in $ComputerName) {
-        $session = $null
-        try {
-            Write-Host "Connecting: $computer"
-            if ($AddToTrustedHosts -or ($Credential -and (Test-IpAddress -Value $computer))) {
-                Write-Host "Adding TrustedHosts entry: $computer"
-                if (Add-TargetToTrustedHosts -TargetComputer $computer) {
-                    $addedTrustedHosts += $computer
+    # Wrapped in try/finally at this level (not just the cleanup call
+    # itself) so an interruption partway through the loop below (Ctrl+C, a
+    # killed session) still removes any TrustedHosts entries this run
+    # already added, instead of leaving them behind indefinitely.
+    try {
+        foreach ($computer in $ComputerName) {
+            $session = $null
+            try {
+                Write-Host "Connecting: $computer"
+                if ($AddToTrustedHosts -or ($Credential -and (Test-IpAddress -Value $computer))) {
+                    Write-Host "Adding TrustedHosts entry: $computer"
+                    if (Add-TargetToTrustedHosts -TargetComputer $computer) {
+                        $addedTrustedHosts += $computer
+                    }
                 }
+                $session = New-InventorySession -TargetComputer $computer
+
+                $selectedClientPath = Get-RemoteClientPackagePath -Session $session
+                $remoteDeployPath = Join-Path -Path $RemotePackagePath -ChildPath 'Deploy-ClientGpo.ps1'
+                $remoteClientPath = Join-Path -Path $RemotePackagePath -ChildPath (Split-Path -Leaf $selectedClientPath)
+
+                Write-Host "Copying deploy script: $computer"
+                Copy-FileOverWinRM -Session $session -LocalPath $deployPath -RemotePath $remoteDeployPath
+
+                Write-Host "Copying client package: $computer"
+                Copy-FileOverWinRM -Session $session -LocalPath $selectedClientPath -RemotePath $remoteClientPath
+
+                Write-Host "Installing client service: $computer"
+                Invoke-RemoteDeploy -Session $session -RemoteDeployPath $remoteDeployPath -RemoteClientPath $remoteClientPath
+
+                if (-not $KeepRemotePackage) {
+                    Invoke-Command -Session $session -ScriptBlock $script:RemoveRemotePackageScriptBlock -ArgumentList $RemotePackagePath
+                }
+
+                Write-Host "Client installed: $computer"
             }
-            $session = New-InventorySession -TargetComputer $computer
-
-            $selectedClientPath = Get-RemoteClientPackagePath -Session $session
-            $remoteDeployPath = Join-Path -Path $RemotePackagePath -ChildPath 'Deploy-ClientGpo.ps1'
-            $remoteClientPath = Join-Path -Path $RemotePackagePath -ChildPath (Split-Path -Leaf $selectedClientPath)
-
-            Write-Host "Copying deploy script: $computer"
-            Copy-FileOverWinRM -Session $session -LocalPath $deployPath -RemotePath $remoteDeployPath
-
-            Write-Host "Copying client package: $computer"
-            Copy-FileOverWinRM -Session $session -LocalPath $selectedClientPath -RemotePath $remoteClientPath
-
-            Write-Host "Installing client service: $computer"
-            Invoke-RemoteDeploy -Session $session -RemoteDeployPath $remoteDeployPath -RemoteClientPath $remoteClientPath
-
-            if (-not $KeepRemotePackage) {
-                Invoke-Command -Session $session -ScriptBlock $script:RemoveRemotePackageScriptBlock -ArgumentList $RemotePackagePath
+            catch {
+                $hadFailure = $true
+                # Write-Error would work too, but PowerShell wraps it in a full
+                # ErrorRecord (position info relative to the wrapping one-line
+                # -Command invocation, CategoryInfo, FullyQualifiedErrorId) when it
+                # reaches the caller's captured stderr - exactly the kind of wall
+                # of PowerShell plumbing text Get-FriendlyConnectionError above is
+                # meant to spare the dashboard's job log from. A plain stderr write
+                # carries the same message with none of that ceremony.
+                [Console]::Error.WriteLine(("Failed to install client on {0}: {1}" -f $computer, (Get-FriendlyConnectionError -Exception $_.Exception)))
             }
-
-            Write-Host "Client installed: $computer"
-        }
-        catch {
-            $hadFailure = $true
-            # Write-Error would work too, but PowerShell wraps it in a full
-            # ErrorRecord (position info relative to the wrapping one-line
-            # -Command invocation, CategoryInfo, FullyQualifiedErrorId) when it
-            # reaches the caller's captured stderr - exactly the kind of wall
-            # of PowerShell plumbing text Get-FriendlyConnectionError above is
-            # meant to spare the dashboard's job log from. A plain stderr write
-            # carries the same message with none of that ceremony.
-            [Console]::Error.WriteLine(("Failed to install client on {0}: {1}" -f $computer, (Get-FriendlyConnectionError -Exception $_.Exception)))
-        }
-        finally {
-            if ($session) {
-                Remove-PSSession -Session $session
+            finally {
+                if ($session) {
+                    Remove-PSSession -Session $session
+                }
             }
         }
     }
-
-    foreach ($addedTarget in $addedTrustedHosts) {
-        Remove-TargetFromTrustedHosts -TargetComputer $addedTarget
+    finally {
+        foreach ($addedTarget in $addedTrustedHosts) {
+            Remove-TargetFromTrustedHosts -TargetComputer $addedTarget
+        }
     }
 
     if ($hadFailure) {

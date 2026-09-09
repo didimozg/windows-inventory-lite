@@ -465,7 +465,9 @@ if ($MyInvocation.InvocationName -ne '.') {
     foreach ($computer in $ComputerName) {
         try {
             Write-Host "Connecting: $computer"
-            $sudoPrefix = if ($CredentialUsername -eq 'root') { '' } else { 'sudo ' }
+            # -ceq, not -eq: Linux usernames are case-sensitive, unlike
+            # PowerShell's default string comparison.
+            $sudoPrefix = if ($CredentialUsername -ceq 'root') { '' } else { 'sudo ' }
             $uninstallCommand = Get-LinuxUninstallCommand -InstallPath $InstallPath -SudoPrefix $sudoPrefix
 
             Write-Host "Removing client: $computer"

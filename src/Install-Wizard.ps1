@@ -432,6 +432,38 @@ function Get-ClientServiceBinaryPath {
     return $service.PathName
 }
 
+# Reads back the ingestion token currently set on the service's registry
+# Environment value - same implementation as Deploy-ClientGpo.ps1's own
+# Get-ServiceEnvironmentToken, duplicated rather than shared per this
+# project's established per-script convention. Needed here because the
+# token no longer appears in the binPath itself (it moved to this registry
+# value - see Install-Client.ps1's own Set-ServiceEnvironmentToken):
+# ConvertFrom-ClientBinPath's --token parsing below can never find it
+# anymore, so Get-InstallClientMode calls this separately to recover the
+# current token for its "Just refresh" reconstruction.
+function Get-ServiceEnvironmentToken {
+    param(
+        [string]$ServiceName,
+        [string]$ServiceRegistryRoot = 'HKLM:\SYSTEM\CurrentControlSet\Services'
+    )
+
+    $servicePath = Join-Path -Path $ServiceRegistryRoot -ChildPath $ServiceName
+    $item = Get-ItemProperty -LiteralPath $servicePath -ErrorAction SilentlyContinue
+    if (-not $item -or -not $item.PSObject.Properties['Environment']) {
+        return ''
+    }
+    $environment = $item.Environment
+    if (-not $environment) {
+        return ''
+    }
+    foreach ($line in $environment) {
+        if ($line -like 'WIL_INGESTION_TOKEN=*') {
+            return $line.Substring('WIL_INGESTION_TOKEN='.Length)
+        }
+    }
+    return ''
+}
+
 # Reverse-parses a WindowsInventoryLiteClient service's binPath back into
 # the same named parameters Install-Client.ps1 accepts. Built to handle
 # both real shapes this project produces: Install-Client.ps1's own
@@ -461,6 +493,13 @@ function ConvertFrom-ClientBinPath {
         $params['ServerSharePath'] = $sharePath
     }
 
+    # Kept for a pre-existing service installed before the ingestion token
+    # moved off the command line into the service's registry Environment
+    # value (see Install-Client.ps1's Set-ServiceEnvironmentToken) - a
+    # binPath from that older install still has --token in it. A
+    # current-shape binPath never will; Get-InstallClientMode separately
+    # calls Get-ServiceEnvironmentToken to recover the token in that case,
+    # since this function only ever sees the binPath string itself.
     $token = Get-BinPathFlagValue -BinPath $BinPath -FlagName '--token'
     if ($token) {
         $params['Token'] = $token
@@ -526,6 +565,20 @@ function Get-InstallClientMode {
     $parsedParams = ConvertFrom-ClientBinPath -BinPath $binPath
     if (-not $parsedParams) {
         return @{ Mode = 'Full'; Params = @{} }
+    }
+
+    # ConvertFrom-ClientBinPath can only recover a token from a pre-move
+    # binPath (see its own comment) - a current-shape install never has one
+    # there, since it lives in the service's registry Environment value
+    # instead. Without this, "Just refresh" on a token-configured client
+    # would call Install-Client.ps1 with no -Token, which unconditionally
+    # calls Set-ServiceEnvironmentToken with an empty value and wipes the
+    # existing token.
+    if (-not $parsedParams.ContainsKey('Token')) {
+        $currentToken = Get-ServiceEnvironmentToken -ServiceName $ServiceName
+        if ($currentToken) {
+            $parsedParams['Token'] = $currentToken
+        }
     }
 
     Write-Host ''

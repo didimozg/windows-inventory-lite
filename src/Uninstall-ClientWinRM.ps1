@@ -211,7 +211,12 @@ $script:RemoveClientScriptBlock = {
         $deleteExitCode = $LASTEXITCODE
         Write-Host "Delete service exit code: $deleteExitCode"
         if ($deleteExitCode -ne 0) {
-            throw "Failed to delete service. sc.exe exit code: $deleteExitCode."
+            # Every other sc.exe-wrapping helper in this codebase
+            # (Invoke-ServiceControl in Install-Server.ps1/Install-Client.ps1/
+            # Deploy-ClientGpo.ps1/Install-Wizard.ps1) appends the captured
+            # output to the thrown message for diagnosability - this one
+            # captured $deleteOutput but never used it.
+            throw ("Failed to delete service. sc.exe exit code: $deleteExitCode. Output: " + (($deleteOutput | Out-String).Trim()))
         }
         Start-Sleep -Seconds 2
     }
@@ -272,44 +277,51 @@ if ($MyInvocation.InvocationName -ne '.') {
     # uninstall. Never includes anything already configured before this run.
     $addedTrustedHosts = @()
 
-    foreach ($computer in $ComputerName) {
-        $session = $null
-        try {
-            Write-Host "Connecting: $computer"
-            if ($AddToTrustedHosts -or ($Credential -and (Test-IpAddress -Value $computer))) {
-                Write-Host "Adding TrustedHosts entry: $computer"
-                if (Add-TargetToTrustedHosts -TargetComputer $computer) {
-                    $addedTrustedHosts += $computer
+    # Wrapped in try/finally at this level (not just the cleanup call
+    # itself) so an interruption partway through the loop below (Ctrl+C, a
+    # killed session) still removes any TrustedHosts entries this run
+    # already added, instead of leaving them behind indefinitely.
+    try {
+        foreach ($computer in $ComputerName) {
+            $session = $null
+            try {
+                Write-Host "Connecting: $computer"
+                if ($AddToTrustedHosts -or ($Credential -and (Test-IpAddress -Value $computer))) {
+                    Write-Host "Adding TrustedHosts entry: $computer"
+                    if (Add-TargetToTrustedHosts -TargetComputer $computer) {
+                        $addedTrustedHosts += $computer
+                    }
                 }
+
+                $session = New-InventorySession -TargetComputer $computer
+                Write-Host "Uninstalling client service: $computer"
+
+                Invoke-Command -Session $session -ScriptBlock $script:RemoveClientScriptBlock -ArgumentList $serviceName, $InstallPath
+
+                Write-Host "Client removed: $computer"
             }
-
-            $session = New-InventorySession -TargetComputer $computer
-            Write-Host "Uninstalling client service: $computer"
-
-            Invoke-Command -Session $session -ScriptBlock $script:RemoveClientScriptBlock -ArgumentList $serviceName, $InstallPath
-
-            Write-Host "Client removed: $computer"
-        }
-        catch {
-            $hadFailure = $true
-            # Write-Error would work too, but PowerShell wraps it in a full
-            # ErrorRecord (position info relative to the wrapping one-line
-            # -Command invocation, CategoryInfo, FullyQualifiedErrorId) when it
-            # reaches the caller's captured stderr - exactly the kind of wall
-            # of PowerShell plumbing text Get-FriendlyConnectionError above is
-            # meant to spare the dashboard's job log from. A plain stderr write
-            # carries the same message with none of that ceremony.
-            [Console]::Error.WriteLine(("Failed to uninstall client on {0}: {1}" -f $computer, (Get-FriendlyConnectionError -Exception $_.Exception)))
-        }
-        finally {
-            if ($session) {
-                Remove-PSSession -Session $session
+            catch {
+                $hadFailure = $true
+                # Write-Error would work too, but PowerShell wraps it in a full
+                # ErrorRecord (position info relative to the wrapping one-line
+                # -Command invocation, CategoryInfo, FullyQualifiedErrorId) when it
+                # reaches the caller's captured stderr - exactly the kind of wall
+                # of PowerShell plumbing text Get-FriendlyConnectionError above is
+                # meant to spare the dashboard's job log from. A plain stderr write
+                # carries the same message with none of that ceremony.
+                [Console]::Error.WriteLine(("Failed to uninstall client on {0}: {1}" -f $computer, (Get-FriendlyConnectionError -Exception $_.Exception)))
+            }
+            finally {
+                if ($session) {
+                    Remove-PSSession -Session $session
+                }
             }
         }
     }
-
-    foreach ($addedTarget in $addedTrustedHosts) {
-        Remove-TargetFromTrustedHosts -TargetComputer $addedTarget
+    finally {
+        foreach ($addedTarget in $addedTrustedHosts) {
+            Remove-TargetFromTrustedHosts -TargetComputer $addedTarget
+        }
     }
 
     if ($hadFailure) {

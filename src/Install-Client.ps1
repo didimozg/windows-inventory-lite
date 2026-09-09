@@ -339,7 +339,14 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
 
     Copy-Item -LiteralPath $ClientExecutablePath -Destination $servicePath -Force
-    $clientVersion = (& $servicePath --version 2>&1 | Select-Object -First 1)
+    # 2>$null, not 2>&1: $ErrorActionPreference = 'Stop' (set script-wide)
+    # plus 2>&1 turns harmless native-command stderr text into a
+    # terminating error on some PowerShell engine versions (see
+    # Deploy-ClientGpo.ps1's Get-ExeVersion fix for the same pattern). By
+    # this point the previous service is already deleted and this exe
+    # already copied over the old one, so an uncaught exception here would
+    # abort mid-install with no way back except a fresh reinstall.
+    $clientVersion = (& $servicePath --version 2>$null | Select-Object -First 1)
 
     $serviceCommand = Get-ClientServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SoftwareHours $SoftwareCheckIntervalHours -SharePath $ServerSharePath -OutputDirectory $InstallPath -DebugLogPath $debugLogPath
 

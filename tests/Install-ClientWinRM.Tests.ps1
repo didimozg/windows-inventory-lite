@@ -93,6 +93,35 @@ Describe 'Windows Inventory Lite Install-ClientWinRM safety guard' {
         $script:capturedArguments[$index + 1] | Should -Be '6'
     }
 
+    # The token used to be passed as a literal -Token argument to the
+    # powershell.exe process spawned on the REMOTE target - visible via
+    # Get-Process/WMI Win32_Process.CommandLine there for the run's
+    # duration. It is now set as an environment variable on this process
+    # instead, which the spawned child inherits automatically;
+    # Deploy-ClientGpo.ps1 reads WIL_INGESTION_TOKEN as a fallback when
+    # -Token is not supplied.
+    It 'RemoteDeployScriptBlock passes a real token via environment, never as a -Token command-line argument' {
+        $originalToken = $env:WIL_INGESTION_TOKEN
+        try {
+            New-Item -Path 'function:powershell.exe' -Value { $script:capturedArguments = $args; $global:LASTEXITCODE = 0 } -Force | Out-Null
+            Remove-Item Env:\WIL_INGESTION_TOKEN -ErrorAction SilentlyContinue
+            & $script:RemoteDeployScriptBlock -DeployPath 'C:\deploy\Install-Client.ps1' -ClientPath 'C:\deploy\client.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SoftwareHours 6 -SharedToken 'real-secret-token' -ForceInstall $false
+
+            $script:capturedArguments | Should -Not -Contain '-Token'
+            $script:capturedArguments -join ' ' | Should -Not -Match 'real-secret-token'
+            $env:WIL_INGESTION_TOKEN | Should -Be 'real-secret-token'
+        }
+        finally {
+            Remove-Item -Path 'function:powershell.exe' -ErrorAction SilentlyContinue
+            if ($null -eq $originalToken) {
+                Remove-Item Env:\WIL_INGESTION_TOKEN -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:WIL_INGESTION_TOKEN = $originalToken
+            }
+        }
+    }
+
     # Add-TargetToTrustedHosts/Remove-TargetFromTrustedHosts mutate the real
     # WSMan:\localhost\Client\TrustedHosts on whatever machine runs this test
     # (no per-test-sandboxable equivalent exists), so only the pure,

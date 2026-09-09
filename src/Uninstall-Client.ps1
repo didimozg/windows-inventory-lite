@@ -50,7 +50,12 @@ if (-not $InstallPath) {
 }
 
 foreach ($legacyName in @('WindowsLicenseInventoryClient', 'WindowsLicenseInventory')) {
-    & sc.exe query $legacyName | Out-Null
+    # 2>&1, matching every other sc.exe query existence-check in this
+    # codebase (Uninstall-Server.ps1, Install-Server.ps1, Install-Client.ps1,
+    # Deploy-ClientGpo.ps1, Install-Wizard.ps1, Uninstall-ClientWinRM.ps1) -
+    # style consistency, not a functional fix (sc.exe's "not installed" text
+    # goes to stdout, not stderr).
+    $null = & sc.exe query $legacyName 2>&1
     if ($LASTEXITCODE -eq 0 -and $PSCmdlet.ShouldProcess($legacyName, 'Stop and delete legacy service')) {
         & sc.exe stop $legacyName | Out-Null
         & sc.exe delete $legacyName | Out-Null
@@ -64,7 +69,7 @@ if ((Test-Path -LiteralPath $legacyInstallPath) -and $PSCmdlet.ShouldProcess($le
 }
 
 $serviceName = 'WindowsInventoryLiteClient'
-& sc.exe query $serviceName | Out-Null
+$null = & sc.exe query $serviceName 2>&1
 if ($LASTEXITCODE -eq 0 -and $PSCmdlet.ShouldProcess($serviceName, 'Stop and delete service')) {
     & sc.exe stop $serviceName | Out-Null
     & sc.exe delete $serviceName | Out-Null

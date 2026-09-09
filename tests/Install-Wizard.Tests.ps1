@@ -374,6 +374,31 @@ Describe 'Windows Inventory Lite Install Wizard' {
         $result.Params['InstallPath'] | Should -Be 'C:\ProgramData\WindowsInventoryLite\client-data'
     }
 
+    # Regression test: the ingestion token moved off the binPath into the
+    # service's registry Environment value (Install-Client.ps1's
+    # Set-ServiceEnvironmentToken), so a current-shape binPath (like the
+    # test above) never has --token in it. Without recovering it from the
+    # registry separately, "Just refresh" on a token-configured client would
+    # call Install-Client.ps1 with no -Token, which unconditionally wipes
+    # the existing token.
+    It 'Get-InstallClientMode recovers the ingestion token from the registry Environment value when the binPath has none' {
+        Mock Invoke-ScExe {
+            return @{ Output = @('SERVICE_NAME: WindowsInventoryLiteClient'); ExitCode = 0 }
+        } -ParameterFilter { $Arguments[0] -eq 'query' }
+        Mock Get-WmiObject {
+            return [pscustomobject]@{ PathName = '"C:\ProgramData\WindowsInventoryLite\client-data\WindowsInventoryLiteClient.exe" --server-url "https://server.example.local/api/v1/inventory" --interval-hours 6 --output "C:\ProgramData\WindowsInventoryLite\client-data" --debug-log-path "C:\ProgramData\WindowsInventoryLite\client-data\_logs\debug.log"' }
+        }
+        Mock Read-WizardAnswer { return $null }
+        Mock Get-ItemProperty {
+            return [pscustomobject]@{ Environment = @('WIL_INGESTION_TOKEN=recovered-token') }
+        }
+
+        $result = Get-InstallClientMode -ServiceName 'WindowsInventoryLiteClient'
+
+        $result.Mode | Should -Be 'Skip'
+        $result.Params['Token'] | Should -Be 'recovered-token'
+    }
+
     It 'Get-InstallClientMode returns Full when the service exists, parses, and the user explicitly picks full reconfigure' {
         Mock Invoke-ScExe {
             return @{ Output = @('SERVICE_NAME: WindowsInventoryLiteClient'); ExitCode = 0 }

@@ -17,6 +17,9 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $clientDir = Join-Path -Path $PSScriptRoot -ChildPath 'client'
 $clientSources = @(Get-ChildItem -Path $clientDir -Filter '*.cs' | ForEach-Object { $_.FullName })
+if ($clientSources.Count -eq 0) {
+    throw "No .cs files found in $clientDir - nothing to compile."
+}
 
 if (-not $OutputPath) {
     $OutputPath = Join-Path -Path $projectRoot -ChildPath 'build\WindowsInventoryLiteClient.exe'

@@ -687,6 +687,9 @@ if ($CertificatePfxPath) {
     if (-not (Test-Path -LiteralPath $CertificatePfxPath)) {
         throw "Certificate file not found: $CertificatePfxPath"
     }
+    if (-not $CertificatePfxPassword) {
+        throw "-CertificatePfxPath requires -CertificatePfxPassword."
+    }
 
     $securePfxPassword = ConvertTo-SecureString -String $CertificatePfxPassword -Force -AsPlainText
     $importedCertificate = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(
@@ -951,7 +954,17 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 Copy-Item -LiteralPath $ServerExecutablePath -Destination $servicePath -Force
-$serverVersion = (& $servicePath --version 2>&1 | Select-Object -First 1)
+# 2>$null, not 2>&1: $ErrorActionPreference = 'Stop' (set script-wide) plus
+# 2>&1 turns harmless native-command stderr text into a terminating error
+# on some PowerShell engine versions (see Deploy-ClientGpo.ps1's
+# Get-ExeVersion fix, and Install-ClientDebianSSH.ps1's
+# Invoke-NativeAllowingStderr for the general pattern). Only the version
+# string on stdout is needed here, and unlike Get-ExeVersion this call has
+# no try/catch of its own - by this point the previous service is already
+# deleted and this exe already copied over the old one, so an uncaught
+# exception here would abort mid-install with no way back except a fresh
+# reinstall.
+$serverVersion = (& $servicePath --version 2>$null | Select-Object -First 1)
 $dashboardSource = Join-Path -Path (Split-Path -Parent $PSScriptRoot) -ChildPath 'server\dashboard'
 Copy-Item -Path (Join-Path -Path $dashboardSource -ChildPath '*') -Destination $ContentPath -Recurse -Force
 $winRmInstallerSource = Join-Path -Path $PSScriptRoot -ChildPath 'Install-ClientWinRM.ps1'
@@ -1062,10 +1075,11 @@ else {
 $clientNet35Version = $null
 $clientNet40Version = $null
 if (Test-Path -LiteralPath $clientNet35PackagePath) {
-    $clientNet35Version = (& $clientNet35PackagePath --version 2>&1 | Select-Object -First 1)
+    # 2>$null, not 2>&1 - same reasoning as $serverVersion above.
+    $clientNet35Version = (& $clientNet35PackagePath --version 2>$null | Select-Object -First 1)
 }
 if (Test-Path -LiteralPath $clientNet40PackagePath) {
-    $clientNet40Version = (& $clientNet40PackagePath --version 2>&1 | Select-Object -First 1)
+    $clientNet40Version = (& $clientNet40PackagePath --version 2>$null | Select-Object -First 1)
 }
 
 # The deployed binary is a Linux ELF executable - it cannot be run on this

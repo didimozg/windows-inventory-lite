@@ -716,7 +716,11 @@ if ($MyInvocation.InvocationName -ne '.') {
     # root never needed elevation in the first place. Skip the prefix
     # specifically when the connecting user already IS root; a non-root
     # CredentialUsername still gets "sudo " exactly as before.
-    $sudoPrefix = if ($CredentialUsername -eq 'root') { '' } else { 'sudo ' }
+    # -ceq, not -eq: Linux usernames are case-sensitive, unlike PowerShell's
+    # default string comparison - "Root" is a different (and non-existent,
+    # in practice) account from "root" on the target, not an alternate
+    # spelling of it.
+    $sudoPrefix = if ($CredentialUsername -ceq 'root') { '' } else { 'sudo ' }
 
     $hadFailure = $false
     $stagingDir = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ([System.Guid]::NewGuid().ToString())

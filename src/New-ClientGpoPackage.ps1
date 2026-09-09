@@ -64,6 +64,31 @@ Test-BatchSafeValue -Value $ServerUrl -FieldName 'ServerUrl'
 Test-BatchSafeValue -Value $Token -FieldName 'Token'
 Test-BatchSafeValue -Value $PackageSharePath -FieldName 'PackageSharePath'
 
+# Restricts a file to Administrators+SYSTEM plus the identity actually
+# running this script (whoever built the package, so they can still read/
+# copy their own output regardless of whether they are a local admin) -
+# same three-way grant Install-Server.ps1's own ApplyRestrictedConfigAcl
+# uses. -OutputPath is a local staging location (its default is a
+# project-relative dist\gpo-client, not a real GPO share - -PackageSharePath
+# is the separate, explicit way to point the generated .cmd at wherever it
+# is actually deployed), so restricting the generated .cmd here does not
+# interfere with a later copy to SYSVOL or a custom share; that copy's own
+# destination ACL governs what target machines can read.
+function Set-RestrictedFileAcl {
+    param([string]$FilePath)
+    $adminSid  = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+    $systemSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+    $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl = Get-Acl -LiteralPath $FilePath
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($adminSid, 'FullControl', 'Allow')))
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($systemSid, 'FullControl', 'Allow')))
+    if ($currentSid -and $currentSid -ne $adminSid -and $currentSid -ne $systemSid) {
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($currentSid, 'FullControl', 'Allow')))
+    }
+    Set-Acl -LiteralPath $FilePath -AclObject $acl
+}
+
 $projectRoot = Split-Path -Parent $PSScriptRoot
 if (-not $OutputPath) {
     $OutputPath = Join-Path -Path $projectRoot -ChildPath 'dist\gpo-client'
@@ -151,6 +176,7 @@ $lines += ''
 $lines += 'exit /b %ERRORLEVEL%'
 
 Set-Content -LiteralPath $cmdPath -Value $lines -Encoding ASCII
+Set-RestrictedFileAcl -FilePath $cmdPath
 
 Write-Host "GPO client package: $OutputPath"
 Write-Host "Startup script: $cmdPath"
