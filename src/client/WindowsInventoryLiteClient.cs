@@ -148,6 +148,30 @@ namespace WindowsInventoryLite
 
             protected override void OnStart(string[] args)
             {
+                // A throwaway InventoryCollector, used only to reach its
+                // LoadLearnedConfig() - the file it reads lives next to the
+                // license-key-sources cache, which is InventoryCollector's
+                // own concept, not this service's.
+                Dictionary<string, object> learnedConfig = new InventoryCollector(options).LoadLearnedConfig();
+                if (learnedConfig != null)
+                {
+                    if (learnedConfig.ContainsKey("intervalHours"))
+                    {
+                        int learnedInterval;
+                        if (Int32.TryParse(Convert.ToString(learnedConfig["intervalHours"]), out learnedInterval) && learnedInterval >= 1 && learnedInterval <= 24)
+                        {
+                            options.IntervalHours = learnedInterval;
+                        }
+                    }
+                    if (learnedConfig.ContainsKey("softwareCheckIntervalHours"))
+                    {
+                        int learnedSoftwareInterval;
+                        if (Int32.TryParse(Convert.ToString(learnedConfig["softwareCheckIntervalHours"]), out learnedSoftwareInterval) && learnedSoftwareInterval >= 1 && learnedSoftwareInterval <= 24)
+                        {
+                            options.SoftwareCheckIntervalHours = learnedSoftwareInterval;
+                        }
+                    }
+                }
                 timer = new Timer(Collect, null, TimeSpan.Zero, TimeSpan.FromHours(options.IntervalHours));
                 softwareCheckTimer = new Timer(CheckSoftwareJobs, null, TimeSpan.FromMinutes(2), TimeSpan.FromHours(options.SoftwareCheckIntervalHours));
             }
@@ -204,8 +228,24 @@ namespace WindowsInventoryLite
                 }
                 try
                 {
+                    // Snapshotted so a config change learned during
+                    // CollectAndSave() (InventoryCollector.ApplyConfigFromServer
+                    // mutates options in place, but cannot reach these Timer
+                    // fields itself - see that method's own comment) can be
+                    // detected here and rescheduled immediately, instead of
+                    // waiting for this timer to next re-arm on its own.
+                    int previousIntervalHours = options.IntervalHours;
+                    int previousSoftwareCheckIntervalHours = options.SoftwareCheckIntervalHours;
                     InventoryCollector collector = new InventoryCollector(options);
                     collector.CollectAndSave();
+                    if (options.IntervalHours != previousIntervalHours && timer != null)
+                    {
+                        timer.Change(TimeSpan.FromHours(options.IntervalHours), TimeSpan.FromHours(options.IntervalHours));
+                    }
+                    if (options.SoftwareCheckIntervalHours != previousSoftwareCheckIntervalHours && softwareCheckTimer != null)
+                    {
+                        softwareCheckTimer.Change(TimeSpan.FromMinutes(2), TimeSpan.FromHours(options.SoftwareCheckIntervalHours));
+                    }
                     DebugLogger.Log(options, "Server", "Collection cycle completed successfully.");
                 }
                 catch (Exception ex)
@@ -876,7 +916,7 @@ namespace WindowsInventoryLite
             if (!String.IsNullOrEmpty(options.ServerUrl))
             {
                 string responseBody = PostJson(options.ServerUrl, json, options.Token);
-                ApplyLicenseKeySourcesResponse(responseBody);
+                ApplyInventoryAckResponse(responseBody);
                 if (options.RunOnce)
                 {
                     Console.WriteLine("Inventory posted: " + options.ServerUrl);
@@ -1670,7 +1710,7 @@ namespace WindowsInventoryLite
             }
         }
 
-        private void ApplyLicenseKeySourcesResponse(string responseBody)
+        private void ApplyInventoryAckResponse(string responseBody)
         {
             if (String.IsNullOrEmpty(responseBody))
             {
@@ -1681,15 +1721,192 @@ namespace WindowsInventoryLite
             {
                 JavaScriptSerializer serializer = new JavaScriptSerializer();
                 Dictionary<string, object> response = serializer.Deserialize<Dictionary<string, object>>(responseBody);
-                if (response != null && response.ContainsKey("licenseKeySources"))
+                if (response == null)
+                {
+                    return;
+                }
+                if (response.ContainsKey("licenseKeySources"))
                 {
                     SaveLicenseKeySourcesCache(response["licenseKeySources"]);
+                }
+                if (response.ContainsKey("config"))
+                {
+                    ApplyConfigFromServer(response["config"] as Dictionary<string, object>);
                 }
             }
             catch
             {
                 // A malformed/unparseable response must never fail a
                 // report the server has already accepted.
+            }
+        }
+
+        // Local marker file - not the license-key-sources cache, a
+        // separate small file next to it (same directory,
+        // GetLicenseKeySourcesCachePath()'s own containing folder) - so a
+        // config value learned from the server over the inventory ack
+        // survives a service restart instead of reverting to whatever
+        // was baked into the service's own command line at install time.
+        private string GetLearnedConfigCachePath()
+        {
+            string directory = Path.GetDirectoryName(GetLicenseKeySourcesCachePath());
+            return Path.Combine(directory, "learned-config.json");
+        }
+
+        private void SaveLearnedConfig(int intervalHours, int softwareCheckIntervalHours)
+        {
+            try
+            {
+                Dictionary<string, object> learned = new Dictionary<string, object>();
+                learned["intervalHours"] = intervalHours;
+                learned["softwareCheckIntervalHours"] = softwareCheckIntervalHours;
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                WriteText(GetLearnedConfigCachePath(), serializer.Serialize(learned));
+            }
+            catch
+            {
+                // Best-effort persistence, same reasoning as
+                // SaveLicenseKeySourcesCache - never let this fail an
+                // already-accepted report.
+            }
+        }
+
+        // Called once at startup, before the two Timer objects are
+        // created, so a service restart mid-overlap or after an interval
+        // change picks up the learned value instead of the original
+        // command-line-parsed one. Returns null (caller keeps the
+        // command-line value) if no learned config exists yet or it
+        // fails to parse - a brand-new install has never contacted the
+        // server successfully, so the command-line value is correctly
+        // the only thing to fall back on.
+        //
+        // internal rather than private: InventoryService.OnStart() (a
+        // different top-level-sibling class, not nested inside this one)
+        // needs to call this before creating its own timer/
+        // softwareCheckTimer fields, the same cross-class reason PostJson
+        // just above is internal instead of private.
+        internal Dictionary<string, object> LoadLearnedConfig()
+        {
+            try
+            {
+                string path = GetLearnedConfigCachePath();
+                if (!File.Exists(path))
+                {
+                    return null;
+                }
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                return serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // Applies intervalHours/softwareCheckIntervalHours/ingestionToken
+        // learned from the inventory ack. Only mutates options and (for a
+        // changed interval) persists learned-config.json here - it does
+        // NOT reschedule the Timer objects itself, because those are
+        // private fields of InventoryService (the outer, service-hosting
+        // class in this same file), not of this InventoryCollector - a
+        // fresh InventoryCollector is instantiated by InventoryService for
+        // every single collection cycle and has no reference back to the
+        // timers that scheduled it. InventoryService.Collect() reschedules
+        // both timers itself immediately after this method returns, by
+        // comparing options' values before/after this call.
+        private void ApplyConfigFromServer(Dictionary<string, object> config)
+        {
+            if (config == null)
+            {
+                return;
+            }
+
+            bool changed = false;
+            int newIntervalHours = options.IntervalHours;
+            int newSoftwareCheckIntervalHours = options.SoftwareCheckIntervalHours;
+
+            if (config.ContainsKey("intervalHours"))
+            {
+                int parsedInterval;
+                if (Int32.TryParse(Convert.ToString(config["intervalHours"]), out parsedInterval) && parsedInterval >= 1 && parsedInterval <= 24 && parsedInterval != options.IntervalHours)
+                {
+                    newIntervalHours = parsedInterval;
+                    options.IntervalHours = parsedInterval;
+                    changed = true;
+                }
+            }
+
+            if (config.ContainsKey("softwareCheckIntervalHours"))
+            {
+                int parsedSoftwareInterval;
+                if (Int32.TryParse(Convert.ToString(config["softwareCheckIntervalHours"]), out parsedSoftwareInterval) && parsedSoftwareInterval >= 1 && parsedSoftwareInterval <= 24 && parsedSoftwareInterval != options.SoftwareCheckIntervalHours)
+                {
+                    newSoftwareCheckIntervalHours = parsedSoftwareInterval;
+                    options.SoftwareCheckIntervalHours = parsedSoftwareInterval;
+                    changed = true;
+                }
+            }
+
+            if (changed)
+            {
+                SaveLearnedConfig(newIntervalHours, newSoftwareCheckIntervalHours);
+            }
+
+            if (config.ContainsKey("ingestionToken"))
+            {
+                string newToken = Convert.ToString(config["ingestionToken"]);
+                if (!String.IsNullOrEmpty(newToken))
+                {
+                    ApplyLearnedIngestionToken(newToken);
+                }
+            }
+        }
+
+        // Writes WIL_INGESTION_TOKEN into this service's own registry
+        // Environment value (HKLM\SYSTEM\CurrentControlSet\Services\
+        // <name>\Environment, REG_MULTI_SZ) - the same mechanism
+        // Install-Client.ps1/Deploy-ClientGpo.ps1 already use at install
+        // time (see their own Set-ServiceEnvironmentToken), just invoked
+        // from the running client itself so a token learned mid-overlap
+        // survives a later service restart instead of reverting to
+        // whatever was written there at install time. Best-effort: a
+        // registry-write failure (e.g. this instance is somehow not
+        // running as LocalSystem/an account with rights to its own
+        // service key) must not fail the report that already succeeded -
+        // the in-process token (options.Token, set immediately below) still
+        // works for the remainder of this process's lifetime either way.
+        private void ApplyLearnedIngestionToken(string newToken)
+        {
+            options.Token = newToken;
+            try
+            {
+                using (RegistryKey serviceKey = Registry.LocalMachine.OpenSubKey(
+                    @"SYSTEM\CurrentControlSet\Services\WindowsInventoryLiteClient", true))
+                {
+                    if (serviceKey == null)
+                    {
+                        return;
+                    }
+                    List<string> lines = new List<string>();
+                    object existing = serviceKey.GetValue("Environment");
+                    string[] existingLines = existing as string[];
+                    if (existingLines != null)
+                    {
+                        foreach (string line in existingLines)
+                        {
+                            if (!line.StartsWith("WIL_INGESTION_TOKEN=", StringComparison.OrdinalIgnoreCase))
+                            {
+                                lines.Add(line);
+                            }
+                        }
+                    }
+                    lines.Add("WIL_INGESTION_TOKEN=" + newToken);
+                    serviceKey.SetValue("Environment", lines.ToArray(), RegistryValueKind.MultiString);
+                }
+            }
+            catch
+            {
+                // Best-effort - see method comment above.
             }
         }
 
