@@ -1759,24 +1759,6 @@ th.sort-desc::after {
   margin-bottom: 16px;
 }
 
-/* "Windows push status"/"Linux push status" on the merged Deploy > Updates
-   page are the only .settings-block-title headings in the app that sit
-   bare, not as the first child of their own .settings-block - there's
-   nothing above them contributing the usual 12-18px separation a
-   .settings-block's own margin-bottom/border-bottom would give the
-   heading that follows it, so the button right above touched the heading
-   with zero gap (reported live). Scoped to this one class rather than
-   widening .settings-block-title's own margin, which every other
-   instance already gets correctly from its wrapping .settings-block.
-   h3.push-status-heading, not bare .push-status-heading: same specificity
-   (0,1,0) as .settings-block-title's own margin shorthand, which is
-   defined later in this file and would otherwise win on source order and
-   reset margin-top back to 0 - this project's own recurring specificity-
-   tie failure mode, caught here before shipping instead of after. */
-h3.push-status-heading {
-  margin-top: 18px;
-}
-
 .pkg-message {
   margin-top: 12px;
   padding: var(--space-sm) var(--space-md);
