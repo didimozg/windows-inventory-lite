@@ -11,6 +11,14 @@
   const linuxDataViews = ['clients', 'linuxServices', 'dashboard', 'hardware'];
   const state = {
     clients: [], linuxClients: [], ...getInitialViewState(), installJobId: null, installPollTimer: null, installJobs: [],
+    // Which job's per-target detail is currently shown in Logging >
+    // Installs' shared #installHistoryJobDetail panel - up to three jobs
+    // (install/uninstall, Windows update push, Linux update push) can be
+    // polling concurrently, but only one is ever rendered at a time. Set
+    // by clicking a row in the history table, or automatically when a new
+    // job is started (see startClientActionJob/startMergedUpdatesPush/
+    // trustHostKeyAndRetry).
+    installHistorySelectedJobId: null,
     updateJobId: null, updatePollTimer: null,
     // Keyed "platform|target" (matches a row checkbox's own dataset), not
     // DOM checkbox state - renderMergedUpdatesTable rebuilds updatesBody's
@@ -1027,7 +1035,7 @@
       </tr>`;
   }
 
-  function renderInstallJob(job, statusElementId = 'installStatus') {
+  function renderInstallJob(job) {
     const results = job.results || [];
     const rows = results.map((result, index) => {
       // Trust-and-retry reads the ssh attempt's host-key fields, which
@@ -1043,7 +1051,7 @@
       // (previously gated on statusElementId === 'linuxInstallStatus'),
       // just re-pointed at the one surviving Actions status element id.
       let trustControl = '';
-      if (statusElementId === 'installStatus') {
+      if (job.id === state.installJobId) {
         if (result.hostKeyStatus && result.hostKeyFingerprint) {
           trustControl = `<button class="link-button trust-host-key-button" type="button"
              data-trust-host="${escapeHtml(result.target)}"
@@ -1072,7 +1080,7 @@
     </tr>${renderAttemptRows(job.id, index, hasMultipleAttempts ? attempts : null)}`;
     }).join('');
 
-    const statusElement = byId(statusElementId);
+    const statusElement = byId('installHistoryJobDetail');
     // innerHTML replacement below recreates .install-results from scratch,
     // which would silently reset its scroll position to the top on every
     // poll tick (every 3s while a job runs) - capture it first and restore
@@ -1130,7 +1138,7 @@
     });
 
     statusElement.querySelectorAll('[data-trust-host]').forEach(button => {
-      button.addEventListener('click', () => trustHostKeyAndRetry(button.dataset.trustHost, button.dataset.trustFingerprint, statusElementId));
+      button.addEventListener('click', () => trustHostKeyAndRetry(button.dataset.trustHost, button.dataset.trustFingerprint));
     });
     statusElement.querySelectorAll('[data-trust-host-manual]').forEach(button => {
       button.addEventListener('click', () => {
@@ -1141,7 +1149,7 @@
           window.alert('Enter the host key fingerprint (e.g. SHA256:...) before trusting it.');
           return;
         }
-        trustHostKeyAndRetry(host, fingerprint, statusElementId);
+        trustHostKeyAndRetry(host, fingerprint);
       });
     });
   }
@@ -1220,24 +1228,51 @@
       });
   }
 
-  function pollInstallJob(jobId, statusElementId = 'installStatus', onComplete = loadInstallHistory, timerKey = 'installPollTimer', onProgress = null) {
+  function pollInstallJob(jobId, onComplete = loadInstallHistory, timerKey = 'installPollTimer', onProgress = null) {
     fetch(`/api/v1/client-install/${encodeURIComponent(jobId)}`, { cache: 'no-store' })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
       })
       .then(job => {
-        renderInstallJob(job, statusElementId);
+        if (jobId === state.installHistorySelectedJobId) {
+          renderInstallJob(job);
+        }
         if (onProgress) onProgress(job);
+        // Keeps the history table's row for this job (status/completedAt/
+        // failedCount) current while it runs, regardless of which job (if
+        // any) is currently selected in the detail panel above.
+        loadInstallHistory();
         if (job.status === 'completed' && state[timerKey]) {
           window.clearInterval(state[timerKey]);
           state[timerKey] = null;
           onComplete();
         }
+        // After any timer-clearing above, so a job's own completion is
+        // reflected in the same tick it happens on.
+        updateLoggingBadge();
       })
       .catch(error => {
-        byId(statusElementId).textContent = `Install job status is not available: ${error.message}`;
+        if (jobId === state.installHistorySelectedJobId) {
+          byId('installHistoryJobDetail').textContent = `Install job status is not available: ${error.message}`;
+        }
       });
+  }
+
+  // Counts currently-active poll timers (0-3: install/uninstall, Windows
+  // update push, Linux update push) - the only visible indicator that a
+  // job is running once its own trigger button stopped showing inline
+  // progress (see startClientActionJob/startMergedUpdatesPush). Matches
+  // the existing updatesBadge/linuxUpdatesBadge look (.nav-badge).
+  function updateLoggingBadge() {
+    const count = [state.installPollTimer, state.updatePollTimer, state.linuxUpdatesPollTimer].filter(Boolean).length;
+    const badge = byId('loggingBadge');
+    if (count > 0) {
+      badge.textContent = String(count);
+      badge.classList.remove('hidden');
+    } else {
+      badge.classList.add('hidden');
+    }
   }
 
   // SSH credential source for Deploy > Updates - global hides both fields
