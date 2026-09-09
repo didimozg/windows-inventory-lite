@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.60.0]
+
+### Added
+
+- **Managed clients can now pick up a changed report interval or a rotated ingestion token without a reinstall or re-push.** Both inventory endpoints (`POST /api/v1/inventory`, `POST /api/v1/linux-inventory`) now include a `config` object in their ack response - `intervalHours`/`softwareCheckIntervalHours` (Windows) or `intervalHours`/`statusIntervalMinutes` (Linux), always the current fleet-wide default from two new Settings > Windows > Install defaults fields (mirroring the existing Settings > Linux ones). The Windows client applies an interval change immediately via `Timer.Change()` and persists it locally so a later service restart doesn't revert to the original install-time value; the Linux client (a one-shot binary re-invoked by systemd, no long-running process to hot-reload) rewrites its own `.timer` unit's `OnUnitActiveSec=` and reloads systemd instead.
+- **Regenerating the ingestion token no longer cuts every client off immediately.** A new "Token overlap (hours)" setting (Settings > Server > Ingestion Token, default 24, 0 = old immediate-cutover behavior) keeps the previous token accepted for a configurable window after Regenerate; a client that authenticates with the outgoing token receives the new one in its `config.ingestionToken` field and persists it (registry `Environment` value on Windows, `wil-linux-client.env` on Linux) before the window closes. A client that never checks in within the window still eventually loses access - this is a known, accepted limitation (the server does not track each client's own interval), not a bug.
+
+240 self-tests (unchanged - no new C# tests added), 166/166 Pester green under Windows PowerShell 5.1 (unchanged, no `.ps1` touched).
+
+## [Windows client 0.4.2]
+
+### Added
+
+- Reads the new `config` object on every inventory report and applies interval/token changes live - see the server entry above for the full behavior. See `CHANGELOG.md`'s versioning note: this is a client-only version bump, independent of the server/dashboard version.
+
 ## [0.59.11]
 
 ### Fixed
