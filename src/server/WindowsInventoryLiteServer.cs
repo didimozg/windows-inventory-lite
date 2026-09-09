@@ -215,6 +215,34 @@ namespace WindowsInventoryLite
         public int LinuxDefaultIntervalHours;
         public int LinuxDefaultStatusIntervalMinutes;
         public string LinuxDefaultInstallPath;
+        // Windows-side counterparts to the three Linux fields above -
+        // dashboard-only (Settings > Windows > Install defaults), no
+        // Install-Client.ps1/Deploy-ClientGpo.ps1 CLI flag (same
+        // reasoning as the Linux ones: this is a fleet-wide value pushed
+        // to already-installed clients over the inventory-report ack, not
+        // an install-time parameter). See ReceiveInventory's `config`
+        // field and WindowsInventoryLiteClient.cs's ApplyConfigFromServer.
+        public int WindowsDefaultIntervalHours;
+        public int WindowsDefaultSoftwareCheckIntervalHours;
+        // Set only by RegenerateIngestionToken (never directly via
+        // /api/v1/server/settings) - the token being phased out and when
+        // it stops being accepted. Both empty ("") when there is no
+        // token currently in its overlap window. PreviousTokenExpiresUtc
+        // is a string, not DateTime?, matching this file's own
+        // convention for every other stored UTC timestamp
+        // (ClientUpdateScheduleLastRunUtc et al.) - parse with the
+        // existing ParseUtcOrNull helper, never add a DateTime?-typed
+        // ServerOptions field.
+        public string PreviousToken;
+        public string PreviousTokenExpiresUtc;
+        // Admin-configurable window (Settings > Server > Ingestion
+        // Token) - how long PreviousToken keeps being accepted after a
+        // Regenerate click, giving an already-installed client time to
+        // learn the new token over its own next report before the old
+        // one stops working. 0 means no overlap - Regenerate cuts over
+        // immediately, preserving this project's original behavior for
+        // an admin who deliberately wants that (e.g. incident response).
+        public int TokenOverlapHours;
         // Off by default - a plain-text file capturing AD lookups,
         // inventory-report traffic, and unhandled server errors. See
         // DebugLogger.cs. Only meant for troubleshooting a specific
@@ -271,6 +299,11 @@ namespace WindowsInventoryLite
             options.LinuxDefaultIntervalHours = 6;
             options.LinuxDefaultStatusIntervalMinutes = 30;
             options.LinuxDefaultInstallPath = "/opt/windows-inventory-lite";
+            options.WindowsDefaultIntervalHours = 6;
+            options.WindowsDefaultSoftwareCheckIntervalHours = 6;
+            options.PreviousToken = "";
+            options.PreviousTokenExpiresUtc = "";
+            options.TokenOverlapHours = 24;
             options.LoginLockoutThreshold = 10;
             options.LoginLockoutWindowMinutes = 15;
             options.LoginLockoutDurationMinutes = 15;
@@ -643,6 +676,41 @@ namespace WindowsInventoryLite
                     {
                         options.LinuxDefaultStatusIntervalMinutes = linuxDefaultStatusIntervalFromConfig;
                     }
+                }
+                if (options.WindowsDefaultIntervalHours == 6)
+                {
+                    string windowsDefaultIntervalText = GetConfigString(config, "WindowsDefaultIntervalHours");
+                    int windowsDefaultIntervalFromConfig;
+                    if (!String.IsNullOrEmpty(windowsDefaultIntervalText) && Int32.TryParse(windowsDefaultIntervalText, out windowsDefaultIntervalFromConfig) && windowsDefaultIntervalFromConfig >= 1 && windowsDefaultIntervalFromConfig <= 24)
+                    {
+                        options.WindowsDefaultIntervalHours = windowsDefaultIntervalFromConfig;
+                    }
+                }
+                if (options.WindowsDefaultSoftwareCheckIntervalHours == 6)
+                {
+                    string windowsDefaultSoftwareCheckIntervalText = GetConfigString(config, "WindowsDefaultSoftwareCheckIntervalHours");
+                    int windowsDefaultSoftwareCheckIntervalFromConfig;
+                    if (!String.IsNullOrEmpty(windowsDefaultSoftwareCheckIntervalText) && Int32.TryParse(windowsDefaultSoftwareCheckIntervalText, out windowsDefaultSoftwareCheckIntervalFromConfig) && windowsDefaultSoftwareCheckIntervalFromConfig >= 1 && windowsDefaultSoftwareCheckIntervalFromConfig <= 24)
+                    {
+                        options.WindowsDefaultSoftwareCheckIntervalHours = windowsDefaultSoftwareCheckIntervalFromConfig;
+                    }
+                }
+                if (options.TokenOverlapHours == 24)
+                {
+                    string tokenOverlapText = GetConfigString(config, "TokenOverlapHours");
+                    int tokenOverlapFromConfig;
+                    if (!String.IsNullOrEmpty(tokenOverlapText) && Int32.TryParse(tokenOverlapText, out tokenOverlapFromConfig) && tokenOverlapFromConfig >= 0 && tokenOverlapFromConfig <= 168)
+                    {
+                        options.TokenOverlapHours = tokenOverlapFromConfig;
+                    }
+                }
+                if (String.IsNullOrEmpty(options.PreviousToken))
+                {
+                    options.PreviousToken = GetConfigString(config, "PreviousToken");
+                }
+                if (String.IsNullOrEmpty(options.PreviousTokenExpiresUtc))
+                {
+                    options.PreviousTokenExpiresUtc = GetConfigString(config, "PreviousTokenExpiresUtc");
                 }
                 if (String.Equals(options.LinuxDefaultInstallPath, "/opt/windows-inventory-lite", StringComparison.Ordinal))
                 {
@@ -8825,6 +8893,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             result["linuxDefaultIntervalHours"] = options.LinuxDefaultIntervalHours;
             result["linuxDefaultStatusIntervalMinutes"] = options.LinuxDefaultStatusIntervalMinutes;
             result["linuxDefaultInstallPath"] = options.LinuxDefaultInstallPath;
+            result["windowsDefaultIntervalHours"] = options.WindowsDefaultIntervalHours;
+            result["windowsDefaultSoftwareCheckIntervalHours"] = options.WindowsDefaultSoftwareCheckIntervalHours;
+            result["tokenOverlapHours"] = options.TokenOverlapHours;
             result["loginLockoutThreshold"] = options.LoginLockoutThreshold;
             result["loginLockoutWindowMinutes"] = options.LoginLockoutWindowMinutes;
             result["loginLockoutDurationMinutes"] = options.LoginLockoutDurationMinutes;
@@ -9180,6 +9251,42 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 }
                 options.LinuxDefaultStatusIntervalMinutes = linuxDefaultStatusIntervalMinutes;
                 updates["LinuxDefaultStatusIntervalMinutes"] = linuxDefaultStatusIntervalMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("windowsDefaultIntervalHours"))
+            {
+                int windowsDefaultIntervalHours;
+                if (!Int32.TryParse(Convert.ToString(payload["windowsDefaultIntervalHours"]), out windowsDefaultIntervalHours) || windowsDefaultIntervalHours < 1 || windowsDefaultIntervalHours > 24)
+                {
+                    SendText(stream, "{\"error\":\"windowsDefaultIntervalHours must be between 1 and 24\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.WindowsDefaultIntervalHours = windowsDefaultIntervalHours;
+                updates["WindowsDefaultIntervalHours"] = windowsDefaultIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("windowsDefaultSoftwareCheckIntervalHours"))
+            {
+                int windowsDefaultSoftwareCheckIntervalHours;
+                if (!Int32.TryParse(Convert.ToString(payload["windowsDefaultSoftwareCheckIntervalHours"]), out windowsDefaultSoftwareCheckIntervalHours) || windowsDefaultSoftwareCheckIntervalHours < 1 || windowsDefaultSoftwareCheckIntervalHours > 24)
+                {
+                    SendText(stream, "{\"error\":\"windowsDefaultSoftwareCheckIntervalHours must be between 1 and 24\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.WindowsDefaultSoftwareCheckIntervalHours = windowsDefaultSoftwareCheckIntervalHours;
+                updates["WindowsDefaultSoftwareCheckIntervalHours"] = windowsDefaultSoftwareCheckIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("tokenOverlapHours"))
+            {
+                int tokenOverlapHours;
+                if (!Int32.TryParse(Convert.ToString(payload["tokenOverlapHours"]), out tokenOverlapHours) || tokenOverlapHours < 0 || tokenOverlapHours > 168)
+                {
+                    SendText(stream, "{\"error\":\"tokenOverlapHours must be between 0 and 168\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.TokenOverlapHours = tokenOverlapHours;
+                updates["TokenOverlapHours"] = tokenOverlapHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
             }
 
             if (payload.ContainsKey("linuxDefaultInstallPath"))
@@ -12708,6 +12815,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "SendLogoutResult is idempotent when no session cookie is present", TestSendLogoutResultIsIdempotentWithNoSessionCookie);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings validates sessionLifetimeHours is between 1 and 720", TestConfigureServerSettingsValidatesSessionLifetimeHours);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips softwareJobAttemptLogRetentionDays/MaxEntries", TestConfigureServerSettingsRoundTripsSoftwareJobAttemptLogRetention);
+            allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips windowsDefaultIntervalHours/SoftwareCheckIntervalHours/tokenOverlapHours", TestConfigureServerSettingsRoundTripsWindowsDefaultsAndTokenOverlap);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips showUsbStorageIndicator", TestConfigureServerSettingsRoundTripsShowUsbStorageIndicator);
             allPassed &= SelfTestCheck(output, "SendUnauthorized serves the embedded login page for a browser navigation to /, with no WWW-Authenticate", TestSendUnauthorizedServesLoginPageForBrowserNavigation);
             allPassed &= SelfTestCheck(output, "SendUnauthorized keeps the plain-text 401 body for API routes", TestSendUnauthorizedServesPlainTextForApiRequests);
@@ -13833,6 +13941,61 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return "expected the live options object to be updated, got retentionDays=" + options.SoftwareJobAttemptLogRetentionDays + " maxEntries=" + options.SoftwareJobAttemptLogMaxEntries;
             }
             return null;
+        }
+
+        private static string TestConfigureServerSettingsRoundTripsWindowsDefaultsAndTokenOverlap()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.EnableHttp = true;
+            options.WindowsDefaultIntervalHours = 6;
+            options.WindowsDefaultSoftwareCheckIntervalHours = 6;
+            options.TokenOverlapHours = 24;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-windowsdefaults-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext postRequest = new RequestContext();
+                postRequest.Method = "POST";
+                postRequest.Path = "/api/v1/server/settings";
+                postRequest.Headers = new Dictionary<string, string>();
+                postRequest.Body = "{\"windowsDefaultIntervalHours\":12,\"windowsDefaultSoftwareCheckIntervalHours\":8,\"tokenOverlapHours\":48}";
+
+                using (MemoryStream postStream = new MemoryStream())
+                {
+                    server.ConfigureServerSettings(postStream, postRequest);
+                }
+
+                if (options.WindowsDefaultIntervalHours != 12 || options.WindowsDefaultSoftwareCheckIntervalHours != 8 || options.TokenOverlapHours != 48)
+                {
+                    return "expected the live options object to be updated, got intervalHours=" + options.WindowsDefaultIntervalHours + " softwareCheckIntervalHours=" + options.WindowsDefaultSoftwareCheckIntervalHours + " tokenOverlapHours=" + options.TokenOverlapHours;
+                }
+
+                RequestContext getRequest = new RequestContext();
+                getRequest.Method = "GET";
+                getRequest.Headers = new Dictionary<string, string>();
+
+                string responseText;
+                using (MemoryStream getStream = new MemoryStream())
+                {
+                    server.SendServerSettings(getStream);
+                    responseText = Encoding.UTF8.GetString(getStream.ToArray());
+                }
+
+                if (responseText.IndexOf("\"windowsDefaultIntervalHours\":12", StringComparison.Ordinal) < 0 || responseText.IndexOf("\"windowsDefaultSoftwareCheckIntervalHours\":8", StringComparison.Ordinal) < 0 || responseText.IndexOf("\"tokenOverlapHours\":48", StringComparison.Ordinal) < 0)
+                {
+                    return "expected GET /api/v1/server/settings to echo back the saved values, got: " + responseText;
+                }
+
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
         }
 
         private static string TestConfigureServerSettingsRoundTripsShowUsbStorageIndicator()
