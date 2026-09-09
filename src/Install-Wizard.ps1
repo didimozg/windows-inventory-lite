@@ -6,6 +6,19 @@ param()
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+# Every flow this wizard dispatches to (all 6 menu options) creates or
+# removes a Windows service, restricts an ACL under %ProgramData%, or
+# modifies WinRM TrustedHosts - all of which require local admin rights.
+# Checked once up front so a non-elevated run gets one clear message
+# instead of reaching Read-WizardServerConfig's "Access denied" partway
+# through menu option 1, which could otherwise be misread as "no server
+# is installed yet" instead of "this session lacks the rights to check."
+function Test-IsElevatedAdmin {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
 # Single mockable prompt primitive - every question in every flow goes
 # through this function, so Pester tests can Mock it to feed canned
 # answers without any real console interaction.
@@ -322,7 +335,16 @@ function Read-WizardServerConfig {
         }
     }
     catch {
-        Write-Warning "Failed to read server config: $($_.Exception.Message)"
+        # A file that exists but can't be read or parsed is not the same
+        # thing as no file at all - silently falling through to $null here
+        # (the exact behavior a fresh install produces) previously made an
+        # existing server look uninstalled, sending this flow into "Quick
+        # install" instead of offering "just refresh"/"full reconfigure"
+        # against the real config. By the time this runs the caller has
+        # already confirmed the process is elevated, so a real read/parse
+        # failure here is genuinely unexpected and should stop the wizard,
+        # not be guessed away.
+        throw "Failed to read server config at '$Path': $($_.Exception.Message)"
     }
 
     return $null
@@ -722,6 +744,10 @@ function Show-WizardMenu {
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
+    if (-not (Test-IsElevatedAdmin)) {
+        throw 'This script must be run from an elevated (Run as Administrator) PowerShell session.'
+    }
+
     while ($true) {
         Show-WizardMenu -Flows $flows
         $choice = Read-Host -Prompt 'Choice'

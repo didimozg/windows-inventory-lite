@@ -13,6 +13,24 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+# This script stops/deletes a Windows service, removes firewall rules, and
+# deletes files under %ProgramData% - all of which require local admin
+# rights. Checked up front so a non-elevated run gets one clear message
+# instead of an "Access denied" partway through (or, worse, Read-ServerConfig
+# below silently misreading that as "no server is installed"). Skipped
+# under -WhatIf: a preview run does not touch anything, so it should not
+# require rights it will never use - also lets Pester dot-source this file
+# with -WhatIf for unit-testing the pure helper functions below.
+function Test-IsElevatedAdmin {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+if (-not $WhatIfPreference -and -not (Test-IsElevatedAdmin)) {
+    throw 'This script must be run from an elevated (Run as Administrator) PowerShell session.'
+}
+
 function Get-ConfigValue {
     param(
         [object]$Config,
@@ -73,7 +91,15 @@ function Read-ServerConfig {
         }
     }
     catch {
-        Write-Warning "Failed to read server config: $($_.Exception.Message)"
+        # A file that exists but can't be read or parsed is not the same
+        # thing as no file at all - silently falling through to @{} here
+        # (the exact behavior "nothing is installed" produces) would make
+        # this uninstall proceed against made-up default paths instead of
+        # the real ones the server actually uses. By the time this runs
+        # (outside -WhatIf) the caller has already confirmed the process is
+        # elevated, so a real read/parse failure here is genuinely
+        # unexpected and should stop the uninstall, not be guessed away.
+        throw "Failed to read server config at '$Path': $($_.Exception.Message)"
     }
 
     return @{}

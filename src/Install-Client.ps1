@@ -41,6 +41,17 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+# This script creates/replaces a Windows service and restricts an ACL under
+# %ProgramData% - both require local admin rights. Only defined here;
+# enforced below, inside the "real install" guard, so Pester can still
+# dot-source this file (as it does today) to unit-test the pure functions
+# in this file without needing an elevated test session.
+function Test-IsElevatedAdmin {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
 # ServerUrl/Token/ServerSharePath end up embedded in the sc.exe command line
 # Invoke-ServiceCreate builds below and runs via cmd.exe /c - the surrounding
 # double quotes do NOT protect &, |, <, >, ^ from being parsed as live cmd.exe
@@ -289,6 +300,10 @@ function Set-RestrictedDirectoryAcl {
 # unit testing without performing a real install - same technique used in
 # src\Install-Wizard.ps1 and deploy\client\Deploy-ClientGpo.ps1.
 if ($MyInvocation.InvocationName -ne '.') {
+    if (-not (Test-IsElevatedAdmin)) {
+        throw 'This script must be run from an elevated (Run as Administrator) PowerShell session.'
+    }
+
     if (-not $InstallPath) {
         $InstallPath = Join-Path -Path $env:ProgramData -ChildPath 'WindowsInventoryLite\client-data'
     }

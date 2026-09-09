@@ -10,6 +10,23 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+# This script stops/deletes a Windows service and deletes files under
+# %ProgramData% - both require local admin rights. Checked up front so a
+# non-elevated run gets one clear message instead of an "Access denied"
+# partway through. Skipped under -WhatIf: a preview run does not touch
+# anything, so it should not require rights it will never use - also lets
+# Pester dot-source this file with -WhatIf for unit-testing the pure
+# helper functions below.
+function Test-IsElevatedAdmin {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+if (-not $WhatIfPreference -and -not (Test-IsElevatedAdmin)) {
+    throw 'This script must be run from an elevated (Run as Administrator) PowerShell session.'
+}
+
 # Historical safety net for the client/server co-located case (an explicit
 # -InstallPath override pointing at the bare shared root): Test-IsUnderAllowedInstallRoot
 # below already refuses a bare $sharedRoot unconditionally now (it is not a

@@ -175,6 +175,22 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+# This script creates/replaces a Windows service, restricts ACLs under
+# %ProgramData%, and opens firewall rules - all of which require local
+# admin rights. Checked before any of the six destructive-block parameters
+# below are even validated, so a non-elevated run gets one clear message
+# instead of an "Access denied" partway through (or, worse, Read-ServerConfig
+# silently misreading that as "no server is installed yet").
+function Test-IsElevatedAdmin {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+if (-not (Test-IsElevatedAdmin)) {
+    throw 'This script must be run from an elevated (Run as Administrator) PowerShell session.'
+}
+
 # DataPath/ContentPath/ClientPackagePath/ConfigPath end up embedded in the
 # sc.exe command line Invoke-ServiceCreate builds below and runs via cmd.exe
 # /c - the surrounding double quotes do NOT protect &, |, <, >, ^ from being
@@ -336,7 +352,16 @@ function Read-ServerConfig {
         }
     }
     catch {
-        Write-Warning "Failed to read server config: $($_.Exception.Message)"
+        # A file that exists but can't be read or parsed is not the same
+        # thing as no file at all - silently falling through to @{} here
+        # (the exact behavior a fresh install produces) would make an
+        # existing install's settings look absent and get overwritten with
+        # defaults instead of reloaded, for any parameter left unspecified.
+        # By the time this runs the caller has already confirmed the
+        # process is elevated, so a real read/parse failure here is
+        # genuinely unexpected and should stop the install, not be
+        # guessed away.
+        throw "Failed to read server config at '$Path': $($_.Exception.Message)"
     }
 
     return @{}

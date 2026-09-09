@@ -9,7 +9,14 @@ Describe 'Windows Inventory Lite Uninstall-Server safety guard' {
         # which is also where Test-IsPathSafeToRemove is invoked) - safe to
         # dot-source with no real side effects, same technique already used
         # by tests/Uninstall-Client.Tests.ps1 for the identical reason.
-        . $script:ScriptPath -WhatIf
+        # -ConfigPath points at a guaranteed-nonexistent scratch path -
+        # Read-ServerConfig runs unconditionally (not itself ShouldProcess-
+        # gated), so without this it would read this machine's real
+        # server-config.json if one happens to exist, which - since that
+        # file is ACL-restricted to Administrators+SYSTEM - throws on a
+        # non-elevated test run instead of exercising the intended
+        # "no config" path.
+        . $script:ScriptPath -WhatIf -ConfigPath (Join-Path -Path $TestDrive -ChildPath 'nonexistent-server-config.json')
     }
 
     It 'Test-IsPathSafeToRemove refuses a bare drive root' {
