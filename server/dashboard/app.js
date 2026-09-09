@@ -1042,14 +1042,15 @@
       // mirror onto the summary result when ssh is the last attempt tried
       // (see RunUnifiedInstallTarget) - unchanged shape from before the
       // Windows/Linux merge, just now reachable from any mode. Gated to
-      // the merged Actions status box specifically: it submits Deploy >
+      // the job Client Actions itself started: it submits Deploy >
       // Actions' own form fields (installSshAuthMode/installSshUsername/
-      // installSshPassword/etc via trustHostKeyAndRetry),
-      // which don't match whatever credentials Deploy > Updates' Linux
-      // push actually used - rendering it there would silently resubmit
-      // the wrong account. Same restriction the pre-merge code had
-      // (previously gated on statusElementId === 'linuxInstallStatus'),
-      // just re-pointed at the one surviving Actions status element id.
+      // installSshPassword/etc via trustHostKeyAndRetry), which don't
+      // match whatever credentials Deploy > Updates' Linux push actually
+      // used - showing it for an Updates-started job would silently
+      // resubmit the wrong account. All jobs now share one detail panel
+      // (installHistoryJobDetail), so this checks the job's own id
+      // (state.installJobId, set only by startClientActionJob and
+      // trustHostKeyAndRetry) instead of which panel it used to render into.
       let trustControl = '';
       if (job.id === state.installJobId) {
         if (result.hostKeyStatus && result.hostKeyFingerprint) {
@@ -1193,6 +1194,15 @@
       <td>${escapeHtml(job.retentionDays)}</td>
     </tr>`).join('');
 
+    // Rebuilding .install-history-results from scratch (its own
+    // max-height/overflow scroll box) resets scroll to the top - now that
+    // this runs on every poll tick (every 3s while a job runs), not just
+    // on subview open, capture and restore it the same way renderInstallJob
+    // already does for .install-results, so a user reading further down a
+    // long job list doesn't keep getting yanked back to the top.
+    const previousHistoryResults = byId('installHistory').querySelector('.install-history-results');
+    const previousHistoryScrollTop = previousHistoryResults ? previousHistoryResults.scrollTop : 0;
+
     byId('installHistory').classList.remove('empty');
     byId('installHistory').innerHTML = `<h2 class="settings-block-title">Saved client action logs</h2>
       ${errorNotice}
@@ -1203,10 +1213,21 @@
         </table>
       </div>`;
 
+    const newHistoryResults = byId('installHistory').querySelector('.install-history-results');
+    if (newHistoryResults) newHistoryResults.scrollTop = previousHistoryScrollTop;
+
     document.querySelectorAll('[data-action-job]').forEach(button => {
       button.addEventListener('click', () => {
         state.installHistorySelectedJobId = button.dataset.actionJob;
-        pollInstallJob(state.installHistorySelectedJobId);
+        // No timerKey of our own here - a history-table click just wants a
+        // one-time render of whichever job was clicked. Passing the
+        // default ('installPollTimer') would incorrectly clear a
+        // DIFFERENT, still-running Client Actions job's timer the moment
+        // this fetch resolves 'completed' for the CLICKED job -
+        // state[timerKey] doesn't know which job it belongs to. null makes
+        // state[null] (undefined) always falsy, so this call can never
+        // touch any job's poll timer, only render the one snapshot.
+        pollInstallJob(state.installHistorySelectedJobId, loadInstallHistory, null);
       });
     });
   }
@@ -1977,9 +1998,11 @@
   // badge fetch. A scheduled push runs entirely server-side (the timer
   // calls StartScheduledClientUpdatePush directly, no HTTP request from
   // any browser involved) - lastScheduledJobId is how an open dashboard
-  // tab learns that happened at all. Only reacts if the Client updates tab
-  // is the active view and no other update push is already being polled
-  // (a manually-started push in progress takes priority - never hijack it).
+  // tab learns that happened at all. Only reacts if no other update push
+  // is already being polled (a manually-started push in progress takes
+  // priority - never hijack it) - not gated on which view/subview is
+  // active any more, since the live detail for this job now renders in
+  // Logging > Installs regardless of where the admin happens to be.
   function handleClientUpdatesSummary(data) {
     updateUpdatesBadge(data.packageAvailable ? data.outdatedCount : 0);
 
@@ -1990,7 +2013,7 @@
     }
     if (scheduledJobId && scheduledJobId !== state.knownScheduledJobId) {
       state.knownScheduledJobId = scheduledJobId;
-      if (state.view === 'deploy' && state.subview === 'updates' && !state.updatePollTimer) {
+      if (!state.updatePollTimer) {
         state.updateJobId = scheduledJobId;
         state.installHistorySelectedJobId = state.updateJobId;
         pollInstallJob(state.updateJobId, () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows'));
@@ -5408,11 +5431,12 @@
       const jobId = attemptBtn.dataset.attemptJob;
       const key = 'attempt:' + jobId + ':' + attemptBtn.dataset.attemptToggle;
       // Scoped to the button's own status box (.install-status), not a
-      // bare document-wide query - harmless today since only one status
-      // box (installStatus) ever renders attempt rows, but a job id +
-      // index pair is only unique WITHIN one status box's own render, not
-      // guaranteed unique document-wide if a future status box (e.g.
-      // Phase 4's Updates view) renders attempt rows too.
+      // bare document-wide query - a job id + index pair is only unique
+      // WITHIN one status box's own render, not guaranteed unique
+      // document-wide. Only one status box (installHistoryJobDetail) ever
+      // renders attempt rows today, so this scoping is currently a no-op
+      // in practice, but it costs nothing and keeps this correct if that
+      // ever changes.
       const container = attemptBtn.closest('.install-status');
       const row = container && container.querySelector(`[data-attempt-details="${attemptBtn.dataset.attemptToggle}"][data-attempt-job="${CSS.escape(jobId)}"]`);
       if (row) {
