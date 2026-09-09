@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.59.9]
+
+### Fixed
+
+- **Clicking a job in Logging > Installs' "Saved client action logs" table did nothing visible** - it rendered into `#installStatus`, an element in a different, currently-hidden section (left behind when the three log views were consolidated into Logging in `[0.59.0]`). The three live per-target status panels (Client Actions' `installStatus`, Deploy > Updates' `updatesStatus`/`linuxUpdatesStatus`) now share one panel inside Logging > Installs instead, reused for both a running job and a clicked historical one; a new badge on the Logging nav item shows how many jobs are currently running, replacing the inline "Starting..." text and per-target table that used to sit at each trigger button. Live-verified against a scratch server (a real WinRM job against an unreachable target, watched start to finish, plus re-selecting a completed job from history).
+
+230 self-tests (unchanged - no C# touched in this release), Pester unaffected (no `.ps1` files touched).
+
 ## [0.59.8]
 
 ### Fixed
