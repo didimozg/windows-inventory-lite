@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.59.10]
+
+### Fixed
+
+- **The Software table's "License" button could open a new-license form instead of editing the record it looked like it belonged to.** `renderSoftwareTable`'s button-visibility check (`findLicenseForSoftware`) reads `state.licenses`, which was only ever refreshed by visiting the Licenses tab - a license added or edited elsewhere in the session stayed invisible to Software's own matching until Licenses happened to be opened again. The button itself never went stale (`data-software-license-name` is always the software's own name), but clicking it re-fetches licenses fresh and can find no match if that fetch is the first one this session, sending the admin into "add" instead of the edit they expected. `state.licenses` now loads unconditionally at page startup (same reasoning already applied to `licenseKeySources` for the same class of problem) and refreshes again every time the Software tab is opened, matching the existing Linux-client-data refresh pattern for Clients/Hardware. Live-verified: a license created with no prior visit to the Licenses tab now shows and correctly opens for editing from Software on first load.
+
+230 self-tests (unchanged - no C# touched in this release), Pester unaffected (no `.ps1` files touched).
+
 ## [0.59.9]
 
 ### Fixed

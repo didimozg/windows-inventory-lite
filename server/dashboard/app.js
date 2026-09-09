@@ -264,6 +264,14 @@
     // read Linux data too - opening either tab re-fetches it rather than
     // waiting up to 30s for the next poll tick.
     if (view === 'clients' || view === 'linuxServices' || view === 'hardware') loadLinuxClients();
+    // renderSoftwareTable's License-button column (findLicenseForSoftware)
+    // depends on state.licenses, which otherwise only refreshes when the
+    // Licenses tab itself is visited - without this, a license added or
+    // renamed earlier in the session stays invisible to the Software
+    // table's own matching until the admin happens to open Licenses again,
+    // which can make a still-showing License button open "add" instead of
+    // the actual record it looks like it should edit.
+    if (view === 'software') loadLicenses();
   }
 
   function renderSubtabStrips() {
@@ -5295,6 +5303,10 @@
     if (state.view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
     if (state.view === 'logging') loadLoggingSubviewData(state.subview);
     if (state.view === 'clients' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
+    // See the matching comment in setView - keeps the Software table's
+    // License-button matching in sync with state.licenses on every
+    // navigation to this view, not just via setView's own direct calls.
+    if (state.view === 'software') loadLicenses();
   });
   byId('pkgServerUrl').value = `${window.location.origin}/api/v1/inventory`;
   byId('linuxPkgServerUrl').value = `${window.location.origin}/api/v1/linux/inventory`;
@@ -5709,6 +5721,12 @@
   // the fetch just populates the hidden table's data with no visible
   // effect on whatever view is actually showing.
   loadLicenseKeySources();
+  // Same reasoning as loadLicenseKeySources above, for the same class of
+  // problem: renderSoftwareTable's License-button matching (see the
+  // setView/hashchange comments) needs state.licenses regardless of
+  // whether the admin has visited Licenses this session, including when
+  // a reloaded/bookmarked URL lands directly on the Software view.
+  loadLicenses();
   updateLinuxUpdatesAuthModeFieldsUi();
   updateUpdatesCredentialFieldVisibility();
   updateUpdatesSelectionState();
