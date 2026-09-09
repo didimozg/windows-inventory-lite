@@ -47,7 +47,7 @@
       <button id="deployTab" class="topnav-item" type="button">Install <span id="updatesBadge" class="nav-badge hidden">0</span><span id="linuxUpdatesBadge" class="nav-badge hidden">0</span></button>
       <button id="licensesTab" class="topnav-item" type="button">Licenses</button>
       <button id="settingsTab" class="topnav-item" type="button">Settings</button>
-      <button id="loggingTab" class="topnav-item" type="button">Logging</button>
+      <button id="loggingTab" class="topnav-item" type="button">Logging <span id="loggingBadge" class="nav-badge hidden">0</span></button>
       <div class="topnav-spacer"></div>
       <span id="generatedAt" class="nav-status-text hidden">Waiting for inventory data.</span>
       <span id="serverVersionBadge" class="nav-status-text">Server: unknown</span>
@@ -777,6 +777,7 @@
 
         <section id="installHistoryView" class="install-panel card-glow hidden" aria-label="Saved client action logs">
           <div id="installHistory" class="install-history empty">No saved client action logs.</div>
+          <div id="installHistoryJobDetail" class="install-status empty">Select a job above to see its details.</div>
         </section>
 
         <section id="softwareJobHistoryView" class="hidden" aria-label="Software job attempt history">
