@@ -706,7 +706,7 @@ namespace WindowsInventoryLite
                 }
                 if (String.IsNullOrEmpty(options.PreviousToken))
                 {
-                    options.PreviousToken = GetConfigString(config, "PreviousToken");
+                    options.PreviousToken = SecretProtector.Unprotect(GetConfigString(config, "PreviousToken"));
                 }
                 if (String.IsNullOrEmpty(options.PreviousTokenExpiresUtc))
                 {
@@ -9886,7 +9886,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // ConfigureCertificate here and Install-Server.ps1's own import
         // step), so there is nothing to encrypt for it.
         private static readonly HashSet<string> EncryptedConfigKeys = new HashSet<string>(
-            new[] { "AdPassword", "WebPassword", "Token", "ClientUpdatePassword", "LinuxUpdatePassword", "SoftwareRepositoryPassword" },
+            new[] { "AdPassword", "WebPassword", "Token", "ClientUpdatePassword", "LinuxUpdatePassword", "SoftwareRepositoryPassword", "PreviousToken" },
             StringComparer.Ordinal);
 
         private void SaveServerConfigValues(Dictionary<string, string> updates)
@@ -12995,6 +12995,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ApplyRestrictedConfigAcl grants the current process's own identity, not just Administrators/SYSTEM", TestApplyRestrictedConfigAclGrantsCurrentIdentity);
             allPassed &= SelfTestCheck(output, "GetDecryptedLicenseKeysForClient decrypts stored keys and returns null for an unknown computer", TestGetDecryptedLicenseKeysForClientRoundTripsAndHandlesUnknownComputer);
             allPassed &= SelfTestCheck(output, "SoftwareRepositoryPassword is DPAPI-encrypted at rest", TestSoftwareRepositoryPasswordIsInEncryptedConfigKeys);
+            allPassed &= SelfTestCheck(output, "PreviousToken is DPAPI-encrypted at rest", TestPreviousTokenIsInEncryptedConfigKeys);
             allPassed &= SelfTestCheck(output, "SplitDomainUsername handles both DOMAIN\\user and bare-username forms", TestSplitDomainUsernameHandlesBothForms);
             allPassed &= SelfTestCheck(output, "WithSoftwareRepositoryIdentity runs the action directly when no credentials are configured", TestWithSoftwareRepositoryIdentityRunsDirectlyWhenNoCredentialsConfigured);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository reports failure when SoftwareRepositoryPath is not configured", TestScanSoftwareRepositoryReportsMissingConfiguration);
@@ -18251,6 +18252,15 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (!EncryptedConfigKeys.Contains("SoftwareRepositoryPassword"))
             {
                 return "expected SoftwareRepositoryPassword to be in EncryptedConfigKeys so it is never stored in plaintext";
+            }
+            return null;
+        }
+
+        private static string TestPreviousTokenIsInEncryptedConfigKeys()
+        {
+            if (!EncryptedConfigKeys.Contains("PreviousToken"))
+            {
+                return "expected PreviousToken to be in EncryptedConfigKeys so it is never stored in plaintext";
             }
             return null;
         }
