@@ -2225,7 +2225,7 @@ namespace WindowsInventoryLite
         private void ReceiveInventory(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
+            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
             {
                 RecordIngestionRejection(request, "windows-inventory", ResolveIngestionRejectionReason(token));
                 DebugLogger.Log(options, "Client", "Rejected inventory report: invalid or missing token");
@@ -2311,7 +2311,7 @@ namespace WindowsInventoryLite
             // SendSoftwareRepositoryConnectionInfo/SendClientSoftwareJobs. A
             // caller with no valid token still gets its report accepted; it
             // just never receives this catalog.
-            if (!IsIngestionTokenRejected(true, token, options.Token))
+            if (!IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
             {
                 ackResponse["licenseKeySources"] = BuildLicenseKeySourcesForClientResponse();
             }
@@ -2340,7 +2340,7 @@ namespace WindowsInventoryLite
             // open. Passing true also makes IsIngestionTokenRejected fail
             // closed when no Token is configured at all, so an unconfigured
             // server rejects instead of publishing the credential.
-            if (IsIngestionTokenRejected(true, token, options.Token))
+            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
             {
                 RecordIngestionRejection(request, "software-repository-connection", ResolveIngestionRejectionReason(token));
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -2365,7 +2365,7 @@ namespace WindowsInventoryLite
             // for any computer name the caller names, which is a map of what
             // is about to be executed where; that is not covered by the
             // low-sensitivity risk model that toggle was designed around.
-            if (IsIngestionTokenRejected(true, token, options.Token))
+            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
             {
                 RecordIngestionRejection(request, "software-jobs", ResolveIngestionRejectionReason(token));
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -2472,7 +2472,7 @@ namespace WindowsInventoryLite
             // attempt-history log, so leaving it open lets anyone who can
             // reach the port forge or flood the only record an admin has of
             // what actually ran where.
-            if (IsIngestionTokenRejected(true, token, options.Token))
+            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
             {
                 RecordIngestionRejection(request, "software-job-results", ResolveIngestionRejectionReason(token));
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -3063,7 +3063,7 @@ namespace WindowsInventoryLite
         private void ReceiveLinuxInventory(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
+            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
             {
                 RecordIngestionRejection(request, "linux-inventory", ResolveIngestionRejectionReason(token));
                 DebugLogger.Log(options, "Client", "Rejected Linux inventory report: invalid or missing token");
@@ -3135,7 +3135,7 @@ namespace WindowsInventoryLite
         private void ReceiveLinuxServiceStatus(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token))
+            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
             {
                 RecordIngestionRejection(request, "linux-service-status", ResolveIngestionRejectionReason(token));
                 DebugLogger.Log(options, "Client", "Rejected Linux service-status report: invalid or missing token");
@@ -6998,7 +6998,7 @@ namespace WindowsInventoryLite
         // configured (preventing accidental unauthenticated access if an
         // admin explicitly sets RequireIngestionToken: true without also
         // configuring a token).
-        private static bool IsIngestionTokenRejected(bool requireIngestionToken, string suppliedToken, string configuredToken)
+        private static bool IsIngestionTokenRejected(bool requireIngestionToken, string suppliedToken, string configuredToken, string previousToken, DateTime? previousTokenExpiresUtc)
         {
             if (!requireIngestionToken)
             {
@@ -7008,6 +7008,25 @@ namespace WindowsInventoryLite
             {
                 return true;
             }
+            if (FixedTimeEquals(suppliedToken, configuredToken))
+            {
+                return false;
+            }
+            if (!String.IsNullOrEmpty(previousToken) && previousTokenExpiresUtc.HasValue && DateTime.UtcNow < previousTokenExpiresUtc.Value)
+            {
+                return !FixedTimeEquals(suppliedToken, previousToken);
+            }
+            return true;
+        }
+
+        // A request that reached here already passed IsIngestionTokenRejected
+        // (i.e. it was accepted) - if it doesn't match the CURRENT token, the
+        // only other way IsIngestionTokenRejected returns false is a match on
+        // PreviousToken, so "not current" is a sound proxy for "used the
+        // previous, still-in-its-overlap-window token" without needing
+        // IsIngestionTokenRejected itself to report which branch matched.
+        private static bool AuthenticatedWithPreviousToken(string suppliedToken, string configuredToken)
+        {
             return !FixedTimeEquals(suppliedToken, configuredToken);
         }
 
@@ -9553,23 +9572,33 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         private void RegenerateIngestionToken(Stream stream, RequestContext request)
         {
             string newToken = GenerateRandomToken();
+            string previousToken = options.TokenOverlapHours > 0 ? options.Token : "";
+            string previousTokenExpiresUtc = options.TokenOverlapHours > 0 ? DateTime.UtcNow.AddHours(options.TokenOverlapHours).ToString("yyyy-MM-ddTHH:mm:ssZ") : "";
 
             Dictionary<string, string> updates = new Dictionary<string, string>();
             updates["Token"] = newToken;
+            updates["PreviousToken"] = previousToken;
+            updates["PreviousTokenExpiresUtc"] = previousTokenExpiresUtc;
             SaveServerConfigValues(updates);
 
             // Only mutate in-memory state after the save succeeds - if
             // SaveServerConfigValues throws, the exception propagates to the
-            // generic error handler and options.Token is left untouched, so
-            // a failed persist never leaves live clients 401'ing against a
-            // token that was never actually written to disk.
+            // generic error handler and options.Token/PreviousToken/
+            // PreviousTokenExpiresUtc are all left untouched, so a failed
+            // persist never leaves live clients 401'ing against a token
+            // that was never actually written to disk.
             options.Token = newToken;
+            options.PreviousToken = previousToken;
+            options.PreviousTokenExpiresUtc = previousTokenExpiresUtc;
 
             try
             {
+                string eventMessage = options.TokenOverlapHours > 0
+                    ? "Ingestion token regenerated from the Settings page. The previous token remains accepted for " + options.TokenOverlapHours + " more hour(s) so already-installed clients can pick up the new one via their next report; after that it will be rejected."
+                    : "Ingestion token regenerated from the Settings page. Existing clients will be unable to submit inventory until reconfigured with the new token.";
                 System.Diagnostics.EventLog.WriteEntry(
                     "WindowsInventoryLite",
-                    "Ingestion token regenerated from the Settings page. Existing clients will be unable to submit inventory until reconfigured with the new token.",
+                    eventMessage,
                     System.Diagnostics.EventLogEntryType.Information);
             }
             catch { }
@@ -12886,6 +12915,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected requires a matching token when enforcement is on", TestIsIngestionTokenRejectedRequiresMatchWhenEnforced);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected always accepts when enforcement is off, regardless of the supplied token", TestIsIngestionTokenRejectedAlwaysAcceptsWhenNotEnforced);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected fails closed when enforcement is on but no token is configured", TestIsIngestionTokenRejectedFailsClosedWhenEnforcedButNoTokenConfigured);
+            allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected accepts the previous token within its overlap window", TestIsIngestionTokenRejectedAcceptsPreviousTokenWithinOverlapWindow);
+            allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected rejects the previous token once its overlap window expires", TestIsIngestionTokenRejectedRejectsPreviousTokenAfterOverlapExpires);
+            allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected rejects an unrelated token even during an active overlap window", TestIsIngestionTokenRejectedRejectsUnrelatedTokenEvenDuringOverlapWindow);
+            allPassed &= SelfTestCheck(output, "AuthenticatedWithPreviousToken distinguishes the current token from any other accepted one", TestAuthenticatedWithPreviousTokenDetectsNonCurrentToken);
+            allPassed &= SelfTestCheck(output, "RegenerateIngestionToken sets PreviousToken/PreviousTokenExpiresUtc when an overlap window is configured", TestRegenerateIngestionTokenSetsPreviousTokenWhenOverlapConfigured);
+            allPassed &= SelfTestCheck(output, "RegenerateIngestionToken leaves PreviousToken empty when TokenOverlapHours is 0", TestRegenerateIngestionTokenSkipsPreviousTokenWhenOverlapIsZero);
             allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected ignores non-state-changing methods", TestIsCrossSiteRequestRejectedIgnoresNonStateChangingMethods);
             allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected allows a state-changing request with neither Origin nor Referer", TestIsCrossSiteRequestRejectedAllowsMissingOriginAndReferer);
             allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected requires a Host header", TestIsCrossSiteRequestRejectedRequiresHostHeader);
@@ -16070,15 +16105,15 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private static string TestIsIngestionTokenRejectedRequiresMatchWhenEnforced()
         {
-            if (InventoryServer.IsIngestionTokenRejected(true, "correct-token", "correct-token"))
+            if (InventoryServer.IsIngestionTokenRejected(true, "correct-token", "correct-token", null, null))
             {
                 return "expected a matching token to be accepted when enforcement is on";
             }
-            if (!InventoryServer.IsIngestionTokenRejected(true, "wrong-token", "correct-token"))
+            if (!InventoryServer.IsIngestionTokenRejected(true, "wrong-token", "correct-token", null, null))
             {
                 return "expected a non-matching token to be rejected when enforcement is on";
             }
-            if (!InventoryServer.IsIngestionTokenRejected(true, null, "correct-token"))
+            if (!InventoryServer.IsIngestionTokenRejected(true, null, "correct-token", null, null))
             {
                 return "expected a missing token to be rejected when enforcement is on";
             }
@@ -16087,11 +16122,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private static string TestIsIngestionTokenRejectedAlwaysAcceptsWhenNotEnforced()
         {
-            if (InventoryServer.IsIngestionTokenRejected(false, "wrong-token", "correct-token"))
+            if (InventoryServer.IsIngestionTokenRejected(false, "wrong-token", "correct-token", null, null))
             {
                 return "expected a non-matching token to be accepted when enforcement is off";
             }
-            if (InventoryServer.IsIngestionTokenRejected(false, null, "correct-token"))
+            if (InventoryServer.IsIngestionTokenRejected(false, null, "correct-token", null, null))
             {
                 return "expected a missing token to be accepted when enforcement is off";
             }
@@ -16100,23 +16135,136 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private static string TestIsIngestionTokenRejectedFailsClosedWhenEnforcedButNoTokenConfigured()
         {
-            if (!InventoryServer.IsIngestionTokenRejected(true, null, null))
+            if (!InventoryServer.IsIngestionTokenRejected(true, null, null, null, null))
             {
                 return "expected rejection when enforcement is on but no token is configured (null supplied, null configured)";
             }
-            if (!InventoryServer.IsIngestionTokenRejected(true, null, ""))
+            if (!InventoryServer.IsIngestionTokenRejected(true, null, "", null, null))
             {
                 return "expected rejection when enforcement is on but no token is configured (null supplied, empty configured)";
             }
-            if (!InventoryServer.IsIngestionTokenRejected(true, "", null))
+            if (!InventoryServer.IsIngestionTokenRejected(true, "", null, null, null))
             {
                 return "expected rejection when enforcement is on but no token is configured (empty supplied, null configured)";
             }
-            if (!InventoryServer.IsIngestionTokenRejected(true, "", ""))
+            if (!InventoryServer.IsIngestionTokenRejected(true, "", "", null, null))
             {
                 return "expected rejection when enforcement is on but no token is configured (empty supplied, empty configured)";
             }
             return null;
+        }
+
+        private static string TestIsIngestionTokenRejectedAcceptsPreviousTokenWithinOverlapWindow()
+        {
+            DateTime futureExpiry = DateTime.UtcNow.AddHours(1);
+            if (InventoryServer.IsIngestionTokenRejected(true, "old-token", "new-token", "old-token", futureExpiry))
+            {
+                return "expected the previous token to be accepted while its overlap window has not yet expired";
+            }
+            return null;
+        }
+
+        private static string TestIsIngestionTokenRejectedRejectsPreviousTokenAfterOverlapExpires()
+        {
+            DateTime pastExpiry = DateTime.UtcNow.AddHours(-1);
+            if (!InventoryServer.IsIngestionTokenRejected(true, "old-token", "new-token", "old-token", pastExpiry))
+            {
+                return "expected the previous token to be rejected once its overlap window has expired";
+            }
+            return null;
+        }
+
+        private static string TestIsIngestionTokenRejectedRejectsUnrelatedTokenEvenDuringOverlapWindow()
+        {
+            DateTime futureExpiry = DateTime.UtcNow.AddHours(1);
+            if (!InventoryServer.IsIngestionTokenRejected(true, "some-attacker-guess", "new-token", "old-token", futureExpiry))
+            {
+                return "expected a token that matches neither the current nor the previous token to be rejected, even with an active overlap window";
+            }
+            return null;
+        }
+
+        private static string TestAuthenticatedWithPreviousTokenDetectsNonCurrentToken()
+        {
+            if (InventoryServer.AuthenticatedWithPreviousToken("current-token", "current-token"))
+            {
+                return "expected false when the supplied token matches the current one";
+            }
+            if (!InventoryServer.AuthenticatedWithPreviousToken("old-token", "current-token"))
+            {
+                return "expected true when the supplied token does not match the current one";
+            }
+            return null;
+        }
+
+        private static string TestRegenerateIngestionTokenSetsPreviousTokenWhenOverlapConfigured()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-regenoverlap-" + Guid.NewGuid().ToString("N"));
+            options.Token = "original-token";
+            options.TokenOverlapHours = 24;
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Headers = new Dictionary<string, string>();
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.RegenerateIngestionToken(stream, request);
+                }
+
+                if (options.Token == "original-token")
+                {
+                    return "expected Token to change after regenerate";
+                }
+                if (options.PreviousToken != "original-token")
+                {
+                    return "expected PreviousToken to hold the just-replaced token, got '" + options.PreviousToken + "'";
+                }
+                if (String.IsNullOrEmpty(options.PreviousTokenExpiresUtc))
+                {
+                    return "expected PreviousTokenExpiresUtc to be set when TokenOverlapHours > 0";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestRegenerateIngestionTokenSkipsPreviousTokenWhenOverlapIsZero()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-regennooverlap-" + Guid.NewGuid().ToString("N"));
+            options.Token = "original-token";
+            options.TokenOverlapHours = 0;
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Headers = new Dictionary<string, string>();
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.RegenerateIngestionToken(stream, request);
+                }
+
+                if (!String.IsNullOrEmpty(options.PreviousToken) || !String.IsNullOrEmpty(options.PreviousTokenExpiresUtc))
+                {
+                    return "expected no previous-token overlap to be recorded when TokenOverlapHours is 0, got PreviousToken='" + options.PreviousToken + "' PreviousTokenExpiresUtc='" + options.PreviousTokenExpiresUtc + "'";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
         }
 
         private static string TestIsCrossSiteRequestRejectedIgnoresNonStateChangingMethods()
