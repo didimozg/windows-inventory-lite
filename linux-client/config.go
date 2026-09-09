@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"regexp"
@@ -119,6 +120,7 @@ func applyConfigFromServer(body []byte, timerUnitPath string, statusTimerUnitPat
 			// systemd unit. Skip rather than fail; the next run (which
 			// may or may not be root, depending on deployment) will see
 			// the same instruction again from the server and retry.
+			log.Printf("skipping systemd interval timer rewrite: not running as root")
 		} else {
 			changed, err := rewriteTimerInterval(timerUnitPath, response.Config.IntervalHours, "h")
 			if err != nil {
@@ -143,6 +145,12 @@ func applyConfigFromServer(body []byte, timerUnitPath string, statusTimerUnitPat
 					return fmt.Errorf("reload status timer: %w", err)
 				}
 			}
+		} else {
+			// Not running as root - can't safely rewrite/reload a
+			// systemd unit. Skip rather than fail; the next run (which
+			// may or may not be root, depending on deployment) will see
+			// the same instruction again from the server and retry.
+			log.Printf("skipping systemd status timer rewrite: not running as root")
 		}
 	}
 

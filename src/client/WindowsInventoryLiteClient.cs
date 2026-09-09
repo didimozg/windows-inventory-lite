@@ -244,7 +244,7 @@ namespace WindowsInventoryLite
                     }
                     if (options.SoftwareCheckIntervalHours != previousSoftwareCheckIntervalHours && softwareCheckTimer != null)
                     {
-                        softwareCheckTimer.Change(TimeSpan.FromMinutes(2), TimeSpan.FromHours(options.SoftwareCheckIntervalHours));
+                        softwareCheckTimer.Change(TimeSpan.FromHours(options.SoftwareCheckIntervalHours), TimeSpan.FromHours(options.SoftwareCheckIntervalHours));
                     }
                     DebugLogger.Log(options, "Server", "Collection cycle completed successfully.");
                 }
