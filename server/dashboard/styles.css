@@ -1822,6 +1822,18 @@ h3.push-status-heading {
   grid-template-columns: minmax(180px, 1fr) minmax(280px, 2fr) auto;
 }
 
+/* Log retention's fields are 3 (then 2) uniform number inputs, not the
+   narrow/wide/auto shape .general-grid's base template assumes (meant for
+   e.g. a label + a URL-shaped field + a button) - reused as-is, the 2fr
+   middle column stretched the second field far wider than a number input
+   needs and pushed the third field (or, in the second row, the only other
+   field) out toward the far edge of the page instead of sitting next to
+   its neighbor. Equal-width columns instead; a row with fewer than 3
+   fields just leaves a trailing empty track, same as any other grid. */
+.log-retention-grid {
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+}
+
 /* Same narrow single-column treatment as .ad-identity-panel below, for the
    "Sync Description from AD" / "Sync mode" / "Sync interval" group - keeps
    this settings block reading as two small stacked panels instead of one

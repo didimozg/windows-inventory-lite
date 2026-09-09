@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.59.7]
+
+### Fixed
+
+- **Settings > Server > Log retention's fields overlapped/spread unevenly across the page.** The block reused `.general-grid`'s base template (`minmax(180px,1fr) minmax(280px,2fr) auto`), sized for a narrow field beside a wide one (e.g. a port number next to a long checkbox label) - but this block has 3 (then 2) uniform, same-shaped number inputs, which the mismatched column widths pushed apart unevenly instead of packing together. New `.log-retention-grid` modifier applies equal-width columns instead; every other `.general-grid` usage on the page was checked and left alone (all genuinely narrow+wide field pairs, not affected). Live-verified in a browser at 1600px, 1000px, and the 900px mobile-collapse breakpoint.
+
 ## [0.59.6]
 
 ### Fixed
