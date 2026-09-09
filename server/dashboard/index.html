@@ -184,6 +184,11 @@
               <input id="generalRequireIngestionToken" type="checkbox" checked>
               Require ingestion token
             </label>
+            <label class="token-overlap-field">
+              Token overlap (hours)
+              <input id="generalTokenOverlapHours" type="number" min="0" max="168" value="24">
+            </label>
+            <p class="cert-hint">How long the previous token keeps being accepted after Regenerate, so an already-installed client has time to learn the new one over its own next report. 0 = cut over immediately (the old behavior).</p>
             <div class="pkg-buttons">
               <button id="ingestionTokenRegenerateButton" class="danger-button" type="button">Regenerate</button>
             </div>
@@ -300,6 +305,20 @@
               </label>
             </div>
             <p class="cert-hint">"Configure AD User" makes the domain/credentials below available to Client actions, Client updates, and AD Computer Import. "Sync Description from AD" additionally writes each computer's Active Directory description into its inventory record, read-only in the Clients table while it's on. Turn it off to edit Description manually instead - re-enabling it later overwrites any manual edits on the next sync. Reading the description attribute is allowed to any authenticated domain user by default AD ACLs, so the service account identity usually needs no special AD delegation.</p>
+          </div>
+          <div class="settings-block">
+            <h3 class="settings-block-title">Install defaults</h3>
+            <p class="cert-hint">Pushed to every already-installed Windows client over its own next inventory report - no reinstall or re-push needed. Also used as the fallback for a client install request that doesn't specify its own interval.</p>
+            <div class="pkg-grid windows-defaults-grid">
+              <label class="pkg-token-field">
+                Interval (hours)
+                <input id="windowsDefaultIntervalHours" type="number" min="1" max="24" value="6">
+              </label>
+              <label class="pkg-token-field">
+                Software check interval (hours)
+                <input id="windowsDefaultSoftwareCheckIntervalHours" type="number" min="1" max="24" value="6">
+              </label>
+            </div>
           </div>
           <div class="pkg-buttons">
             <button id="windowsSettingsSaveButton" class="primary-button" type="button">Save</button>

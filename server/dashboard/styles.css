@@ -1648,6 +1648,21 @@ th.sort-desc::after {
   max-width: 520px;
 }
 
+/* Same root cause as .token-value-field above: this label sits directly
+   in the Ingestion Token .settings-block, not inside a .pkg-grid, so
+   nothing sets display:grid on it without this. */
+.token-overlap-field {
+  display: grid;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+  color: var(--muted);
+  font-size: var(--font-size-sm);
+}
+
+.token-overlap-field input {
+  max-width: 160px;
+}
+
 /* Same root cause as .token-value-field above, for the checkbox right
    below it: outside a .pkg-grid, .check-label's own grid-template-columns/
    align-items/min-height (declared further down this file) never actually
@@ -1884,6 +1899,18 @@ th.sort-desc::after {
    .client-update-schedule-panel above fixes it here without a fixed
    grid-column/grid-row placement. */
 .linux-defaults-grid {
+  grid-template-columns: 1fr;
+  max-width: 420px;
+}
+
+/* Same shape as .linux-defaults-grid above (two plain number fields,
+   nothing that needs a wide/asymmetric column) - a dedicated class
+   rather than reusing .linux-defaults-grid directly, matching this
+   file's own convention of one modifier class per named settings block
+   even when the CSS body is identical (see .ad-sync-panel/
+   .ad-identity-panel for the same pattern) - keeps this block free to
+   diverge later without an unrelated rename. */
+.windows-defaults-grid {
   grid-template-columns: 1fr;
   max-width: 420px;
 }

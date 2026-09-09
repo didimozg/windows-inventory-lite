@@ -2875,6 +2875,7 @@
         state.showUsbStorageIndicator = data.showUsbStorageIndicator !== false;
         byId('generalIngestionRejectionLogRetentionDays').value = data.ingestionRejectionLogRetentionDays || 30;
         byId('generalIngestionRejectionLogMaxEntries').value = data.ingestionRejectionLogMaxEntries || 5000;
+        byId('generalTokenOverlapHours').value = data.tokenOverlapHours || 24;
         byId('generalInstallLogRetentionDays').value = data.installLogRetentionDays || 30;
         byId('generalSoftwareJobAttemptLogRetentionDays').value = data.softwareJobAttemptLogRetentionDays || 90;
         byId('generalSoftwareJobAttemptLogMaxEntries').value = data.softwareJobAttemptLogMaxEntries || 5000;
@@ -2928,6 +2929,8 @@
         applyPasswordPlaceholder('generalAdPassword', !!data.adPasswordConfigured, 'leave blank to keep the current password');
         byId('generalAdComputerImportOUs').value = data.adComputerImportOUs || '';
         updateAdIdentityFields();
+        byId('windowsDefaultIntervalHours').value = data.windowsDefaultIntervalHours || 6;
+        byId('windowsDefaultSoftwareCheckIntervalHours').value = data.windowsDefaultSoftwareCheckIntervalHours || 6;
       })
       .catch(error => {
         showSavedMessage(byId('windowsSettingsMessage'), `Settings unavailable: ${error.message}`, true);
@@ -2999,6 +3002,7 @@
     const hstsEnabled = byId('generalHstsEnabled').checked;
     const hstsMaxAgeHours = Number.parseInt(byId('generalHstsMaxAgeHours').value, 10) || 24;
     const requireIngestionToken = byId('generalRequireIngestionToken').checked;
+    const tokenOverlapHours = Number.parseInt(byId('generalTokenOverlapHours').value, 10) || 24;
 
     // Only the HTTP port and the Enable HTTP switch can actually move this
     // browser's own connection out from under it - staleHours/httpsPort/
@@ -3033,7 +3037,7 @@
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        staleHours, showUsbStorageIndicator, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, hstsEnabled, hstsMaxAgeHours, ingestionRejectionLogRetentionDays, ingestionRejectionLogMaxEntries, softwareJobAttemptLogRetentionDays, softwareJobAttemptLogMaxEntries, requireIngestionToken,
+        staleHours, showUsbStorageIndicator, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, hstsEnabled, hstsMaxAgeHours, ingestionRejectionLogRetentionDays, ingestionRejectionLogMaxEntries, softwareJobAttemptLogRetentionDays, softwareJobAttemptLogMaxEntries, requireIngestionToken, tokenOverlapHours,
         acknowledgeRisks: !!acknowledgeRisks, acknowledgeIngestionTokenRisk: !!acknowledgeIngestionTokenRisk,
         debugLogEnabled: byId('generalDebugLogEnabled').checked
       })
@@ -3088,7 +3092,9 @@
         adUseServiceIdentity: byId('generalAdUseServiceIdentity').checked,
         adUsername: byId('generalAdUsername').value.trim(),
         adPassword: byId('generalAdPassword').value,
-        adComputerImportOUs: byId('generalAdComputerImportOUs').value
+        adComputerImportOUs: byId('generalAdComputerImportOUs').value,
+        windowsDefaultIntervalHours: Number.parseInt(byId('windowsDefaultIntervalHours').value, 10) || 6,
+        windowsDefaultSoftwareCheckIntervalHours: Number.parseInt(byId('windowsDefaultSoftwareCheckIntervalHours').value, 10) || 6
       })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, data })))
