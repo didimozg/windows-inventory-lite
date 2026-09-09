@@ -21,7 +21,7 @@ func TestSendReportPostsJSONAndToken(t *testing.T) {
 	defer server.Close()
 
 	report := Report{Hostname: "test-host", ClientVersion: "0.1.0"}
-	err := SendReport(server.URL, "secret-token", report)
+	_, err := SendReport(server.URL, "secret-token", report)
 
 	if err != nil {
 		t.Fatalf("SendReport() error = %v", err)
@@ -43,7 +43,7 @@ func TestSendReportNoTokenOmitsHeader(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := SendReport(server.URL, "", Report{Hostname: "test-host"})
+	_, err := SendReport(server.URL, "", Report{Hostname: "test-host"})
 	if err != nil {
 		t.Fatalf("SendReport() error = %v", err)
 	}
@@ -58,7 +58,7 @@ func TestSendReportServerErrorReturnsError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := SendReport(server.URL, "", Report{Hostname: "test-host"})
+	_, err := SendReport(server.URL, "", Report{Hostname: "test-host"})
 	if err == nil {
 		t.Fatal("SendReport() error = nil, want an error for HTTP 400")
 	}
@@ -76,7 +76,7 @@ func TestSendReportAcceptsStatusReportPayload(t *testing.T) {
 	defer server.Close()
 
 	status := StatusReport{Hostname: "test-host", ClientVersion: "0.1.1", ActiveUnits: []string{"radarr.service"}, CollectedAt: "2026-08-04T12:00:00Z"}
-	err := SendReport(server.URL, "", status)
+	_, err := SendReport(server.URL, "", status)
 
 	if err != nil {
 		t.Fatalf("SendReport() error = %v", err)

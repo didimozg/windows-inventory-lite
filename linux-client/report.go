@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"time"
@@ -145,15 +146,19 @@ func BuildStatusReport() (StatusReport, error) {
 // ping (StatusReport) - it never inspects payload's fields directly,
 // only json.Marshal's it, so widening the type is a pure simplification,
 // not a behavior change for existing Report callers.
-func SendReport(serverURL, token string, payload any) error {
+//
+// Returns the raw response body on success so the caller can parse the
+// server's ack (which now includes a "config" object - see
+// ApplyConfigFromServer in config.go) without a second round trip.
+func SendReport(serverURL, token string, payload any) ([]byte, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("encode report: %w", err)
+		return nil, fmt.Errorf("encode report: %w", err)
 	}
 
 	req, err := http.NewRequest(http.MethodPost, serverURL, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return nil, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	if token != "" {
@@ -163,12 +168,17 @@ func SendReport(serverURL, token string, payload any) error {
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("send report: %w", err)
+		return nil, fmt.Errorf("send report: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("server returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("server returned HTTP %d", resp.StatusCode)
 	}
-	return nil
+
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	return responseBody, nil
 }
