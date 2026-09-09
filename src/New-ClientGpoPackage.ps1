@@ -79,14 +79,18 @@ function Set-RestrictedFileAcl {
     $adminSid  = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
     $systemSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
     $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-    $acl = Get-Acl -LiteralPath $FilePath
+    # -Path, not -LiteralPath: this script requires only PS 2.0 (#requires
+    # above), and Get-Acl/Set-Acl only gained -LiteralPath in PS 3.0.
+    # $FilePath is always a script-built path, never wildcard-shaped, so
+    # -Path's wildcard expansion is a safe substitute here.
+    $acl = Get-Acl -Path $FilePath
     $acl.SetAccessRuleProtection($true, $false)
     $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($adminSid, 'FullControl', 'Allow')))
     $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($systemSid, 'FullControl', 'Allow')))
     if ($currentSid -and $currentSid -ne $adminSid -and $currentSid -ne $systemSid) {
         $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($currentSid, 'FullControl', 'Allow')))
     }
-    Set-Acl -LiteralPath $FilePath -AclObject $acl
+    Set-Acl -Path $FilePath -AclObject $acl
 }
 
 $projectRoot = Split-Path -Parent $PSScriptRoot

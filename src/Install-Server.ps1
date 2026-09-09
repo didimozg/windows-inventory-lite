@@ -943,14 +943,20 @@ function Set-RestrictedDirectoryAcl {
     param([string]$DirectoryPath)
     $adminSid  = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
     $systemSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
-    $acl = Get-Acl -LiteralPath $DirectoryPath
+    # -Path, not -LiteralPath: this script requires only PS 2.0 (#requires
+    # above), and Get-Acl/Set-Acl only gained -LiteralPath in PS 3.0 - the
+    # identical sibling of this function in Deploy-ClientGpo.ps1/
+    # Install-Client.ps1 broke this way against a real PS 2.0 Windows 7
+    # target. $DirectoryPath is always a script-built install path, never
+    # wildcard-shaped, so -Path's wildcard expansion is a safe substitute.
+    $acl = Get-Acl -Path $DirectoryPath
     $acl.SetAccessRuleProtection($true, $false)
     $inheritFlags = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
     $adminRule  = New-Object System.Security.AccessControl.FileSystemAccessRule($adminSid, 'FullControl', $inheritFlags, [System.Security.AccessControl.PropagationFlags]::None, 'Allow')
     $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule($systemSid, 'FullControl', $inheritFlags, [System.Security.AccessControl.PropagationFlags]::None, 'Allow')
     $acl.AddAccessRule($adminRule)
     $acl.AddAccessRule($systemRule)
-    Set-Acl -LiteralPath $DirectoryPath -AclObject $acl
+    Set-Acl -Path $DirectoryPath -AclObject $acl
 }
 
 foreach ($path in @($InstallPath, $DataPath, $ContentPath, $ClientPackagePath, $LinuxClientPackagePath)) {
@@ -1133,13 +1139,17 @@ function Set-RestrictedFileAcl {
     # IdentityNotMappedException from AddAccessRule with a literal string.
     $adminSid  = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
     $systemSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
-    $acl = Get-Acl -LiteralPath $FilePath
+    # -Path, not -LiteralPath: this script requires only PS 2.0 (#requires
+    # above), and Get-Acl/Set-Acl only gained -LiteralPath in PS 3.0.
+    # $FilePath is always a script-built path, never wildcard-shaped, so
+    # -Path's wildcard expansion is a safe substitute here.
+    $acl = Get-Acl -Path $FilePath
     $acl.SetAccessRuleProtection($true, $false)
     $adminRule  = New-Object System.Security.AccessControl.FileSystemAccessRule($adminSid, 'FullControl', 'Allow')
     $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule($systemSid, 'FullControl', 'Allow')
     $acl.AddAccessRule($adminRule)
     $acl.AddAccessRule($systemRule)
-    Set-Acl -LiteralPath $FilePath -AclObject $acl
+    Set-Acl -Path $FilePath -AclObject $acl
 }
 
 # --prefix is deliberately NOT included here, unlike --data/--content/etc.

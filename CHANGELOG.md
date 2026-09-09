@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.59.11]
+
+### Fixed
+
+- **A push/GPO update to a genuine Windows 7 client on PowerShell 2.0 failed with `Get-Acl : A parameter cannot be found that matches parameter name 'LiteralPath'`** - `Get-Acl`/`Set-Acl` only gained `-LiteralPath` in PowerShell 3.0, but `Deploy-ClientGpo.ps1` (the script a WinRM push actually copies to and runs on the target) declares `#requires -Version 2.0` and used it anyway, confirmed live against a real fleet machine. Switched to `-Path` in `Set-RestrictedDirectoryAcl`/`Set-RestrictedFileAcl` everywhere they appear across the codebase (`Deploy-ClientGpo.ps1`, `Install-Client.ps1`, `Install-Server.ps1`, `New-ClientGpoPackage.ps1`, `Install-ClientDebianSSH.ps1`, `Uninstall-ClientDebianSSH.ps1`) - every one of these scripts declares the same PS 2.0 floor, and every path passed to these functions is script-built (never wildcard-shaped), so `-Path`'s wildcard expansion is a safe, behavior-preserving substitute.
+
+230 self-tests (unchanged - no C# touched in this release), 166/166 Pester green under Windows PowerShell 5.1 (unchanged).
+
 ## [0.59.10]
 
 ### Fixed

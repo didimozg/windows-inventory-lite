@@ -270,12 +270,16 @@ function New-SystemdEnvFile {
 
     $envPath = Join-Path -Path $Directory -ChildPath 'wil-linux-client.env'
     New-Item -Path $envPath -ItemType File -Force | Out-Null
-    $acl = Get-Acl -LiteralPath $envPath
+    # -Path, not -LiteralPath: this script requires only PS 2.0 (#requires
+    # above), and Get-Acl/Set-Acl only gained -LiteralPath in PS 3.0.
+    # $envPath is always a script-built path, never wildcard-shaped, so
+    # -Path's wildcard expansion is a safe substitute here.
+    $acl = Get-Acl -Path $envPath
     $acl.SetAccessRuleProtection($true, $false)
     $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
     $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($currentUser, 'FullControl', 'Allow')
     $acl.AddAccessRule($rule)
-    Set-Acl -LiteralPath $envPath -AclObject $acl
+    Set-Acl -Path $envPath -AclObject $acl
 
     [System.IO.File]::WriteAllText($envPath, "WIL_INGESTION_TOKEN=$SharedToken`n", (New-Object System.Text.UTF8Encoding($false)))
     return @{ EnvPath = $envPath }
@@ -544,12 +548,17 @@ function Invoke-PlinkWithPasswordFile {
 
     $pwFile = [System.IO.Path]::GetTempFileName()
     try {
-        $acl = Get-Acl -LiteralPath $pwFile
+        # -Path, not -LiteralPath: this script requires only PS 2.0
+        # (#requires above), and Get-Acl/Set-Acl only gained -LiteralPath in
+        # PS 3.0. $pwFile comes from GetTempFileName(), never
+        # wildcard-shaped, so -Path's wildcard expansion is a safe
+        # substitute here.
+        $acl = Get-Acl -Path $pwFile
         $acl.SetAccessRuleProtection($true, $false)
         $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
         $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($currentUser, 'FullControl', 'Allow')
         $acl.AddAccessRule($rule)
-        Set-Acl -LiteralPath $pwFile -AclObject $acl
+        Set-Acl -Path $pwFile -AclObject $acl
 
         [System.IO.File]::WriteAllText($pwFile, $PlainPassword, (New-Object System.Text.UTF8Encoding($false)))
 

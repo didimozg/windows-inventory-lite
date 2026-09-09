@@ -357,12 +357,17 @@ function Invoke-PlinkWithPasswordFile {
 
     $pwFile = [System.IO.Path]::GetTempFileName()
     try {
-        $acl = Get-Acl -LiteralPath $pwFile
+        # -Path, not -LiteralPath: this script requires only PS 2.0
+        # (#requires above), and Get-Acl/Set-Acl only gained -LiteralPath in
+        # PS 3.0. $pwFile comes from GetTempFileName(), never
+        # wildcard-shaped, so -Path's wildcard expansion is a safe
+        # substitute here.
+        $acl = Get-Acl -Path $pwFile
         $acl.SetAccessRuleProtection($true, $false)
         $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
         $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($currentUser, 'FullControl', 'Allow')
         $acl.AddAccessRule($rule)
-        Set-Acl -LiteralPath $pwFile -AclObject $acl
+        Set-Acl -Path $pwFile -AclObject $acl
 
         [System.IO.File]::WriteAllText($pwFile, $PlainPassword, (New-Object System.Text.UTF8Encoding($false)))
 

@@ -410,14 +410,21 @@ function Set-RestrictedDirectoryAcl {
     param([string]$DirectoryPath)
     $adminSid  = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
     $systemSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
-    $acl = Get-Acl -LiteralPath $DirectoryPath
+    # -Path, not -LiteralPath: this script requires only PS 2.0 (#requires
+    # above), and Get-Acl/Set-Acl only gained -LiteralPath in PS 3.0 - a
+    # genuine Windows 7 target still on PS 2.0 fails here with "A parameter
+    # cannot be found that matches parameter name 'LiteralPath'" (confirmed
+    # live against a real fleet machine). $DirectoryPath is always a
+    # script-built install path, never wildcard-shaped, so -Path's wildcard
+    # expansion is a safe substitute here.
+    $acl = Get-Acl -Path $DirectoryPath
     $acl.SetAccessRuleProtection($true, $false)
     $inheritFlags = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
     $adminRule  = New-Object System.Security.AccessControl.FileSystemAccessRule($adminSid, 'FullControl', $inheritFlags, [System.Security.AccessControl.PropagationFlags]::None, 'Allow')
     $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule($systemSid, 'FullControl', $inheritFlags, [System.Security.AccessControl.PropagationFlags]::None, 'Allow')
     $acl.AddAccessRule($adminRule)
     $acl.AddAccessRule($systemRule)
-    Set-Acl -LiteralPath $DirectoryPath -AclObject $acl
+    Set-Acl -Path $DirectoryPath -AclObject $acl
 }
 
 function Test-Administrator {
