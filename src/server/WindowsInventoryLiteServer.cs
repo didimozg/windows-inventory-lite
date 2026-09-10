@@ -1977,6 +1977,10 @@ namespace WindowsInventoryLite
                     {
                         DownloadClientPackageUpdate(stream, request);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-package/update-download")
+                    {
+                        DownloadLinuxClientPackageUpdate(stream, request);
+                    }
                     else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-install/trust-host-key")
                     {
                         TrustLinuxHostKey(stream, request);
@@ -3265,6 +3269,14 @@ namespace WindowsInventoryLite
             Dictionary<string, object> configResponse = new Dictionary<string, object>();
             configResponse["intervalHours"] = options.LinuxDefaultIntervalHours;
             configResponse["statusIntervalMinutes"] = options.LinuxDefaultStatusIntervalMinutes;
+            if (options.EnableLinuxClientSelfUpdate)
+            {
+                Dictionary<string, object> updateInfo = BuildLinuxClientUpdateInfo(GetStringValue(inventory, "clientVersion"));
+                if (updateInfo != null)
+                {
+                    configResponse["update"] = updateInfo;
+                }
+            }
             ackResponse["config"] = configResponse;
             // ingestionToken is populated only from inside a strict,
             // unconditional token check, not from AuthenticatedWithPreviousToken
@@ -3439,6 +3451,37 @@ namespace WindowsInventoryLite
             {
                 return null;
             }
+        }
+
+        // Returns null when there is nothing to advertise (no built package
+        // present, or the reporting client's version already matches it) -
+        // never an empty Dictionary, so the caller's simple null-check is
+        // sufficient to decide whether to add the "update" key at all.
+        // Unlike BuildWindowsClientUpdateInfo, the Linux client has one
+        // build, not two runtime targets, so there is only one binary path
+        // to check and hash.
+        private Dictionary<string, object> BuildLinuxClientUpdateInfo(string reportedClientVersion)
+        {
+            string currentVersion = GetLinuxClientPackageVersion();
+            if (String.IsNullOrEmpty(currentVersion))
+            {
+                return null;
+            }
+            if (!String.IsNullOrEmpty(reportedClientVersion) && String.Equals(reportedClientVersion, currentVersion, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            string binaryPath = Path.Combine(options.LinuxClientPackagePath, "wil-linux-client");
+            if (!File.Exists(binaryPath))
+            {
+                return null;
+            }
+
+            Dictionary<string, object> updateInfo = new Dictionary<string, object>();
+            updateInfo["version"] = currentVersion;
+            updateInfo["sha256"] = ComputeFileSha256(binaryPath);
+            return updateInfo;
         }
 
         private void SendLinuxClientUpdates(Stream stream)
@@ -8351,6 +8394,31 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendBytes(stream, exeBytes, "application/octet-stream", "WindowsInventoryLiteClient.exe");
         }
 
+        // Linux equivalent of DownloadClientPackageUpdate above - same
+        // ingestion-token auth (called by the running client itself, not a
+        // dashboard session), but no target parameter since the Linux
+        // client has one build, not two runtime targets.
+        private void DownloadLinuxClientPackageUpdate(Stream stream, RequestContext request)
+        {
+            string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
+            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            {
+                RecordIngestionRejection(request, "linux-client-package-update-download", ResolveIngestionRejectionReason(token));
+                SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
+                return;
+            }
+
+            string binaryPath = Path.Combine(options.LinuxClientPackagePath, "wil-linux-client");
+            if (!File.Exists(binaryPath))
+            {
+                SendText(stream, "Client package not found.", "text/plain; charset=utf-8", 404);
+                return;
+            }
+
+            byte[] binaryBytes = File.ReadAllBytes(binaryPath);
+            SendBytes(stream, binaryBytes, "application/octet-stream", "wil-linux-client");
+        }
+
         private void SendLinuxClientPackageStatus(Stream stream)
         {
             JavaScriptSerializer serializer = CreateJsonSerializer();
@@ -13136,6 +13204,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate rejects a request with no ingestion token", TestDownloadClientPackageUpdateRejectsMissingToken);
             allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate rejects an invalid target value with 400", TestDownloadClientPackageUpdateRejectsInvalidTarget);
             allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate returns 404 when the requested target file does not exist", TestDownloadClientPackageUpdateReturns404WhenFileMissing);
+            allPassed &= SelfTestCheck(output, "ReceiveLinuxInventory omits update when EnableLinuxClientSelfUpdate is false", TestReceiveLinuxInventoryOmitsUpdateWhenSelfUpdateDisabled);
+            allPassed &= SelfTestCheck(output, "ReceiveLinuxInventory includes update with the built version when it differs and self-update is enabled", TestReceiveLinuxInventoryIncludesUpdateWhenVersionDiffersAndEnabled);
+            allPassed &= SelfTestCheck(output, "DownloadLinuxClientPackageUpdate rejects a request with no ingestion token", TestDownloadLinuxClientPackageUpdateRejectsMissingToken);
+            allPassed &= SelfTestCheck(output, "DownloadLinuxClientPackageUpdate returns 404 when the target file does not exist", TestDownloadLinuxClientPackageUpdateReturns404WhenFileMissing);
             allPassed &= SelfTestCheck(output, "RegenerateIngestionToken sets PreviousToken/PreviousTokenExpiresUtc when an overlap window is configured", TestRegenerateIngestionTokenSetsPreviousTokenWhenOverlapConfigured);
             allPassed &= SelfTestCheck(output, "RegenerateIngestionToken leaves PreviousToken empty when TokenOverlapHours is 0", TestRegenerateIngestionTokenSkipsPreviousTokenWhenOverlapIsZero);
             allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected ignores non-state-changing methods", TestIsCrossSiteRequestRejectedIgnoresNonStateChangingMethods);
@@ -16791,6 +16863,174 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 try { Directory.Delete(options.DataPath, true); } catch { }
                 try { Directory.Delete(options.ClientPackagePath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveLinuxInventoryOmitsUpdateWhenSelfUpdateDisabled()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxnoupdate-" + Guid.NewGuid().ToString("N"));
+            // ReceiveLinuxInventory writes the report under LinuxDataPath,
+            // not DataPath - a plain `new ServerOptions()` leaves this null
+            // (only ServerOptions.Parse fills in a default), so it must be
+            // set explicitly here or Path.Combine inside the handler throws
+            // ArgumentNullException before the update logic under test ever
+            // runs.
+            options.LinuxDataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxnoupdatedata-" + Guid.NewGuid().ToString("N"));
+            options.LinuxClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxnoupdatepkg-" + Guid.NewGuid().ToString("N"));
+            options.Token = "shared-secret";
+            options.EnableLinuxClientSelfUpdate = false;
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.LinuxDataPath);
+            Directory.CreateDirectory(options.LinuxClientPackagePath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "shared-secret";
+                request.Body = "{\"hostname\":\"linux-test\",\"clientVersion\":\"0.1.0\"}";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveLinuxInventory(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("\"update\"", StringComparison.Ordinal) >= 0)
+                {
+                    return "expected no update field when EnableLinuxClientSelfUpdate is false, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.LinuxDataPath, true); } catch { }
+                try { Directory.Delete(options.LinuxClientPackagePath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveLinuxInventoryIncludesUpdateWhenVersionDiffersAndEnabled()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxhasupdate-" + Guid.NewGuid().ToString("N"));
+            // See TestReceiveLinuxInventoryOmitsUpdateWhenSelfUpdateDisabled's
+            // comment - LinuxDataPath is not defaulted by `new ServerOptions()`.
+            options.LinuxDataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxhasupdatedata-" + Guid.NewGuid().ToString("N"));
+            options.LinuxClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxhasupdatepkg-" + Guid.NewGuid().ToString("N"));
+            options.Token = "shared-secret";
+            options.EnableLinuxClientSelfUpdate = true;
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.LinuxDataPath);
+            Directory.CreateDirectory(options.LinuxClientPackagePath);
+            try
+            {
+                string binaryPath = Path.Combine(options.LinuxClientPackagePath, "wil-linux-client");
+                File.WriteAllBytes(binaryPath, new byte[] { 1, 2, 3, 4 });
+                File.WriteAllText(Path.Combine(options.LinuxClientPackagePath, "wil-linux-client.version"), "0.9.9-test");
+
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "shared-secret";
+                request.Body = "{\"hostname\":\"linux-test\",\"clientVersion\":\"0.0.0-old\"}";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveLinuxInventory(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("\"update\":{", StringComparison.Ordinal) < 0)
+                {
+                    return "expected an update object when the reported clientVersion does not match the built package and self-update is enabled, got: " + responseText;
+                }
+                if (responseText.IndexOf("\"version\":\"0.9.9-test\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected update.version to be the built package's version, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.LinuxDataPath, true); } catch { }
+                try { Directory.Delete(options.LinuxClientPackagePath, true); } catch { }
+            }
+        }
+
+        private static string TestDownloadLinuxClientPackageUpdateRejectsMissingToken()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxdlnotok-" + Guid.NewGuid().ToString("N"));
+            options.Token = "shared-secret";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/linux-client-package/update-download";
+                request.Headers = new Dictionary<string, string>();
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DownloadLinuxClientPackageUpdate(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("Unauthorized", StringComparison.Ordinal) < 0)
+                {
+                    return "expected Unauthorized with no token, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestDownloadLinuxClientPackageUpdateReturns404WhenFileMissing()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxdlmissing-" + Guid.NewGuid().ToString("N"));
+            options.LinuxClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxdlmissingpkg-" + Guid.NewGuid().ToString("N"));
+            options.Token = "shared-secret";
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.LinuxClientPackagePath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/linux-client-package/update-download";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "shared-secret";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DownloadLinuxClientPackageUpdate(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("not found", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    return "expected a 404 'not found' response, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.LinuxClientPackagePath, true); } catch { }
             }
         }
 
