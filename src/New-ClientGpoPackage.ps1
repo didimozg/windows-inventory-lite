@@ -179,8 +179,16 @@ $lines += 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%DEPLOY_SCRI
 $lines += ''
 $lines += 'exit /b %ERRORLEVEL%'
 
-Set-Content -LiteralPath $cmdPath -Value $lines -Encoding ASCII
+# Create empty, restrict, THEN write - the same discipline
+# Install-Server.ps1's Save-EncryptedConfig already applies. The previous
+# order (write, then restrict) left this file world-readable for the whole
+# window between the two while it already contained the plaintext
+# ingestion token in its ARGS line.
+if (-not (Test-Path -LiteralPath $cmdPath)) {
+    New-Item -Path $cmdPath -ItemType File -Force | Out-Null
+}
 Set-RestrictedFileAcl -FilePath $cmdPath
+Set-Content -LiteralPath $cmdPath -Value $lines -Encoding ASCII
 
 Write-Host "GPO client package: $OutputPath"
 Write-Host "Startup script: $cmdPath"

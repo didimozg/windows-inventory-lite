@@ -693,44 +693,51 @@ $uninstallClientWinRMQuestions = @(
     @{ Name = 'AddToTrustedHosts'; Prompt = 'Add target computers to WinRM TrustedHosts (needed for non-domain-joined or workgroup targets)'; Type = 'Switch' }
 )
 
-$flows = [ordered]@{
-    '1' = @{
+# [ordered]@{...} is a PS3.0+ syntax construct - not available on real
+# PS2.0 despite this script's own "#requires -Version 2.0" declaration
+# (confirmed against a genuine Windows 7/PS2.0 fleet machine). Building the
+# same System.Collections.Specialized.OrderedDictionary via New-Object/.Add
+# is the PS2.0-compatible equivalent; Show-WizardMenu already declares that
+# exact type on its -Flows parameter and enumerates .Keys in insertion
+# order to print the menu "1. Install server" .. "6. ...", so the ordering
+# is load-bearing, not cosmetic.
+$flows = New-Object System.Collections.Specialized.OrderedDictionary
+$flows.Add('1', @{
         Label        = 'Install server'
         ScriptName   = 'Install-Server.ps1'
         Questions    = $installServerQuestions
         SecretParams = @('WebPassword', 'Token', 'CertificatePfxPassword', 'AdPassword')
-    }
-    '2' = @{
+    })
+$flows.Add('2', @{
         Label        = 'Install client (local)'
         ScriptName   = 'Install-Client.ps1'
         Questions    = $installClientQuestions
         SecretParams = @('Token')
-    }
-    '3' = @{
+    })
+$flows.Add('3', @{
         Label        = 'Deploy client to remote machines (WinRM)'
         ScriptName   = 'Install-ClientWinRM.ps1'
         Questions    = $installClientWinRMQuestions
         SecretParams = @('Token', 'CredentialPassword')
-    }
-    '4' = @{
+    })
+$flows.Add('4', @{
         Label        = 'Uninstall server'
         ScriptName   = 'Uninstall-Server.ps1'
         Questions    = $uninstallServerQuestions
         SecretParams = @()
-    }
-    '5' = @{
+    })
+$flows.Add('5', @{
         Label        = 'Uninstall client (local)'
         ScriptName   = 'Uninstall-Client.ps1'
         Questions    = $uninstallClientQuestions
         SecretParams = @()
-    }
-    '6' = @{
+    })
+$flows.Add('6', @{
         Label        = 'Uninstall client (remote, WinRM)'
         ScriptName   = 'Uninstall-ClientWinRM.ps1'
         Questions    = $uninstallClientWinRMQuestions
         SecretParams = @('CredentialPassword')
-    }
-}
+    })
 
 function Show-WizardMenu {
     param([Parameter(Mandatory = $true)][System.Collections.Specialized.OrderedDictionary]$Flows)

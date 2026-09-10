@@ -59,6 +59,18 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+# This script writes to WSMan:\localhost\Client\TrustedHosts, a machine-wide
+# WinRM setting - requires local admin rights. Only defined here; enforced
+# below, inside the "real deploy" guard, so Pester can still dot-source this
+# file to unit-test the pure functions in it without needing an elevated
+# test session. Same pattern already applied to Install-Server.ps1,
+# Install-Client.ps1, and Install-Wizard.ps1.
+function Test-IsElevatedAdmin {
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
 $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $scriptDirectory) {
     $scriptDirectory = (Get-Location).Path
@@ -387,6 +399,10 @@ $script:RemoveRemotePackageScriptBlock = {
 # technique used in src\Uninstall-ClientWinRM.ps1, src\Install-Client.ps1, and
 # deploy\client\Deploy-ClientGpo.ps1.
 if ($MyInvocation.InvocationName -ne '.') {
+    if (-not (Test-IsElevatedAdmin)) {
+        throw 'This script must be run from an elevated (Run as Administrator) PowerShell session.'
+    }
+
     # Entries this run itself adds to TrustedHosts - removed again once every
     # target has been attempted (see the cleanup after the loop below), so
     # trusting a workgroup/non-domain target does not outlive this one push.
