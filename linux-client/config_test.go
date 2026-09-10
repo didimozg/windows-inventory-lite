@@ -119,6 +119,35 @@ func TestApplyConfigFromServerRewritesEnvToken(t *testing.T) {
 	}
 }
 
+// A real, confirmed bug: regexp.ReplaceAll interprets "$" in the
+// REPLACEMENT text as submatch-expansion syntax ($1, ${name}, $$ for a
+// literal "$") even though the pattern here has zero capture groups.
+// The server's own auto-generated tokens (64 lowercase hex) never
+// contain "$", but an operator-chosen custom token (--token/config, no
+// charset restriction) can - this guards against a silent, no-error
+// corruption of exactly that case.
+func TestRewriteEnvTokenHandlesDollarSignsInToken(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "wil-linux-client.env")
+	if err := os.WriteFile(envPath, []byte("WIL_INGESTION_TOKEN=old-token\n"), 0644); err != nil {
+		t.Fatalf("write env fixture: %v", err)
+	}
+
+	tokenWithDollarSigns := "abc$1def${2}ghi$$end"
+	if err := rewriteEnvToken(envPath, tokenWithDollarSigns); err != nil {
+		t.Fatalf("rewriteEnvToken returned error: %v", err)
+	}
+
+	result, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	expected := "WIL_INGESTION_TOKEN=" + tokenWithDollarSigns
+	if !strings.Contains(string(result), expected) {
+		t.Errorf("expected the token to be written verbatim, dollar signs intact - got:\n%s\nwanted line: %s", string(result), expected)
+	}
+}
+
 // applyConfigFromServerForTest is a test-only seam: the real
 // ApplyConfigFromServer always wires reloadAndRestartTimer, which shells
 // out to systemctl - not available in a test environment (and on this

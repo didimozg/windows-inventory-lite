@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -8,6 +9,9 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
+	"strings"
+
+	"windows-inventory-lite/linux-client/collect"
 )
 
 // onUnitActiveSecPattern matches a systemd timer's OnUnitActiveSec= line
@@ -41,12 +45,16 @@ func rewriteTimerInterval(unitPath string, newValue int, unitSuffix string) (boo
 	}
 
 	newLine := "OnUnitActiveSec=" + strconv.Itoa(newValue) + unitSuffix
-	current := onUnitActiveSecPattern.Find(content)
-	if string(current) == newLine {
+	// Compare the FULL before/after content, not just the first regex
+	// match - a unit file with a duplicated OnUnitActiveSec= line whose
+	// first occurrence already matched newLine would previously report
+	// "no change" and skip fixing a stale second occurrence (only
+	// reachable with an already-malformed unit file, but cheap to make
+	// correct regardless of match count).
+	updated := onUnitActiveSecPattern.ReplaceAll(content, []byte(newLine))
+	if bytes.Equal(updated, content) {
 		return false, nil
 	}
-
-	updated := onUnitActiveSecPattern.ReplaceAll(content, []byte(newLine))
 	if err := os.WriteFile(unitPath, updated, 0644); err != nil {
 		return false, fmt.Errorf("write %s: %w", unitPath, err)
 	}
@@ -65,7 +73,19 @@ func rewriteEnvToken(envFilePath string, newToken string) error {
 	newLine := "WIL_INGESTION_TOKEN=" + newToken
 	var updated []byte
 	if pattern.Match(content) {
-		updated = pattern.ReplaceAll(content, []byte(newLine))
+		// regexp.ReplaceAll interprets "$" in the REPLACEMENT text as
+		// submatch-expansion syntax ($1, ${name}, $$ for a literal "$"),
+		// even though this pattern has zero capture groups - confirmed
+		// empirically: a token containing "$1"/"${x}"/"$$" was silently
+		// corrupted on write (e.g. "abc$1def" -> "abc"), no error. The
+		// server's auto-generated tokens (64 lowercase hex) never
+		// contain "$", but an operator-chosen custom token
+		// (--token/config, no charset restriction) can. Escaping every
+		// literal "$" in the replacement text (doubling it to "$$") is
+		// the documented way to tell ReplaceAll it's not a submatch
+		// reference.
+		escapedNewLine := strings.Replace(newLine, "$", "$$", -1)
+		updated = pattern.ReplaceAll(content, []byte(escapedNewLine))
 	} else {
 		updated = append(content, []byte("\n"+newLine+"\n")...)
 	}
@@ -77,11 +97,19 @@ func rewriteEnvToken(envFilePath string, newToken string) error {
 // shells out, kept separate from rewriteTimerInterval's pure file logic
 // specifically so tests can inject a no-op in place of this function
 // without needing a real systemd.
+//
+// Uses collect.SystemctlPath (an absolute path), not a bare "systemctl"
+// resolved through PATH - this function only ever runs as root (see its
+// only caller's own os.Geteuid()==0 gate), and collect.SystemctlPath's
+// own comment documents why a PATH lookup is a real local-privilege-
+// escalation vector for a root-run systemd service on this project's
+// target distros. This was the one place in this codebase that still
+// used the bare, PATH-resolved form.
 func reloadAndRestartTimer(timerUnitName string) error {
-	if err := exec.Command("systemctl", "daemon-reload").Run(); err != nil {
+	if err := exec.Command(collect.SystemctlPath, "daemon-reload").Run(); err != nil {
 		return fmt.Errorf("systemctl daemon-reload: %w", err)
 	}
-	if err := exec.Command("systemctl", "restart", timerUnitName).Run(); err != nil {
+	if err := exec.Command(collect.SystemctlPath, "restart", timerUnitName).Run(); err != nil {
 		return fmt.Errorf("systemctl restart %s: %w", timerUnitName, err)
 	}
 	return nil

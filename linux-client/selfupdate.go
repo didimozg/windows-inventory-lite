@@ -87,7 +87,14 @@ func applySelfUpdate(body []byte, binaryPath string, downloadURL string, token s
 	if err := os.WriteFile(stagingPath, newContent, 0755); err != nil {
 		// binaryPath was never touched by this failure - the backup is
 		// unused, not a restore-from-.bak case. Remove it rather than
-		// leaving a stray, unnecessary copy next to the binary.
+		// leaving a stray, unnecessary copy next to the binary. Also
+		// remove stagingPath itself: a write that fails partway (e.g.
+		// ENOSPC) can leave a partial/zero-length file at this path
+		// (os.WriteFile creates the file before it can fail on the write
+		// itself) - this branch previously left that orphan behind,
+		// unlike the Rename-failure branch below which already cleaned
+		// up both paths.
+		_ = os.Remove(stagingPath)
 		_ = os.Remove(backupPath)
 		return fmt.Errorf("write staged binary: %w", err)
 	}
