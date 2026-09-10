@@ -1963,7 +1963,7 @@ namespace WindowsInventoryLite
             script.AppendLine("sc query WindowsInventoryLiteClient | find \"RUNNING\" >nul");
             script.AppendLine("if not errorlevel 1 goto running");
             script.AppendLine("set /a wilwaitcount+=1");
-            script.AppendLine("if %wilwaitcount% GEQ 15 goto rollback");
+            script.AppendLine("if %wilwaitcount% GEQ 30 goto rollback");
             script.AppendLine("ping -n 2 127.0.0.1 >nul");
             script.AppendLine("goto waitrunning");
             script.AppendLine(":running");
@@ -2008,7 +2008,11 @@ namespace WindowsInventoryLite
             {
                 // The server has no build for this client's own target
                 // (e.g. only the other target's exe exists in
-                // ClientPackagePath) - nothing to self-update to.
+                // ClientPackagePath) - nothing to self-update to. Logged
+                // (not silent) - otherwise this looks identical to the
+                // original per-target hash bug from the outside: a client
+                // that never updates with no visible reason why.
+                DebugLogger.Log(options, "SelfUpdate", "Server advertised version " + newVersion + " but has no build for this client's own target (" + target + ", key " + hashKey + ") - nothing to update to.");
                 return;
             }
             string expectedSha256 = Convert.ToString(update[hashKey]);

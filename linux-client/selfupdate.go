@@ -85,10 +85,18 @@ func applySelfUpdate(body []byte, binaryPath string, downloadURL string, token s
 	// for a Linux process replacing its own executable.
 	stagingPath := binaryPath + ".new"
 	if err := os.WriteFile(stagingPath, newContent, 0755); err != nil {
+		// binaryPath was never touched by this failure - the backup is
+		// unused, not a restore-from-.bak case. Remove it rather than
+		// leaving a stray, unnecessary copy next to the binary.
+		_ = os.Remove(backupPath)
 		return fmt.Errorf("write staged binary: %w", err)
 	}
 	if err := os.Rename(stagingPath, binaryPath); err != nil {
+		// Same reasoning - a failed rename leaves binaryPath as whatever
+		// it already was (rename is atomic on the same filesystem), so
+		// there is nothing to restore, only an unused backup to clean up.
 		_ = os.Remove(stagingPath)
+		_ = os.Remove(backupPath)
 		return fmt.Errorf("rename staged binary into place: %w", err)
 	}
 
