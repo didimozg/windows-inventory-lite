@@ -2285,25 +2285,28 @@ namespace WindowsInventoryLite
                 return null;
             }
 
-            string currentVersion = net40Version ?? net35Version;
             string net35Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net35.exe");
             string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
 
             Dictionary<string, object> updateInfo = new Dictionary<string, object>();
-            updateInfo["version"] = currentVersion;
-            // One hash per target, not one ambiguous shared hash - the
-            // downloading client independently decides its own target via
-            // Environment.Version.Major and has no way to tell the server
-            // which one it needs when this ack is built, so both must be
-            // offered whenever both files exist. A net35 client comparing
-            // against a net40 hash (or vice versa) would fail verification
-            // permanently and silently - this was a real, confirmed bug.
-            if (File.Exists(net35Path))
+            // Both version AND hash are per-target, not one ambiguous
+            // shared value - a net35 build and a net40 build can genuinely
+            // be at different versions (e.g. a partial rebuild/copy still
+            // in progress in ClientPackagePath), and a client only ever
+            // downloads/verifies its own target. A shared "version" field
+            // was the exact structural sibling of the already-fixed
+            // shared-hash bug: it could report the OTHER target's version
+            // string while this client's own download/hash was still the
+            // older build - self-healing next cycle, but actively wrong
+            // in the meantime for anything that logs/displays it.
+            if (net35Version != null && File.Exists(net35Path))
             {
+                updateInfo["versionNet35"] = net35Version;
                 updateInfo["sha256Net35"] = ComputeFileSha256(net35Path);
             }
-            if (File.Exists(net40Path))
+            if (net40Version != null && File.Exists(net40Path))
             {
+                updateInfo["versionNet40"] = net40Version;
                 updateInfo["sha256Net40"] = ComputeFileSha256(net40Path);
             }
             if (!updateInfo.ContainsKey("sha256Net35") && !updateInfo.ContainsKey("sha256Net40"))
@@ -2421,14 +2424,6 @@ namespace WindowsInventoryLite
             Dictionary<string, object> configResponse = new Dictionary<string, object>();
             configResponse["intervalHours"] = options.WindowsDefaultIntervalHours;
             configResponse["softwareCheckIntervalHours"] = options.WindowsDefaultSoftwareCheckIntervalHours;
-            if (options.EnableWindowsClientSelfUpdate)
-            {
-                Dictionary<string, object> updateInfo = BuildWindowsClientUpdateInfo(GetStringValue(inventory, "clientVersion"));
-                if (updateInfo != null)
-                {
-                    configResponse["update"] = updateInfo;
-                }
-            }
             ackResponse["config"] = configResponse;
             // The basic report-acceptance gate above deliberately honors the
             // admin-toggleable RequireIngestionToken (fake inventory
@@ -2448,6 +2443,26 @@ namespace WindowsInventoryLite
                 if (AuthenticatedWithPreviousToken(token, options.Token))
                 {
                     configResponse["ingestionToken"] = options.Token;
+                }
+                // Self-update's version/hash computation spawns real
+                // child processes (GetExeVersion) and hashes real files
+                // on every call - moved behind this same strict,
+                // unconditional token check rather than gated only on
+                // EnableWindowsClientSelfUpdate, so an anonymous or
+                // garbage-token caller can no longer trigger this cost on
+                // every request when the admin-toggleable
+                // RequireIngestionToken (this method's own entry gate)
+                // happens to be off - the same reasoning already applied
+                // to licenseKeySources/ingestionToken above. A client
+                // genuinely mid-token-rotation (previous-token overlap)
+                // still gets this normally.
+                if (options.EnableWindowsClientSelfUpdate)
+                {
+                    Dictionary<string, object> updateInfo = BuildWindowsClientUpdateInfo(GetStringValue(inventory, "clientVersion"));
+                    if (updateInfo != null)
+                    {
+                        configResponse["update"] = updateInfo;
+                    }
                 }
             }
             SendJson(stream, serializer.Serialize(ackResponse));
@@ -3270,14 +3285,6 @@ namespace WindowsInventoryLite
             Dictionary<string, object> configResponse = new Dictionary<string, object>();
             configResponse["intervalHours"] = options.LinuxDefaultIntervalHours;
             configResponse["statusIntervalMinutes"] = options.LinuxDefaultStatusIntervalMinutes;
-            if (options.EnableLinuxClientSelfUpdate)
-            {
-                Dictionary<string, object> updateInfo = BuildLinuxClientUpdateInfo(GetStringValue(inventory, "clientVersion"));
-                if (updateInfo != null)
-                {
-                    configResponse["update"] = updateInfo;
-                }
-            }
             ackResponse["config"] = configResponse;
             // ingestionToken is populated only from inside a strict,
             // unconditional token check, not from AuthenticatedWithPreviousToken
@@ -3287,9 +3294,29 @@ namespace WindowsInventoryLite
             // unauthenticated (no or garbage token) request while a real
             // token stays configured; without this guard that caller would
             // receive the real, current secret token in this field.
-            if (!IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)) && AuthenticatedWithPreviousToken(token, options.Token))
+            if (!IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
             {
-                configResponse["ingestionToken"] = options.Token;
+                if (AuthenticatedWithPreviousToken(token, options.Token))
+                {
+                    configResponse["ingestionToken"] = options.Token;
+                }
+                // Self-update's version/hash computation reads and hashes
+                // a real file on every call - moved behind this same
+                // strict, unconditional token check rather than gated
+                // only on EnableLinuxClientSelfUpdate, matching the
+                // identical fix applied to ReceiveInventory (see its own
+                // comment for the full reasoning - this endpoint's own
+                // per-call cost is smaller, one file read/hash rather
+                // than two subprocess spawns, but the same reachability
+                // gap applies).
+                if (options.EnableLinuxClientSelfUpdate)
+                {
+                    Dictionary<string, object> updateInfo = BuildLinuxClientUpdateInfo(GetStringValue(inventory, "clientVersion"));
+                    if (updateInfo != null)
+                    {
+                        configResponse["update"] = updateInfo;
+                    }
+                }
             }
             SendJson(stream, serializer.Serialize(ackResponse));
         }
@@ -13203,6 +13230,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ReceiveInventory omits update when EnableWindowsClientSelfUpdate is false", TestReceiveInventoryOmitsUpdateWhenSelfUpdateDisabled);
             allPassed &= SelfTestCheck(output, "ReceiveInventory includes update with a sha256 when the reported version differs and self-update is enabled", TestReceiveInventoryIncludesUpdateWhenVersionDiffersAndEnabled);
             allPassed &= SelfTestCheck(output, "ReceiveInventory advertises separate, correctly-matched sha256 hashes for net35 and net40", TestReceiveInventoryAdvertisesSeparateHashesPerTarget);
+            allPassed &= SelfTestCheck(output, "ReceiveInventory omits update (and its GetExeVersion/hash cost) for an anonymous caller when RequireIngestionToken is off", TestReceiveInventoryOmitsUpdateForAnonymousCallerWhenTokenNotRequired);
             allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate rejects a request with no ingestion token", TestDownloadClientPackageUpdateRejectsMissingToken);
             allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate rejects an invalid target value with 400", TestDownloadClientPackageUpdateRejectsInvalidTarget);
             allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate returns 404 when the requested target file does not exist", TestDownloadClientPackageUpdateReturns404WhenFileMissing);
@@ -16751,6 +16779,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 {
                     return "expected an update object when the reported clientVersion does not match the built package and self-update is enabled, got: " + responseText;
                 }
+                if (responseText.IndexOf("\"versionNet40\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the update object to include a versionNet40 field, got: " + responseText;
+                }
                 if (responseText.IndexOf("\"sha256Net40\"", StringComparison.Ordinal) < 0)
                 {
                     return "expected the update object to include a sha256Net40 field, got: " + responseText;
@@ -16819,6 +16851,81 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (String.Equals(expectedNet35Hash, expectedNet40Hash, StringComparison.Ordinal))
                 {
                     return "test fixture invalid: the real net35 and net40 exes hashed identically, so this test cannot distinguish a swapped/missing per-target hash bug";
+                }
+                // versionNet35/versionNet40 must both be present too - a
+                // shared "version" field was the structural sibling of
+                // the shared-hash bug this test already guards, found and
+                // fixed in the same feature after the fact.
+                if (responseText.IndexOf("\"versionNet35\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected update.versionNet35 to be present, got: " + responseText;
+                }
+                if (responseText.IndexOf("\"versionNet40\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected update.versionNet40 to be present, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.ClientPackagePath, true); } catch { }
+            }
+        }
+
+        // Guards against a real amplification finding: BuildWindowsClientUpdateInfo
+        // spawns two real GetExeVersion subprocesses (each up to a 5s
+        // WaitForExit) and hashes two real files - this must never be
+        // reachable by a caller with no valid token, even when
+        // RequireIngestionToken is off (a real, admin-supported
+        // low-security mode). Before the fix, this computation ran
+        // regardless of the entry gate's outcome; now it must sit behind
+        // the same strict, unconditional check licenseKeySources/
+        // ingestionToken already use.
+        private static string TestReceiveInventoryOmitsUpdateForAnonymousCallerWhenTokenNotRequired()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-anonnoupdate-" + Guid.NewGuid().ToString("N"));
+            options.ClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-anonnoupdatepkg-" + Guid.NewGuid().ToString("N"));
+            options.Token = "shared-secret";
+            options.RequireIngestionToken = false;
+            options.EnableWindowsClientSelfUpdate = true;
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.ClientPackagePath);
+            try
+            {
+                string buildDir = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
+                string realClientExePath = Path.Combine(buildDir, "WindowsInventoryLiteClient-net40.exe");
+                if (!File.Exists(realClientExePath))
+                {
+                    // Same missing-precondition case documented in
+                    // TestReceiveInventoryIncludesUpdateWhenVersionDiffersAndEnabled.
+                    return null;
+                }
+                File.Copy(realClientExePath, Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe"), true);
+
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Headers = new Dictionary<string, string>();
+                // No x-inventory-token header at all - anonymous caller,
+                // accepted only because RequireIngestionToken is off.
+                request.Body = "{\"computerName\":\"TEST-PC\",\"clientVersion\":\"0\"}";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveInventory(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("\"status\":\"ok\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the anonymous report to still be accepted (RequireIngestionToken is off), got: " + responseText;
+                }
+                if (responseText.IndexOf("\"update\"", StringComparison.Ordinal) >= 0)
+                {
+                    return "expected NO update field (and no GetExeVersion/hash work) for an anonymous caller even with self-update enabled, got: " + responseText;
                 }
                 return null;
             }

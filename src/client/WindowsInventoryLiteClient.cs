@@ -1948,15 +1948,34 @@ namespace WindowsInventoryLite
             script.AppendLine("@echo off");
             script.AppendLine("echo [self-update] starting >> " + log);
             script.AppendLine("sc stop WindowsInventoryLiteClient");
+            script.AppendLine("set wilstopwaitcount=0");
             script.AppendLine(":waitstopped");
             script.AppendLine("sc query WindowsInventoryLiteClient | find \"STOPPED\" >nul");
             script.AppendLine("if not errorlevel 1 goto stopped");
+            script.AppendLine("set /a wilstopwaitcount+=1");
+            // Bounded, not the unbounded loop an earlier pass deliberately
+            // shipped - a service that never reaches STOPPED (a genuinely
+            // possible state per OnStop()'s own comment on an in-progress
+            // install) must not spin this SYSTEM-level task forever with
+            // no rollback ever reached. ~30s, matching the run-wait loop's
+            // own bound below.
+            script.AppendLine("if %wilstopwaitcount% GEQ 30 goto stop_timed_out");
             script.AppendLine("ping -n 2 127.0.0.1 >nul");
             script.AppendLine("goto waitstopped");
+            script.AppendLine(":stop_timed_out");
+            script.AppendLine("echo [self-update] service never reached STOPPED within timeout - aborting, nothing was touched >> " + log);
+            script.AppendLine("goto cleanup");
             script.AppendLine(":stopped");
             script.AppendLine("echo [self-update] service stopped, swapping files >> " + log);
             script.AppendLine("move /y \"" + currentExePath + "\" \"" + backupExePath + "\"");
+            // Both move /y calls are now errorlevel-checked - previously
+            // neither was, so a failed backup (e.g. an AV real-time-scan
+            // lock racing the just-stopped exe) silently proceeded to
+            // overwrite the live exe anyway with no real backup to roll
+            // back to if the new build then failed to start.
+            script.AppendLine("if errorlevel 1 goto backup_failed");
             script.AppendLine("move /y \"" + newExePath + "\" \"" + currentExePath + "\"");
+            script.AppendLine("if errorlevel 1 goto swap_failed");
             script.AppendLine("sc start WindowsInventoryLiteClient");
             script.AppendLine("set wilwaitcount=0");
             script.AppendLine(":waitrunning");
@@ -1973,6 +1992,22 @@ namespace WindowsInventoryLite
             script.AppendLine(":rollback");
             script.AppendLine("echo [self-update] new version failed to reach RUNNING within timeout, rolling back >> " + log);
             script.AppendLine("move /y \"" + currentExePath + "\" \"" + failedExePath + "\"");
+            script.AppendLine("move /y \"" + backupExePath + "\" \"" + currentExePath + "\"");
+            script.AppendLine("sc start WindowsInventoryLiteClient");
+            script.AppendLine("goto cleanup");
+            script.AppendLine(":backup_failed");
+            // currentExePath was never actually moved (move /y failed, so
+            // its source is untouched on this filesystem) - nothing to
+            // restore, just get the still-original service running again.
+            script.AppendLine("echo [self-update] failed to back up the current exe - aborting without touching it >> " + log);
+            script.AppendLine("sc start WindowsInventoryLiteClient");
+            script.AppendLine("goto cleanup");
+            script.AppendLine(":swap_failed");
+            // The backup DOES exist here (we only reach this label after
+            // the backup move succeeded) - explicitly restore it rather
+            // than assume currentExePath is still intact, since the
+            // failure reason for this specific move is unknown.
+            script.AppendLine("echo [self-update] failed to swap in the new exe after backup was created - restoring backup >> " + log);
             script.AppendLine("move /y \"" + backupExePath + "\" \"" + currentExePath + "\"");
             script.AppendLine("sc start WindowsInventoryLiteClient");
             script.AppendLine(":cleanup");
@@ -1992,19 +2027,10 @@ namespace WindowsInventoryLite
         // automatically on the next cycle.
         private void ApplySelfUpdateFromServer(Dictionary<string, object> update)
         {
-            if (!update.ContainsKey("version"))
-            {
-                return;
-            }
-            string newVersion = Convert.ToString(update["version"]);
-            if (String.IsNullOrEmpty(newVersion) || String.Equals(newVersion, Program.ProductVersion, StringComparison.Ordinal))
-            {
-                return;
-            }
-
             string target = Environment.Version.Major >= 4 ? "net40" : "net35";
+            string versionKey = target == "net40" ? "versionNet40" : "versionNet35";
             string hashKey = target == "net40" ? "sha256Net40" : "sha256Net35";
-            if (!update.ContainsKey(hashKey))
+            if (!update.ContainsKey(versionKey) || !update.ContainsKey(hashKey))
             {
                 // The server has no build for this client's own target
                 // (e.g. only the other target's exe exists in
@@ -2012,7 +2038,27 @@ namespace WindowsInventoryLite
                 // (not silent) - otherwise this looks identical to the
                 // original per-target hash bug from the outside: a client
                 // that never updates with no visible reason why.
-                DebugLogger.Log(options, "SelfUpdate", "Server advertised version " + newVersion + " but has no build for this client's own target (" + target + ", key " + hashKey + ") - nothing to update to.");
+                DebugLogger.Log(options, "SelfUpdate", "Server has no build for this client's own target (" + target + ", keys " + versionKey + "/" + hashKey + ") - nothing to update to.");
+                return;
+            }
+            string newVersion = Convert.ToString(update[versionKey]);
+            if (String.IsNullOrEmpty(newVersion) || String.Equals(newVersion, Program.ProductVersion, StringComparison.Ordinal))
+            {
+                return;
+            }
+            if (!IsVersionNewer(newVersion, Program.ProductVersion))
+            {
+                // Only ever move forward. Nothing in this ack proves the
+                // server's build is actually newer - a stale rebuild, a
+                // bad manual ClientPackagePath copy, or a restored old
+                // backup on the server would otherwise silently downgrade
+                // every self-update-enabled client that reports in while
+                // it's in that state, with no confirmation and no log
+                // distinguishing "upgrade" from "downgrade." An
+                // unparseable version string is treated the same as "not
+                // newer" - never apply a build this client can't actually
+                // compare.
+                DebugLogger.Log(options, "SelfUpdate", "Server advertised version " + newVersion + " for target " + target + ", but it is not newer than this client's own " + Program.ProductVersion + " - ignoring (would be a downgrade, or the version string could not be compared).");
                 return;
             }
             string expectedSha256 = Convert.ToString(update[hashKey]);
@@ -2057,9 +2103,24 @@ namespace WindowsInventoryLite
                 File.WriteAllText(cmdPath, BuildSelfUpdateCmdScript(exePath, newExePath, logPath), Encoding.ASCII);
 
                 string createArgs = "/Create /TN \"" + SelfUpdateTaskName + "\" /TR \"cmd.exe /c \\\"" + cmdPath + "\\\"\" /SC ONCE /ST 23:59 /RU SYSTEM /F";
-                RunHelperProcess("schtasks.exe", createArgs);
-                RunHelperProcess("schtasks.exe", "/Run /TN \"" + SelfUpdateTaskName + "\"");
-                DebugLogger.Log(options, "SelfUpdate", "Scheduled task '" + SelfUpdateTaskName + "' created and started.");
+                bool created = RunHelperProcess("schtasks.exe", createArgs);
+                bool ran = created && RunHelperProcess("schtasks.exe", "/Run /TN \"" + SelfUpdateTaskName + "\"");
+                if (created && ran)
+                {
+                    DebugLogger.Log(options, "SelfUpdate", "Scheduled task '" + SelfUpdateTaskName + "' created and started.");
+                }
+                else
+                {
+                    // Previously logged success unconditionally regardless
+                    // of whether either schtasks.exe call actually
+                    // succeeded - an AV/EDR block on scheduled-task
+                    // creation (a real risk given this project's own
+                    // Kaspersky false-positive history) meant self-update
+                    // silently never applied while the diagnostic log
+                    // built specifically to catch this kept reporting
+                    // success on every cycle.
+                    DebugLogger.Log(options, "SelfUpdate", "Failed to " + (!created ? "create" : "run") + " scheduled task '" + SelfUpdateTaskName + "' - self-update was not applied this cycle (possibly an AV/EDR block or a permissions issue). Will retry next cycle if the version still differs.");
+                }
             }
             catch (Exception ex)
             {
@@ -2067,18 +2128,72 @@ namespace WindowsInventoryLite
             }
         }
 
-        // Runs a short-lived native helper process (schtasks.exe here) and
-        // waits for it to exit - no PowerShell involved anywhere in this
-        // path (a real PowerShell 2.0 floor exists on this fleet).
-        private static void RunHelperProcess(string fileName, string arguments)
+        // Returns true only if the process both exited within the timeout
+        // AND returned a zero exit code - the caller previously ignored
+        // both signals and always assumed success.
+        private static bool RunHelperProcess(string fileName, string arguments)
         {
             ProcessStartInfo startInfo = new ProcessStartInfo(fileName, arguments);
             startInfo.UseShellExecute = false;
             startInfo.CreateNoWindow = true;
             using (Process process = Process.Start(startInfo))
             {
-                process.WaitForExit(15000);
+                if (!process.WaitForExit(15000))
+                {
+                    try { process.Kill(); } catch { }
+                    return false;
+                }
+                return process.ExitCode == 0;
             }
+        }
+
+        // Ordinal, numeric-segment version comparison ("1.2.10" > "1.2.9",
+        // unlike a plain string compare) - this project's own versions are
+        // always simple dotted-numeric (its own versioning convention),
+        // so arbitrary semver pre-release/build-metadata suffixes are not
+        // handled. Returns true only when candidateVersion is STRICTLY
+        // greater than currentVersion; an equal or unparseable value
+        // returns false - a client that can't prove a build is actually
+        // newer must never apply it.
+        internal static bool IsVersionNewer(string candidateVersion, string currentVersion)
+        {
+            int[] candidateParts = ParseVersionParts(candidateVersion);
+            int[] currentParts = ParseVersionParts(currentVersion);
+            if (candidateParts == null || currentParts == null)
+            {
+                return false;
+            }
+            int segmentCount = Math.Max(candidateParts.Length, currentParts.Length);
+            for (int i = 0; i < segmentCount; i++)
+            {
+                int candidateSegment = i < candidateParts.Length ? candidateParts[i] : 0;
+                int currentSegment = i < currentParts.Length ? currentParts[i] : 0;
+                if (candidateSegment != currentSegment)
+                {
+                    return candidateSegment > currentSegment;
+                }
+            }
+            return false;
+        }
+
+        private static int[] ParseVersionParts(string version)
+        {
+            if (String.IsNullOrEmpty(version))
+            {
+                return null;
+            }
+            string[] segments = version.Split('.');
+            int[] parts = new int[segments.Length];
+            for (int i = 0; i < segments.Length; i++)
+            {
+                int value;
+                if (!Int32.TryParse(segments[i], out value))
+                {
+                    return null;
+                }
+                parts[i] = value;
+            }
+            return parts;
         }
 
         // internal rather than private so SoftwareJobRunner can post job
