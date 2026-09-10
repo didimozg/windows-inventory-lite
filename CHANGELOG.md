@@ -6,6 +6,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.61.0]
+
+### Added
+
+- **Managed Windows and Linux clients can now self-update, as an opt-in supplement to the existing WinRM/SSH push.** Two new Settings toggles ("Enable client self-update" in Settings > Windows and Settings > Linux, both off by default) make the `config` object on both inventory acks include an `update` field (`version`, `sha256`) whenever a reporting client's version doesn't match the currently-built package - reusing the exact same version-comparison logic the WinRM/SSH push scheduler already uses. Two new ingestion-token-authenticated endpoints (`GET /api/v1/client-package/update-download?target=net35|net40`, `GET /api/v1/linux-client-package/update-download`) serve the raw binary. The existing push model is unchanged and remains the only path for first-time installs.
+- **Windows self-update applies via a one-time Scheduled Task, not by having the running service touch its own locked executable directly.** The client downloads and hash-verifies the new build, then registers a fixed-name (`WindowsInventoryLiteClient-SelfUpdate`) scheduled task that stops the service, swaps the file, restarts it, and rolls back to a backup on failure - see `docs/self-update-av-exclusions.md` for the antivirus-exclusion guidance this ships with, given a closely related pattern already triggered a real Kaspersky false positive against this project once before.
+- **Linux self-update applies within a single run.** The one-shot binary downloads, hash-verifies, atomically swaps itself, and immediately runs the new binary once (`--version`) as a same-run verification before committing - deferring this check to the next systemd-triggered run would not work, since a binary that fails to even launch can never run its own rollback logic.
+
+251 self-tests (11 new self-tests added by this feature - settings round-trip, package-version lookup, config.update presence/absence under every toggle/version-match combination for both platforms, and both download endpoints' auth/validation - net total up from 240), 166/166 Pester green under Windows PowerShell 5.1 (unchanged - the only `.ps1` file this feature touches is `Build-LinuxClient.ps1`'s version default).
+
+## [Windows client 0.5.0]
+
+### Added
+
+- Downloads, verifies, and applies a self-update via a generated one-time Scheduled Task when the server advertises a newer build - see the server entry above for the full behavior. See `CHANGELOG.md`'s versioning note: this is a client-only version bump, independent of the server/dashboard version.
+
+## [Linux client 0.2.0]
+
+### Added
+
+- Downloads, verifies, and applies a self-update within a single run (atomic swap + same-run `--version` verification, with rollback on failure) when the server advertises a newer build - see the server entry above for the full behavior. Independent of the server/dashboard and Windows client version numbers, per this file's own versioning note.
+
 ## [0.60.0]
 
 ### Added
