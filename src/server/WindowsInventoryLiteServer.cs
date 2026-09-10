@@ -179,6 +179,19 @@ namespace WindowsInventoryLite
         // off/on flip. Default true (existing behavior unchanged) - an
         // admin who doesn't want it tracked/shown turns it off.
         public bool ShowUsbStorageIndicator;
+        // Both default false (opt-in) - self-replacing a running Windows
+        // service's own executable, or atomically swapping the Linux
+        // binary between systemd-timer ticks, is materially more
+        // invasive than anything client config refresh does (which only
+        // ever changes settings/tokens, never the binary itself). See
+        // docs/superpowers/specs/2026-09-10-client-self-update-design.md.
+        // Separate toggles, not one combined flag: the two mechanisms
+        // carry different risk (Windows briefly stops a live service and
+        // registers a SYSTEM-level scheduled task; Linux is a same-run
+        // atomic file swap with no live process interruption) - an admin
+        // may reasonably want one without the other.
+        public bool EnableWindowsClientSelfUpdate;
+        public bool EnableLinuxClientSelfUpdate;
         public bool ConsoleMode;
         public bool ShowVersion;
         // AD sync is opt-in and off by default - deployments without AD, or
@@ -522,6 +535,16 @@ namespace WindowsInventoryLite
                 {
                     string hstsEnabledText = GetConfigString(config, "HstsEnabled");
                     options.HstsEnabled = String.Equals(hstsEnabledText, "true", StringComparison.OrdinalIgnoreCase);
+                }
+                if (!options.EnableWindowsClientSelfUpdate)
+                {
+                    string enableWindowsClientSelfUpdateText = GetConfigString(config, "EnableWindowsClientSelfUpdate");
+                    options.EnableWindowsClientSelfUpdate = String.Equals(enableWindowsClientSelfUpdateText, "true", StringComparison.OrdinalIgnoreCase);
+                }
+                if (!options.EnableLinuxClientSelfUpdate)
+                {
+                    string enableLinuxClientSelfUpdateText = GetConfigString(config, "EnableLinuxClientSelfUpdate");
+                    options.EnableLinuxClientSelfUpdate = String.Equals(enableLinuxClientSelfUpdateText, "true", StringComparison.OrdinalIgnoreCase);
                 }
                 if (options.HstsMaxAgeHours == 24)
                 {
@@ -1454,6 +1477,25 @@ namespace WindowsInventoryLite
             return null;
         }
 
+        // Single source of truth for "what Windows client version(s) are
+        // currently built" - both the WinRM push scheduler
+        // (StartScheduledClientUpdatePush) and the self-update version
+        // check (ReceiveInventory) need this exact lookup and must never
+        // drift from each other about what "current" means.
+        private void GetWindowsClientPackageVersions(out string net35Version, out string net40Version)
+        {
+            net35Version = null;
+            net40Version = null;
+            if (!Directory.Exists(options.ClientPackagePath))
+            {
+                return;
+            }
+            string net35Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net35.exe");
+            string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
+            net35Version = File.Exists(net35Path) ? GetExeVersion(net35Path) : null;
+            net40Version = File.Exists(net40Path) ? GetExeVersion(net40Path) : null;
+        }
+
         // Builds and starts an install job against every currently-outdated
         // client, exactly as if an admin had checked every row on the Client
         // updates page and clicked "Update selected" - reuses the same
@@ -1467,15 +1509,9 @@ namespace WindowsInventoryLite
         // the same way as any other job, via the Client updates page.
         private void StartScheduledClientUpdatePush()
         {
-            string net35Version = null;
-            string net40Version = null;
-            if (Directory.Exists(options.ClientPackagePath))
-            {
-                string net35Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net35.exe");
-                string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
-                net35Version = File.Exists(net35Path) ? GetExeVersion(net35Path) : null;
-                net40Version = File.Exists(net40Path) ? GetExeVersion(net40Path) : null;
-            }
+            string net35Version;
+            string net40Version;
+            GetWindowsClientPackageVersions(out net35Version, out net40Version);
             if (net35Version == null && net40Version == null)
             {
                 return;
@@ -8436,6 +8472,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["useHttps"] = options.UseHttps;
             result["hstsEnabled"] = options.HstsEnabled;
+            result["enableWindowsClientSelfUpdate"] = options.EnableWindowsClientSelfUpdate;
+            result["enableLinuxClientSelfUpdate"] = options.EnableLinuxClientSelfUpdate;
             result["hstsMaxAgeHours"] = options.HstsMaxAgeHours;
             result["thumbprint"] = options.CertificateThumbprint;
 
@@ -9187,6 +9225,16 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 options.HstsEnabled = Convert.ToBoolean(payload["hstsEnabled"]);
                 updates["HstsEnabled"] = options.HstsEnabled ? "true" : "false";
+            }
+            if (payload.ContainsKey("enableWindowsClientSelfUpdate"))
+            {
+                options.EnableWindowsClientSelfUpdate = Convert.ToBoolean(payload["enableWindowsClientSelfUpdate"]);
+                updates["EnableWindowsClientSelfUpdate"] = options.EnableWindowsClientSelfUpdate ? "true" : "false";
+            }
+            if (payload.ContainsKey("enableLinuxClientSelfUpdate"))
+            {
+                options.EnableLinuxClientSelfUpdate = Convert.ToBoolean(payload["enableLinuxClientSelfUpdate"]);
+                updates["EnableLinuxClientSelfUpdate"] = options.EnableLinuxClientSelfUpdate ? "true" : "false";
             }
 
             if (payload.ContainsKey("showUsbStorageIndicator"))
@@ -12891,6 +12939,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips softwareJobAttemptLogRetentionDays/MaxEntries", TestConfigureServerSettingsRoundTripsSoftwareJobAttemptLogRetention);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips windowsDefaultIntervalHours/SoftwareCheckIntervalHours/tokenOverlapHours", TestConfigureServerSettingsRoundTripsWindowsDefaultsAndTokenOverlap);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips showUsbStorageIndicator", TestConfigureServerSettingsRoundTripsShowUsbStorageIndicator);
+            allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips enableWindowsClientSelfUpdate/enableLinuxClientSelfUpdate", TestConfigureServerSettingsRoundTripsSelfUpdateToggles);
+            allPassed &= SelfTestCheck(output, "GetWindowsClientPackageVersions returns null,null when no package files exist", TestGetWindowsClientPackageVersionsReadsBothTargets);
             allPassed &= SelfTestCheck(output, "SendUnauthorized serves the embedded login page for a browser navigation to /, with no WWW-Authenticate", TestSendUnauthorizedServesLoginPageForBrowserNavigation);
             allPassed &= SelfTestCheck(output, "SendUnauthorized keeps the plain-text 401 body for API routes", TestSendUnauthorizedServesPlainTextForApiRequests);
             allPassed &= SelfTestCheck(output, "SendDashboardImage returns 404 with no body when the file is missing", TestSendDashboardImageReturns404WhenFileMissing);
@@ -14117,6 +14167,86 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
 
             return null;
+        }
+
+        private static string TestConfigureServerSettingsRoundTripsSelfUpdateToggles()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.EnableHttp = true;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-selfupdatetoggles-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext postRequest = new RequestContext();
+                postRequest.Method = "POST";
+                postRequest.Path = "/api/v1/server/settings";
+                postRequest.Headers = new Dictionary<string, string>();
+                postRequest.Body = "{\"enableWindowsClientSelfUpdate\":true,\"enableLinuxClientSelfUpdate\":true}";
+
+                using (MemoryStream postStream = new MemoryStream())
+                {
+                    server.ConfigureServerSettings(postStream, postRequest);
+                }
+
+                if (!options.EnableWindowsClientSelfUpdate || !options.EnableLinuxClientSelfUpdate)
+                {
+                    return "expected both self-update toggles to be true after POST, got Windows=" + options.EnableWindowsClientSelfUpdate + " Linux=" + options.EnableLinuxClientSelfUpdate;
+                }
+
+                RequestContext getRequest = new RequestContext();
+                getRequest.Method = "GET";
+                getRequest.Headers = new Dictionary<string, string>();
+
+                string responseText;
+                using (MemoryStream getStream = new MemoryStream())
+                {
+                    server.SendServerSettings(getStream);
+                    responseText = Encoding.UTF8.GetString(getStream.ToArray());
+                }
+
+                if (responseText.IndexOf("\"enableWindowsClientSelfUpdate\":true", StringComparison.Ordinal) < 0 || responseText.IndexOf("\"enableLinuxClientSelfUpdate\":true", StringComparison.Ordinal) < 0)
+                {
+                    return "expected GET /api/v1/server/settings to echo back both toggles as true, got: " + responseText;
+                }
+
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestGetWindowsClientPackageVersionsReadsBothTargets()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-pkgversions-" + Guid.NewGuid().ToString("N"));
+            options.ClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-pkgpath-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.ClientPackagePath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                string net35Version;
+                string net40Version;
+
+                // Neither file exists yet.
+                server.GetWindowsClientPackageVersions(out net35Version, out net40Version);
+                if (net35Version != null || net40Version != null)
+                {
+                    return "expected both versions to be null when no package files exist, got net35=" + net35Version + " net40=" + net40Version;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.ClientPackagePath, true); } catch { }
+            }
         }
 
         private static string TestSendUnauthorizedServesLoginPageForBrowserNavigation()
