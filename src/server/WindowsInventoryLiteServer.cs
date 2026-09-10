@@ -1973,6 +1973,10 @@ namespace WindowsInventoryLite
                     {
                         DownloadClientPackage(stream);
                     }
+                    else if (request.Method == "GET" && request.Path.StartsWith("/api/v1/client-package/update-download", StringComparison.OrdinalIgnoreCase))
+                    {
+                        DownloadClientPackageUpdate(stream, request);
+                    }
                     else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-install/trust-host-key")
                     {
                         TrustLinuxHostKey(stream, request);
@@ -2258,6 +2262,62 @@ namespace WindowsInventoryLite
             }
         }
 
+        // Returns null when there is nothing to advertise (no candidate
+        // build present in ClientPackagePath, or the reporting client's
+        // version already matches it) - never an empty Dictionary, so the
+        // caller's simple null-check is sufficient to decide whether to
+        // add the "update" key at all.
+        private Dictionary<string, object> BuildWindowsClientUpdateInfo(string reportedClientVersion)
+        {
+            string net35Version;
+            string net40Version;
+            GetWindowsClientPackageVersions(out net35Version, out net40Version);
+            if (net35Version == null && net40Version == null)
+            {
+                return null;
+            }
+            if (IsClientVersionCurrent(reportedClientVersion, net35Version, net40Version))
+            {
+                return null;
+            }
+
+            string currentVersion = net40Version ?? net35Version;
+            string net35Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net35.exe");
+            string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
+            // Prefer whichever target's file is actually present and
+            // matches currentVersion for the hash - net40Version's own
+            // file if it produced currentVersion, otherwise fall back to
+            // net35's. A reporting client always requests its OWN target
+            // from the download endpoint (Task 5 determines this via
+            // Environment.Version.Major at download time, not from
+            // anything in this response) - this hash only needs to be
+            // "a real hash of a real current build", not target-specific,
+            // since GetHashesForPath below is only ever computed for
+            // whichever single file actually produced currentVersion.
+            string hashSourcePath = String.Equals(currentVersion, net40Version, StringComparison.Ordinal) && File.Exists(net40Path)
+                ? net40Path
+                : net35Path;
+            if (!File.Exists(hashSourcePath))
+            {
+                return null;
+            }
+
+            Dictionary<string, object> updateInfo = new Dictionary<string, object>();
+            updateInfo["version"] = currentVersion;
+            updateInfo["sha256"] = ComputeFileSha256(hashSourcePath);
+            return updateInfo;
+        }
+
+        private static string ComputeFileSha256(string path)
+        {
+            using (SHA256 sha256 = SHA256.Create())
+            using (FileStream stream = File.OpenRead(path))
+            {
+                byte[] hash = sha256.ComputeHash(stream);
+                return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+            }
+        }
+
         private void ReceiveInventory(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
@@ -2356,6 +2416,14 @@ namespace WindowsInventoryLite
             Dictionary<string, object> configResponse = new Dictionary<string, object>();
             configResponse["intervalHours"] = options.WindowsDefaultIntervalHours;
             configResponse["softwareCheckIntervalHours"] = options.WindowsDefaultSoftwareCheckIntervalHours;
+            if (options.EnableWindowsClientSelfUpdate)
+            {
+                Dictionary<string, object> updateInfo = BuildWindowsClientUpdateInfo(GetStringValue(inventory, "clientVersion"));
+                if (updateInfo != null)
+                {
+                    configResponse["update"] = updateInfo;
+                }
+            }
             ackResponse["config"] = configResponse;
             // The basic report-acceptance gate above deliberately honors the
             // admin-toggleable RequireIngestionToken (fake inventory
@@ -8236,6 +8304,53 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendBytes(stream, zipBytes, "application/zip", "windows-inventory-lite-client.zip");
         }
 
+        // Unlike DownloadClientPackage (admin/dashboard session-auth, bundles
+        // a ZIP with GPO scripts), this is called by the running client
+        // ITSELF, authenticated the same way every inventory report is -
+        // the current or still-in-overlap previous ingestion token, not a
+        // session cookie. Serves the raw single exe, not a ZIP.
+        private void DownloadClientPackageUpdate(Stream stream, RequestContext request)
+        {
+            string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
+            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            {
+                RecordIngestionRejection(request, "client-package-update-download", ResolveIngestionRejectionReason(token));
+                SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
+                return;
+            }
+
+            string target = null;
+            int queryStart = request.Path.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                string query = request.Path.Substring(queryStart + 1);
+                foreach (string pair in query.Split('&'))
+                {
+                    int equalsIndex = pair.IndexOf('=');
+                    if (equalsIndex > 0 && pair.Substring(0, equalsIndex) == "target")
+                    {
+                        target = Uri.UnescapeDataString(pair.Substring(equalsIndex + 1));
+                    }
+                }
+            }
+
+            if (target != "net35" && target != "net40")
+            {
+                SendText(stream, "{\"error\":\"target must be net35 or net40\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string exePath = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-" + target + ".exe");
+            if (!File.Exists(exePath))
+            {
+                SendText(stream, "Client package not found for the requested target.", "text/plain; charset=utf-8", 404);
+                return;
+            }
+
+            byte[] exeBytes = File.ReadAllBytes(exePath);
+            SendBytes(stream, exeBytes, "application/octet-stream", "WindowsInventoryLiteClient.exe");
+        }
+
         private void SendLinuxClientPackageStatus(Stream stream)
         {
             JavaScriptSerializer serializer = CreateJsonSerializer();
@@ -13016,6 +13131,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "AuthenticatedWithPreviousToken distinguishes the current token from any other accepted one", TestAuthenticatedWithPreviousTokenDetectsNonCurrentToken);
             allPassed &= SelfTestCheck(output, "ReceiveInventory's ack includes a config object with the current Windows defaults", TestReceiveInventoryIncludesConfigWithCurrentDefaults);
             allPassed &= SelfTestCheck(output, "ReceiveInventory's ack includes the new token when the request authenticated with the previous one", TestReceiveInventoryIncludesNewTokenWhenAuthenticatedWithPreviousToken);
+            allPassed &= SelfTestCheck(output, "ReceiveInventory omits update when EnableWindowsClientSelfUpdate is false", TestReceiveInventoryOmitsUpdateWhenSelfUpdateDisabled);
+            allPassed &= SelfTestCheck(output, "ReceiveInventory includes update with a sha256 when the reported version differs and self-update is enabled", TestReceiveInventoryIncludesUpdateWhenVersionDiffersAndEnabled);
+            allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate rejects a request with no ingestion token", TestDownloadClientPackageUpdateRejectsMissingToken);
+            allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate rejects an invalid target value with 400", TestDownloadClientPackageUpdateRejectsInvalidTarget);
+            allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate returns 404 when the requested target file does not exist", TestDownloadClientPackageUpdateReturns404WhenFileMissing);
             allPassed &= SelfTestCheck(output, "RegenerateIngestionToken sets PreviousToken/PreviousTokenExpiresUtc when an overlap window is configured", TestRegenerateIngestionTokenSetsPreviousTokenWhenOverlapConfigured);
             allPassed &= SelfTestCheck(output, "RegenerateIngestionToken leaves PreviousToken empty when TokenOverlapHours is 0", TestRegenerateIngestionTokenSkipsPreviousTokenWhenOverlapIsZero);
             allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected ignores non-state-changing methods", TestIsCrossSiteRequestRejectedIgnoresNonStateChangingMethods);
@@ -16447,6 +16567,230 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveInventoryOmitsUpdateWhenSelfUpdateDisabled()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-noupdate-" + Guid.NewGuid().ToString("N"));
+            options.ClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-noupdatepkg-" + Guid.NewGuid().ToString("N"));
+            options.Token = "shared-secret";
+            options.EnableWindowsClientSelfUpdate = false;
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.ClientPackagePath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "shared-secret";
+                request.Body = "{\"computerName\":\"TEST-PC\",\"clientVersion\":\"0.1.0\"}";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveInventory(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("\"update\"", StringComparison.Ordinal) >= 0)
+                {
+                    return "expected no update field when EnableWindowsClientSelfUpdate is false, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.ClientPackagePath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveInventoryIncludesUpdateWhenVersionDiffersAndEnabled()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-hasupdate-" + Guid.NewGuid().ToString("N"));
+            options.ClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-hasupdatepkg-" + Guid.NewGuid().ToString("N"));
+            options.Token = "shared-secret";
+            options.EnableWindowsClientSelfUpdate = true;
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.ClientPackagePath);
+            try
+            {
+                // GetExeVersion does NOT read a PE version resource - it
+                // actually launches the file with "--version" and reads
+                // its stdout (confirmed by reading GetExeVersion's own
+                // body before writing this test). A hand-written byte
+                // array or an arbitrary file cannot fake this cheaply,
+                // and copying THIS test process's own executable
+                // (WindowsInventoryLiteServer.exe, since self-tests run
+                // inside it) would spawn a second copy of the SERVER
+                // itself as a subprocess - fragile and confusing even if
+                // --version happens to short-circuit before anything
+                // else. Build-Server.ps1 always builds both client
+                // targets before --self-test ever runs (confirmed
+                // earlier this session), so the real, already-built
+                // WindowsInventoryLiteClient-net40.exe is guaranteed to
+                // sit in the same build\ directory as this server exe -
+                // copy that instead. It genuinely supports --version and
+                // prints its own real ProductVersion, which will not
+                // equal "0.0.0-definitely-not-a-real-build" below.
+                string realClientExePath = Path.Combine(Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location), "WindowsInventoryLiteClient-net40.exe");
+                if (!File.Exists(realClientExePath))
+                {
+                    // SelfTest.Tests.ps1 builds the server exe under test
+                    // into an isolated Pester TestDrive path via
+                    // Build-Server.ps1 -OutputPath - Build-Server.ps1 still
+                    // (unconditionally) refreshes the two client exes, but
+                    // always into the real project's own build\ directory,
+                    // never into that isolated TestDrive path alongside the
+                    // server exe under test. In that harness this server
+                    // exe therefore has no real client exe next to it to
+                    // copy, unlike every other invocation of --self-test
+                    // (the normal build\WindowsInventoryLiteServer.exe one
+                    // this task's own build/test steps use, where the two
+                    // always sit side by side). Skip rather than fail: this
+                    // is a missing precondition in that one harness, not a
+                    // defect in the feature being tested.
+                    return null;
+                }
+                string fakeClientPath = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
+                File.Copy(realClientExePath, fakeClientPath, true);
+
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "shared-secret";
+                request.Body = "{\"computerName\":\"TEST-PC\",\"clientVersion\":\"0.0.0-definitely-not-a-real-build\"}";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveInventory(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("\"update\":{", StringComparison.Ordinal) < 0)
+                {
+                    return "expected an update object when the reported clientVersion does not match the built package and self-update is enabled, got: " + responseText;
+                }
+                if (responseText.IndexOf("\"sha256\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the update object to include a sha256 field, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.ClientPackagePath, true); } catch { }
+            }
+        }
+
+        private static string TestDownloadClientPackageUpdateRejectsMissingToken()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-dlnotok-" + Guid.NewGuid().ToString("N"));
+            options.Token = "shared-secret";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client-package/update-download?target=net40";
+                request.Headers = new Dictionary<string, string>();
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DownloadClientPackageUpdate(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("Unauthorized", StringComparison.Ordinal) < 0)
+                {
+                    return "expected Unauthorized with no token, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestDownloadClientPackageUpdateRejectsInvalidTarget()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-dlbadtarget-" + Guid.NewGuid().ToString("N"));
+            options.Token = "shared-secret";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client-package/update-download?target=not-a-real-target";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "shared-secret";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DownloadClientPackageUpdate(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("target must be net35 or net40", StringComparison.Ordinal) < 0)
+                {
+                    return "expected a 400 'target must be net35 or net40' error, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestDownloadClientPackageUpdateReturns404WhenFileMissing()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-dlmissing-" + Guid.NewGuid().ToString("N"));
+            options.ClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-dlmissingpkg-" + Guid.NewGuid().ToString("N"));
+            options.Token = "shared-secret";
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.ClientPackagePath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client-package/update-download?target=net40";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "shared-secret";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DownloadClientPackageUpdate(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("not found", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    return "expected a 404 'not found' response when the target file does not exist, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.ClientPackagePath, true); } catch { }
             }
         }
 
