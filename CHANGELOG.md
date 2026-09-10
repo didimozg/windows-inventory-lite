@@ -21,6 +21,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Reads the new `config` object on every inventory report and applies interval/token changes live - see the server entry above for the full behavior. See `CHANGELOG.md`'s versioning note: this is a client-only version bump, independent of the server/dashboard version.
 
+## [Linux client 0.1.6]
+
+### Added
+
+- Reads the new `config` object on every inventory report and applies interval/token changes live (rewrites its own systemd `.timer` unit's `OnUnitActiveSec=` and reloads systemd on a changed interval; rewrites `wil-linux-client.env`'s `WIL_INGESTION_TOKEN=` line on a rotated token) - see the server entry above for the full behavior. This bump was missed when `[0.60.0]`/`[Windows client 0.4.2]` originally shipped (`SendReport`'s signature change and the new `config.go` are real client-supported behavior changes) and is corrected here, independent of the server/dashboard version per this file's own versioning note.
+
 ## [0.59.11]
 
 ### Fixed
