@@ -10,7 +10,7 @@ Nothing here is a workaround for a bug - it is standard practice for any legitim
 
 If you enable Windows client self-update fleet-wide, add these to your antivirus policy for machines running the client:
 
-- **Path exclusion:** the client's install directory (default `%ProgramData%\WindowsInventoryLite\client-data` - confirm your actual install path from the dashboard's Clients view or `Install-Client.ps1`'s own `-InstallPath` if you customized it).
+- **Path exclusion:** the client's install directory (default `%ProgramData%\WindowsInventoryLite\client-data` - if you customized `Install-Client.ps1`'s `-InstallPath` at install time, confirm the actual path on a target machine via Services.msc's "WindowsInventoryLiteClient" service properties, or `sc qc WindowsInventoryLiteClient`'s `BINARY_PATH_NAME`; the dashboard does not report a client's install path).
 - **Scheduled Task name exclusion (if your product supports it):** `WindowsInventoryLiteClient-SelfUpdate` - this is a fixed name, always exactly this string, never a randomly-generated one, specifically so it can be whitelisted once rather than needing per-run approval.
 - **Process exclusion:** `WindowsInventoryLiteClient.exe` in the install directory above.
 
