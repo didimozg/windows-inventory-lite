@@ -6,6 +6,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.61.1]
+
+### Fixed
+
+- **Self-update's version/hash lookup was reachable without a valid ingestion token whenever "Require ingestion token" is off (a real, documented, supported low-security mode) and client self-update is enabled.** `BuildWindowsClientUpdateInfo`/`BuildLinuxClientUpdateInfo` (two subprocess spawns and file hashes per request) now sit behind the same strict, unconditional token check `licenseKeySources`/`ingestionToken` already use, so an anonymous or garbage-token caller can no longer force this cost on every request.
+- **The self-update ack's `version` field wasn't split per download target, unlike `sha256`.** It always reported the net40 build's version regardless of which target a given client would actually download, so a net35 client could briefly see a version string that didn't match the bytes it was about to fetch. Now `versionNet35`/`versionNet40`, mirroring the existing `sha256Net35`/`sha256Net40` split.
+- **Windows client self-update could silently do nothing while its own log claimed success, spin forever on a stuck service stop, or apply a server-side version regression as a downgrade.** `RunHelperProcess` now checks `schtasks.exe`'s actual exit code instead of assuming success; the generated swap script's stop-wait loop is now bounded (matching its own start-wait sibling) and both `move` steps are checked, with explicit rollback-to-backup on a failed swap; a new ordinal version comparison refuses to apply anything that isn't strictly newer than the client's own reported version.
+- **Linux client: three real bugs found by review.** `reloadAndRestartTimer` called bare `systemctl` resolved through `PATH` instead of the existing absolute-path constant its own sibling code specifically exists to avoid (a documented local-privilege-escalation shape on this project's target distros); a custom ingestion token containing `$` could be silently corrupted on write (`regexp.ReplaceAll` interprets `$` in replacement text as submatch-expansion syntax even with no capture groups in the pattern - auto-generated tokens never hit this, an operator-chosen one could); a failed self-update binary write left an orphaned partial file behind instead of being cleaned up.
+- **Dashboard: the "Rescan" button (Windows Updates / Third-Party Software) silently did nothing on a genuine transport failure or a session-expiry 401 mid-click**, with no indication to the admin that the rescan never actually ran. Both now surface the failure via an alert.
+- **`New-ClientGpoPackage.ps1` wrote its generated startup script - which embeds the plaintext ingestion token - to disk before restricting its ACL**, the same "write first, restrict later" ordering already fixed everywhere else in this project. Now creates the file empty, restricts it, then writes.
+- **`Install-Wizard.ps1` used `[ordered]@{...}`, a PowerShell 3.0+ construct, despite declaring PS2.0 support** - a real, confirmed-in-production floor. On genuine PS2.0 this broke the wizard before it could even show its menu. Now builds the same ordered dictionary via `New-Object`/`.Add()`.
+- **`Install-ClientWinRM.ps1`/`Uninstall-ClientWinRM.ps1` had no elevation check before writing to WinRM TrustedHosts**, unlike five sibling scripts already hardened for this. Both now require an elevated session up front.
+
+Found by a full-project review (server security/logic, Windows client, Linux client, dashboard, PowerShell scripts - 6 parallel passes). 253 self-tests (1 new, a regression test proving the token-gate fix - up from 252), 166/166 Pester green under Windows PowerShell 5.1. A handful of Minor/systemic findings from the same review (a pre-existing settings-save race also present in `ChangeAdminPassword`; two narrow non-atomicity windows in the Linux/Windows self-update file-swap sequences; a self-caught, cosmetic-only timer-field race) were deliberately left as-is - see `docs/backlog.md` for the reasoning behind each.
+
+## [Windows client 0.5.1]
+
+### Fixed
+
+- Self-update resilience fixes - see the server entry above for the full behavior. Independent of the server/dashboard version, per this file's own versioning note.
+
+## [Linux client 0.2.1]
+
+### Fixed
+
+- `systemctl` PATH-resolution, ingestion-token `$`-corruption, and self-update cleanup fixes - see the server entry above for the full behavior. Independent of the server/dashboard and Windows client version numbers, per this file's own versioning note.
+
 ## [0.61.0]
 
 ### Added
