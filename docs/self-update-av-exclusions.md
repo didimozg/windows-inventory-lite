@@ -13,6 +13,7 @@ If you enable Windows client self-update fleet-wide, add these to your antivirus
 - **Path exclusion:** the client's install directory (default `%ProgramData%\WindowsInventoryLite\client-data` - if you customized `Install-Client.ps1`'s `-InstallPath` at install time, confirm the actual path on a target machine via Services.msc's "WindowsInventoryLiteClient" service properties, or `sc qc WindowsInventoryLiteClient`'s `BINARY_PATH_NAME`; the dashboard does not report a client's install path).
 - **Scheduled Task name exclusion (if your product supports it):** `WindowsInventoryLiteClient-SelfUpdate` - this is a fixed name, always exactly this string, never a randomly-generated one, specifically so it can be whitelisted once rather than needing per-run approval.
 - **Process exclusion:** `WindowsInventoryLiteClient.exe` in the install directory above.
+- **File exclusion:** `wil-self-update.cmd` inside the client's install directory (same directory as `WindowsInventoryLiteClient.exe`) - the swap script the scheduled task above actually runs. Fixed name, same directory every time - not a temp file, not randomly named.
 
 ## What you do NOT need to exclude
 

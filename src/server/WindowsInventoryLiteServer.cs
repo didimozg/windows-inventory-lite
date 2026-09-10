@@ -1872,6 +1872,14 @@ namespace WindowsInventoryLite
                     {
                         SendSoftwareRepositoryConnectionInfo(stream, request);
                     }
+                    else if (request.Method == "GET" && request.Path.StartsWith("/api/v1/client-package/update-download", StringComparison.OrdinalIgnoreCase))
+                    {
+                        DownloadClientPackageUpdate(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-package/update-download")
+                    {
+                        DownloadLinuxClientPackageUpdate(stream, request);
+                    }
                     else if (IsBasicAuthLockedOut(request, out loginLockoutRetryAfterSeconds))
                     {
                         SendTooManyRequests(stream, loginLockoutRetryAfterSeconds);
@@ -1972,14 +1980,6 @@ namespace WindowsInventoryLite
                     else if (request.Method == "GET" && request.Path == "/api/v1/client-package/download")
                     {
                         DownloadClientPackage(stream);
-                    }
-                    else if (request.Method == "GET" && request.Path.StartsWith("/api/v1/client-package/update-download", StringComparison.OrdinalIgnoreCase))
-                    {
-                        DownloadClientPackageUpdate(stream, request);
-                    }
-                    else if (request.Method == "GET" && request.Path == "/api/v1/linux-client-package/update-download")
-                    {
-                        DownloadLinuxClientPackageUpdate(stream, request);
                     }
                     else if (request.Method == "POST" && request.Path == "/api/v1/linux-client-install/trust-host-key")
                     {
@@ -2288,27 +2288,28 @@ namespace WindowsInventoryLite
             string currentVersion = net40Version ?? net35Version;
             string net35Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net35.exe");
             string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
-            // Prefer whichever target's file is actually present and
-            // matches currentVersion for the hash - net40Version's own
-            // file if it produced currentVersion, otherwise fall back to
-            // net35's. A reporting client always requests its OWN target
-            // from the download endpoint (Task 5 determines this via
-            // Environment.Version.Major at download time, not from
-            // anything in this response) - this hash only needs to be
-            // "a real hash of a real current build", not target-specific,
-            // since GetHashesForPath below is only ever computed for
-            // whichever single file actually produced currentVersion.
-            string hashSourcePath = String.Equals(currentVersion, net40Version, StringComparison.Ordinal) && File.Exists(net40Path)
-                ? net40Path
-                : net35Path;
-            if (!File.Exists(hashSourcePath))
-            {
-                return null;
-            }
 
             Dictionary<string, object> updateInfo = new Dictionary<string, object>();
             updateInfo["version"] = currentVersion;
-            updateInfo["sha256"] = ComputeFileSha256(hashSourcePath);
+            // One hash per target, not one ambiguous shared hash - the
+            // downloading client independently decides its own target via
+            // Environment.Version.Major and has no way to tell the server
+            // which one it needs when this ack is built, so both must be
+            // offered whenever both files exist. A net35 client comparing
+            // against a net40 hash (or vice versa) would fail verification
+            // permanently and silently - this was a real, confirmed bug.
+            if (File.Exists(net35Path))
+            {
+                updateInfo["sha256Net35"] = ComputeFileSha256(net35Path);
+            }
+            if (File.Exists(net40Path))
+            {
+                updateInfo["sha256Net40"] = ComputeFileSha256(net40Path);
+            }
+            if (!updateInfo.ContainsKey("sha256Net35") && !updateInfo.ContainsKey("sha256Net40"))
+            {
+                return null;
+            }
             return updateInfo;
         }
 
@@ -13201,6 +13202,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ReceiveInventory's ack includes the new token when the request authenticated with the previous one", TestReceiveInventoryIncludesNewTokenWhenAuthenticatedWithPreviousToken);
             allPassed &= SelfTestCheck(output, "ReceiveInventory omits update when EnableWindowsClientSelfUpdate is false", TestReceiveInventoryOmitsUpdateWhenSelfUpdateDisabled);
             allPassed &= SelfTestCheck(output, "ReceiveInventory includes update with a sha256 when the reported version differs and self-update is enabled", TestReceiveInventoryIncludesUpdateWhenVersionDiffersAndEnabled);
+            allPassed &= SelfTestCheck(output, "ReceiveInventory advertises separate, correctly-matched sha256 hashes for net35 and net40", TestReceiveInventoryAdvertisesSeparateHashesPerTarget);
             allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate rejects a request with no ingestion token", TestDownloadClientPackageUpdateRejectsMissingToken);
             allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate rejects an invalid target value with 400", TestDownloadClientPackageUpdateRejectsInvalidTarget);
             allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate returns 404 when the requested target file does not exist", TestDownloadClientPackageUpdateReturns404WhenFileMissing);
@@ -16749,9 +16751,74 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 {
                     return "expected an update object when the reported clientVersion does not match the built package and self-update is enabled, got: " + responseText;
                 }
-                if (responseText.IndexOf("\"sha256\"", StringComparison.Ordinal) < 0)
+                if (responseText.IndexOf("\"sha256Net40\"", StringComparison.Ordinal) < 0)
                 {
-                    return "expected the update object to include a sha256 field, got: " + responseText;
+                    return "expected the update object to include a sha256Net40 field, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.ClientPackagePath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveInventoryAdvertisesSeparateHashesPerTarget()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-perhash-" + Guid.NewGuid().ToString("N"));
+            options.ClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-perhashpkg-" + Guid.NewGuid().ToString("N"));
+            options.Token = "shared-secret";
+            options.EnableWindowsClientSelfUpdate = true;
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.ClientPackagePath);
+            try
+            {
+                string buildDir = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
+                string realNet35Path = Path.Combine(buildDir, "WindowsInventoryLiteClient-net35.exe");
+                string realNet40Path = Path.Combine(buildDir, "WindowsInventoryLiteClient-net40.exe");
+                if (!File.Exists(realNet35Path) || !File.Exists(realNet40Path))
+                {
+                    // Same missing-precondition case documented in
+                    // TestReceiveInventoryIncludesUpdateWhenVersionDiffersAndEnabled
+                    // above: some harnesses build the server exe under test
+                    // into an isolated path with no client exes alongside it.
+                    return null;
+                }
+                string fakeNet35Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net35.exe");
+                string fakeNet40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
+                File.Copy(realNet35Path, fakeNet35Path, true);
+                File.Copy(realNet40Path, fakeNet40Path, true);
+
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "shared-secret";
+                request.Body = "{\"computerName\":\"TEST-PC\",\"clientVersion\":\"0.0.0-definitely-not-a-real-build\"}";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveInventory(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                string expectedNet35Hash = ComputeFileSha256(fakeNet35Path);
+                string expectedNet40Hash = ComputeFileSha256(fakeNet40Path);
+
+                if (responseText.IndexOf("\"sha256Net35\":\"" + expectedNet35Hash + "\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected update.sha256Net35 to be the net35 exe's own real hash, got: " + responseText;
+                }
+                if (responseText.IndexOf("\"sha256Net40\":\"" + expectedNet40Hash + "\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected update.sha256Net40 to be the net40 exe's own real hash, got: " + responseText;
+                }
+                if (String.Equals(expectedNet35Hash, expectedNet40Hash, StringComparison.Ordinal))
+                {
+                    return "test fixture invalid: the real net35 and net40 exes hashed identically, so this test cannot distinguish a swapped/missing per-target hash bug";
                 }
                 return null;
             }

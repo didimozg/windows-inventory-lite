@@ -1933,12 +1933,20 @@ namespace WindowsInventoryLite
         // perform the actual swap. Pure string construction - no side
         // effects - so it can be reasoned about/tested in isolation from
         // the process-spawning code that writes and registers it.
-        internal static string BuildSelfUpdateCmdScript(string currentExePath, string newExePath)
+        //
+        // logPath is where each major step gets logged (the same file
+        // DebugLogger already writes to) - pass "NUL" (Windows' null
+        // device) when debug logging is disabled, so the script's own
+        // `>>` redirects are always valid syntax with no conditional
+        // generation needed, and simply discard output when off.
+        internal static string BuildSelfUpdateCmdScript(string currentExePath, string newExePath, string logPath)
         {
             string backupExePath = currentExePath + ".bak";
             string failedExePath = currentExePath + ".failed";
+            string log = "\"" + logPath + "\"";
             StringBuilder script = new StringBuilder();
             script.AppendLine("@echo off");
+            script.AppendLine("echo [self-update] starting >> " + log);
             script.AppendLine("sc stop WindowsInventoryLiteClient");
             script.AppendLine(":waitstopped");
             script.AppendLine("sc query WindowsInventoryLiteClient | find \"STOPPED\" >nul");
@@ -1946,15 +1954,24 @@ namespace WindowsInventoryLite
             script.AppendLine("ping -n 2 127.0.0.1 >nul");
             script.AppendLine("goto waitstopped");
             script.AppendLine(":stopped");
+            script.AppendLine("echo [self-update] service stopped, swapping files >> " + log);
             script.AppendLine("move /y \"" + currentExePath + "\" \"" + backupExePath + "\"");
             script.AppendLine("move /y \"" + newExePath + "\" \"" + currentExePath + "\"");
             script.AppendLine("sc start WindowsInventoryLiteClient");
-            script.AppendLine("ping -n 6 127.0.0.1 >nul");
+            script.AppendLine("set wilwaitcount=0");
+            script.AppendLine(":waitrunning");
             script.AppendLine("sc query WindowsInventoryLiteClient | find \"RUNNING\" >nul");
-            script.AppendLine("if errorlevel 1 goto rollback");
+            script.AppendLine("if not errorlevel 1 goto running");
+            script.AppendLine("set /a wilwaitcount+=1");
+            script.AppendLine("if %wilwaitcount% GEQ 15 goto rollback");
+            script.AppendLine("ping -n 2 127.0.0.1 >nul");
+            script.AppendLine("goto waitrunning");
+            script.AppendLine(":running");
+            script.AppendLine("echo [self-update] new version running, cleaning up >> " + log);
             script.AppendLine("del \"" + backupExePath + "\"");
             script.AppendLine("goto cleanup");
             script.AppendLine(":rollback");
+            script.AppendLine("echo [self-update] new version failed to reach RUNNING within timeout, rolling back >> " + log);
             script.AppendLine("move /y \"" + currentExePath + "\" \"" + failedExePath + "\"");
             script.AppendLine("move /y \"" + backupExePath + "\" \"" + currentExePath + "\"");
             script.AppendLine("sc start WindowsInventoryLiteClient");
@@ -1975,23 +1992,38 @@ namespace WindowsInventoryLite
         // automatically on the next cycle.
         private void ApplySelfUpdateFromServer(Dictionary<string, object> update)
         {
-            if (!update.ContainsKey("version") || !update.ContainsKey("sha256"))
+            if (!update.ContainsKey("version"))
             {
                 return;
             }
             string newVersion = Convert.ToString(update["version"]);
-            string expectedSha256 = Convert.ToString(update["sha256"]);
-            if (String.IsNullOrEmpty(newVersion) || String.IsNullOrEmpty(expectedSha256) || String.Equals(newVersion, Program.ProductVersion, StringComparison.Ordinal))
+            if (String.IsNullOrEmpty(newVersion) || String.Equals(newVersion, Program.ProductVersion, StringComparison.Ordinal))
             {
                 return;
             }
+
+            string target = Environment.Version.Major >= 4 ? "net40" : "net35";
+            string hashKey = target == "net40" ? "sha256Net40" : "sha256Net35";
+            if (!update.ContainsKey(hashKey))
+            {
+                // The server has no build for this client's own target
+                // (e.g. only the other target's exe exists in
+                // ClientPackagePath) - nothing to self-update to.
+                return;
+            }
+            string expectedSha256 = Convert.ToString(update[hashKey]);
+            if (String.IsNullOrEmpty(expectedSha256))
+            {
+                return;
+            }
+
+            DebugLogger.Log(options, "SelfUpdate", "Server advertised version " + newVersion + " for target " + target + " - attempting self-update.");
 
             try
             {
                 string exePath = Process.GetCurrentProcess().MainModule.FileName;
                 string exeDirectory = Path.GetDirectoryName(exePath);
                 string newExePath = Path.Combine(exeDirectory, "WindowsInventoryLiteClient.exe.new");
-                string target = Environment.Version.Major >= 4 ? "net40" : "net35";
 
                 string downloadUrl = ToClientPackageUpdateDownloadUrl(options.ServerUrl, target);
                 byte[] downloadedBytes = HttpGetBytes(downloadUrl, options.Token);
@@ -2003,21 +2035,31 @@ namespace WindowsInventoryLite
                 }
                 if (!String.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
                 {
+                    DebugLogger.Log(options, "SelfUpdate", "Downloaded build's hash did not match the advertised " + hashKey + " - aborting, will retry next cycle.");
                     return;
                 }
 
                 File.WriteAllBytes(newExePath, downloadedBytes);
+                DebugLogger.Log(options, "SelfUpdate", "Downloaded and hash-verified version " + newVersion + " (" + target + ") - registering scheduled task to apply it.");
 
-                string cmdPath = Path.Combine(Path.GetTempPath(), "wil-self-update-" + Guid.NewGuid().ToString("N") + ".cmd");
-                File.WriteAllText(cmdPath, BuildSelfUpdateCmdScript(exePath, newExePath), Encoding.ASCII);
+                // Fixed, deterministic path inside the ACL-restricted
+                // install directory - not %TEMP% with a per-run GUID name,
+                // which would have undercut this feature's own fixed-task-
+                // name AV mitigation (an admin excluding the task name
+                // would still have an unexcluded, ever-changing SYSTEM
+                // script sitting in a world-writable-by-create directory).
+                string logPath = options.DebugLogEnabled ? DebugLogger.ResolvePath(options) : "NUL";
+                string cmdPath = Path.Combine(exeDirectory, "wil-self-update.cmd");
+                File.WriteAllText(cmdPath, BuildSelfUpdateCmdScript(exePath, newExePath, logPath), Encoding.ASCII);
 
                 string createArgs = "/Create /TN \"" + SelfUpdateTaskName + "\" /TR \"cmd.exe /c \\\"" + cmdPath + "\\\"\" /SC ONCE /ST 23:59 /RU SYSTEM /F";
                 RunHelperProcess("schtasks.exe", createArgs);
                 RunHelperProcess("schtasks.exe", "/Run /TN \"" + SelfUpdateTaskName + "\"");
+                DebugLogger.Log(options, "SelfUpdate", "Scheduled task '" + SelfUpdateTaskName + "' created and started.");
             }
-            catch
+            catch (Exception ex)
             {
-                // Best-effort - see method comment above.
+                DebugLogger.Log(options, "SelfUpdate", "Self-update attempt failed (report already accepted, will retry next cycle): " + ex);
             }
         }
 

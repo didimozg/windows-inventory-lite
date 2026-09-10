@@ -76,11 +76,20 @@ func applySelfUpdate(body []byte, binaryPath string, downloadURL string, token s
 		return fmt.Errorf("back up current binary: %w", err)
 	}
 
-	if err := os.WriteFile(binaryPath, newContent, 0755); err != nil {
-		// Restore the backup immediately - a half-written binary must
-		// never be left in place.
-		_ = os.Rename(backupPath, binaryPath)
-		return fmt.Errorf("write new binary: %w", err)
+	// Write to a sibling temp file, not directly onto binaryPath - the
+	// kernel returns ETXTBSY ("text file busy") when opening a currently-
+	// executing binary for write/truncate, which binaryPath always is
+	// here (it's os.Args[0]). A rename onto the same path IS allowed
+	// while it's running (the old inode stays valid via the process's
+	// existing mapping/open descriptor) - this is the standard pattern
+	// for a Linux process replacing its own executable.
+	stagingPath := binaryPath + ".new"
+	if err := os.WriteFile(stagingPath, newContent, 0755); err != nil {
+		return fmt.Errorf("write staged binary: %w", err)
+	}
+	if err := os.Rename(stagingPath, binaryPath); err != nil {
+		_ = os.Remove(stagingPath)
+		return fmt.Errorf("rename staged binary into place: %w", err)
 	}
 
 	// Verify from the OUTSIDE, in this same run, before committing - a
