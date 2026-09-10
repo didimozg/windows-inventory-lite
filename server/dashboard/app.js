@@ -3892,7 +3892,11 @@
   function refreshWindowsUpdateScan() {
     byId('windowsUpdateScanButton').disabled = true;
     fetch('/api/v1/software-repository/scan', { method: 'POST', cache: 'no-store' })
-      .then(() => loadWindowsUpdateDiscovered())
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return loadWindowsUpdateDiscovered();
+      })
+      .catch(error => window.alert(`Failed to start scan: ${error.message}`))
       .finally(() => { byId('windowsUpdateScanButton').disabled = false; });
   }
 
@@ -4067,7 +4071,11 @@
   function refreshThirdPartySoftwareScan() {
     byId('thirdPartySoftwareScanButton').disabled = true;
     fetch('/api/v1/software-repository/scan', { method: 'POST', cache: 'no-store' })
-      .then(() => loadThirdPartySoftwareDiscovered())
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return loadThirdPartySoftwareDiscovered();
+      })
+      .catch(error => window.alert(`Failed to start scan: ${error.message}`))
       .finally(() => { byId('thirdPartySoftwareScanButton').disabled = false; });
   }
 
