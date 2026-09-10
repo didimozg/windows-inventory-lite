@@ -2931,6 +2931,7 @@
         updateAdIdentityFields();
         byId('windowsDefaultIntervalHours').value = data.windowsDefaultIntervalHours || 6;
         byId('windowsDefaultSoftwareCheckIntervalHours').value = data.windowsDefaultSoftwareCheckIntervalHours || 6;
+        byId('windowsEnableClientSelfUpdate').checked = !!data.enableWindowsClientSelfUpdate;
       })
       .catch(error => {
         showSavedMessage(byId('windowsSettingsMessage'), `Settings unavailable: ${error.message}`, true);
@@ -2948,6 +2949,7 @@
         byId('linuxDefaultIntervalHours').value = data.linuxDefaultIntervalHours || 6;
         byId('linuxDefaultStatusIntervalMinutes').value = data.linuxDefaultStatusIntervalMinutes || 30;
         byId('linuxDefaultInstallPath').value = data.linuxDefaultInstallPath || '/opt/windows-inventory-lite';
+        byId('linuxEnableClientSelfUpdate').checked = !!data.enableLinuxClientSelfUpdate;
       })
       .catch(error => {
         showSavedMessage(byId('linuxSettingsMessage'), `Settings unavailable: ${error.message}`, true);
@@ -3094,7 +3096,8 @@
         adPassword: byId('generalAdPassword').value,
         adComputerImportOUs: byId('generalAdComputerImportOUs').value,
         windowsDefaultIntervalHours: Number.parseInt(byId('windowsDefaultIntervalHours').value, 10) || 6,
-        windowsDefaultSoftwareCheckIntervalHours: Number.parseInt(byId('windowsDefaultSoftwareCheckIntervalHours').value, 10) || 6
+        windowsDefaultSoftwareCheckIntervalHours: Number.parseInt(byId('windowsDefaultSoftwareCheckIntervalHours').value, 10) || 6,
+        enableWindowsClientSelfUpdate: byId('windowsEnableClientSelfUpdate').checked
       })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, data })))
@@ -3124,7 +3127,8 @@
         preferredLinuxSubnet: byId('generalPreferredLinuxSubnet').value.trim(),
         linuxDefaultIntervalHours: Number.parseInt(byId('linuxDefaultIntervalHours').value, 10) || 6,
         linuxDefaultStatusIntervalMinutes: Number.parseInt(byId('linuxDefaultStatusIntervalMinutes').value, 10) || 30,
-        linuxDefaultInstallPath: byId('linuxDefaultInstallPath').value.trim()
+        linuxDefaultInstallPath: byId('linuxDefaultInstallPath').value.trim(),
+        enableLinuxClientSelfUpdate: byId('linuxEnableClientSelfUpdate').checked
       })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, data })))

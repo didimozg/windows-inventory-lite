@@ -320,6 +320,14 @@
               </label>
             </div>
           </div>
+          <div class="settings-block">
+            <h3 class="settings-block-title">Client self-update</h3>
+            <label class="check-label windows-self-update-field">
+              <input id="windowsEnableClientSelfUpdate" type="checkbox">
+              Enable client self-update
+            </label>
+            <p class="cert-hint">When on, an already-installed Windows client that reports an out-of-date version downloads the current build and applies it itself (stopping and restarting its own service via a one-time scheduled task) - no WinRM push required. Off by default. See docs/self-update-av-exclusions.md before enabling on a fleet with strict antivirus policy.</p>
+          </div>
           <div class="pkg-buttons">
             <button id="windowsSettingsSaveButton" class="primary-button" type="button">Save</button>
           </div>
@@ -402,6 +410,14 @@
               </label>
             </div>
           </div>
+          </div>
+          <div class="settings-block">
+            <h3 class="settings-block-title">Client self-update</h3>
+            <label class="check-label linux-self-update-field">
+              <input id="linuxEnableClientSelfUpdate" type="checkbox">
+              Enable client self-update
+            </label>
+            <p class="cert-hint">When on, an already-installed Linux client that reports an out-of-date version downloads the current build and swaps its own binary between systemd-timer runs - no SSH push required. Off by default.</p>
           </div>
           <div class="pkg-buttons">
             <button id="linuxSettingsSaveButton" class="primary-button" type="button">Save</button>

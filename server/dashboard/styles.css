@@ -1699,6 +1699,19 @@ th.sort-desc::after {
   margin-bottom: var(--space-md);
 }
 
+/* Client self-update toggles (Settings > Windows / Settings > Linux) sit
+   directly in their own .settings-block, not inside a .pkg-grid - same
+   .check-label display:grid root cause as .ingestion-require-token-field/
+   .linux-updates-trust-field above. No margin-bottom needed here (unlike
+   those two): the .cert-hint immediately below each of these already
+   supplies its own margin-top (12px). Two identical-body classes, one per
+   platform, matching this file's own convention of one modifier class per
+   named settings block (see .windows-defaults-grid/.linux-defaults-grid). */
+.windows-self-update-field,
+.linux-self-update-field {
+  display: grid;
+}
+
 .pkg-grid {
   display: grid;
   grid-template-columns: minmax(240px, 2fr) minmax(160px, 1fr) 110px auto;
