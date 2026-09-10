@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 )
 
 // IngestionTokenEnvVar is the environment variable the systemd units deliver
@@ -99,5 +100,32 @@ func main() {
 		log.Printf("config refresh failed (report already accepted): %v", applyErr)
 	}
 
+	// os.Args[0] is the real installed binary path here, not a relative or
+	// symlinked one: the server always generates ExecStart= with the
+	// absolute installDirectory path (GenerateSystemdUnitLines in
+	// WindowsInventoryLiteServer.cs, e.g.
+	// "/opt/windows-inventory-lite/wil-linux-client"), install.sh copies
+	// the binary straight to that path with no symlink involved, and
+	// systemd execs ExecStart directly (no shell, no PATH lookup), so
+	// argv[0] as seen by this process is byte-for-byte that same absolute
+	// path.
+	if selfUpdateErr := ApplySelfUpdate(responseBody, os.Args[0], downloadURLFromServerURL(*serverURL), ingestionToken); selfUpdateErr != nil {
+		log.Printf("self-update failed (report already accepted): %v", selfUpdateErr)
+	}
+
 	fmt.Printf("Report sent: %s\n", report.Hostname)
+}
+
+// downloadURLFromServerURL derives the self-update package download
+// endpoint from the main inventory endpoint - mirrors config.go's own
+// suffix-swap style, but for the Linux download endpoint added in Task 3
+// (DownloadLinuxClientPackageUpdate, served at
+// /api/v1/linux-client-package/update-download in
+// WindowsInventoryLiteServer.cs).
+func downloadURLFromServerURL(serverURL string) string {
+	const inventorySuffix = "/api/v1/linux/inventory"
+	if strings.HasSuffix(serverURL, inventorySuffix) {
+		return serverURL[:len(serverURL)-len(inventorySuffix)] + "/api/v1/linux-client-package/update-download"
+	}
+	return serverURL
 }
