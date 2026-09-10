@@ -6,6 +6,7 @@ using System.IO;
 using System.Management;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Security.Principal;
 using System.ServiceProcess;
 using System.Text;
@@ -1860,6 +1861,15 @@ namespace WindowsInventoryLite
                     ApplyLearnedIngestionToken(newToken);
                 }
             }
+
+            if (config.ContainsKey("update"))
+            {
+                Dictionary<string, object> update = config["update"] as Dictionary<string, object>;
+                if (update != null)
+                {
+                    ApplySelfUpdateFromServer(update);
+                }
+            }
         }
 
         // Writes WIL_INGESTION_TOKEN into this service's own registry
@@ -1907,6 +1917,121 @@ namespace WindowsInventoryLite
             catch
             {
                 // Best-effort - see method comment above.
+            }
+        }
+
+        // Fixed name, not a per-run GUID - see this feature's design spec
+        // (docs/superpowers/specs/2026-09-10-client-self-update-design.md,
+        // "AV posture"): a random scheduled-task name per invocation is
+        // itself a heuristic red flag, while a fixed, documented name is
+        // something an admin can whitelist once in their AV product.
+        internal const string SelfUpdateTaskName = "WindowsInventoryLiteClient-SelfUpdate";
+
+        // Builds the plain cmd.exe script (not PowerShell - this client's
+        // fleet includes real PowerShell 2.0 machines, and native cmd.exe
+        // has no such floor) that a one-shot Scheduled Task runs to
+        // perform the actual swap. Pure string construction - no side
+        // effects - so it can be reasoned about/tested in isolation from
+        // the process-spawning code that writes and registers it.
+        internal static string BuildSelfUpdateCmdScript(string currentExePath, string newExePath)
+        {
+            string backupExePath = currentExePath + ".bak";
+            string failedExePath = currentExePath + ".failed";
+            StringBuilder script = new StringBuilder();
+            script.AppendLine("@echo off");
+            script.AppendLine("sc stop WindowsInventoryLiteClient");
+            script.AppendLine(":waitstopped");
+            script.AppendLine("sc query WindowsInventoryLiteClient | find \"STOPPED\" >nul");
+            script.AppendLine("if not errorlevel 1 goto stopped");
+            script.AppendLine("ping -n 2 127.0.0.1 >nul");
+            script.AppendLine("goto waitstopped");
+            script.AppendLine(":stopped");
+            script.AppendLine("move /y \"" + currentExePath + "\" \"" + backupExePath + "\"");
+            script.AppendLine("move /y \"" + newExePath + "\" \"" + currentExePath + "\"");
+            script.AppendLine("sc start WindowsInventoryLiteClient");
+            script.AppendLine("ping -n 6 127.0.0.1 >nul");
+            script.AppendLine("sc query WindowsInventoryLiteClient | find \"RUNNING\" >nul");
+            script.AppendLine("if errorlevel 1 goto rollback");
+            script.AppendLine("del \"" + backupExePath + "\"");
+            script.AppendLine("goto cleanup");
+            script.AppendLine(":rollback");
+            script.AppendLine("move /y \"" + currentExePath + "\" \"" + failedExePath + "\"");
+            script.AppendLine("move /y \"" + backupExePath + "\" \"" + currentExePath + "\"");
+            script.AppendLine("sc start WindowsInventoryLiteClient");
+            script.AppendLine(":cleanup");
+            script.AppendLine("schtasks /Delete /TN \"" + SelfUpdateTaskName + "\" /F");
+            script.AppendLine("del \"%~f0\"");
+            return script.ToString();
+        }
+
+        // Downloads the newer client build the server just advertised,
+        // verifies its hash, and hands the actual swap-and-restart off to
+        // a generated one-shot Scheduled Task - this running process
+        // cannot safely overwrite its own locked executable. Best-effort
+        // throughout: any failure here must never affect the inventory
+        // report that already succeeded, and the server will keep
+        // advertising the same "update" until this client's reported
+        // version actually changes, so a failed attempt here is retried
+        // automatically on the next cycle.
+        private void ApplySelfUpdateFromServer(Dictionary<string, object> update)
+        {
+            if (!update.ContainsKey("version") || !update.ContainsKey("sha256"))
+            {
+                return;
+            }
+            string newVersion = Convert.ToString(update["version"]);
+            string expectedSha256 = Convert.ToString(update["sha256"]);
+            if (String.IsNullOrEmpty(newVersion) || String.IsNullOrEmpty(expectedSha256) || String.Equals(newVersion, Program.ProductVersion, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            try
+            {
+                string exePath = Process.GetCurrentProcess().MainModule.FileName;
+                string exeDirectory = Path.GetDirectoryName(exePath);
+                string newExePath = Path.Combine(exeDirectory, "WindowsInventoryLiteClient.exe.new");
+                string target = Environment.Version.Major >= 4 ? "net40" : "net35";
+
+                string downloadUrl = ToClientPackageUpdateDownloadUrl(options.ServerUrl, target);
+                byte[] downloadedBytes = HttpGetBytes(downloadUrl, options.Token);
+
+                string actualSha256;
+                using (SHA256 sha256 = SHA256.Create())
+                {
+                    actualSha256 = BitConverter.ToString(sha256.ComputeHash(downloadedBytes)).Replace("-", "").ToLowerInvariant();
+                }
+                if (!String.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+
+                File.WriteAllBytes(newExePath, downloadedBytes);
+
+                string cmdPath = Path.Combine(Path.GetTempPath(), "wil-self-update-" + Guid.NewGuid().ToString("N") + ".cmd");
+                File.WriteAllText(cmdPath, BuildSelfUpdateCmdScript(exePath, newExePath), Encoding.ASCII);
+
+                string createArgs = "/Create /TN \"" + SelfUpdateTaskName + "\" /TR \"cmd.exe /c \\\"" + cmdPath + "\\\"\" /SC ONCE /ST 23:59 /RU SYSTEM /F";
+                RunHelperProcess("schtasks.exe", createArgs);
+                RunHelperProcess("schtasks.exe", "/Run /TN \"" + SelfUpdateTaskName + "\"");
+            }
+            catch
+            {
+                // Best-effort - see method comment above.
+            }
+        }
+
+        // Runs a short-lived native helper process (schtasks.exe here) and
+        // waits for it to exit - no PowerShell involved anywhere in this
+        // path (a real PowerShell 2.0 floor exists on this fleet).
+        private static void RunHelperProcess(string fileName, string arguments)
+        {
+            ProcessStartInfo startInfo = new ProcessStartInfo(fileName, arguments);
+            startInfo.UseShellExecute = false;
+            startInfo.CreateNoWindow = true;
+            using (Process process = Process.Start(startInfo))
+            {
+                process.WaitForExit(15000);
             }
         }
 
@@ -1995,6 +2120,49 @@ namespace WindowsInventoryLite
             }
         }
 
+        // Same shape as HttpGet, returning the raw response bytes instead
+        // of decoding them as UTF-8 text - used for downloading the
+        // client package itself, which is a binary .exe, not JSON/text.
+        internal static byte[] HttpGetBytes(string url, string token)
+        {
+            if (url.StartsWith("https:", StringComparison.OrdinalIgnoreCase))
+            {
+                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
+            }
+
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            request.Method = "GET";
+            request.Timeout = 60000;
+
+            if (!String.IsNullOrEmpty(token))
+            {
+                request.Headers["X-Inventory-Token"] = token;
+            }
+
+            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+            {
+                if ((int)response.StatusCode < 200 || (int)response.StatusCode >= 300)
+                {
+                    throw new InvalidOperationException("Server returned HTTP " + (int)response.StatusCode);
+                }
+
+                using (Stream responseStream = response.GetResponseStream())
+                using (MemoryStream buffer = new MemoryStream())
+                {
+                    // Stream.CopyTo was only added in .NET 4.0 - this
+                    // client's Net35 build target predates it, so the copy
+                    // loop is written out manually here instead.
+                    byte[] readBuffer = new byte[8192];
+                    int bytesRead;
+                    while ((bytesRead = responseStream.Read(readBuffer, 0, readBuffer.Length)) > 0)
+                    {
+                        buffer.Write(readBuffer, 0, bytesRead);
+                    }
+                    return buffer.ToArray();
+                }
+            }
+        }
+
         // options.ServerUrl is the full URL of the inventory ingestion
         // endpoint (the install wizard asks the admin for exactly
         // "https://server/api/v1/inventory"), so the sibling client endpoints
@@ -2020,6 +2188,11 @@ namespace WindowsInventoryLite
         internal static string ToSoftwareJobsUrl(string serverUrl)
         {
             return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/software-jobs?computerName=" + Uri.EscapeDataString(Environment.MachineName));
+        }
+
+        internal static string ToClientPackageUpdateDownloadUrl(string serverUrl, string target)
+        {
+            return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client-package/update-download?target=" + Uri.EscapeDataString(target));
         }
 
         internal static string ToSoftwareJobResultsUrl(string serverUrl)
