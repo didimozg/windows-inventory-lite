@@ -23,7 +23,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.61.2";
+        internal const string ProductVersion = "0.61.3";
 
         private static int Main(string[] args)
         {
@@ -13251,10 +13251,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate rejects a request with no ingestion token", TestDownloadClientPackageUpdateRejectsMissingToken);
             allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate rejects an invalid target value with 400", TestDownloadClientPackageUpdateRejectsInvalidTarget);
             allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate returns 404 when the requested target file does not exist", TestDownloadClientPackageUpdateReturns404WhenFileMissing);
+            allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate returns 200 with the exact target file bytes on a valid token", TestDownloadClientPackageUpdateReturns200WithFileBytesOnValidToken);
+            allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate accepts the previous token within its overlap window", TestDownloadClientPackageUpdateAcceptsPreviousTokenWithinOverlap);
             allPassed &= SelfTestCheck(output, "ReceiveLinuxInventory omits update when EnableLinuxClientSelfUpdate is false", TestReceiveLinuxInventoryOmitsUpdateWhenSelfUpdateDisabled);
             allPassed &= SelfTestCheck(output, "ReceiveLinuxInventory includes update with the built version when it differs and self-update is enabled", TestReceiveLinuxInventoryIncludesUpdateWhenVersionDiffersAndEnabled);
             allPassed &= SelfTestCheck(output, "DownloadLinuxClientPackageUpdate rejects a request with no ingestion token", TestDownloadLinuxClientPackageUpdateRejectsMissingToken);
             allPassed &= SelfTestCheck(output, "DownloadLinuxClientPackageUpdate returns 404 when the target file does not exist", TestDownloadLinuxClientPackageUpdateReturns404WhenFileMissing);
+            allPassed &= SelfTestCheck(output, "DownloadLinuxClientPackageUpdate returns 200 with the exact binary bytes on a valid token", TestDownloadLinuxClientPackageUpdateReturns200WithFileBytesOnValidToken);
+            allPassed &= SelfTestCheck(output, "DownloadLinuxClientPackageUpdate accepts the previous token within its overlap window", TestDownloadLinuxClientPackageUpdateAcceptsPreviousTokenWithinOverlap);
             allPassed &= SelfTestCheck(output, "RegenerateIngestionToken sets PreviousToken/PreviousTokenExpiresUtc when an overlap window is configured", TestRegenerateIngestionTokenSetsPreviousTokenWhenOverlapConfigured);
             allPassed &= SelfTestCheck(output, "RegenerateIngestionToken leaves PreviousToken empty when TokenOverlapHours is 0", TestRegenerateIngestionTokenSkipsPreviousTokenWhenOverlapIsZero);
             allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected ignores non-state-changing methods", TestIsCrossSiteRequestRejectedIgnoresNonStateChangingMethods);
@@ -17073,6 +17077,111 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
+        private static string TestDownloadClientPackageUpdateReturns200WithFileBytesOnValidToken()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-dlok-" + Guid.NewGuid().ToString("N"));
+            options.ClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-dlokpkg-" + Guid.NewGuid().ToString("N"));
+            options.Token = "shared-secret";
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.ClientPackagePath);
+            try
+            {
+                byte[] expectedBytes = new byte[] { 0x4D, 0x5A, 1, 2, 3, 4, 5 };
+                File.WriteAllBytes(Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe"), expectedBytes);
+
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client-package/update-download?target=net40";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "shared-secret";
+
+                byte[] responseBytes;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DownloadClientPackageUpdate(stream, request);
+                    responseBytes = stream.ToArray();
+                }
+
+                string responseText = Encoding.ASCII.GetString(responseBytes);
+                if (responseText.IndexOf("HTTP/1.1 200 OK", StringComparison.Ordinal) < 0)
+                {
+                    return "expected a 200 OK response for a valid token and an existing target file, got: " + responseText;
+                }
+                int headerEnd = responseText.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+                if (headerEnd < 0)
+                {
+                    return "expected a header/body separator in the response, got: " + responseText;
+                }
+                byte[] actualBody = new byte[responseBytes.Length - (headerEnd + 4)];
+                Array.Copy(responseBytes, headerEnd + 4, actualBody, 0, actualBody.Length);
+                if (actualBody.Length != expectedBytes.Length)
+                {
+                    return "expected the response body to be exactly the target file's " + expectedBytes.Length + " bytes, got " + actualBody.Length + " bytes";
+                }
+                for (int i = 0; i < expectedBytes.Length; i++)
+                {
+                    if (actualBody[i] != expectedBytes[i])
+                    {
+                        return "expected the response body to match the target file's bytes exactly, mismatch at index " + i;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.ClientPackagePath, true); } catch { }
+            }
+        }
+
+        private static string TestDownloadClientPackageUpdateAcceptsPreviousTokenWithinOverlap()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-dlprevtoken-" + Guid.NewGuid().ToString("N"));
+            options.ClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-dlprevtokenpkg-" + Guid.NewGuid().ToString("N"));
+            options.Token = "new-token";
+            options.PreviousToken = "old-token";
+            options.PreviousTokenExpiresUtc = DateTime.UtcNow.AddHours(1).ToString("yyyy-MM-ddTHH:mm:ssZ");
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.ClientPackagePath);
+            try
+            {
+                File.WriteAllBytes(Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe"), new byte[] { 1, 2, 3 });
+
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client-package/update-download?target=net40";
+                request.Headers = new Dictionary<string, string>();
+                // Deliberately the OLD token, not options.Token - proves the
+                // overlap window (not just an exact-match check) is what's
+                // gating this endpoint, matching the strict
+                // IsIngestionTokenRejected(true, ...) call it shares with
+                // ReceiveInventory's own already-tested overlap behavior.
+                request.Headers["x-inventory-token"] = "old-token";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DownloadClientPackageUpdate(stream, request);
+                    responseText = Encoding.ASCII.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("HTTP/1.1 200 OK", StringComparison.Ordinal) < 0)
+                {
+                    return "expected a 200 OK response when authenticating with the previous token inside its overlap window, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.ClientPackagePath, true); } catch { }
+            }
+        }
+
         private static string TestReceiveLinuxInventoryOmitsUpdateWhenSelfUpdateDisabled()
         {
             ServerOptions options = new ServerOptions();
@@ -17231,6 +17340,109 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (responseText.IndexOf("not found", StringComparison.OrdinalIgnoreCase) < 0)
                 {
                     return "expected a 404 'not found' response, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.LinuxClientPackagePath, true); } catch { }
+            }
+        }
+
+        private static string TestDownloadLinuxClientPackageUpdateReturns200WithFileBytesOnValidToken()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxdlok-" + Guid.NewGuid().ToString("N"));
+            options.LinuxClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxdlokpkg-" + Guid.NewGuid().ToString("N"));
+            options.Token = "shared-secret";
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.LinuxClientPackagePath);
+            try
+            {
+                byte[] expectedBytes = new byte[] { 0x7F, 0x45, 0x4C, 0x46, 9, 8, 7 };
+                File.WriteAllBytes(Path.Combine(options.LinuxClientPackagePath, "wil-linux-client"), expectedBytes);
+
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/linux-client-package/update-download";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "shared-secret";
+
+                byte[] responseBytes;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DownloadLinuxClientPackageUpdate(stream, request);
+                    responseBytes = stream.ToArray();
+                }
+
+                string responseText = Encoding.ASCII.GetString(responseBytes);
+                if (responseText.IndexOf("HTTP/1.1 200 OK", StringComparison.Ordinal) < 0)
+                {
+                    return "expected a 200 OK response for a valid token and an existing binary, got: " + responseText;
+                }
+                int headerEnd = responseText.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+                if (headerEnd < 0)
+                {
+                    return "expected a header/body separator in the response, got: " + responseText;
+                }
+                byte[] actualBody = new byte[responseBytes.Length - (headerEnd + 4)];
+                Array.Copy(responseBytes, headerEnd + 4, actualBody, 0, actualBody.Length);
+                if (actualBody.Length != expectedBytes.Length)
+                {
+                    return "expected the response body to be exactly the binary's " + expectedBytes.Length + " bytes, got " + actualBody.Length + " bytes";
+                }
+                for (int i = 0; i < expectedBytes.Length; i++)
+                {
+                    if (actualBody[i] != expectedBytes[i])
+                    {
+                        return "expected the response body to match the binary's bytes exactly, mismatch at index " + i;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.LinuxClientPackagePath, true); } catch { }
+            }
+        }
+
+        private static string TestDownloadLinuxClientPackageUpdateAcceptsPreviousTokenWithinOverlap()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxdlprevtoken-" + Guid.NewGuid().ToString("N"));
+            options.LinuxClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxdlprevtokenpkg-" + Guid.NewGuid().ToString("N"));
+            options.Token = "new-token";
+            options.PreviousToken = "old-token";
+            options.PreviousTokenExpiresUtc = DateTime.UtcNow.AddHours(1).ToString("yyyy-MM-ddTHH:mm:ssZ");
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.LinuxClientPackagePath);
+            try
+            {
+                File.WriteAllBytes(Path.Combine(options.LinuxClientPackagePath, "wil-linux-client"), new byte[] { 1, 2, 3 });
+
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/linux-client-package/update-download";
+                request.Headers = new Dictionary<string, string>();
+                // Deliberately the OLD token, not options.Token - same
+                // reasoning as the Windows sibling above: proves the
+                // overlap window itself is what's gating this endpoint.
+                request.Headers["x-inventory-token"] = "old-token";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DownloadLinuxClientPackageUpdate(stream, request);
+                    responseText = Encoding.ASCII.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("HTTP/1.1 200 OK", StringComparison.Ordinal) < 0)
+                {
+                    return "expected a 200 OK response when authenticating with the previous token inside its overlap window, got: " + responseText;
                 }
                 return null;
             }
