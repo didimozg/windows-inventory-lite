@@ -23,7 +23,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.61.1";
+        internal const string ProductVersion = "0.61.2";
 
         private static int Main(string[] args)
         {
@@ -2313,6 +2313,23 @@ namespace WindowsInventoryLite
             {
                 return null;
             }
+            // Also emit the old shared "version" key, alongside the correct
+            // per-target ones above - a real regression, caught live against
+            // a real fleet client still on the client build that shipped
+            // BEFORE this per-target split (every currently-deployed client,
+            // since self-update can only ever deliver the split-aware build
+            // to a client that already understands the split). That client's
+            // own ApplySelfUpdateFromServer only reads update["version"] to
+            // decide whether to proceed at all - hashKey selection was
+            // already per-target before this fix and is unaffected - so
+            // dropping this key silently and permanently breaks self-update
+            // for the entire existing fleet with no way to recover except a
+            // manual/WinRM re-push. The exact value doesn't need to be
+            // target-correct for that older client (it only compares it for
+            // inequality against its own version, never uses it to pick a
+            // hash), so the same best-effort fallback this project used
+            // before the split is fine here.
+            updateInfo["version"] = net40Version ?? net35Version;
             return updateInfo;
         }
 
@@ -16786,6 +16803,22 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (responseText.IndexOf("\"sha256Net40\"", StringComparison.Ordinal) < 0)
                 {
                     return "expected the update object to include a sha256Net40 field, got: " + responseText;
+                }
+                if (responseText.IndexOf("\"version\":", StringComparison.Ordinal) < 0)
+                {
+                    // Real regression, caught live against a real fleet
+                    // client still on the pre-split build (every currently-
+                    // deployed client, by construction - self-update can
+                    // only ever deliver the split-aware build to a client
+                    // that already understands the split). That client's
+                    // own ApplySelfUpdateFromServer only checks
+                    // update.ContainsKey("version") to decide whether to
+                    // proceed at all; dropping this shared key when
+                    // versionNet35/versionNet40 were added silently and
+                    // permanently broke self-update for the whole existing
+                    // fleet, with no way to recover except a manual/WinRM
+                    // re-push.
+                    return "expected the update object to still include the legacy shared 'version' field for clients built before the per-target split, got: " + responseText;
                 }
                 return null;
             }
