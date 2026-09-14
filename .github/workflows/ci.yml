@@ -58,12 +58,27 @@ jobs:
       # Server.ps1 builds net35/net40 as a side effect, and the step above
       # adds a second net40 build via the standalone Build-Client.ps1 path),
       # so --self-test here exercises what the isolated Pester run cannot.
+      #
+      # Also runs the client's own --self-test (added 2026-09-14) against
+      # both built targets - the client had no automated tests of its own
+      # at all before that, the exact gap that let the 0.61.1 wire-format
+      # regression break self-update fleet-wide before a live test caught
+      # it. Both targets are self-tested, not just one, since both are
+      # already sitting in build\ regardless of this step.
       - name: Run self-tests against the real build
         shell: pwsh
         run: |
           .\build\WindowsInventoryLiteServer.exe --self-test
           if ($LASTEXITCODE -ne 0) {
             throw "Server self-tests failed against the real build (exit code $LASTEXITCODE)"
+          }
+          .\build\WindowsInventoryLiteClient-net40.exe --self-test
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows client (net40) self-tests failed against the real build (exit code $LASTEXITCODE)"
+          }
+          .\build\WindowsInventoryLiteClient-net35.exe --self-test
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows client (net35) self-tests failed against the real build (exit code $LASTEXITCODE)"
           }
 
       # windows-latest GitHub-hosted runners ship with Go preinstalled - no
