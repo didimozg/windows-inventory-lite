@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.61.5]
+
+### Fixed
+
+- **CI never actually ran the C# self-test suite against a real, freshly-built server+client set.** `SelfTest.Tests.ps1` (invoked from the "Run PowerShell tests" step) builds the server-under-test into an isolated `$TestDrive` path with no client exe beside it, so the two self-tests that need one (`GetExeVersion` spawns the target file with `--version` - it can't be faked cheaply) silently skip their own real work there. That step also runs before CI's own build steps populate `.\build\` at all. Added a new CI step, `.\build\WindowsInventoryLiteServer.exe --self-test`, right after the build steps - by then `build\` has the real server and both real client targets, so this is the actual gate those two tests never had. No change to `SelfTest.Tests.ps1`/`Build-Server.ps1` - the local Pester run stays a best-effort check, this is purely additive.
+
+257/257 self-tests, 166/166 Pester green.
+
 ## [0.61.4]
 
 ### Changed

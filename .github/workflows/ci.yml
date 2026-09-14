@@ -46,6 +46,26 @@ jobs:
           .\src\Build-Client.ps1 -TargetFramework Net40 -OutputPath .\build\WindowsInventoryLiteClient-net40.exe
           .\build\WindowsInventoryLiteClient-net40.exe --version
 
+      # The "Run PowerShell tests" step above also runs the C# self-tests
+      # (via SelfTest.Tests.ps1/Pester), but against a server built into an
+      # isolated $TestDrive path with no client exe beside it - two of those
+      # self-tests need a real client exe next to the server-under-test exe
+      # (GetExeVersion spawns the target file with --version; it doesn't
+      # read a PE version resource, so nothing can fake this cheaply) and
+      # silently skip their own real work there via their own File.Exists
+      # guard. This step is the actual gate for those two tests: by now
+      # build\ has the real server plus both real client targets (Build-
+      # Server.ps1 builds net35/net40 as a side effect, and the step above
+      # adds a second net40 build via the standalone Build-Client.ps1 path),
+      # so --self-test here exercises what the isolated Pester run cannot.
+      - name: Run self-tests against the real build
+        shell: pwsh
+        run: |
+          .\build\WindowsInventoryLiteServer.exe --self-test
+          if ($LASTEXITCODE -ne 0) {
+            throw "Server self-tests failed against the real build (exit code $LASTEXITCODE)"
+          }
+
       # windows-latest GitHub-hosted runners ship with Go preinstalled - no
       # actions/setup-go step needed. This doesn't rebuild/recommit
       # linux-client/prebuilt/wil-linux-client (that stays a deliberate
