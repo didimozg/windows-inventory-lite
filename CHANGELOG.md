@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [Windows client 0.5.2]
+
+### Added
+
+- The client now has real, automated test coverage for its self-update logic - previously entirely unverified by any test (`docs/backlog.md`'s own "No automated test harness exists for WindowsInventoryLiteClient.cs at all" gap, closed here). Mirrors the server's own hand-rolled `--self-test` convention - no new dependencies, this project has never used NuGet/MSBuild for testing. `ApplySelfUpdateFromServer` was split into a thin real entry point and a new, injectable `ApplySelfUpdateFromServerCore` returning a `SelfUpdateOutcome` enum instead of void - production behavior (log messages, decisions, side effects) is unchanged, this is a testability-only refactor. 18 new self-tests cover the already-pure `IsVersionNewer`/`BuildSelfUpdateCmdScript` plus all 9 branches of the self-update decision logic, including a regression-shaped test for the exact ack shape that broke self-update fleet-wide in the `[0.61.2]` incident above.
+
+Windows client 0.5.1 -> 0.5.2 (PATCH - test-only, no production behavior change). CI now also runs `--self-test` against both built client targets.
+
 ## [0.61.5]
 
 ### Fixed
