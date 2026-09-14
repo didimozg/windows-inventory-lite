@@ -2016,6 +2016,19 @@ namespace WindowsInventoryLite
             return script.ToString();
         }
 
+        internal enum SelfUpdateOutcome
+        {
+            NoBuildForTarget,
+            AlreadyCurrent,
+            NotNewer,
+            NoHashAdvertised,
+            HashMismatch,
+            TaskCreateFailed,
+            TaskRunFailed,
+            Applied,
+            Error
+        }
+
         // Downloads the newer client build the server just advertised,
         // verifies its hash, and hands the actual swap-and-restart off to
         // a generated one-shot Scheduled Task - this running process
@@ -2025,7 +2038,44 @@ namespace WindowsInventoryLite
         // advertising the same "update" until this client's reported
         // version actually changes, so a failed attempt here is retried
         // automatically on the next cycle.
+        //
+        // Thin wrapper around ApplySelfUpdateFromServerCore below - all
+        // decision logic and logging live in Core, which returns a
+        // SelfUpdateOutcome so self-tests can assert on it directly. This
+        // wrapper's own try/catch is defense in depth on top of Core's own
+        // internal one, in case Core itself has a bug - this call path
+        // must never throw back into Collect()'s already-accepted report.
         private void ApplySelfUpdateFromServer(Dictionary<string, object> update)
+        {
+            try
+            {
+                string exePath = Process.GetCurrentProcess().MainModule.FileName;
+                ApplySelfUpdateFromServerCore(update, exePath, Program.ProductVersion, options, HttpGetBytes, RunHelperProcess);
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "SelfUpdate", "Self-update attempt failed (report already accepted, will retry next cycle): " + ex);
+            }
+        }
+
+        // Testable core of ApplySelfUpdateFromServer - exePath, currentVersion,
+        // and options are explicit parameters (not derived internally via
+        // Process.GetCurrentProcess()/Program.ProductVersion) specifically so
+        // self-tests can supply fake values; the real wrapper above supplies
+        // the real ones. download/runHelperProcess are injected the same way
+        // (mirroring the Linux client's own downloadFunc/verifyFunc pattern)
+        // since a real HTTP call and a real schtasks.exe spawn can't be faked
+        // cheaply. File I/O is NOT injected - self-tests use real temporary
+        // files/directories for the backup/swap/.cmd-write side, the same way
+        // this project's server self-tests already do for file-based logic.
+        //
+        // Every DebugLogger.Log call below is unchanged from the original,
+        // inline, single method this was extracted from - same text, same
+        // position, same conditions. DebugLogger.Log is a safe no-op in a
+        // test context (it early-returns whenever options.DebugLogEnabled is
+        // false, the default for a freshly-constructed ClientOptions), so no
+        // test needs to guard against it.
+        internal static SelfUpdateOutcome ApplySelfUpdateFromServerCore(Dictionary<string, object> update, string exePath, string currentVersion, ClientOptions options, Func<string, string, byte[]> download, Func<string, string, bool> runHelperProcess)
         {
             string target = Environment.Version.Major >= 4 ? "net40" : "net35";
             string versionKey = target == "net40" ? "versionNet40" : "versionNet35";
@@ -2039,14 +2089,14 @@ namespace WindowsInventoryLite
                 // original per-target hash bug from the outside: a client
                 // that never updates with no visible reason why.
                 DebugLogger.Log(options, "SelfUpdate", "Server has no build for this client's own target (" + target + ", keys " + versionKey + "/" + hashKey + ") - nothing to update to.");
-                return;
+                return SelfUpdateOutcome.NoBuildForTarget;
             }
             string newVersion = Convert.ToString(update[versionKey]);
-            if (String.IsNullOrEmpty(newVersion) || String.Equals(newVersion, Program.ProductVersion, StringComparison.Ordinal))
+            if (String.IsNullOrEmpty(newVersion) || String.Equals(newVersion, currentVersion, StringComparison.Ordinal))
             {
-                return;
+                return SelfUpdateOutcome.AlreadyCurrent;
             }
-            if (!IsVersionNewer(newVersion, Program.ProductVersion))
+            if (!IsVersionNewer(newVersion, currentVersion))
             {
                 // Only ever move forward. Nothing in this ack proves the
                 // server's build is actually newer - a stale rebuild, a
@@ -2058,25 +2108,24 @@ namespace WindowsInventoryLite
                 // unparseable version string is treated the same as "not
                 // newer" - never apply a build this client can't actually
                 // compare.
-                DebugLogger.Log(options, "SelfUpdate", "Server advertised version " + newVersion + " for target " + target + ", but it is not newer than this client's own " + Program.ProductVersion + " - ignoring (would be a downgrade, or the version string could not be compared).");
-                return;
+                DebugLogger.Log(options, "SelfUpdate", "Server advertised version " + newVersion + " for target " + target + ", but it is not newer than this client's own " + currentVersion + " - ignoring (would be a downgrade, or the version string could not be compared).");
+                return SelfUpdateOutcome.NotNewer;
             }
             string expectedSha256 = Convert.ToString(update[hashKey]);
             if (String.IsNullOrEmpty(expectedSha256))
             {
-                return;
+                return SelfUpdateOutcome.NoHashAdvertised;
             }
 
             DebugLogger.Log(options, "SelfUpdate", "Server advertised version " + newVersion + " for target " + target + " - attempting self-update.");
 
             try
             {
-                string exePath = Process.GetCurrentProcess().MainModule.FileName;
                 string exeDirectory = Path.GetDirectoryName(exePath);
                 string newExePath = Path.Combine(exeDirectory, "WindowsInventoryLiteClient.exe.new");
 
                 string downloadUrl = ToClientPackageUpdateDownloadUrl(options.ServerUrl, target);
-                byte[] downloadedBytes = HttpGetBytes(downloadUrl, options.Token);
+                byte[] downloadedBytes = download(downloadUrl, options.Token);
 
                 string actualSha256;
                 using (SHA256 sha256 = SHA256.Create())
@@ -2086,7 +2135,7 @@ namespace WindowsInventoryLite
                 if (!String.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
                 {
                     DebugLogger.Log(options, "SelfUpdate", "Downloaded build's hash did not match the advertised " + hashKey + " - aborting, will retry next cycle.");
-                    return;
+                    return SelfUpdateOutcome.HashMismatch;
                 }
 
                 File.WriteAllBytes(newExePath, downloadedBytes);
@@ -2103,28 +2152,25 @@ namespace WindowsInventoryLite
                 File.WriteAllText(cmdPath, BuildSelfUpdateCmdScript(exePath, newExePath, logPath), Encoding.ASCII);
 
                 string createArgs = "/Create /TN \"" + SelfUpdateTaskName + "\" /TR \"cmd.exe /c \\\"" + cmdPath + "\\\"\" /SC ONCE /ST 23:59 /RU SYSTEM /F";
-                bool created = RunHelperProcess("schtasks.exe", createArgs);
-                bool ran = created && RunHelperProcess("schtasks.exe", "/Run /TN \"" + SelfUpdateTaskName + "\"");
-                if (created && ran)
+                bool created = runHelperProcess("schtasks.exe", createArgs);
+                if (!created)
                 {
-                    DebugLogger.Log(options, "SelfUpdate", "Scheduled task '" + SelfUpdateTaskName + "' created and started.");
+                    DebugLogger.Log(options, "SelfUpdate", "Failed to create scheduled task '" + SelfUpdateTaskName + "' - self-update was not applied this cycle (possibly an AV/EDR block or a permissions issue). Will retry next cycle if the version still differs.");
+                    return SelfUpdateOutcome.TaskCreateFailed;
                 }
-                else
+                bool ran = runHelperProcess("schtasks.exe", "/Run /TN \"" + SelfUpdateTaskName + "\"");
+                if (!ran)
                 {
-                    // Previously logged success unconditionally regardless
-                    // of whether either schtasks.exe call actually
-                    // succeeded - an AV/EDR block on scheduled-task
-                    // creation (a real risk given this project's own
-                    // Kaspersky false-positive history) meant self-update
-                    // silently never applied while the diagnostic log
-                    // built specifically to catch this kept reporting
-                    // success on every cycle.
-                    DebugLogger.Log(options, "SelfUpdate", "Failed to " + (!created ? "create" : "run") + " scheduled task '" + SelfUpdateTaskName + "' - self-update was not applied this cycle (possibly an AV/EDR block or a permissions issue). Will retry next cycle if the version still differs.");
+                    DebugLogger.Log(options, "SelfUpdate", "Failed to run scheduled task '" + SelfUpdateTaskName + "' - self-update was not applied this cycle (possibly an AV/EDR block or a permissions issue). Will retry next cycle if the version still differs.");
+                    return SelfUpdateOutcome.TaskRunFailed;
                 }
+                DebugLogger.Log(options, "SelfUpdate", "Scheduled task '" + SelfUpdateTaskName + "' created and started.");
+                return SelfUpdateOutcome.Applied;
             }
             catch (Exception ex)
             {
                 DebugLogger.Log(options, "SelfUpdate", "Self-update attempt failed (report already accepted, will retry next cycle): " + ex);
+                return SelfUpdateOutcome.Error;
             }
         }
 
