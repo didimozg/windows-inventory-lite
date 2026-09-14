@@ -23,7 +23,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.61.3";
+        internal const string ProductVersion = "0.61.4";
 
         private static int Main(string[] args)
         {
@@ -8036,9 +8036,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // record (see RecordIngestionRejection) and kept in memory in
         // ingestionRejectionLog for fast correlation/serving without
         // re-reading the file. Endpoint is one of "windows-inventory",
-        // "linux-inventory", "linux-service-status"; Reason is one of
-        // "missing" (no token header at all) or "mismatched" (a token was
-        // supplied but did not match).
+        // "linux-inventory", "linux-service-status", "software-repository-connection",
+        // "software-jobs", "software-job-results", "client-package-update-download",
+        // "linux-client-package-update-download"; Reason is one of "missing"
+        // (no token header at all) or "mismatched" (a token was supplied but
+        // did not match).
         private sealed class IngestionRejectionEntry
         {
             public DateTime TimestampUtc;

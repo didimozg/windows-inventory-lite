@@ -6,6 +6,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.61.4]
+
+### Changed
+
+- **Removed the "Ingestion token" field from both deploy-package forms (Deploy > Package, Windows and Linux).** Both already fell back to the server's live token when the field was left blank (`ResolveEffectiveToken`) - the field only ever existed to support an override nobody wanted, and could show a stale value after a token rotation. The generated packages now always use the current token; the forms say so.
+- **Linux package's "Install path" field is gone too** - the server-side default (`/opt/windows-inventory-lite`) was never actually wired to a setting and stays exactly as it was. Both package forms now show a plain reference line naming where their client installs (`/opt/windows-inventory-lite` for Linux, `%ProgramData%\WindowsInventoryLite\client-data` for Windows), replacing the removed input.
+- `IngestionRejectionEntry`'s doc comment now lists all 8 real endpoint tags this log actually records against, not the 3 it was written for originally.
+
+### Fixed
+
+- **Linux client: `applySelfUpdate` had no root check at all**, unlike `config.go`'s own established convention for this class of privileged operation - a non-root invocation would reach the download and binary-swap attempt and only fail there with a permission error instead of skipping cleanly. Fixed by injecting the root check as a testable parameter (mirroring the existing `download`/`verify` injection), the same pattern already used to add this check safely without gutting existing test coverage (a bare inline `os.Geteuid() == 0` was tried first and reverted for exactly that reason).
+
+Server 0.61.3 -> 0.61.4, Linux client 0.2.1 -> 0.2.2 (Windows client unchanged - no client-side C# touched). 257 self-tests (unchanged), 166/166 Pester green, Go build/vet/test clean including a new regression test for the root-check gate.
+
+## [Linux client 0.2.2]
+
+### Fixed
+
+- `applySelfUpdate` now skips cleanly on a non-root invocation instead of reaching the download/swap attempt and failing there with a permission error - see the server entry above for the full behavior. Independent of the server/dashboard and Windows client version numbers, per this file's own versioning note.
+
 ## [0.61.3]
 
 ### Added
