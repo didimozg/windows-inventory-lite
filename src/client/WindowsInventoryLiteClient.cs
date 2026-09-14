@@ -31,6 +31,12 @@ namespace WindowsInventoryLite
                 return 0;
             }
 
+            if (options.RunSelfTest)
+            {
+                bool selfTestsPassed = InventoryCollector.RunSelfTests(Console.Out);
+                return selfTestsPassed ? 0 : 1;
+            }
+
             if (options.RunOnce)
             {
                 InventoryCollector collector = new InventoryCollector(options);
@@ -733,6 +739,7 @@ namespace WindowsInventoryLite
         public bool RunOnce;
         public bool SkipSoftware;
         public bool ShowVersion;
+        public bool RunSelfTest;
         // Off by default - a plain-text log file capturing each collection
         // cycle's outcome (success or the full exception on failure). See
         // DebugLogger below. Independent of the Windows Event Log write
@@ -759,6 +766,10 @@ namespace WindowsInventoryLite
                 else if (key == "--version")
                 {
                     options.ShowVersion = true;
+                }
+                else if (key == "--self-test")
+                {
+                    options.RunSelfTest = true;
                 }
                 else if (key == "--skip-software")
                 {
@@ -2172,6 +2183,175 @@ namespace WindowsInventoryLite
                 DebugLogger.Log(options, "SelfUpdate", "Self-update attempt failed (report already accepted, will retry next cycle): " + ex);
                 return SelfUpdateOutcome.Error;
             }
+        }
+
+        internal static bool RunSelfTests(TextWriter output)
+        {
+            bool allPassed = true;
+            allPassed &= SelfTestCheck(output, "IsVersionNewer returns true for a strictly greater version", TestIsVersionNewerReturnsTrueForStrictlyGreaterVersion);
+            allPassed &= SelfTestCheck(output, "IsVersionNewer returns false for an equal version", TestIsVersionNewerReturnsFalseForEqualVersion);
+            allPassed &= SelfTestCheck(output, "IsVersionNewer returns false for an older version", TestIsVersionNewerReturnsFalseForOlderVersion);
+            allPassed &= SelfTestCheck(output, "IsVersionNewer returns false for an unparseable version", TestIsVersionNewerReturnsFalseForUnparseableVersion);
+            allPassed &= SelfTestCheck(output, "IsVersionNewer handles differing segment counts", TestIsVersionNewerHandlesDifferingSegmentCounts);
+            allPassed &= SelfTestCheck(output, "BuildSelfUpdateCmdScript's label graph is closed (no dangling goto targets)", TestBuildSelfUpdateCmdScriptLabelGraphIsClosed);
+            allPassed &= SelfTestCheck(output, "BuildSelfUpdateCmdScript checks both move commands for errorlevel", TestBuildSelfUpdateCmdScriptChecksBothMoveCommandsForErrorlevel);
+            allPassed &= SelfTestCheck(output, "BuildSelfUpdateCmdScript's wait loops are bounded", TestBuildSelfUpdateCmdScriptHasBoundedWaitLoops);
+            allPassed &= SelfTestCheck(output, "BuildSelfUpdateCmdScript's cleanup deletes the task and itself", TestBuildSelfUpdateCmdScriptCleansUpTaskAndItself);
+            return allPassed;
+        }
+
+        private static bool SelfTestCheck(TextWriter output, string name, Func<string> testCase)
+        {
+            string failure;
+            try
+            {
+                failure = testCase();
+            }
+            catch (Exception ex)
+            {
+                failure = "threw " + ex.GetType().Name + ": " + ex.Message;
+            }
+
+            if (failure == null)
+            {
+                output.WriteLine("PASS " + name);
+                return true;
+            }
+
+            output.WriteLine("FAIL " + name + " - " + failure);
+            return false;
+        }
+
+        private static string TestIsVersionNewerReturnsTrueForStrictlyGreaterVersion()
+        {
+            if (!IsVersionNewer("1.2.10", "1.2.9"))
+            {
+                return "expected \"1.2.10\" to be newer than \"1.2.9\"";
+            }
+            return null;
+        }
+
+        private static string TestIsVersionNewerReturnsFalseForEqualVersion()
+        {
+            if (IsVersionNewer("1.2.9", "1.2.9"))
+            {
+                return "expected equal versions to not be considered newer";
+            }
+            return null;
+        }
+
+        private static string TestIsVersionNewerReturnsFalseForOlderVersion()
+        {
+            if (IsVersionNewer("1.2.8", "1.2.9"))
+            {
+                return "expected an older version to not be considered newer";
+            }
+            return null;
+        }
+
+        private static string TestIsVersionNewerReturnsFalseForUnparseableVersion()
+        {
+            if (IsVersionNewer("not-a-version", "1.2.9"))
+            {
+                return "expected an unparseable candidate version to never be treated as newer";
+            }
+            return null;
+        }
+
+        private static string TestIsVersionNewerHandlesDifferingSegmentCounts()
+        {
+            if (IsVersionNewer("1.2", "1.2.0"))
+            {
+                return "expected \"1.2\" and \"1.2.0\" to compare as equal (missing segments treated as 0), not newer";
+            }
+            if (!IsVersionNewer("1.2.1", "1.2"))
+            {
+                return "expected \"1.2.1\" to be newer than \"1.2\" (missing segment on the shorter side treated as 0)";
+            }
+            return null;
+        }
+
+        private static string TestBuildSelfUpdateCmdScriptLabelGraphIsClosed()
+        {
+            string script = BuildSelfUpdateCmdScript(@"C:\install\WindowsInventoryLiteClient.exe", @"C:\install\WindowsInventoryLiteClient.exe.new", "NUL");
+            string[] lines = script.Split(new[] { "\r\n" }, StringSplitOptions.None);
+
+            List<string> definedLabels = new List<string>();
+            List<string> gotoTargets = new List<string>();
+            foreach (string rawLine in lines)
+            {
+                string line = rawLine.Trim();
+                if (line.StartsWith(":") && !line.StartsWith("::"))
+                {
+                    definedLabels.Add(line.Substring(1));
+                }
+                if (line.StartsWith("goto ", StringComparison.OrdinalIgnoreCase))
+                {
+                    gotoTargets.Add(line.Substring(5).Trim());
+                }
+            }
+
+            if (definedLabels.Count == 0 || gotoTargets.Count == 0)
+            {
+                return "expected the generated script to contain both labels and goto statements - found none, this test's own parsing may be broken";
+            }
+            foreach (string target in gotoTargets)
+            {
+                if (!definedLabels.Contains(target))
+                {
+                    return "goto target \"" + target + "\" has no matching :label in the generated script";
+                }
+            }
+            return null;
+        }
+
+        private static string TestBuildSelfUpdateCmdScriptChecksBothMoveCommandsForErrorlevel()
+        {
+            string currentExePath = @"C:\install\WindowsInventoryLiteClient.exe";
+            string newExePath = @"C:\install\WindowsInventoryLiteClient.exe.new";
+            string backupExePath = currentExePath + ".bak";
+            string script = BuildSelfUpdateCmdScript(currentExePath, newExePath, "NUL");
+
+            string expectedBackupSequence = "move /y \"" + currentExePath + "\" \"" + backupExePath + "\"\r\nif errorlevel 1 goto backup_failed";
+            string expectedSwapSequence = "move /y \"" + newExePath + "\" \"" + currentExePath + "\"\r\nif errorlevel 1 goto swap_failed";
+
+            if (!script.Contains(expectedBackupSequence))
+            {
+                return "expected the backup move to be immediately followed by \"if errorlevel 1 goto backup_failed\", got:\n" + script;
+            }
+            if (!script.Contains(expectedSwapSequence))
+            {
+                return "expected the swap move to be immediately followed by \"if errorlevel 1 goto swap_failed\", got:\n" + script;
+            }
+            return null;
+        }
+
+        private static string TestBuildSelfUpdateCmdScriptHasBoundedWaitLoops()
+        {
+            string script = BuildSelfUpdateCmdScript(@"C:\install\WindowsInventoryLiteClient.exe", @"C:\install\WindowsInventoryLiteClient.exe.new", "NUL");
+            if (!script.Contains("if %wilstopwaitcount% GEQ 30 goto stop_timed_out"))
+            {
+                return "expected the stop-wait loop to have a bounded counter check, got:\n" + script;
+            }
+            if (!script.Contains("if %wilwaitcount% GEQ 30 goto rollback"))
+            {
+                return "expected the run-wait loop to have a bounded counter check, got:\n" + script;
+            }
+            return null;
+        }
+
+        private static string TestBuildSelfUpdateCmdScriptCleansUpTaskAndItself()
+        {
+            string script = BuildSelfUpdateCmdScript(@"C:\install\WindowsInventoryLiteClient.exe", @"C:\install\WindowsInventoryLiteClient.exe.new", "NUL");
+            if (!script.Contains("schtasks /Delete /TN \"" + SelfUpdateTaskName + "\" /F"))
+            {
+                return "expected :cleanup to delete the scheduled task, got:\n" + script;
+            }
+            if (!script.Contains("del \"%~f0\""))
+            {
+                return "expected :cleanup to delete the script itself, got:\n" + script;
+            }
+            return null;
         }
 
         // Returns true only if the process both exited within the timeout
