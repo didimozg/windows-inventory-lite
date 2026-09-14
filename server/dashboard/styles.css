@@ -1729,30 +1729,37 @@ th.sort-desc::after {
 }
 
 /* The Client Package grid has one more field (Server URL, Package share
-   path, Ingestion token, Interval) than the base .pkg-grid template
-   accounts for (used elsewhere, e.g. the Certificate page, with 3 items) -
-   a shared class change here would reintroduce empty tracks on those other
-   pages, so this is a modifier class rather than an ID-scoped override:
-   an ID selector would outrank the plain-class .pkg-grid rule inside the
+   path, Interval) than the base .pkg-grid template accounts for (used
+   elsewhere, e.g. the Certificate page, with 3 items) - a shared class
+   change here would reintroduce empty tracks on those other pages, so
+   this is a modifier class rather than an ID-scoped override: an ID
+   selector would outrank the plain-class .pkg-grid rule inside the
    @media (max-width: 900px) collapse block below regardless of source
    order, un-collapsing this grid on mobile (this exact class of bug - a
    more specific selector silently winning over a later, lower-specificity
-   one - already happened once on this branch with .hidden). Keep the
-   field count in sync with index.html's #packageView .pkg-grid. */
+   one - already happened once on this branch with .hidden). Dropped to 4
+   columns (was 5) when the Ingestion token field was removed - it always
+   used the server's live token, so the field was a redundant, sometimes-
+   stale override with nothing left to configure. Keep the field count in
+   sync with index.html's #packageView .pkg-grid. */
 .pkg-grid-package {
-  grid-template-columns: minmax(220px, 1.4fr) minmax(200px, 1.2fr) minmax(140px, 1fr) 110px auto;
+  grid-template-columns: minmax(220px, 1.4fr) minmax(140px, 1fr) 110px auto;
 }
 
-/* Linux package has one more field than Windows package (Status check
-   interval, added alongside L1's dual-cadence status pinging) - reusing
-   .pkg-grid-package's 5-column template here left its 6th item (the
-   Save/Download button pair) with no track to sit in, wrapping it onto
-   its own row below while Windows package's identical-looking button
-   pair stayed inline - the exact misalignment reported live.
-   A dedicated 6-column modifier, not a change to .pkg-grid-package
-   itself, so Windows package's own (correct) 5-column layout is untouched. */
+/* Linux package keeps one more field than Windows package (Status check
+   interval, added alongside L1's dual-cadence status pinging). Dropped to
+   4 columns (was 6) when the Ingestion token field (same reasoning as
+   .pkg-grid-package above) and the Install path field (hardcoded on the
+   server side regardless of what this form ever sent - kept as fixed
+   behavior, not made configurable; see the reference text in index.html
+   instead) were both removed. A dedicated modifier, not a change to
+   .pkg-grid-package itself, so Windows package's own layout is untouched -
+   the two forms' remaining fields differ in kind (Linux: one URL field
+   plus two interval fields; Windows: two URL-ish fields plus one interval
+   field), so they don't share a track-width profile even at the same
+   column count. */
 .pkg-grid-linux-package {
-  grid-template-columns: minmax(220px, 1.4fr) minmax(200px, 1.2fr) minmax(140px, 1fr) 110px 110px auto;
+  grid-template-columns: minmax(220px, 1.4fr) 110px 110px auto;
 }
 
 .pkg-grid label {

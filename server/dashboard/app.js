@@ -2460,22 +2460,6 @@
         if (data.cmdServerUrl) byId('pkgServerUrl').value = data.cmdServerUrl;
         if (data.cmdIntervalHours) byId('pkgIntervalHours').value = data.cmdIntervalHours;
         byId('pkgSharePath').value = data.cmdPackageSharePath || '';
-        // Only pre-fill from the last-built package's own baked-in token if
-        // it still matches the server's current live token - otherwise a
-        // regenerate leaves this field silently showing a stale value that
-        // looks correct but isn't, and resubmitting it would also defeat
-        // ResolveEffectiveToken's blank-means-use-live-token fallback
-        // (Task 3), since the field would never actually be blank.
-        if (data.cmdToken) {
-          fetch('/api/v1/server/ingestion-token', { cache: 'no-store' })
-            .then(response => (response.ok ? response.json() : null))
-            .then(tokenStatus => {
-              if (tokenStatus && tokenStatus.token === data.cmdToken) {
-                byId('pkgToken').value = data.cmdToken;
-              }
-            })
-            .catch(() => {});
-        }
       })
       .catch(error => {
         byId('pkgStatus').textContent = `Package status unavailable: ${error.message}`;
@@ -2501,21 +2485,6 @@
         if (data.serverUrl) byId('linuxPkgServerUrl').value = data.serverUrl;
         byId('linuxPkgIntervalHours').value = data.intervalHours || 6;
         byId('linuxPkgStatusIntervalMinutes').value = data.statusIntervalMinutes || 30;
-        byId('linuxPkgInstallPath').value = data.installPath || '/opt/windows-inventory-lite';
-        // Only pre-fill from the last-saved settings' token if it still
-        // matches the server's current live token - see the identical
-        // guard in loadPackageStatus for why a stale baked token must
-        // never silently resurface here.
-        if (data.token) {
-          fetch('/api/v1/server/ingestion-token', { cache: 'no-store' })
-            .then(response => (response.ok ? response.json() : null))
-            .then(tokenStatus => {
-              if (tokenStatus && tokenStatus.token === data.token) {
-                byId('linuxPkgToken').value = data.token;
-              }
-            })
-            .catch(() => {});
-        }
       })
       .catch(error => {
         byId('linuxPkgStatus').textContent = `Linux package status unavailable: ${error.message}`;
@@ -2524,10 +2493,8 @@
 
   function saveLinuxPackageConfig() {
     const serverUrl = byId('linuxPkgServerUrl').value.trim();
-    const token = byId('linuxPkgToken').value.trim();
     const intervalHours = Number(byId('linuxPkgIntervalHours').value) || 6;
     const statusIntervalMinutes = Number(byId('linuxPkgStatusIntervalMinutes').value) || 30;
-    const installPath = byId('linuxPkgInstallPath').value.trim() || '/opt/windows-inventory-lite';
 
     if (!serverUrl) {
       window.alert('Enter server URL.');
@@ -2539,7 +2506,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ serverUrl, token, intervalHours, statusIntervalMinutes, installPath })
+      body: JSON.stringify({ serverUrl, intervalHours, statusIntervalMinutes })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, data })))
       .then(({ ok, data }) => {
@@ -2574,7 +2541,6 @@
 
   function savePackageConfig() {
     const serverUrl = byId('pkgServerUrl').value.trim();
-    const token = byId('pkgToken').value.trim();
     const intervalHours = parseInt(byId('pkgIntervalHours').value, 10) || 6;
     const packageSharePath = byId('pkgSharePath').value.trim();
     if (!serverUrl) { window.alert('Enter server URL.'); return; }
@@ -2586,7 +2552,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ serverUrl, token, intervalHours, packageSharePath })
+      body: JSON.stringify({ serverUrl, intervalHours, packageSharePath })
     })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -3249,15 +3215,6 @@
         messageEl.textContent = `Token regenerated: ${data.token}`;
         messageEl.className = 'pkg-message';
         loadIngestionTokenStatus();
-        // Client Package tab fields were pre-filled from the last-built
-        // package's own baked-in token, which is now stale - blank them so
-        // an immediate Save on that tab (without reloading first) correctly
-        // falls back to the fresh live token via ResolveEffectiveToken,
-        // instead of silently resubmitting the token that was just replaced.
-        const pkgTokenEl = byId('pkgToken');
-        if (pkgTokenEl) pkgTokenEl.value = '';
-        const linuxPkgTokenEl = byId('linuxPkgToken');
-        if (linuxPkgTokenEl) linuxPkgTokenEl.value = '';
       })
       .catch(error => {
         showSavedMessage(byId('ingestionTokenMessage'), `Regenerate failed: ${error.message}`, true);

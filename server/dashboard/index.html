@@ -861,10 +861,6 @@
                 Server URL
                 <input id="pkgServerUrl" type="text" placeholder="http://192.168.1.1:8080/api/v1/inventory">
               </label>
-              <label class="pkg-token-field">
-                Ingestion token
-                <input id="pkgToken" type="text" autocomplete="off" placeholder="leave empty to use the server's current token">
-              </label>
               <label class="pkg-url-field">
                 Package share path
                 <input id="pkgSharePath" type="text" placeholder="leave blank to use the .cmd's own folder">
@@ -879,6 +875,7 @@
               </div>
             </div>
             <p class="cert-hint">By default the GPO startup script (<code>Install-ClientGpo.cmd</code>) looks for the client files in its own folder. Set this only when the script and the client files are deployed to different locations (for example, the script runs from SYSVOL but the client executables live on a separate file share) - an UNC path such as <code>\\server\share\gpo-client</code>.</p>
+            <p class="cert-hint">The generated package always uses the server's current ingestion token. The client installs to <code>%ProgramData%\WindowsInventoryLite\client-data</code>.</p>
             <div id="pkgMessage" class="pkg-message hidden"></div>
           </div>
 
@@ -890,14 +887,6 @@
               <label class="pkg-url-field">
                 Server URL
                 <input id="linuxPkgServerUrl" type="text" placeholder="http://192.168.1.1:8080/api/v1/linux/inventory">
-              </label>
-              <label class="pkg-token-field">
-                Ingestion token
-                <input id="linuxPkgToken" type="text" autocomplete="off" placeholder="leave empty to use the server's current token">
-              </label>
-              <label class="pkg-url-field">
-                Install path
-                <input id="linuxPkgInstallPath" type="text" value="/opt/windows-inventory-lite">
               </label>
               <label class="pkg-interval-field">
                 Interval (hours)
@@ -912,6 +901,7 @@
                 <button id="linuxPkgDownloadButton" class="export-button" type="button">Download Linux package</button>
               </div>
             </div>
+            <p class="cert-hint">The generated package always uses the server's current ingestion token. The client installs to <code>/opt/windows-inventory-lite</code>.</p>
             <div id="linuxPkgMessage" class="pkg-message hidden"></div>
           </div>
         </section>
