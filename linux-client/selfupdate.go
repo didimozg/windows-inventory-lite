@@ -27,20 +27,34 @@ type selfUpdateResponse struct {
 	} `json:"config"`
 }
 
-// downloadFunc and verifyFunc are injected so tests can substitute fakes
-// for the two operations that would otherwise need a real network call
-// and a real second binary on disk - mirroring config.go's own
-// reloadAndRestartTimer injection pattern.
+// downloadFunc, verifyFunc, and isRootFunc are injected so tests can
+// substitute fakes for the operations that would otherwise need a real
+// network call, a real second binary on disk, or a real root process -
+// mirroring config.go's own reloadAndRestartTimer injection pattern.
 type downloadFunc func(url, token string) ([]byte, error)
 type verifyFunc func(binaryPath string) error
+type isRootFunc func() bool
+
+// isRunningAsRoot is the real root check - a bare inline os.Geteuid() == 0
+// call (config.go's own convention for this class of privileged operation)
+// was tried directly in applySelfUpdate first and reverted: os.Geteuid()
+// always returns -1 on a non-Linux dev machine, so a blanket inline gate
+// made every existing applySelfUpdate test short-circuit before doing any
+// real work, silently gutting their own coverage instead of skipping
+// cleanly. Injecting it as a parameter (like download/verify above) lets
+// tests force it true and keep exercising the real swap/verify/rollback
+// logic.
+func isRunningAsRoot() bool {
+	return os.Geteuid() == 0
+}
 
 // ApplySelfUpdate is the real entry point called from the main report
 // loop.
 func ApplySelfUpdate(body []byte, binaryPath string, downloadURL string, token string) error {
-	return applySelfUpdate(body, binaryPath, downloadURL, token, downloadClientPackage, verifyBinaryLaunches)
+	return applySelfUpdate(body, binaryPath, downloadURL, token, downloadClientPackage, verifyBinaryLaunches, isRunningAsRoot)
 }
 
-func applySelfUpdate(body []byte, binaryPath string, downloadURL string, token string, download downloadFunc, verify verifyFunc) error {
+func applySelfUpdate(body []byte, binaryPath string, downloadURL string, token string, download downloadFunc, verify verifyFunc, isRoot isRootFunc) error {
 	if len(body) == 0 {
 		return nil
 	}
@@ -54,6 +68,16 @@ func applySelfUpdate(body []byte, binaryPath string, downloadURL string, token s
 	}
 
 	if response.Config.Update.Version == "" || response.Config.Update.SHA256 == "" {
+		return nil
+	}
+
+	if !isRoot() {
+		// Swapping the running binary needs write access to its own
+		// install directory (typically /opt/windows-inventory-lite,
+		// root-owned) - same reasoning as config.go's own os.Geteuid()
+		// gates on its privileged rewrites. Skip rather than fail: the
+		// next run (which may or may not be root, depending on
+		// deployment) sees the same update advertised again and retries.
 		return nil
 	}
 
