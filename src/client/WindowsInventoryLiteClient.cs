@@ -2162,6 +2162,13 @@ namespace WindowsInventoryLite
                 string cmdPath = Path.Combine(exeDirectory, "wil-self-update.cmd");
                 File.WriteAllText(cmdPath, BuildSelfUpdateCmdScript(exePath, newExePath, logPath), Encoding.ASCII);
 
+                // Previously logged success unconditionally regardless of
+                // whether either schtasks.exe call actually succeeded - an
+                // AV/EDR block on scheduled-task creation (a real risk
+                // given this project's own Kaspersky false-positive
+                // history) meant self-update silently never applied while
+                // the diagnostic log built specifically to catch this kept
+                // reporting success on every cycle.
                 string createArgs = "/Create /TN \"" + SelfUpdateTaskName + "\" /TR \"cmd.exe /c \\\"" + cmdPath + "\\\"\" /SC ONCE /ST 23:59 /RU SYSTEM /F";
                 bool created = runHelperProcess("schtasks.exe", createArgs);
                 if (!created)
@@ -2198,6 +2205,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "BuildSelfUpdateCmdScript's wait loops are bounded", TestBuildSelfUpdateCmdScriptHasBoundedWaitLoops);
             allPassed &= SelfTestCheck(output, "BuildSelfUpdateCmdScript's cleanup deletes the task and itself", TestBuildSelfUpdateCmdScriptCleansUpTaskAndItself);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns NoBuildForTarget for a pre-split ack", TestApplySelfUpdateFromServerCoreReturnsNoBuildForTargetOnPreSplitAck);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns NoBuildForTarget when only the version key is present", TestApplySelfUpdateFromServerCoreReturnsNoBuildForTargetWhenOnlyVersionKeyPresent);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns AlreadyCurrent when the version matches", TestApplySelfUpdateFromServerCoreReturnsAlreadyCurrentWhenVersionMatches);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns NotNewer when the advertised version is older", TestApplySelfUpdateFromServerCoreReturnsNotNewerWhenAdvertisedVersionIsOlder);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns NoHashAdvertised when the hash is empty", TestApplySelfUpdateFromServerCoreReturnsNoHashAdvertisedWhenHashIsEmpty);
@@ -2371,6 +2379,15 @@ namespace WindowsInventoryLite
         // against (Environment.Version.Major inside Core picks the target
         // at runtime) - setting both keeps every test's outcome identical
         // regardless of which target is actually running it.
+        //
+        // The Core tests below pass "0.5.1" as currentVersion, not
+        // Program.ProductVersion - deliberately: Core takes currentVersion
+        // as an explicit parameter specifically so these tests never
+        // depend on whatever the real product version happens to be. Do
+        // not "fix" this to match Program.ProductVersion after a future
+        // version bump - these fixtures compare two hardcoded version
+        // strings against each other and stay correct regardless of what
+        // ships.
         private static Dictionary<string, object> BuildSelfTestUpdateAck(string version, string sha256)
         {
             Dictionary<string, object> update = new Dictionary<string, object>();
@@ -2398,6 +2415,31 @@ namespace WindowsInventoryLite
             if (outcome != SelfUpdateOutcome.NoBuildForTarget)
             {
                 return "expected NoBuildForTarget for a pre-split ack with no versionNetXX key for either target, got " + outcome;
+            }
+            return null;
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreReturnsNoBuildForTargetWhenOnlyVersionKeyPresent()
+        {
+            // Distinguishes the "||" in "!ContainsKey(versionKey) ||
+            // !ContainsKey(hashKey)" from "&&" - the pre-split-ack test
+            // above satisfies both sides of the check at once (neither key
+            // present), so on its own it could not catch a regression that
+            // flipped this to require BOTH keys missing. Here the version
+            // key exists for both targets but neither hash key does, so
+            // only the hashKey side of the check is what makes this return
+            // NoBuildForTarget - correctly reachable regardless of which
+            // target this self-test binary was compiled as.
+            Dictionary<string, object> update = new Dictionary<string, object>();
+            update["versionNet35"] = "9.9.9";
+            update["versionNet40"] = "9.9.9";
+
+            ClientOptions options = new ClientOptions();
+            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true);
+
+            if (outcome != SelfUpdateOutcome.NoBuildForTarget)
+            {
+                return "expected NoBuildForTarget when the version key is present but the hash key is absent for both targets, got " + outcome;
             }
             return null;
         }
