@@ -2197,6 +2197,15 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "BuildSelfUpdateCmdScript checks both move commands for errorlevel", TestBuildSelfUpdateCmdScriptChecksBothMoveCommandsForErrorlevel);
             allPassed &= SelfTestCheck(output, "BuildSelfUpdateCmdScript's wait loops are bounded", TestBuildSelfUpdateCmdScriptHasBoundedWaitLoops);
             allPassed &= SelfTestCheck(output, "BuildSelfUpdateCmdScript's cleanup deletes the task and itself", TestBuildSelfUpdateCmdScriptCleansUpTaskAndItself);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns NoBuildForTarget for a pre-split ack", TestApplySelfUpdateFromServerCoreReturnsNoBuildForTargetOnPreSplitAck);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns AlreadyCurrent when the version matches", TestApplySelfUpdateFromServerCoreReturnsAlreadyCurrentWhenVersionMatches);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns NotNewer when the advertised version is older", TestApplySelfUpdateFromServerCoreReturnsNotNewerWhenAdvertisedVersionIsOlder);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns NoHashAdvertised when the hash is empty", TestApplySelfUpdateFromServerCoreReturnsNoHashAdvertisedWhenHashIsEmpty);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns HashMismatch and leaves the file untouched", TestApplySelfUpdateFromServerCoreReturnsHashMismatchAndLeavesFileUntouched);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns TaskCreateFailed when schtasks /Create fails", TestApplySelfUpdateFromServerCoreReturnsTaskCreateFailedWhenSchtasksCreateFails);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns TaskRunFailed when schtasks /Run fails", TestApplySelfUpdateFromServerCoreReturnsTaskRunFailedWhenSchtasksRunFails);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns Applied and writes the expected files", TestApplySelfUpdateFromServerCoreReturnsAppliedAndWritesExpectedFiles);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns Error when download throws", TestApplySelfUpdateFromServerCoreReturnsErrorWhenDownloadThrows);
             return allPassed;
         }
 
@@ -2352,6 +2361,281 @@ namespace WindowsInventoryLite
                 return "expected :cleanup to delete the script itself, got:\n" + script;
             }
             return null;
+        }
+
+        // Test-only fixture helper: builds an ack's "update" object with
+        // BOTH targets' keys set to the same version/hash. Every Core test
+        // below needs this rather than setting only one target's keys,
+        // because the same compiled test binary runs as EITHER net35 or
+        // net40 depending on which built exe self-tests are invoked
+        // against (Environment.Version.Major inside Core picks the target
+        // at runtime) - setting both keeps every test's outcome identical
+        // regardless of which target is actually running it.
+        private static Dictionary<string, object> BuildSelfTestUpdateAck(string version, string sha256)
+        {
+            Dictionary<string, object> update = new Dictionary<string, object>();
+            update["versionNet35"] = version;
+            update["sha256Net35"] = sha256;
+            update["versionNet40"] = version;
+            update["sha256Net40"] = sha256;
+            return update;
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreReturnsNoBuildForTargetOnPreSplitAck()
+        {
+            // Regression-shaped test for the 2026-09-11 incident: a server
+            // ack shaped like the pre-split wire format (a shared "version"
+            // key, no versionNet35/versionNet40 for either target) must be
+            // recognized as "nothing to update to," not silently ignored
+            // or crash - regardless of which target this self-test binary
+            // itself was compiled as.
+            Dictionary<string, object> update = new Dictionary<string, object>();
+            update["version"] = "9.9.9";
+
+            ClientOptions options = new ClientOptions();
+            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true);
+
+            if (outcome != SelfUpdateOutcome.NoBuildForTarget)
+            {
+                return "expected NoBuildForTarget for a pre-split ack with no versionNetXX key for either target, got " + outcome;
+            }
+            return null;
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreReturnsAlreadyCurrentWhenVersionMatches()
+        {
+            Dictionary<string, object> update = BuildSelfTestUpdateAck("0.5.1", "aaaa");
+            ClientOptions options = new ClientOptions();
+            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true);
+
+            if (outcome != SelfUpdateOutcome.AlreadyCurrent)
+            {
+                return "expected AlreadyCurrent when the advertised version equals the current version, got " + outcome;
+            }
+            return null;
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreReturnsNotNewerWhenAdvertisedVersionIsOlder()
+        {
+            Dictionary<string, object> update = BuildSelfTestUpdateAck("0.5.0", "aaaa");
+            ClientOptions options = new ClientOptions();
+            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true);
+
+            if (outcome != SelfUpdateOutcome.NotNewer)
+            {
+                return "expected NotNewer when the advertised version is older than the current one, got " + outcome;
+            }
+            return null;
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreReturnsNoHashAdvertisedWhenHashIsEmpty()
+        {
+            Dictionary<string, object> update = new Dictionary<string, object>();
+            update["versionNet35"] = "9.9.9";
+            update["versionNet40"] = "9.9.9";
+            update["sha256Net35"] = "";
+            update["sha256Net40"] = "";
+            ClientOptions options = new ClientOptions();
+            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true);
+
+            if (outcome != SelfUpdateOutcome.NoHashAdvertised)
+            {
+                return "expected NoHashAdvertised when the hash key is present but empty, got " + outcome;
+            }
+            return null;
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreReturnsHashMismatchAndLeavesFileUntouched()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "wil-selftest-selfupdatehashmismatch-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                string exePath = Path.Combine(dir, "WindowsInventoryLiteClient.exe");
+                byte[] originalContent = Encoding.ASCII.GetBytes("original-exe-content");
+                File.WriteAllBytes(exePath, originalContent);
+
+                Dictionary<string, object> update = BuildSelfTestUpdateAck("9.9.9", "0000000000000000000000000000000000000000000000000000000000000000");
+                ClientOptions options = new ClientOptions();
+                options.ServerUrl = "http://example.invalid/api/v1/inventory";
+                SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options, (url, token) => Encoding.ASCII.GetBytes("downloaded-content-that-does-not-match-the-hash"), (fileName, arguments) => true);
+
+                if (outcome != SelfUpdateOutcome.HashMismatch)
+                {
+                    return "expected HashMismatch when the downloaded bytes don't match the advertised hash, got " + outcome;
+                }
+                byte[] afterContent = File.ReadAllBytes(exePath);
+                if (Encoding.ASCII.GetString(afterContent) != Encoding.ASCII.GetString(originalContent))
+                {
+                    return "expected the original exe to be untouched after a hash mismatch";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dir, true); } catch { }
+            }
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreReturnsTaskCreateFailedWhenSchtasksCreateFails()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "wil-selftest-selfupdatetaskcreatefail-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                string exePath = Path.Combine(dir, "WindowsInventoryLiteClient.exe");
+                File.WriteAllBytes(exePath, Encoding.ASCII.GetBytes("original-exe-content"));
+
+                byte[] newContent = Encoding.ASCII.GetBytes("new-exe-content");
+                string actualHash;
+                using (SHA256 sha256 = SHA256.Create())
+                {
+                    actualHash = BitConverter.ToString(sha256.ComputeHash(newContent)).Replace("-", "").ToLowerInvariant();
+                }
+
+                Dictionary<string, object> update = BuildSelfTestUpdateAck("9.9.9", actualHash);
+                ClientOptions options = new ClientOptions();
+                options.ServerUrl = "http://example.invalid/api/v1/inventory";
+                SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options, (url, token) => newContent, (fileName, arguments) => false);
+
+                if (outcome != SelfUpdateOutcome.TaskCreateFailed)
+                {
+                    return "expected TaskCreateFailed when the injected schtasks call always returns false, got " + outcome;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dir, true); } catch { }
+            }
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreReturnsTaskRunFailedWhenSchtasksRunFails()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "wil-selftest-selfupdatetaskrunfail-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                string exePath = Path.Combine(dir, "WindowsInventoryLiteClient.exe");
+                File.WriteAllBytes(exePath, Encoding.ASCII.GetBytes("original-exe-content"));
+
+                byte[] newContent = Encoding.ASCII.GetBytes("new-exe-content");
+                string actualHash;
+                using (SHA256 sha256 = SHA256.Create())
+                {
+                    actualHash = BitConverter.ToString(sha256.ComputeHash(newContent)).Replace("-", "").ToLowerInvariant();
+                }
+
+                Dictionary<string, object> update = BuildSelfTestUpdateAck("9.9.9", actualHash);
+                ClientOptions options = new ClientOptions();
+                options.ServerUrl = "http://example.invalid/api/v1/inventory";
+                SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options, (url, token) => newContent,
+                    (fileName, arguments) => arguments.IndexOf("/Create", StringComparison.OrdinalIgnoreCase) >= 0);
+
+                if (outcome != SelfUpdateOutcome.TaskRunFailed)
+                {
+                    return "expected TaskRunFailed when /Create succeeds but /Run does not, got " + outcome;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dir, true); } catch { }
+            }
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreReturnsAppliedAndWritesExpectedFiles()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "wil-selftest-selfupdateapplied-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                string exePath = Path.Combine(dir, "WindowsInventoryLiteClient.exe");
+                File.WriteAllBytes(exePath, Encoding.ASCII.GetBytes("original-exe-content"));
+
+                byte[] newContent = Encoding.ASCII.GetBytes("new-exe-content");
+                string actualHash;
+                using (SHA256 sha256 = SHA256.Create())
+                {
+                    actualHash = BitConverter.ToString(sha256.ComputeHash(newContent)).Replace("-", "").ToLowerInvariant();
+                }
+
+                Dictionary<string, object> update = BuildSelfTestUpdateAck("9.9.9", actualHash);
+                ClientOptions options = new ClientOptions();
+                options.ServerUrl = "http://example.invalid/api/v1/inventory";
+                SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options, (url, token) => newContent, (fileName, arguments) => true);
+
+                if (outcome != SelfUpdateOutcome.Applied)
+                {
+                    return "expected Applied when download, hash check, and both schtasks calls all succeed, got " + outcome;
+                }
+
+                string newExePath = exePath + ".new";
+                if (!File.Exists(newExePath))
+                {
+                    return "expected " + newExePath + " to have been written";
+                }
+                byte[] writtenNewExe = File.ReadAllBytes(newExePath);
+                if (Encoding.ASCII.GetString(writtenNewExe) != Encoding.ASCII.GetString(newContent))
+                {
+                    return "expected the written .new file to contain the downloaded bytes";
+                }
+
+                string cmdPath = Path.Combine(dir, "wil-self-update.cmd");
+                if (!File.Exists(cmdPath))
+                {
+                    return "expected " + cmdPath + " to have been written";
+                }
+                string writtenCmd = File.ReadAllText(cmdPath, Encoding.ASCII);
+                string expectedCmd = BuildSelfUpdateCmdScript(exePath, newExePath, "NUL");
+                if (writtenCmd != expectedCmd)
+                {
+                    return "expected the written .cmd content to match BuildSelfUpdateCmdScript's own output exactly";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dir, true); } catch { }
+            }
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreReturnsErrorWhenDownloadThrows()
+        {
+            string dir = Path.Combine(Path.GetTempPath(), "wil-selftest-selfupdateerror-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            try
+            {
+                string exePath = Path.Combine(dir, "WindowsInventoryLiteClient.exe");
+                byte[] originalContent = Encoding.ASCII.GetBytes("original-exe-content");
+                File.WriteAllBytes(exePath, originalContent);
+
+                Dictionary<string, object> update = BuildSelfTestUpdateAck("9.9.9", "aaaa");
+                ClientOptions options = new ClientOptions();
+                options.ServerUrl = "http://example.invalid/api/v1/inventory";
+                SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options,
+                    (url, token) => { throw new InvalidOperationException("simulated download failure"); },
+                    (fileName, arguments) => true);
+
+                if (outcome != SelfUpdateOutcome.Error)
+                {
+                    return "expected Error when the injected download throws, got " + outcome;
+                }
+                byte[] afterContent = File.ReadAllBytes(exePath);
+                if (Encoding.ASCII.GetString(afterContent) != Encoding.ASCII.GetString(originalContent))
+                {
+                    return "expected the original exe to be completely untouched when download throws before any file write";
+                }
+                if (File.Exists(exePath + ".new") || File.Exists(exePath + ".bak") || File.Exists(Path.Combine(dir, "wil-self-update.cmd")))
+                {
+                    return "expected no .new/.bak/.cmd file to exist when download throws before any file write";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dir, true); } catch { }
+            }
         }
 
         // Returns true only if the process both exited within the timeout
