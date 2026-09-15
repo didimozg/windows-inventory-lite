@@ -180,6 +180,7 @@
     if (hash === 'thirdpartysoftware') return { view: 'thirdPartySoftware', subview: null };
     if (hash === 'softwarejobhistory') return { view: 'logging', subview: 'software' };
     if (hash === 'logging-installs') return { view: 'logging', subview: 'installs' };
+    if (hash === 'logging-debug') return { view: 'logging', subview: 'debug' };
     if (hash === 'logging') return { view: 'logging', subview: 'ingestion' };
     // #linux-clients / #linux are kept as aliases of the merged Clients
     // page (same backward-compat pattern as #linux-hardware above and
@@ -214,7 +215,7 @@
       return 'settings-server';
     }
     if (view === 'licenses') return subview === 'sources' ? 'licensekeysources' : subview === 'keys' ? 'licenses-keys' : 'licenses';
-    if (view === 'logging') return subview === 'installs' ? 'logging-installs' : subview === 'software' ? 'softwarejobhistory' : 'logging';
+    if (view === 'logging') return subview === 'installs' ? 'logging-installs' : subview === 'software' ? 'softwarejobhistory' : subview === 'debug' ? 'logging-debug' : 'logging';
     if (view === 'linuxServices') return 'linux-services';
     return view;
   }
@@ -230,6 +231,7 @@
     if (subview === 'ingestion') loadIngestionRejectionLog();
     if (subview === 'installs') loadInstallHistory();
     if (subview === 'software') loadSoftwareJobHistory();
+    if (subview === 'debug') loadDebugLog();
   }
 
   function loadLicensesSubviewData(subview) {
@@ -307,6 +309,8 @@
     byId('loggingSubtabInstalls').setAttribute('aria-selected', String(state.view === 'logging' && state.subview === 'installs'));
     byId('loggingSubtabSoftware').classList.toggle('active', state.view === 'logging' && state.subview === 'software');
     byId('loggingSubtabSoftware').setAttribute('aria-selected', String(state.view === 'logging' && state.subview === 'software'));
+    byId('loggingSubtabDebug').classList.toggle('active', state.view === 'logging' && state.subview === 'debug');
+    byId('loggingSubtabDebug').setAttribute('aria-selected', String(state.view === 'logging' && state.subview === 'debug'));
   }
 
   function text(value) {
@@ -2868,6 +2872,8 @@
         }
         byId('generalDebugLogEnabled').checked = !!data.debugLogEnabled;
         byId('generalDebugLogPath').textContent = data.debugLogPath || '-';
+        byId('generalDebugLogRetentionDays').value = data.debugLogRetentionDays || 7;
+        byId('generalDebugLogMaxSizeMb').value = data.debugLogMaxSizeMb || 10;
         renderConnectionStatus(data);
       })
       .catch(error => {
@@ -2971,6 +2977,8 @@
     const hstsMaxAgeHours = Number.parseInt(byId('generalHstsMaxAgeHours').value, 10) || 24;
     const requireIngestionToken = byId('generalRequireIngestionToken').checked;
     const tokenOverlapHours = Number.parseInt(byId('generalTokenOverlapHours').value, 10) || 24;
+    const debugLogRetentionDays = Number.parseInt(byId('generalDebugLogRetentionDays').value, 10) || 7;
+    const debugLogMaxSizeMb = Number.parseFloat(byId('generalDebugLogMaxSizeMb').value) || 10;
 
     // Only the HTTP port and the Enable HTTP switch can actually move this
     // browser's own connection out from under it - staleHours/httpsPort/
@@ -3005,7 +3013,7 @@
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        staleHours, showUsbStorageIndicator, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, hstsEnabled, hstsMaxAgeHours, ingestionRejectionLogRetentionDays, ingestionRejectionLogMaxEntries, softwareJobAttemptLogRetentionDays, softwareJobAttemptLogMaxEntries, requireIngestionToken, tokenOverlapHours,
+        staleHours, showUsbStorageIndicator, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, hstsEnabled, hstsMaxAgeHours, ingestionRejectionLogRetentionDays, ingestionRejectionLogMaxEntries, softwareJobAttemptLogRetentionDays, softwareJobAttemptLogMaxEntries, requireIngestionToken, tokenOverlapHours, debugLogRetentionDays, debugLogMaxSizeMb,
         acknowledgeRisks: !!acknowledgeRisks, acknowledgeIngestionTokenRisk: !!acknowledgeIngestionTokenRisk,
         debugLogEnabled: byId('generalDebugLogEnabled').checked
       })
@@ -4730,6 +4738,23 @@
       });
   }
 
+  function loadDebugLog() {
+    fetch('/api/v1/server/debug-log', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('debugLogContent').textContent = data.content || '(empty)';
+        const sizeKb = ((data.sizeBytes || 0) / 1024).toFixed(1);
+        byId('debugLogMeta').textContent = `${sizeKb} KB - ${data.path || ''}`;
+      })
+      .catch(error => {
+        byId('debugLogContent').textContent = `Log unavailable: ${error.message}`;
+        byId('debugLogMeta').textContent = '';
+      });
+  }
+
   // Fleet-wide row list for the Licenses > Keys subtab. `index` is this
   // license's position inside THIS client's own `licenses` array - the
   // reveal button needs it to pick the right entry out of
@@ -4941,6 +4966,7 @@
     byId('loggingView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'ingestion'));
     byId('installHistoryView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'installs'));
     byId('softwareJobHistoryView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'software'));
+    byId('debugLogView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'debug'));
     byId('linuxServicesView').classList.toggle('hidden', state.view !== 'linuxServices');
     // Deploy: Actions shows both platforms' sections together (stacked, own
     // headings), Updates and Package are each already cross-platform on one
@@ -5514,6 +5540,8 @@
   byId('loggingSubtabIngestion').addEventListener('click', () => setView('logging', 'ingestion'));
   byId('loggingSubtabInstalls').addEventListener('click', () => setView('logging', 'installs'));
   byId('loggingSubtabSoftware').addEventListener('click', () => setView('logging', 'software'));
+  byId('loggingSubtabDebug').addEventListener('click', () => setView('logging', 'debug'));
+  byId('debugLogRefreshButton').addEventListener('click', loadDebugLog);
   byId('deployTab').addEventListener('click', () => setView('deploy', 'actions'));
   byId('settingsTab').addEventListener('click', () => setView('settings', 'server'));
 

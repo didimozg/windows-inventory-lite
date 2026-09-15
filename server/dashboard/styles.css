@@ -1326,6 +1326,17 @@ pre {
   font-size: var(--font-size-xs);
 }
 
+.debug-log-content {
+  max-width: 100%;
+  max-height: 70vh;
+  overflow-y: auto;
+  overflow-x: auto;
+  padding: var(--space-md);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--code-bg);
+}
+
 .usb-badge {
   display: inline-block;
   margin-left: 6px;
@@ -1777,20 +1788,22 @@ th.sort-desc::after {
 }
 
 /* Every other .pkg-buttons sits at the END of its form (Save/Upload/
-   Download), so it never needs bottom spacing of its own. Three places
+   Download), so it never needs bottom spacing of its own. Four places
    have a .pkg-buttons block sitting BEFORE the next block instead of at
    the end of its own: the Certificate view's Delete button (before the
    certificate file field), Settings > Linux's page-level Save button for
    "Linux client targeting"/"Install defaults" (before the separate
-   "Linux Client update credentials" block below it), and Settings >
+   "Linux Client update credentials" block below it), Settings >
    Windows' page-level Save button for "Active Directory" (before the
    separate "Windows Client update credentials" block added alongside it -
    same crowding bug, reported live a second time on the Windows side
-   after already being fixed once for Linux) - without a gap, all three
-   read as belonging to the wrong section. */
+   after already being fixed once for Linux), and Logging > Debug's
+   Refresh button row (before the <pre> log content block) - without a
+   gap, all four read as belonging to the wrong section. */
 #certificateView > .pkg-buttons,
 #linuxSettingsView > .pkg-buttons,
-#windowsSettingsView > .pkg-buttons {
+#windowsSettingsView > .pkg-buttons,
+#debugLogView > .pkg-buttons {
   margin-bottom: 16px;
 }
 

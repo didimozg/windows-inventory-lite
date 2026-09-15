@@ -230,7 +230,17 @@
                 Enable debug log
               </label>
             </div>
-            <p class="cert-hint">Writes a plain-text log of AD lookups, inventory-report traffic, and server errors to <code id="generalDebugLogPath" class="mono">-</code>. Off by default; only meant to be left on for the duration of a troubleshooting session.</p>
+            <div class="pkg-grid general-grid log-retention-grid">
+              <label class="pkg-token-field">
+                Debug log retention (days)
+                <input id="generalDebugLogRetentionDays" type="number" min="1" max="3650" value="7">
+              </label>
+              <label class="pkg-token-field">
+                Debug log max size (MB)
+                <input id="generalDebugLogMaxSizeMb" type="number" min="1" max="1000" step="0.1" value="10">
+              </label>
+            </div>
+            <p class="cert-hint">Writes a plain-text log of AD lookups, inventory-report traffic, and server errors to <code id="generalDebugLogPath" class="mono">-</code>. Off by default; only meant to be left on for the duration of a troubleshooting session. Oldest lines are dropped automatically once either cap above is exceeded.</p>
           </div>
           <div class="pkg-buttons">
             <button id="generalSaveButton" class="primary-button" type="button">Save</button>
@@ -788,6 +798,7 @@
           <button id="loggingSubtabIngestion" class="subtab-item" role="tab" type="button">Ingestion</button>
           <button id="loggingSubtabInstalls" class="subtab-item" role="tab" type="button">Installs</button>
           <button id="loggingSubtabSoftware" class="subtab-item" role="tab" type="button">Software</button>
+          <button id="loggingSubtabDebug" class="subtab-item" role="tab" type="button">Debug</button>
         </div>
 
         <section id="loggingView" class="hidden" aria-label="Ingestion rejection log">
@@ -808,6 +819,15 @@
             </table>
           </div>
           <div id="ingestionRejectionsPager" class="pager"></div>
+        </section>
+
+        <section id="debugLogView" class="hidden" aria-label="Debug log">
+          <p class="cert-hint">Raw content of the server's debug log (Settings &gt; Diagnostics). Empty until "Enable debug log" is turned on and at least one entry has been written. Oldest lines are dropped automatically once the configured retention/size cap is exceeded.</p>
+          <div class="pkg-buttons">
+            <button id="debugLogRefreshButton" class="export-button" type="button">Refresh</button>
+            <span id="debugLogMeta" class="cert-hint"></span>
+          </div>
+          <pre id="debugLogContent" class="debug-log-content"></pre>
         </section>
 
         <section id="installHistoryView" class="install-panel card-glow hidden" aria-label="Saved client action logs">
