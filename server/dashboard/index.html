@@ -237,7 +237,7 @@
               </label>
               <label class="pkg-token-field">
                 Debug log max size (MB)
-                <input id="generalDebugLogMaxSizeMb" type="number" min="1" max="1000" step="0.1" value="10">
+                <input id="generalDebugLogMaxSizeMb" type="number" min="1" max="100" step="0.1" value="10">
               </label>
             </div>
             <p class="cert-hint">Writes a plain-text log of AD lookups, inventory-report traffic, and server errors to <code id="generalDebugLogPath" class="mono">-</code>. Off by default; only meant to be left on for the duration of a troubleshooting session. Oldest lines are dropped automatically once either cap above is exceeded.</p>

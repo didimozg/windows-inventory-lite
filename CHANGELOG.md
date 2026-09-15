@@ -6,6 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.62.1]
+
+### Fixed
+
+A final whole-branch review of the debug log viewer feature (`[0.62.0]` above) found 4 Important issues and 4 Minor ones addressed here, before the branch was considered fully ready.
+
+- **`GET /api/v1/server/debug-log` raced with `DebugLogger`'s own writer, risking a sharing-violation `IOException` on either side.** The endpoint read the file with plain `File.ReadAllText`/`FileInfo`, uncoordinated with the internal `writeLock` that `DebugLogger.Log`'s append and `PruneIfNeeded`'s rewrite both hold - and `Log`'s catch-all silently swallows a write failure, so a concurrent read could silently drop a log line during the exact troubleshooting session the log exists for. New `DebugLogger.ReadCurrent` reads under the same `writeLock`; `SendDebugLog` now calls it instead of touching the file directly.
+- **`debugLogMaxSizeMb`'s upper bound (1000 MB) was unsafe.** `PruneIfNeeded`'s rewrite path loads the whole file into a `List<string>` while holding `writeLock` - at ~1.1 GB (cap plus slack) this risks `OutOfMemoryException` on .NET Framework, silently swallowed by `Log`'s catch-all, which could disable pruning forever at large configured sizes. Lowered the maximum to 100 MB (still 10x the default) in the settings validation, the config-load validation, and the dashboard's input `max`.
+- **A multi-line logged message (e.g. `ex.ToString()`, used at several `DebugLogger.Log(options, "Error", ...)` call sites) broke the "one line = one timestamp" invariant the prune logic depends on.** Only the first line of such a message got a timestamp; orphaned continuation lines could never be removed by the age filter, and if one ever ended up physically first in the file, the age-based prune trigger was silently disabled for that file's remaining life (only the size cap kept working). `DebugLogger.Log` now sanitizes the whole final message (escaping embedded CR/LF), not just caller-embedded sub-values - both layers coexist, since sanitizing a sub-value (e.g. a client-reported computer name) guards against a forged extra line from that one source, while sanitizing the whole message guards the entry boundary itself against embedded CRLF from any source, internal exception traces included.
+- **`docs/api-reference.md` was never updated for this feature.** Added `debugLogRetentionDays`/`debugLogMaxSizeMb` to the `GET /api/v1/server/settings` field list and the `POST` validation-range list, plus a new `### GET /api/v1/server/debug-log` section matching the existing ingestion-rejections section's style.
+- `PruneDebugLogLines` had a `<= 0` guard for `maxSizeBytes` but not for `retentionDays` - a bare `new ServerOptions()` used outside `Parse()` defaults `DebugLogRetentionDays` to 0, which would otherwise make every parseable line look infinitely old and wipe the log via the age filter alone. Added the matching guard.
+- The dashboard's Debug tab now shows the configured size cap and formats the size in MB once above ~1 MB (`"2.3 MB / 10 MB cap - <path>"`), instead of always showing raw KB with no cap for context.
+- Corrected an inaccurate self-test comment (`TestSendDebugLogLargeFileWithNonAsciiExceeds16MbLimit` claimed "~3.5MB of UTF-8 on disk"; the actual marker/repeat-count math is ~11.5MB).
+- `PruneIfNeeded` now checks the cheap `FileInfo.Length` size threshold before the extra file open in `TryGetOldestLineTimestampUtc`, skipping that second open whenever the file is already over the size cap (pruning is needed either way). The common under-cap case still needs both checks, since the age-only trigger has to keep working there too - documented as a partial, behavior-preserving optimization rather than a full fix.
+
+269 self-tests (up from 267 - two new: the `retentionDays <= 0` guard, and `Log` sanitizing an embedded CR/LF into one physical line), 166/166 Pester unchanged (no `.ps1` file touched).
+
 ## [0.62.0]
 
 ### Added

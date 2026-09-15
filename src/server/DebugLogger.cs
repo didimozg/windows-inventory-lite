@@ -26,7 +26,19 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            string line = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + " [" + category + "] " + message;
+            // SanitizeForLog on the whole message (not just caller-embedded
+            // sub-values like a client-reported computer name) guarantees
+            // every entry is exactly one physical line, no matter what a
+            // caller passes in - e.g. an exception's ToString(), which
+            // contains embedded \r\n per stack frame. Without this, only the
+            // first line of such a message gets the timestamp prefix the
+            // rest of this class's prune/parse logic depends on: the age
+            // filter can never remove the resulting untimestamped
+            // continuation lines, and if one ever ends up physically first
+            // in the file, TryGetOldestLineTimestampUtc (which only reads
+            // line 1) returns false permanently, silently disabling the
+            // age-based prune trigger for the rest of that file's life.
+            string line = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + " [" + category + "] " + SanitizeForLog(message);
 
             try
             {
@@ -50,6 +62,27 @@ namespace WindowsInventoryLite
             }
         }
 
+        // Reads the file's current content under writeLock, so a concurrent
+        // DebugLogger.Log call (a plain append or a PruneIfNeeded rewrite) can
+        // never race with a read - without this, File.AppendAllText/
+        // File.WriteAllLines's share mode does not permit a concurrent read,
+        // producing a sharing-violation IOException on one side or the other.
+        internal static string ReadCurrent(ServerOptions options, out long sizeBytes)
+        {
+            lock (writeLock)
+            {
+                string path = ResolvePath(options);
+                if (!File.Exists(path))
+                {
+                    sizeBytes = 0;
+                    return "";
+                }
+                string content = File.ReadAllText(path, Encoding.UTF8);
+                sizeBytes = new FileInfo(path).Length;
+                return content;
+            }
+        }
+
         // Checked on every write but only pays for a read+rewrite when
         // genuinely over budget - mirrors RecordIngestionRejection's own
         // "count > maxEntries + slack OR oldest entry aged out" dual
@@ -66,11 +99,27 @@ namespace WindowsInventoryLite
             long slackBytes = Math.Max(maxSizeBytes / 10, 64L * 1024L);
 
             FileInfo info = new FileInfo(path);
-            DateTime oldestTimestampUtc;
-            bool oldestLineAgedOut = TryGetOldestLineTimestampUtc(path, out oldestTimestampUtc)
-                && (DateTime.UtcNow - oldestTimestampUtc).TotalDays > options.DebugLogRetentionDays;
+            bool overSizeCap = info.Length > maxSizeBytes + slackBytes;
 
-            if (info.Length <= maxSizeBytes + slackBytes && !oldestLineAgedOut)
+            // TryGetOldestLineTimestampUtc opens the file a second time just to
+            // read its first line - skippable here when the size check alone
+            // already means a prune is needed. It can NOT be skipped in the
+            // opposite case: most writes land here comfortably under the size
+            // cap, and the age-only trigger (a line ages out while the file is
+            // still small) has to keep working in exactly that common case, so
+            // the second file open is unavoidable there. This only saves the
+            // extra open in the already-over-budget case - a documented
+            // trade-off, not a missed optimization; pruning behavior is
+            // unchanged either way.
+            bool oldestLineAgedOut = false;
+            if (!overSizeCap)
+            {
+                DateTime oldestTimestampUtc;
+                oldestLineAgedOut = TryGetOldestLineTimestampUtc(path, out oldestTimestampUtc)
+                    && (DateTime.UtcNow - oldestTimestampUtc).TotalDays > options.DebugLogRetentionDays;
+            }
+
+            if (!overSizeCap && !oldestLineAgedOut)
             {
                 return;
             }
@@ -94,15 +143,30 @@ namespace WindowsInventoryLite
         // DebugLogMaxSizeMb to 0 and silently discard every line).
         internal static List<string> PruneDebugLogLines(List<string> lines, DateTime nowUtc, int retentionDays, long maxSizeBytes)
         {
-            List<string> withinAge = new List<string>();
-            foreach (string line in lines)
+            List<string> withinAge;
+            if (retentionDays <= 0)
             {
-                DateTime lineTimestampUtc;
-                if (TryParseDebugLogLineTimestamp(line, out lineTimestampUtc) && (nowUtc - lineTimestampUtc).TotalDays > retentionDays)
+                // Same reasoning as maxSizeBytes's own <= 0 guard below: a bare
+                // `new ServerOptions()` used directly in a test, rather than one
+                // that went through Parse(), would otherwise default
+                // DebugLogRetentionDays to 0 and (nowUtc - lineTimestampUtc).TotalDays > 0
+                // would evaluate true for almost every parseable line, silently
+                // wiping the log via the age filter alone. Skip the age filter
+                // entirely instead; the size trim below still applies normally.
+                withinAge = lines;
+            }
+            else
+            {
+                withinAge = new List<string>();
+                foreach (string line in lines)
                 {
-                    continue;
+                    DateTime lineTimestampUtc;
+                    if (TryParseDebugLogLineTimestamp(line, out lineTimestampUtc) && (nowUtc - lineTimestampUtc).TotalDays > retentionDays)
+                    {
+                        continue;
+                    }
+                    withinAge.Add(line);
                 }
-                withinAge.Add(line);
             }
 
             if (maxSizeBytes <= 0)

@@ -23,7 +23,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.62.0";
+        internal const string ProductVersion = "0.62.1";
 
         private static int Main(string[] args)
         {
@@ -933,7 +933,7 @@ namespace WindowsInventoryLite
                 {
                     string debugLogMaxSizeText = GetConfigString(config, "DebugLogMaxSizeMb");
                     double debugLogMaxSizeFromConfig;
-                    if (!String.IsNullOrEmpty(debugLogMaxSizeText) && Double.TryParse(debugLogMaxSizeText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out debugLogMaxSizeFromConfig) && debugLogMaxSizeFromConfig >= 1 && debugLogMaxSizeFromConfig <= 1000)
+                    if (!String.IsNullOrEmpty(debugLogMaxSizeText) && Double.TryParse(debugLogMaxSizeText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out debugLogMaxSizeFromConfig) && debugLogMaxSizeFromConfig >= 1 && debugLogMaxSizeFromConfig <= 100)
                     {
                         options.DebugLogMaxSizeMb = debugLogMaxSizeFromConfig;
                     }
@@ -9798,12 +9798,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 string debugLogMaxSizeText = Convert.ToString(payload["debugLogMaxSizeMb"]);
                 if (!Double.TryParse(debugLogMaxSizeText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out debugLogMaxSizeMb) && !Double.TryParse(debugLogMaxSizeText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.CurrentCulture, out debugLogMaxSizeMb))
                 {
-                    SendText(stream, "{\"error\":\"debugLogMaxSizeMb must be between 1 and 1000\"}", "application/json; charset=utf-8", 400);
+                    SendText(stream, "{\"error\":\"debugLogMaxSizeMb must be between 1 and 100\"}", "application/json; charset=utf-8", 400);
                     return;
                 }
-                if (debugLogMaxSizeMb < 1 || debugLogMaxSizeMb > 1000)
+                if (debugLogMaxSizeMb < 1 || debugLogMaxSizeMb > 100)
                 {
-                    SendText(stream, "{\"error\":\"debugLogMaxSizeMb must be between 1 and 1000\"}", "application/json; charset=utf-8", 400);
+                    SendText(stream, "{\"error\":\"debugLogMaxSizeMb must be between 1 and 100\"}", "application/json; charset=utf-8", 400);
                     return;
                 }
                 options.DebugLogMaxSizeMb = debugLogMaxSizeMb;
@@ -9856,13 +9856,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         private void SendDebugLog(Stream stream)
         {
             string path = DebugLogger.ResolvePath(options);
-            string content = "";
-            long sizeBytes = 0;
-            if (File.Exists(path))
-            {
-                content = File.ReadAllText(path, Encoding.UTF8);
-                sizeBytes = new FileInfo(path).Length;
-            }
+            // Reads under DebugLogger's own writeLock, so this can never race
+            // with a concurrent DebugLogger.Log append/prune - see ReadCurrent's
+            // own comment in DebugLogger.cs.
+            long sizeBytes;
+            string content = DebugLogger.ReadCurrent(options, out sizeBytes);
 
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["content"] = content;
@@ -9871,7 +9869,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
             // Use a dedicated serializer with a much higher limit for this endpoint only.
             // The shared CreateJsonSerializer() limit of 16MB is too low for debug logs
-            // near their admin-configured max size (up to 1000 MB) once non-ASCII characters
+            // near their admin-configured max size (up to 100 MB) once non-ASCII characters
             // (common in Russian deployments) and backslashes (ubiquitous in exception stacks)
             // are escaped: \uXXXX expands to 6 chars, backslashes double. This endpoint is
             // admin-only, so the higher limit carries no new externally-triggerable risk.
@@ -13290,8 +13288,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "PruneDebugLogLines drops lines older than the retention-days cap", TestPruneDebugLogLinesDropsAgedOutLines);
             allPassed &= SelfTestCheck(output, "PruneDebugLogLines drops oldest lines first over the size cap", TestPruneDebugLogLinesDropsOldestOverSizeCap);
             allPassed &= SelfTestCheck(output, "PruneDebugLogLines skips the size trim (rather than discarding everything) when maxSizeBytes is 0", TestPruneDebugLogLinesZeroMaxSizeSkipsSizeTrim);
+            allPassed &= SelfTestCheck(output, "PruneDebugLogLines skips the age trim (rather than discarding everything) when retentionDays is 0", TestPruneDebugLogLinesZeroRetentionDaysSkipsAgeTrim);
             allPassed &= SelfTestCheck(output, "DebugLogger.TryParseDebugLogLineTimestamp rejects a malformed line and parses a well-formed one", TestDebugLoggerTryParseLineTimestampRejectsMalformedLine);
             allPassed &= SelfTestCheck(output, "DebugLogger.Log prunes an oversized file on its next write", TestDebugLoggerLogPrunesOversizedFileOnNextWrite);
+            allPassed &= SelfTestCheck(output, "DebugLogger.Log sanitizes an embedded CR/LF so a multi-line message still writes exactly one physical line", TestDebugLoggerLogSanitizesEmbeddedNewlines);
             allPassed &= SelfTestCheck(output, "SecretProtector round-trips a value through Protect/Unprotect", TestSecretProtectorRoundTrip);
             allPassed &= SelfTestCheck(output, "SecretProtector.Unprotect passes through a legacy plaintext value", TestSecretProtectorLegacyPlaintext);
             allPassed &= SelfTestCheck(output, "EncryptInventoryLicenseKeys DPAPI-protects each licenses[].key in place", TestEncryptInventoryLicenseKeysProtectsPlaintextKeys);
@@ -14677,7 +14677,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             // content exceeds the old shared CreateJsonSerializer() limit of 16MB.
             // Cyrillic characters (common in Russian deployments) are escaped as
             // \uXXXX (6 chars) by JavaScriptSerializer, and backslashes are
-            // doubled. This test writes ~3.5MB of Cyrillic text (approx 21MB when
+            // doubled. This test writes ~11.5MB of marker text (approx 21MB when
             // escaped), which would fail with the old 16MB limit but succeeds with
             // the new Int32.MaxValue limit on the dedicated serializer.
             string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-debuglogendpoint3-" + Guid.NewGuid().ToString("N"));
@@ -14688,19 +14688,19 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 options.DataPath = tempDir;
                 options.DebugLogEnabled = true;
                 options.DebugLogRetentionDays = 7;
-                options.DebugLogMaxSizeMb = 1000;
+                options.DebugLogMaxSizeMb = 100;
 
                 // Write a large non-ASCII log line to trigger the escaping expansion.
                 // Repeats a synthetic marker (not natural-language text, to keep this
                 // source file English-only per this project's own convention) built
                 // from a non-ASCII symbol so JavaScriptSerializer must \uXXXX-escape
-                // it - ~3.5MB of UTF-8 on disk becomes ~21MB once escaped as JSON.
+                // it - ~11.5MB of UTF-8 on disk becomes ~21MB once escaped as JSON.
                 string nonAsciiMarker = "NonAsciiTestMarker: " + new string('★', 31) + ". ";
                 StringBuilder largeLog = new StringBuilder();
                 largeLog.Append("[");
                 largeLog.Append(DateTime.UtcNow.ToString("o"));
                 largeLog.Append("] Client: ");
-                // Repeat the marker to build ~3.5MB of content
+                // Repeat the marker to build ~11.5MB of content
                 const int repeatCount = 100000;
                 for (int i = 0; i < repeatCount; i++)
                 {
@@ -16132,6 +16132,26 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return null;
         }
 
+        private static string TestPruneDebugLogLinesZeroRetentionDaysSkipsAgeTrim()
+        {
+            // Mirrors TestPruneDebugLogLinesZeroMaxSizeSkipsSizeTrim's own
+            // reasoning, for the corresponding retentionDays <= 0 guard: a
+            // bare `new ServerOptions()` used directly in a test defaults
+            // DebugLogRetentionDays to 0, which would otherwise make every
+            // parseable line look infinitely old and wipe the log via the
+            // age filter alone.
+            DateTime now = new DateTime(2026, 9, 15, 12, 0, 0, DateTimeKind.Utc);
+            List<string> lines = new List<string>();
+            lines.Add(now.AddDays(-10).ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + " [Client] old");
+            lines.Add(now.AddMinutes(-1).ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + " [Client] recent");
+            List<string> result = DebugLogger.PruneDebugLogLines(lines, now, 0, 10 * 1024 * 1024);
+            if (result.Count != 2)
+            {
+                return "expected the age trim to be skipped entirely when retentionDays is 0, got " + result.Count + " line(s)";
+            }
+            return null;
+        }
+
         private static string TestDebugLoggerTryParseLineTimestampRejectsMalformedLine()
         {
             DateTime parsed;
@@ -16223,6 +16243,46 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     return "expected at least one pre-seeded line to have been dropped, but " + survivingLines.Length + " lines remain out of " + preseedLines.Count + " pre-seeded";
                 }
 
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
+        private static string TestDebugLoggerLogSanitizesEmbeddedNewlines()
+        {
+            // Proves DebugLogger.Log now sanitizes the WHOLE message (not just
+            // caller-embedded sub-values, which already went through
+            // SanitizeForLog before this fix) - so a caller passing a
+            // multi-line string (e.g. an exception's ToString(), which
+            // contains embedded \r\n per stack frame) still produces exactly
+            // one physical line, preserving the "every line starts with a
+            // timestamp" invariant TryParseDebugLogLineTimestamp and
+            // TryGetOldestLineTimestampUtc depend on.
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-debuglog-multiline-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(tempDir);
+                ServerOptions options = new ServerOptions();
+                options.DataPath = tempDir;
+                options.DebugLogEnabled = true;
+                options.DebugLogRetentionDays = 7;
+                options.DebugLogMaxSizeMb = 10;
+
+                DebugLogger.Log(options, "Error", "line one\r\nline two\r\nline three");
+
+                string logPath = DebugLogger.ResolvePath(options);
+                string[] fileLines = File.ReadAllLines(logPath, Encoding.UTF8);
+                if (fileLines.Length != 1)
+                {
+                    return "expected a multi-line message to produce exactly one physical line, got " + fileLines.Length;
+                }
+                if (fileLines[0].IndexOf("line one\\r\\nline two\\r\\nline three", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the embedded CR/LF to be escaped in place, got: " + fileLines[0];
+                }
                 return null;
             }
             finally

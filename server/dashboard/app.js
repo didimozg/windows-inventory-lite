@@ -4746,8 +4746,12 @@
       })
       .then(data => {
         byId('debugLogContent').textContent = data.content || '(empty)';
-        const sizeKb = ((data.sizeBytes || 0) / 1024).toFixed(1);
-        byId('debugLogMeta').textContent = `${sizeKb} KB - ${data.path || ''}`;
+        const sizeBytes = data.sizeBytes || 0;
+        const sizeText = sizeBytes >= 1024 * 1024
+          ? `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
+          : `${(sizeBytes / 1024).toFixed(1)} KB`;
+        const capMb = Number.parseFloat(byId('generalDebugLogMaxSizeMb').value) || 10;
+        byId('debugLogMeta').textContent = `${sizeText} / ${capMb} MB cap - ${data.path || ''}`;
       })
       .catch(error => {
         byId('debugLogContent').textContent = `Log unavailable: ${error.message}`;
