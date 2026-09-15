@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.62.2]
+
+### Fixed
+
+- **Key-based SSH push/uninstall to a Linux client could not reach a target running a modern OpenSSH server.** `Install-ClientDebianSSH.ps1`/`Uninstall-ClientDebianSSH.ps1`'s key-auth path used Windows' built-in `ssh.exe`/`scp.exe`/`ssh-keyscan.exe`, which cannot negotiate the `sntrup761x25519-sha512@openssh.com` key-exchange algorithm recent OpenSSH versions offer (confirmed live against a real Debian 13/OpenSSH 10.0p2 target - `choose_kex: unsupported KEX method ...`). Both scripts now route key-auth through the already-bundled `plink.exe`/`pscp.exe` (previously only used for password-auth), which already handles this algorithm correctly. Since `plink`/`pscp` cannot read an OpenSSH-format private key directly, a new in-process converter (`Convert-OpenSshKeyToPpk`, pure PowerShell/.NET, no new bundled tool) produces PuTTY's `.ppk` format once per script run - `puttygen.exe` and Pageant were both investigated as alternatives and confirmed unusable for headless conversion on Windows (see `docs/superpowers/specs/2026-09-15-ssh-key-auth-via-plink-design.md` for the full investigation). RSA keys only; a passphrase-protected key or a non-RSA key type now produces a clear, specific error instead of a confusing native-tool failure. The old `ssh-keyscan`/`ssh-keygen`-based host-key-pinning machinery is removed from both scripts entirely, since both auth modes now share PuTTY's own `-hostkey` fingerprint check.
+
 ## [0.62.1]
 
 ### Fixed
