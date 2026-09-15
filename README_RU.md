@@ -53,10 +53,10 @@ Windows Inventory Lite - легкий инструмент инвентариз�
 .\src\Install-Client.ps1 -ServerUrl 'http://<сервер>:8080/api/v1/inventory' -IntervalHours 6
 ```
 
-либо развернуть Linux-клиент по SSH:
+либо развернуть Linux-клиент по SSH, используя приватный RSA-ключ в формате OpenSSH:
 
 ```powershell
-.\src\Install-ClientDebianSSH.ps1 -ComputerName 192.0.2.10 -ServerUrl 'https://<сервер>/api/v1/linux/inventory' -CredentialUsername root -KeyPath C:\path\to\id_ed25519
+.\src\Install-ClientDebianSSH.ps1 -ComputerName 192.0.2.10 -ServerUrl 'https://<сервер>/api/v1/linux/inventory' -CredentialUsername root -KeyPath C:\path\to\id_rsa
 ```
 
 Полный список параметров каждого скрипта, все ключи `server-config.json`, развёртывание через GPO и push через WinRM - в [docs/parameters-reference.md](./docs/parameters-reference.md).

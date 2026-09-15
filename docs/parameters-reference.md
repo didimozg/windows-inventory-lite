@@ -223,7 +223,7 @@ For remote client uninstalls, see [Uninstall-ClientWinRM.ps1](#uninstall-clientw
 - `src/server/`: standalone C# Windows Service server and embedded dashboard.
 - `linux-client/`: Go source for the Debian/Ubuntu Linux client, plus a committed prebuilt binary as a fallback for machines without a Go toolchain.
 - `deploy/client/`: GPO startup deployment script and command wrapper for the Windows client.
-- `deploy/linux-client/`: PuTTY (`plink.exe`/`pscp.exe`) binaries and provenance notes for password-based SSH pushes.
+- `deploy/linux-client/`: PuTTY (`plink.exe`/`pscp.exe`) binaries and provenance notes for password- and key-based SSH pushes.
 - `server/dashboard/`: static dashboard files copied by the server installer.
 - `docs/`: threat model, API reference, and this parameters reference.
 - `examples/`: example install and one-shot commands.

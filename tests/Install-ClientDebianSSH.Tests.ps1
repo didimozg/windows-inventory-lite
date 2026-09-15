@@ -453,3 +453,37 @@ Private-MAC: 03f3a01d75da47d59ffa45cfb8ffd9a30492b684
         }
     }
 }
+
+# This project has no shared module - Convert-OpenSshKeyToPpk is duplicated,
+# byte-for-byte, in both Install-ClientDebianSSH.ps1 and
+# Uninstall-ClientDebianSSH.ps1 (see either script's own doc comment on the
+# function). Keeping the two copies in sync relies entirely on manual
+# vigilance; this is the cheapest possible guard against silent drift
+# between them - added as part of the 2026-09-15 SSH key-auth final review.
+Describe 'Windows Inventory Lite Convert-OpenSshKeyToPpk stays in sync between Install and Uninstall scripts' {
+    It 'is byte-for-byte identical in both scripts' {
+        $projectRoot = Split-Path -Parent $PSScriptRoot
+        $installPath = Join-Path -Path $projectRoot -ChildPath 'src\Install-ClientDebianSSH.ps1'
+        $uninstallPath = Join-Path -Path $projectRoot -ChildPath 'src\Uninstall-ClientDebianSSH.ps1'
+
+        function Get-FunctionText {
+            param([string]$Path, [string]$FunctionName)
+            $tokens = $null
+            $errors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+            $functionAsts = $ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $FunctionName
+            }, $true)
+            if ($functionAsts.Count -ne 1) {
+                throw "Expected exactly one '$FunctionName' function in $Path, found $($functionAsts.Count)"
+            }
+            return $functionAsts[0].Extent.Text
+        }
+
+        $installText = Get-FunctionText -Path $installPath -FunctionName 'Convert-OpenSshKeyToPpk'
+        $uninstallText = Get-FunctionText -Path $uninstallPath -FunctionName 'Convert-OpenSshKeyToPpk'
+
+        $installText | Should -Be $uninstallText
+    }
+}

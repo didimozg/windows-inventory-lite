@@ -184,6 +184,13 @@ function Convert-OpenSshKeyToPpk {
         [Array]::Reverse($lenBytes)
         $len = [System.BitConverter]::ToUInt32($lenBytes, 0)
         $Offset.Value += 4
+        # $Bytes[$Offset.Value..($Offset.Value - 1)] for a zero-length string
+        # is a DESCENDING PowerShell range (e.g. 5..4), which returns the
+        # wrong byte(s) instead of an empty array - only the comment field
+        # can be zero-length in practice, but handle it explicitly.
+        if ($len -eq 0) {
+            return ,(New-Object byte[] 0)
+        }
         $val = $Bytes[$Offset.Value..($Offset.Value + $len - 1)]
         $Offset.Value += $len
         return ,$val
@@ -200,7 +207,9 @@ function Convert-OpenSshKeyToPpk {
         throw "SSH private key was not found: $KeyPath"
     }
 
-    $raw = Get-Content -LiteralPath $KeyPath -Raw
+    # [System.IO.File]::ReadAllText, not Get-Content -Raw: this script
+    # declares #requires -Version 2.0, and -Raw is a PS 3.0+ parameter.
+    $raw = [System.IO.File]::ReadAllText($KeyPath)
     $lines = $raw -split "`n" | Where-Object { $_ -notmatch '-----BEGIN|-----END' -and $_.Trim() -ne '' }
     $blob = [Convert]::FromBase64String(($lines -join '').Trim())
 
@@ -323,6 +332,17 @@ function Invoke-PlinkWithAuth {
         [string]$ConvertedKeyPath
     )
 
+    # A silent auth-mode fallback in credential-handling code is a hard
+    # error, not a fallback: every real call site always supplies exactly
+    # one of these two, so either state means a bug elsewhere (or a future
+    # caller that forgot to pass either).
+    if ([string]::IsNullOrEmpty($ConvertedKeyPath) -and [string]::IsNullOrEmpty($PlainPassword)) {
+        throw "Invoke-PlinkWithAuth requires either -PlainPassword or -ConvertedKeyPath."
+    }
+    if (-not [string]::IsNullOrEmpty($ConvertedKeyPath) -and -not [string]::IsNullOrEmpty($PlainPassword)) {
+        throw "Invoke-PlinkWithAuth requires exactly one of -PlainPassword or -ConvertedKeyPath, not both."
+    }
+
     $pwFile = $null
     try {
         $authArgs = @()
@@ -428,8 +448,43 @@ if ($MyInvocation.InvocationName -ne '.') {
 
     $script:ConvertedKeyPath = $null
     if (-not $usingPassword) {
-        $script:ConvertedKeyPath = [System.IO.Path]::GetTempFileName() + '.ppk'
-        Convert-OpenSshKeyToPpk -KeyPath $KeyPath -OutputPath $script:ConvertedKeyPath
+        # [System.IO.Path]::GetTempFileName() creates an empty file at the
+        # name it returns - appending '.ppk' targets a DIFFERENT path, so the
+        # original placeholder must be deleted here or it leaks in %TEMP%
+        # forever (only the .ppk path is ever cleaned up below).
+        $tempPlaceholder = [System.IO.Path]::GetTempFileName()
+        $script:ConvertedKeyPath = $tempPlaceholder + '.ppk'
+        Remove-Item -LiteralPath $tempPlaceholder -Force -ErrorAction SilentlyContinue
+        try {
+            Convert-OpenSshKeyToPpk -KeyPath $KeyPath -OutputPath $script:ConvertedKeyPath
+
+            # The converted .ppk is a fully decrypted RSA private key, alive
+            # for the entire script run across every target in $ComputerName,
+            # its path visible in process listings via -i - it gets the same
+            # restricted-ACL treatment as the -pwfile temp file (see
+            # Invoke-PlinkWithAuth), rather than just inheriting %TEMP%'s
+            # own ACL.
+            # -Path, not -LiteralPath: this script requires only PS 2.0
+            # (#requires above), and Get-Acl/Set-Acl only gained -LiteralPath
+            # in PS 3.0. $script:ConvertedKeyPath is always a script-built
+            # path, never wildcard-shaped, so -Path's wildcard expansion is a
+            # safe substitute here.
+            $acl = Get-Acl -Path $script:ConvertedKeyPath
+            $acl.SetAccessRuleProtection($true, $false)
+            $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($currentUser, 'FullControl', 'Allow')
+            $acl.AddAccessRule($rule)
+            Set-Acl -Path $script:ConvertedKeyPath -AclObject $acl
+        }
+        catch {
+            # Conversion (or the ACL step) itself failed - the outer
+            # try/finally below is not entered yet at this point, so this
+            # narrower cleanup covers the gap. Plain delete, not
+            # Clear-TempPasswordFile: the file may not exist yet or may be
+            # only partially written.
+            Remove-Item -LiteralPath $script:ConvertedKeyPath -Force -ErrorAction SilentlyContinue
+            throw
+        }
     }
 
     $hadFailure = $false
@@ -455,7 +510,10 @@ if ($MyInvocation.InvocationName -ne '.') {
     }
     finally {
         if ($script:ConvertedKeyPath) {
-            Remove-Item -LiteralPath $script:ConvertedKeyPath -Force -ErrorAction SilentlyContinue
+            # Same loud-on-failure overwrite-then-delete as the plink
+            # password file above - this is a decrypted RSA private key, not
+            # a file a silent best-effort delete is enough for.
+            Clear-TempPasswordFile -Path $script:ConvertedKeyPath
         }
     }
 
