@@ -9868,7 +9868,15 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             result["content"] = content;
             result["sizeBytes"] = sizeBytes;
             result["path"] = path;
-            JavaScriptSerializer serializer = CreateJsonSerializer();
+
+            // Use a dedicated serializer with a much higher limit for this endpoint only.
+            // The shared CreateJsonSerializer() limit of 16MB is too low for debug logs
+            // near their admin-configured max size (up to 1000 MB) once non-ASCII characters
+            // (common in Russian deployments) and backslashes (ubiquitous in exception stacks)
+            // are escaped: \uXXXX expands to 6 chars, backslashes double. This endpoint is
+            // admin-only, so the higher limit carries no new externally-triggerable risk.
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            serializer.MaxJsonLength = Int32.MaxValue;
             SendJson(stream, serializer.Serialize(result));
         }
 
@@ -13254,6 +13262,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips debugLogRetentionDays/debugLogMaxSizeMb", TestConfigureServerSettingsRoundTripsDebugLogCaps);
             allPassed &= SelfTestCheck(output, "SendDebugLog returns empty content when the log file does not exist", TestSendDebugLogReturnsEmptyContentWhenFileMissing);
             allPassed &= SelfTestCheck(output, "SendDebugLog round-trips real file content", TestSendDebugLogRoundTripsRealFileContent);
+            allPassed &= SelfTestCheck(output, "SendDebugLog handles large files with Cyrillic text exceeding the old 16MB limit", TestSendDebugLogLargeFileWithCyrillicExceeds16MbLimit);
             allPassed &= SelfTestCheck(output, "GetWindowsClientPackageVersions returns null,null when no package files exist", TestGetWindowsClientPackageVersionsReadsBothTargets);
             allPassed &= SelfTestCheck(output, "SendUnauthorized serves the embedded login page for a browser navigation to /, with no WWW-Authenticate", TestSendUnauthorizedServesLoginPageForBrowserNavigation);
             allPassed &= SelfTestCheck(output, "SendUnauthorized keeps the plain-text 401 body for API routes", TestSendUnauthorizedServesPlainTextForApiRequests);
@@ -14652,6 +14661,68 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     if (response.IndexOf("self-test marker line", StringComparison.Ordinal) < 0)
                     {
                         return "expected the endpoint's response to contain the real log line, got: " + response;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
+        private static string TestSendDebugLogLargeFileWithCyrillicExceeds16MbLimit()
+        {
+            // Proves that SendDebugLog can handle a file whose JSON-serialized
+            // content exceeds the old shared CreateJsonSerializer() limit of 16MB.
+            // Cyrillic characters (common in Russian deployments) are escaped as
+            // \uXXXX (6 chars) by JavaScriptSerializer, and backslashes are
+            // doubled. This test writes ~3.5MB of Cyrillic text (approx 21MB when
+            // escaped), which would fail with the old 16MB limit but succeeds with
+            // the new Int32.MaxValue limit on the dedicated serializer.
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-debuglogendpoint3-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(tempDir);
+                ServerOptions options = new ServerOptions();
+                options.DataPath = tempDir;
+                options.DebugLogEnabled = true;
+                options.DebugLogRetentionDays = 7;
+                options.DebugLogMaxSizeMb = 1000;
+
+                // Write a large Cyrillic log line to trigger the escaping expansion.
+                // Use a repeating Cyrillic word (~3.5MB of UTF-8, becomes ~21MB when
+                // escaped as JSON \uXXXX sequences).
+                string cyrillicLine = "Тестовое сообщение на русском языке. ";  // Russian test message
+                StringBuilder largeLog = new StringBuilder();
+                largeLog.Append("[");
+                largeLog.Append(DateTime.UtcNow.ToString("o"));
+                largeLog.Append("] Client: ");
+                // Repeat the Cyrillic line to build ~3.5MB of content
+                const int repeatCount = 100000;
+                for (int i = 0; i < repeatCount; i++)
+                {
+                    largeLog.Append(cyrillicLine);
+                }
+                DebugLogger.Log(options, "Client", largeLog.ToString());
+
+                InventoryServer server = new InventoryServer(options);
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendDebugLog(stream);
+                    byte[] responseBytes = stream.ToArray();
+                    string response = Encoding.UTF8.GetString(responseBytes);
+
+                    // Check that the response starts with HTTP/1.1 200 (not an error).
+                    // The SendJson method prepends the HTTP status line to the body.
+                    if (response.IndexOf("HTTP/1.1 200", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected HTTP 200 response for large Cyrillic log, got: " + response.Substring(0, Math.Min(200, response.Length));
+                    }
+                    // Also verify the Cyrillic content made it through (escaped, but present).
+                    if (response.IndexOf("Тестовое", StringComparison.Ordinal) < 0 && response.IndexOf("\\u0422\\u0435\\u0441\\u0442\\u043e\\u0432\\u043e\\u0435", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected the large Cyrillic content to be present in the response";
                     }
                 }
                 return null;
