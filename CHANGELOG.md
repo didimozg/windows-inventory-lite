@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.62.1]
+
+### Fixed
+
+- **`--console` mode exited within about a second of starting whenever launched without a real interactive console attached** (a script, CI, or an automation tool with stdin closed or piped) - `Console.ReadLine()` returns `null` immediately on stdin EOF instead of blocking, so the server bound its port, printed its startup banner, and shut down again almost instantly. Any external check performed even a moment later (`netstat`, a browser, an HTTP client) correctly saw nothing listening, looking exactly like a bind failure rather than an already-finished process - this was the real cause behind this project's own recurring "scratch server won't bind" flakiness (see `docs/backlog.md`). `Main` now checks `Console.IsInputRedirected`: a real interactive console still gets the original "Press Enter to stop" behavior unchanged, while a non-interactive launch blocks on Ctrl+C instead (`Console.CancelKeyPress`), staying up until deliberately stopped. Verified empirically: launching with stdin redirected from `/dev/null` previously exited in ~732ms; it now stays up and keeps answering requests indefinitely.
+
+269 self-tests (unchanged - this fix is in `Main`'s console entry point, not covered by the self-test harness per this project's own convention of verifying console-mode/HTTP-handler behavior live rather than via stream-mocked tests), 166/166 Pester unchanged (no `.ps1` file touched).
+
 ## [0.62.0]
 
 ### Added

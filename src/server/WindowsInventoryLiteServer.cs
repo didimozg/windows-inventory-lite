@@ -23,7 +23,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.62.0";
+        internal const string ProductVersion = "0.62.1";
 
         private static int Main(string[] args)
         {
@@ -46,8 +46,44 @@ namespace WindowsInventoryLite
                 InventoryServer server = new InventoryServer(options);
                 server.Start();
                 Console.WriteLine("Server URL: http://localhost:" + options.Port + "/");
-                Console.WriteLine("Press Enter to stop.");
-                Console.ReadLine();
+
+                if (Console.IsInputRedirected)
+                {
+                    // No real interactive console attached (e.g. launched by a
+                    // script, CI, or an automation tool with stdin closed or
+                    // piped) - Console.ReadLine() returns null immediately on
+                    // stdin EOF instead of blocking, which used to make the
+                    // server bind, print, and exit within under a second,
+                    // looking exactly like a failure to bind at all to
+                    // whatever external check ran moments later. Block on
+                    // Ctrl+C instead - delivered regardless of stdin
+                    // redirection - so a non-interactive launch stays up
+                    // until deliberately stopped, same as the real service.
+                    Console.WriteLine("No interactive console detected - running until Ctrl+C.");
+                    using (ManualResetEvent stopSignal = new ManualResetEvent(false))
+                    {
+                        ConsoleCancelEventHandler handler = (sender, e) =>
+                        {
+                            e.Cancel = true;
+                            stopSignal.Set();
+                        };
+                        Console.CancelKeyPress += handler;
+                        try
+                        {
+                            stopSignal.WaitOne();
+                        }
+                        finally
+                        {
+                            Console.CancelKeyPress -= handler;
+                        }
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("Press Enter to stop.");
+                    Console.ReadLine();
+                }
+
                 server.Stop();
                 return 0;
             }
