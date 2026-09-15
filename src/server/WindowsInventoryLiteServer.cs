@@ -2111,6 +2111,10 @@ namespace WindowsInventoryLite
                     {
                         SendIngestionRejectionLog(stream);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/server/debug-log")
+                    {
+                        SendDebugLog(stream);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/licenses")
                     {
                         SendLicenses(stream);
@@ -9849,6 +9853,25 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendJson(stream, serializer.Serialize(result));
         }
 
+        private void SendDebugLog(Stream stream)
+        {
+            string path = DebugLogger.ResolvePath(options);
+            string content = "";
+            long sizeBytes = 0;
+            if (File.Exists(path))
+            {
+                content = File.ReadAllText(path, Encoding.UTF8);
+                sizeBytes = new FileInfo(path).Length;
+            }
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["content"] = content;
+            result["sizeBytes"] = sizeBytes;
+            result["path"] = path;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
         private void SendIngestionRejectionLog(Stream stream)
         {
             List<IngestionRejectionEntry> snapshot;
@@ -13229,6 +13252,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips showUsbStorageIndicator", TestConfigureServerSettingsRoundTripsShowUsbStorageIndicator);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips enableWindowsClientSelfUpdate/enableLinuxClientSelfUpdate", TestConfigureServerSettingsRoundTripsSelfUpdateToggles);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips debugLogRetentionDays/debugLogMaxSizeMb", TestConfigureServerSettingsRoundTripsDebugLogCaps);
+            allPassed &= SelfTestCheck(output, "SendDebugLog returns empty content when the log file does not exist", TestSendDebugLogReturnsEmptyContentWhenFileMissing);
+            allPassed &= SelfTestCheck(output, "SendDebugLog round-trips real file content", TestSendDebugLogRoundTripsRealFileContent);
             allPassed &= SelfTestCheck(output, "GetWindowsClientPackageVersions returns null,null when no package files exist", TestGetWindowsClientPackageVersionsReadsBothTargets);
             allPassed &= SelfTestCheck(output, "SendUnauthorized serves the embedded login page for a browser navigation to /, with no WWW-Authenticate", TestSendUnauthorizedServesLoginPageForBrowserNavigation);
             allPassed &= SelfTestCheck(output, "SendUnauthorized keeps the plain-text 401 body for API routes", TestSendUnauthorizedServesPlainTextForApiRequests);
@@ -14579,6 +14604,62 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return "expected GET /api/v1/server/settings to echo back the saved debug-log caps, got: " + responseText;
             }
             return null;
+        }
+
+        private static string TestSendDebugLogReturnsEmptyContentWhenFileMissing()
+        {
+            // Mirrors the existing SendServerSettings self-tests' direct-call
+            // style (e.g. TestConfigureServerSettingsRoundTripsDebugLogCaps in
+            // Task 2) - SendDebugLog is a private instance method, called
+            // directly since this test method lives in the same class. The
+            // DataPath directory is deliberately never created: File.Exists on
+            // a path under a non-existent directory just returns false, which
+            // is exactly the "no debug log written yet" case this test covers.
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-debuglogendpoint-" + Guid.NewGuid().ToString("N"));
+            InventoryServer server = new InventoryServer(options);
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.SendDebugLog(stream);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (response.IndexOf("\"content\":\"\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected empty content when the debug log file does not exist yet, got: " + response;
+                }
+            }
+            return null;
+        }
+
+        private static string TestSendDebugLogRoundTripsRealFileContent()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-debuglogendpoint2-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(tempDir);
+                ServerOptions options = new ServerOptions();
+                options.DataPath = tempDir;
+                options.DebugLogEnabled = true;
+                options.DebugLogRetentionDays = 7;
+                options.DebugLogMaxSizeMb = 10;
+                DebugLogger.Log(options, "Client", "self-test marker line");
+
+                InventoryServer server = new InventoryServer(options);
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendDebugLog(stream);
+                    string response = Encoding.UTF8.GetString(stream.ToArray());
+                    if (response.IndexOf("self-test marker line", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected the endpoint's response to contain the real log line, got: " + response;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
         }
 
         private static string TestGetWindowsClientPackageVersionsReadsBothTargets()
