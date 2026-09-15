@@ -9265,6 +9265,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             result["softwareJobAttemptLogMaxEntries"] = options.SoftwareJobAttemptLogMaxEntries;
             result["debugLogEnabled"] = options.DebugLogEnabled;
             result["debugLogPath"] = DebugLogger.ResolvePath(options);
+            result["debugLogRetentionDays"] = options.DebugLogRetentionDays;
+            result["debugLogMaxSizeMb"] = options.DebugLogMaxSizeMb;
             JavaScriptSerializer serializer = CreateJsonSerializer();
             SendJson(stream, serializer.Serialize(result));
         }
@@ -9772,6 +9774,36 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 // make the server write an arbitrary file path.
                 options.DebugLogEnabled = Convert.ToBoolean(payload["debugLogEnabled"]);
                 updates["DebugLogEnabled"] = options.DebugLogEnabled ? "true" : "false";
+            }
+
+            if (payload.ContainsKey("debugLogRetentionDays"))
+            {
+                int debugLogRetentionDays;
+                if (!Int32.TryParse(Convert.ToString(payload["debugLogRetentionDays"]), out debugLogRetentionDays) || debugLogRetentionDays < 1 || debugLogRetentionDays > 3650)
+                {
+                    SendText(stream, "{\"error\":\"debugLogRetentionDays must be between 1 and 3650\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.DebugLogRetentionDays = debugLogRetentionDays;
+                updates["DebugLogRetentionDays"] = debugLogRetentionDays.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("debugLogMaxSizeMb"))
+            {
+                double debugLogMaxSizeMb;
+                string debugLogMaxSizeText = payload["debugLogMaxSizeMb"].ToString();
+                if (!Double.TryParse(debugLogMaxSizeText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out debugLogMaxSizeMb) && !Double.TryParse(debugLogMaxSizeText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.CurrentCulture, out debugLogMaxSizeMb))
+                {
+                    SendText(stream, "{\"error\":\"debugLogMaxSizeMb must be between 1 and 1000\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                if (debugLogMaxSizeMb < 1 || debugLogMaxSizeMb > 1000)
+                {
+                    SendText(stream, "{\"error\":\"debugLogMaxSizeMb must be between 1 and 1000\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.DebugLogMaxSizeMb = debugLogMaxSizeMb;
+                updates["DebugLogMaxSizeMb"] = debugLogMaxSizeMb.ToString(System.Globalization.CultureInfo.InvariantCulture);
             }
 
             if (payload.ContainsKey("requireIngestionToken"))
@@ -13196,6 +13228,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips windowsDefaultIntervalHours/SoftwareCheckIntervalHours/tokenOverlapHours", TestConfigureServerSettingsRoundTripsWindowsDefaultsAndTokenOverlap);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips showUsbStorageIndicator", TestConfigureServerSettingsRoundTripsShowUsbStorageIndicator);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips enableWindowsClientSelfUpdate/enableLinuxClientSelfUpdate", TestConfigureServerSettingsRoundTripsSelfUpdateToggles);
+            allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips debugLogRetentionDays/debugLogMaxSizeMb", TestConfigureServerSettingsRoundTripsDebugLogCaps);
             allPassed &= SelfTestCheck(output, "GetWindowsClientPackageVersions returns null,null when no package files exist", TestGetWindowsClientPackageVersionsReadsBothTargets);
             allPassed &= SelfTestCheck(output, "SendUnauthorized serves the embedded login page for a browser navigation to /, with no WWW-Authenticate", TestSendUnauthorizedServesLoginPageForBrowserNavigation);
             allPassed &= SelfTestCheck(output, "SendUnauthorized keeps the plain-text 401 body for API routes", TestSendUnauthorizedServesPlainTextForApiRequests);
@@ -14496,6 +14529,56 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 try { Directory.Delete(options.DataPath, true); } catch { }
             }
+        }
+
+        private static string TestConfigureServerSettingsRoundTripsDebugLogCaps()
+        {
+            // Mirrors TestConfigureServerSettingsValidatesSessionLifetimeHours's
+            // exact setup: ConfigureServerSettings/SendServerSettings are private
+            // instance methods, called directly (not via reflection) since this
+            // test method lives in the same class. DataPath must be set (even
+            // though this test never touches disk) because SendServerSettings
+            // resolves DebugLogger.ResolvePath(options) for display.
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.EnableHttp = true;
+            options.DebugLogRetentionDays = 7;
+            options.DebugLogMaxSizeMb = 10;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-debuglogsettings-" + Guid.NewGuid().ToString("N"));
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Path = "/api/v1/server/settings";
+            request.Headers = new Dictionary<string, string>();
+            request.Body = "{\"debugLogRetentionDays\":14,\"debugLogMaxSizeMb\":25.5}";
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.ConfigureServerSettings(stream, request);
+            }
+
+            if (options.DebugLogRetentionDays != 14)
+            {
+                return "expected DebugLogRetentionDays to become 14, got " + options.DebugLogRetentionDays;
+            }
+            if (options.DebugLogMaxSizeMb != 25.5)
+            {
+                return "expected DebugLogMaxSizeMb to become 25.5, got " + options.DebugLogMaxSizeMb;
+            }
+
+            string responseText;
+            using (MemoryStream getStream = new MemoryStream())
+            {
+                server.SendServerSettings(getStream);
+                responseText = Encoding.UTF8.GetString(getStream.ToArray());
+            }
+            if (responseText.IndexOf("\"debugLogRetentionDays\":14", StringComparison.Ordinal) < 0 || responseText.IndexOf("\"debugLogMaxSizeMb\":25.5", StringComparison.Ordinal) < 0)
+            {
+                return "expected GET /api/v1/server/settings to echo back the saved debug-log caps, got: " + responseText;
+            }
+            return null;
         }
 
         private static string TestGetWindowsClientPackageVersionsReadsBothTargets()
