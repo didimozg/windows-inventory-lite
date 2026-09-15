@@ -262,6 +262,13 @@ namespace WindowsInventoryLite
         // deployment; not rotated or size-capped.
         public bool DebugLogEnabled;
         public string DebugLogPath;
+        // Bounds _logs/debug.log's size and age - see DebugLogger.cs's
+        // PruneDebugLogLines. Defaults are deliberately much smaller than
+        // the other logs' (30-day/5000-entry) defaults: this log is meant
+        // for the duration of one troubleshooting session, not long-term
+        // retention.
+        public int DebugLogRetentionDays;
+        public double DebugLogMaxSizeMb;
         // Optional, off by default - dashboard-configured only, no
         // Install-Server.ps1 CLI flag by design. Used as a fallback WinRM
         // credential for Client Auto-Update pushes when the service's own
@@ -327,6 +334,8 @@ namespace WindowsInventoryLite
             options.SoftwareJobAttemptLogRetentionDays = 90;
             options.SoftwareJobAttemptLogMaxEntries = 5000;
             options.SoftwareShareScanIntervalMinutes = 60;
+            options.DebugLogRetentionDays = 7;
+            options.DebugLogMaxSizeMb = 10;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -911,6 +920,24 @@ namespace WindowsInventoryLite
                 if (String.IsNullOrEmpty(options.DebugLogPath))
                 {
                     options.DebugLogPath = GetConfigString(config, "DebugLogPath");
+                }
+                if (options.DebugLogRetentionDays == 7)
+                {
+                    string debugLogRetentionText = GetConfigString(config, "DebugLogRetentionDays");
+                    int debugLogRetentionFromConfig;
+                    if (!String.IsNullOrEmpty(debugLogRetentionText) && Int32.TryParse(debugLogRetentionText, out debugLogRetentionFromConfig) && debugLogRetentionFromConfig >= 1 && debugLogRetentionFromConfig <= 3650)
+                    {
+                        options.DebugLogRetentionDays = debugLogRetentionFromConfig;
+                    }
+                }
+                if (options.DebugLogMaxSizeMb == 10)
+                {
+                    string debugLogMaxSizeText = GetConfigString(config, "DebugLogMaxSizeMb");
+                    double debugLogMaxSizeFromConfig;
+                    if (!String.IsNullOrEmpty(debugLogMaxSizeText) && Double.TryParse(debugLogMaxSizeText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out debugLogMaxSizeFromConfig) && debugLogMaxSizeFromConfig >= 1 && debugLogMaxSizeFromConfig <= 1000)
+                    {
+                        options.DebugLogMaxSizeMb = debugLogMaxSizeFromConfig;
+                    }
                 }
             }
             catch
@@ -13193,6 +13220,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath defaults under DataPath when unset", TestDebugLoggerResolvePathDefault);
             allPassed &= SelfTestCheck(output, "DebugLogger.ResolvePath honors an explicit DebugLogPath", TestDebugLoggerResolvePathOverride);
             allPassed &= SelfTestCheck(output, "DebugLogger.SanitizeForLog escapes embedded CR/LF", TestDebugLoggerSanitizeForLog);
+            allPassed &= SelfTestCheck(output, "PruneDebugLogLines keeps everything under both caps", TestPruneDebugLogLinesUnderBothCaps);
+            allPassed &= SelfTestCheck(output, "PruneDebugLogLines drops lines older than the retention-days cap", TestPruneDebugLogLinesDropsAgedOutLines);
+            allPassed &= SelfTestCheck(output, "PruneDebugLogLines drops oldest lines first over the size cap", TestPruneDebugLogLinesDropsOldestOverSizeCap);
+            allPassed &= SelfTestCheck(output, "PruneDebugLogLines skips the size trim (rather than discarding everything) when maxSizeBytes is 0", TestPruneDebugLogLinesZeroMaxSizeSkipsSizeTrim);
+            allPassed &= SelfTestCheck(output, "DebugLogger.TryParseDebugLogLineTimestamp rejects a malformed line and parses a well-formed one", TestDebugLoggerTryParseLineTimestampRejectsMalformedLine);
+            allPassed &= SelfTestCheck(output, "DebugLogger.Log prunes an oversized file on its next write", TestDebugLoggerLogPrunesOversizedFileOnNextWrite);
             allPassed &= SelfTestCheck(output, "SecretProtector round-trips a value through Protect/Unprotect", TestSecretProtectorRoundTrip);
             allPassed &= SelfTestCheck(output, "SecretProtector.Unprotect passes through a legacy plaintext value", TestSecretProtectorLegacyPlaintext);
             allPassed &= SelfTestCheck(output, "EncryptInventoryLicenseKeys DPAPI-protects each licenses[].key in place", TestEncryptInventoryLicenseKeysProtectsPlaintextKeys);
@@ -15799,6 +15832,124 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return "expected the escaped '\\r\\n' sequence to be visible, got '" + actual + "'";
             }
             return null;
+        }
+
+        private static string TestPruneDebugLogLinesUnderBothCaps()
+        {
+            DateTime now = new DateTime(2026, 9, 15, 12, 0, 0, DateTimeKind.Utc);
+            List<string> lines = new List<string>();
+            lines.Add(now.AddMinutes(-2).ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + " [Client] a");
+            lines.Add(now.AddMinutes(-1).ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + " [Client] b");
+            List<string> result = DebugLogger.PruneDebugLogLines(lines, now, 7, 10 * 1024 * 1024);
+            if (result.Count != 2)
+            {
+                return "expected both lines kept when under both caps, got " + result.Count;
+            }
+            return null;
+        }
+
+        private static string TestPruneDebugLogLinesDropsAgedOutLines()
+        {
+            DateTime now = new DateTime(2026, 9, 15, 12, 0, 0, DateTimeKind.Utc);
+            List<string> lines = new List<string>();
+            lines.Add(now.AddDays(-10).ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + " [Client] old");
+            lines.Add(now.AddMinutes(-1).ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + " [Client] recent");
+            List<string> result = DebugLogger.PruneDebugLogLines(lines, now, 7, 10 * 1024 * 1024);
+            if (result.Count != 1 || result[0].IndexOf("recent") < 0)
+            {
+                return "expected only the recent line to survive a 7-day retention cap, got " + result.Count + " line(s)";
+            }
+            return null;
+        }
+
+        private static string TestPruneDebugLogLinesDropsOldestOverSizeCap()
+        {
+            DateTime now = new DateTime(2026, 9, 15, 12, 0, 0, DateTimeKind.Utc);
+            List<string> lines = new List<string>();
+            for (int i = 0; i < 5; i++)
+            {
+                lines.Add(now.AddMinutes(-5 + i).ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + " [Client] line" + i + " " + new string('x', 100));
+            }
+            long oneLineBytes = Encoding.UTF8.GetByteCount(lines[4]) + Environment.NewLine.Length;
+            List<string> result = DebugLogger.PruneDebugLogLines(lines, now, 3650, oneLineBytes * 2);
+            if (result.Count != 2)
+            {
+                return "expected exactly 2 newest lines to survive a 2-line-equivalent size cap, got " + result.Count;
+            }
+            if (result[0].IndexOf("line3") < 0 || result[1].IndexOf("line4") < 0)
+            {
+                return "expected the two newest lines (line3, line4) to survive, got: " + String.Join(" | ", result.ToArray());
+            }
+            return null;
+        }
+
+        private static string TestPruneDebugLogLinesZeroMaxSizeSkipsSizeTrim()
+        {
+            DateTime now = new DateTime(2026, 9, 15, 12, 0, 0, DateTimeKind.Utc);
+            List<string> lines = new List<string>();
+            lines.Add(now.AddMinutes(-1).ToString("yyyy-MM-ddTHH:mm:ss.fffZ") + " [Client] a");
+            List<string> result = DebugLogger.PruneDebugLogLines(lines, now, 3650, 0);
+            if (result.Count != 1)
+            {
+                return "expected the size trim to be skipped entirely when maxSizeBytes is 0, got " + result.Count + " line(s)";
+            }
+            return null;
+        }
+
+        private static string TestDebugLoggerTryParseLineTimestampRejectsMalformedLine()
+        {
+            DateTime parsed;
+            if (DebugLogger.TryParseDebugLogLineTimestamp("not a timestamp line", out parsed))
+            {
+                return "expected a malformed line to fail to parse";
+            }
+            if (DebugLogger.TryParseDebugLogLineTimestamp("2026-09-15T12:00:00.000Z [Client] ok", out parsed))
+            {
+                if (parsed != new DateTime(2026, 9, 15, 12, 0, 0, 0, DateTimeKind.Utc))
+                {
+                    return "expected the parsed timestamp to match the line's own prefix, got " + parsed.ToString("O");
+                }
+                return null;
+            }
+            return "expected a well-formed line to parse successfully";
+        }
+
+        private static string TestDebugLoggerLogPrunesOversizedFileOnNextWrite()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-debuglog-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(tempDir);
+                ServerOptions options = new ServerOptions();
+                options.DataPath = tempDir;
+                options.DebugLogEnabled = true;
+                options.DebugLogRetentionDays = 3650;
+                options.DebugLogMaxSizeMb = 0.001; // ~1048 bytes - trivially small, forces a prune almost immediately
+
+                for (int i = 0; i < 50; i++)
+                {
+                    DebugLogger.Log(options, "Client", "padding line number " + i + " " + new string('x', 60));
+                }
+
+                string path = DebugLogger.ResolvePath(options);
+                long maxSizeBytes = (long)(options.DebugLogMaxSizeMb * 1024 * 1024);
+                long slackBytes = Math.Max(maxSizeBytes / 10, 64L * 1024L);
+                FileInfo info = new FileInfo(path);
+                if (info.Length > maxSizeBytes + slackBytes)
+                {
+                    return "expected the file to have been pruned back under the size cap plus slack after 50 writes, actual size " + info.Length + " bytes, cap+slack " + (maxSizeBytes + slackBytes);
+                }
+                string[] survivingLines = File.ReadAllLines(path);
+                if (survivingLines.Length == 0 || survivingLines[survivingLines.Length - 1].IndexOf("padding line number 49") < 0)
+                {
+                    return "expected the newest line to survive pruning";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
         }
 
         private static string TestSecretProtectorRoundTrip()
