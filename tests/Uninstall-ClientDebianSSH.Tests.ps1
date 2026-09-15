@@ -51,14 +51,17 @@ Describe 'Windows Inventory Lite Uninstall-ClientDebianSSH' {
         }
     }
 
-    It 'Invoke-RemoteCommand uses ssh.exe for key auth' {
-        Mock ssh.exe { $global:LASTEXITCODE = 0; return 'ok' }
+    It 'Invoke-RemoteCommand key auth calls Invoke-PlinkWithAuth with plink.exe and the converted key path, no -pwfile' {
+        Mock Invoke-PlinkWithAuth { return 'ok' }
         $script:usingPassword = $false
-        $script:KeyPath = 'C:\fake\key.pem'
+        $script:plinkPath = 'plink.exe'
+        $script:ConvertedKeyPath = 'C:\fake\converted.ppk'
         $script:CredentialUsername = 'root'
 
         Invoke-RemoteCommand -TargetComputer '192.0.2.10' -Command 'echo hi'
 
-        Should -Invoke ssh.exe -Times 1
+        Should -Invoke Invoke-PlinkWithAuth -Times 1 -ParameterFilter {
+            $ExePath -eq 'plink.exe' -and $ConvertedKeyPath -eq 'C:\fake\converted.ppk' -and ($Arguments -notcontains '-pwfile')
+        }
     }
 }

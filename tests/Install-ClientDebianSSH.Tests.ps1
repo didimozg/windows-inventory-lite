@@ -126,19 +126,22 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
         $timerContent | Should -Match 'Unit=wil-linux-client-status.service'
     }
 
-    It 'Invoke-RemoteCommand uses ssh.exe for key auth' {
-        Mock ssh.exe { $global:LASTEXITCODE = 0; return 'ok' }
+    It 'Invoke-RemoteCommand key auth calls Invoke-PlinkWithAuth with plink.exe and the converted key path, no -pwfile' {
+        Mock Invoke-PlinkWithAuth { return 'ok' }
         $script:usingPassword = $false
-        $script:KeyPath = 'C:\fake\key.pem'
+        $script:plinkPath = 'plink.exe'
+        $script:ConvertedKeyPath = 'C:\fake\converted.ppk'
         $script:CredentialUsername = 'root'
 
         Invoke-RemoteCommand -TargetComputer '192.0.2.10' -Command 'echo hi'
 
-        Should -Invoke ssh.exe -Times 1
+        Should -Invoke Invoke-PlinkWithAuth -Times 1 -ParameterFilter {
+            $ExePath -eq 'plink.exe' -and $ConvertedKeyPath -eq 'C:\fake\converted.ppk' -and ($Arguments -notcontains '-pwfile')
+        }
     }
 
-    It 'Invoke-RemoteCommand password auth calls Invoke-PlinkWithPasswordFile with plink.exe, no -pw/-batch in its own Arguments, and the real password' {
-        Mock Invoke-PlinkWithPasswordFile { return 'ok' }
+    It 'Invoke-RemoteCommand password auth calls Invoke-PlinkWithAuth with plink.exe, no -pw/-batch in its own Arguments, and the real password' {
+        Mock Invoke-PlinkWithAuth { return 'ok' }
         $script:usingPassword = $true
         $script:plinkPath = 'plink.exe'
         $script:CredentialUsername = 'root'
@@ -146,13 +149,13 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
 
         Invoke-RemoteCommand -TargetComputer '192.0.2.10' -Command 'echo hi'
 
-        Should -Invoke Invoke-PlinkWithPasswordFile -Times 1 -ParameterFilter {
+        Should -Invoke Invoke-PlinkWithAuth -Times 1 -ParameterFilter {
             $ExePath -eq 'plink.exe' -and ($Arguments -notcontains '-pw') -and ($Arguments -notcontains '-batch') -and ($PlainPassword -eq 'unused-test-password')
         }
     }
 
-    It 'Copy-FileToRemote password auth calls Invoke-PlinkWithPasswordFile with pscp.exe, no -pw/-batch in its own Arguments, and the real password' {
-        Mock Invoke-PlinkWithPasswordFile { return 'ok' }
+    It 'Copy-FileToRemote password auth calls Invoke-PlinkWithAuth with pscp.exe, no -pw/-batch in its own Arguments, and the real password' {
+        Mock Invoke-PlinkWithAuth { return 'ok' }
         $script:usingPassword = $true
         $script:pscpPath = 'pscp.exe'
         $script:CredentialUsername = 'root'
@@ -160,12 +163,26 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
 
         Copy-FileToRemote -TargetComputer '192.0.2.10' -LocalPath 'C:\fake\wil-linux-client' -RemotePath '/tmp/wil-linux-client-install/wil-linux-client'
 
-        Should -Invoke Invoke-PlinkWithPasswordFile -Times 1 -ParameterFilter {
+        Should -Invoke Invoke-PlinkWithAuth -Times 1 -ParameterFilter {
             $ExePath -eq 'pscp.exe' -and ($Arguments -notcontains '-pw') -and ($Arguments -notcontains '-batch') -and ($PlainPassword -eq 'unused-test-password')
         }
     }
 
-    Context 'Invoke-PlinkWithPasswordFile' {
+    It 'Copy-FileToRemote key auth calls Invoke-PlinkWithAuth with pscp.exe and the converted key path, no -pwfile' {
+        Mock Invoke-PlinkWithAuth { return 'ok' }
+        $script:usingPassword = $false
+        $script:pscpPath = 'pscp.exe'
+        $script:ConvertedKeyPath = 'C:\fake\converted.ppk'
+        $script:CredentialUsername = 'root'
+
+        Copy-FileToRemote -TargetComputer '192.0.2.10' -LocalPath 'C:\fake\wil-linux-client' -RemotePath '/tmp/wil-linux-client-install/wil-linux-client'
+
+        Should -Invoke Invoke-PlinkWithAuth -Times 1 -ParameterFilter {
+            $ExePath -eq 'pscp.exe' -and $ConvertedKeyPath -eq 'C:\fake\converted.ppk' -and ($Arguments -notcontains '-pwfile')
+        }
+    }
+
+    Context 'Invoke-PlinkWithAuth' {
         It 'never puts the password on the plink/pscp command line, and cleans up its temp password file' {
             # A fake "plink" that just echoes what -pwfile pointed at, so the
             # test can assert on the real file content/cleanup without a
@@ -177,7 +194,7 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
             Add-Content -LiteralPath $fakeExe -Value 'exit /b 0' -Encoding ASCII
 
             $capturedPwFile = $null
-            $output = Invoke-PlinkWithPasswordFile -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'echo hi') -PlainPassword 'unused-test-password'
+            $output = Invoke-PlinkWithAuth -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'echo hi') -PlainPassword 'unused-test-password'
 
             $output | Should -Match ([regex]::Escape('-pwfile'))
             $output | Should -Match '-batch'
@@ -194,19 +211,19 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
             Add-Content -LiteralPath $fakeExe -Value 'echo The server''s host key is not cached and -batch prevents interactive prompting 1>&2' -Encoding ASCII
             Add-Content -LiteralPath $fakeExe -Value 'exit /b 1' -Encoding ASCII
 
-            { Invoke-PlinkWithPasswordFile -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'echo hi') -PlainPassword 'unused-test-password' } |
+            { Invoke-PlinkWithAuth -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'echo hi') -PlainPassword 'unused-test-password' } |
                 Should -Throw '*host key*'
         }
     }
 
-    Context 'Invoke-PlinkWithPasswordFile host key handling' {
+    Context 'Invoke-PlinkWithAuth host key handling' {
         It 'passes -hostkey when ExpectedHostKey is supplied' {
             $fakeExe = Join-Path -Path $TestDrive -ChildPath 'fake-plink-hostkey-arg.cmd'
             Set-Content -LiteralPath $fakeExe -Value '@echo off' -Encoding ASCII
             Add-Content -LiteralPath $fakeExe -Value 'echo ARGS: %*' -Encoding ASCII
             Add-Content -LiteralPath $fakeExe -Value 'exit /b 0' -Encoding ASCII
 
-            $output = Invoke-PlinkWithPasswordFile -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'true') -PlainPassword 'unused-test-password' -ExpectedHostKey 'SHA256:abc123'
+            $output = Invoke-PlinkWithAuth -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'true') -PlainPassword 'unused-test-password' -ExpectedHostKey 'SHA256:abc123'
 
             $output | Should -Match ([regex]::Escape('-hostkey'))
             $output | Should -Match ([regex]::Escape('SHA256:abc123'))
@@ -218,7 +235,7 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
             Add-Content -LiteralPath $fakeExe -Value 'echo ARGS: %*' -Encoding ASCII
             Add-Content -LiteralPath $fakeExe -Value 'exit /b 0' -Encoding ASCII
 
-            $output = Invoke-PlinkWithPasswordFile -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'true') -PlainPassword 'unused-test-password' -ExpectedHostKey ''
+            $output = Invoke-PlinkWithAuth -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'true') -PlainPassword 'unused-test-password' -ExpectedHostKey ''
 
             $output | Should -Not -Match ([regex]::Escape('-hostkey'))
         }
@@ -229,7 +246,7 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
             Add-Content -LiteralPath $fakeExe -Value 'echo The server''s host key is not cached and -batch prevents interactive prompting 1>&2' -Encoding ASCII
             Add-Content -LiteralPath $fakeExe -Value 'exit /b 1' -Encoding ASCII
 
-            { Invoke-PlinkWithPasswordFile -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'true') -PlainPassword 'unused-test-password' -ExpectedHostKey '' } |
+            { Invoke-PlinkWithAuth -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'true') -PlainPassword 'unused-test-password' -ExpectedHostKey '' } |
                 Should -Throw '*is not yet trusted by this machine*'
         }
 
@@ -239,7 +256,7 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
             Add-Content -LiteralPath $fakeExe -Value 'echo WARNING - POTENTIAL SECURITY BREACH! The server''s host key does not match the one PuTTY has cached 1>&2' -Encoding ASCII
             Add-Content -LiteralPath $fakeExe -Value 'exit /b 1' -Encoding ASCII
 
-            { Invoke-PlinkWithPasswordFile -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'true') -PlainPassword 'unused-test-password' -ExpectedHostKey 'SHA256:abc123' } |
+            { Invoke-PlinkWithAuth -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'true') -PlainPassword 'unused-test-password' -ExpectedHostKey 'SHA256:abc123' } |
                 Should -Throw '*has CHANGED since it was last trusted here*'
         }
     }
@@ -350,60 +367,6 @@ Private-MAC: 03f3a01d75da47d59ffa45cfb8ffd9a30492b684
         }
     }
 
-    Context 'Select-KnownHostsLineByFingerprint' {
-        BeforeAll {
-            # Real ssh-keyscan / ssh-keygen -lf output captured from a live host.
-            # ssh-keygen -lf emits one line per NON-COMMENT known_hosts line, in
-            # the same order, with the fingerprint as whitespace field 2.
-            $script:scanLines = @(
-                '# host.example.local:22 SSH-2.0-OpenSSH_9.2p1',
-                'host.example.local ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrq',
-                'host.example.local ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbml',
-                'host.example.local ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLs'
-            )
-            $script:fingerprintLines = @(
-                '3072 SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s host.example.local (RSA)',
-                '256 SHA256:p2QAMXNIC1TJYWeIOttrVc98/R1BUFWu3/LiyKgUfQM host.example.local (ECDSA)',
-                '256 SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU host.example.local (ED25519)'
-            )
-        }
-
-        It 'returns the single matching line and ignores the other presented keys' {
-            $line = Select-KnownHostsLineByFingerprint -KeyScanLines $script:scanLines -FingerprintLines $script:fingerprintLines -ExpectedHostKey 'SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU'
-            $line | Should -Be 'host.example.local ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLs'
-        }
-
-        It 'matches a non-final key, proving it is not just returning the last line' {
-            $line = Select-KnownHostsLineByFingerprint -KeyScanLines $script:scanLines -FingerprintLines $script:fingerprintLines -ExpectedHostKey 'SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s'
-            $line | Should -Be 'host.example.local ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrq'
-        }
-
-        It 'returns null when no presented key matches the pinned fingerprint' {
-            $line = Select-KnownHostsLineByFingerprint -KeyScanLines $script:scanLines -FingerprintLines $script:fingerprintLines -ExpectedHostKey 'SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
-            $line | Should -BeNullOrEmpty
-        }
-
-        It 'returns null when the target presented no keys at all' {
-            $line = Select-KnownHostsLineByFingerprint -KeyScanLines @('# nothing but a comment') -FingerprintLines @() -ExpectedHostKey 'SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU'
-            $line | Should -BeNullOrEmpty
-        }
-    }
-
-    Context 'Get-OpenSshKeyModeOptions' {
-        It 'pins to the supplied known_hosts file with strict checking when a fingerprint was verified' {
-            $options = Get-OpenSshKeyModeOptions -ExpectedHostKey 'SHA256:abc' -KnownHostsPath 'C:\temp\kh.txt'
-            ($options -join ' ') | Should -Match ([regex]::Escape('StrictHostKeyChecking=yes'))
-            ($options -join ' ') | Should -Match ([regex]::Escape('UserKnownHostsFile=C:\temp\kh.txt'))
-            ($options -join ' ') | Should -Not -Match ([regex]::Escape('accept-new'))
-        }
-
-        It 'falls back to first-contact accept-new when no fingerprint is pinned' {
-            $options = Get-OpenSshKeyModeOptions -ExpectedHostKey '' -KnownHostsPath $null
-            ($options -join ' ') | Should -Match ([regex]::Escape('StrictHostKeyChecking=accept-new'))
-            ($options -join ' ') | Should -Not -Match ([regex]::Escape('UserKnownHostsFile'))
-        }
-    }
-
     Context 'New-SystemdUnitFiles token handling' {
         It 'keeps the token out of the unit file and points at the env file instead' {
             $dir = Join-Path -Path $TestDrive -ChildPath 'units-token'
@@ -441,7 +404,7 @@ Private-MAC: 03f3a01d75da47d59ffa45cfb8ffd9a30492b684
 
         # This file holds the ingestion token in plaintext on the LOCAL
         # machine running this script - same class of secret as the plink
-        # -pwfile Invoke-PlinkWithPasswordFile already restricts, and this
+        # -pwfile Invoke-PlinkWithAuth already restricts, and this
         # fix applies that identical ACL treatment here (protect + grant
         # FullControl to only the current user, instead of inheriting
         # whatever $Directory's own ACL happens to be).
@@ -470,39 +433,6 @@ Private-MAC: 03f3a01d75da47d59ffa45cfb8ffd9a30492b684
             Clear-TempPasswordFile -Path $env.EnvPath
 
             Test-Path -LiteralPath $env.EnvPath | Should -BeFalse
-        }
-    }
-
-    Context 'Format-SshKeyscanFailureMessage' {
-        It 'includes ssh-keyscan stderr detail when present, so a KEX-algorithm mismatch is not misreported as "host unreachable"' {
-            # Real-world case: a target running a very new OpenSSH version
-            # (Debian 13, OpenSSH 10.0) can offer a KEX algorithm
-            # (sntrup761x25519-sha512@openssh.com) that an older Windows
-            # OpenSSH client build does not know - ssh-keyscan then emits
-            # zero keys, previously reported as "host unreachable" even
-            # though the host answers fine on port 22. Confirmed live
-            # against a real fleet: TCP connect succeeds, but ssh-keyscan
-            # writes "choose_kex: unsupported KEX method ..." to stderr and
-            # returns no key lines.
-            $message = Format-SshKeyscanFailureMessage -TargetComputer '192.168.4.103' -ScanErrors @('choose_kex: unsupported KEX method sntrup761x25519-sha512@openssh.com')
-            $message | Should -Match ([regex]::Escape('choose_kex: unsupported KEX method sntrup761x25519-sha512@openssh.com'))
-            $message | Should -Match ([regex]::Escape('192.168.4.103'))
-        }
-
-        It 'still reports the generic unreachable message when there is no stderr detail at all' {
-            $message = Format-SshKeyscanFailureMessage -TargetComputer '192.168.4.103' -ScanErrors @()
-            $message | Should -Match 'unreachable'
-        }
-
-        It 'never lets the literal substring "host key" reach the message, even if ssh-keyscan happens to say it' {
-            # ClassifyHostKeyFailure on the server side greps the combined
-            # process output for the case-insensitive substring "host key"
-            # to decide whether a failure means "the target's key changed" -
-            # a diagnostic detail here must never accidentally trigger that,
-            # or a missing-tool/KEX-mismatch failure would be misreported as
-            # a security-relevant host-key change.
-            $message = Format-SshKeyscanFailureMessage -TargetComputer '192.168.4.103' -ScanErrors @('Some hypothetical stderr text mentioning a Host Key in passing')
-            $message | Should -Not -Match '(?i)host key'
         }
     }
 }

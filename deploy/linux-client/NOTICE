@@ -13,6 +13,22 @@ Win32_Process, Task Manager) for the duration of the connection. The temp
 file's contents are overwritten before deletion once the connection
 completes.
 
+plink.exe/pscp.exe are also used for SSH KEY authentication (not just
+password), since 2026-09-15 - Windows' built-in ssh.exe/ssh-keyscan.exe
+cannot negotiate the KEX algorithms recent OpenSSH servers offer (found
+live against a real Debian 13 target), while the bundled PuTTY build
+already handles them. The private key is converted from OpenSSH format
+to PuTTY's own .ppk format entirely in-process by this project's own
+PowerShell code (Convert-OpenSshKeyToPpk in Install-ClientDebianSSH.ps1/
+Uninstall-ClientDebianSSH.ps1, RSA keys only) - PuTTY's own puttygen.exe
+was investigated for this and rejected: the Windows build of puttygen.exe
+is GUI-only and does not support any command-line conversion flags
+(confirmed live, `-O`/`-o`/etc. all rejected as "unrecognised option");
+Pageant (PuTTY's SSH agent) was also tried and also cannot load an
+OpenSSH-format key directly ("Couldn't load this key (OpenSSH SSH-2
+private key (new format))", confirmed live). No third PuTTY binary is
+bundled here as a result - only plink.exe/pscp.exe, exactly as before.
+
 PuTTY (including plink and pscp) is distributed under the MIT license:
 
 Copyright (c) 1997-2024 Simon Tatham.
