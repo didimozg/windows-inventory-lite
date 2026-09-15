@@ -231,6 +231,24 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
             { Invoke-PlinkWithAuth -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'echo hi') -PlainPassword 'unused-test-password' } |
                 Should -Throw '*host key*'
         }
+
+        It 'throws when neither -PlainPassword nor -ConvertedKeyPath is supplied' {
+            $fakeExe = Join-Path -Path $TestDrive -ChildPath 'fake-plink-no-auth.cmd'
+            Set-Content -LiteralPath $fakeExe -Value '@echo off' -Encoding ASCII
+            Add-Content -LiteralPath $fakeExe -Value 'exit /b 0' -Encoding ASCII
+
+            { Invoke-PlinkWithAuth -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'true') } |
+                Should -Throw '*requires either*'
+        }
+
+        It 'throws when both -PlainPassword and -ConvertedKeyPath are supplied' {
+            $fakeExe = Join-Path -Path $TestDrive -ChildPath 'fake-plink-both-auth.cmd'
+            Set-Content -LiteralPath $fakeExe -Value '@echo off' -Encoding ASCII
+            Add-Content -LiteralPath $fakeExe -Value 'exit /b 0' -Encoding ASCII
+
+            { Invoke-PlinkWithAuth -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'true') -PlainPassword 'unused-test-password' -ConvertedKeyPath 'C:\fake\converted.ppk' } |
+                Should -Throw '*not both*'
+        }
     }
 
     Context 'Invoke-PlinkWithAuth host key handling' {
@@ -484,6 +502,6 @@ Describe 'Windows Inventory Lite Convert-OpenSshKeyToPpk stays in sync between I
         $installText = Get-FunctionText -Path $installPath -FunctionName 'Convert-OpenSshKeyToPpk'
         $uninstallText = Get-FunctionText -Path $uninstallPath -FunctionName 'Convert-OpenSshKeyToPpk'
 
-        $installText | Should -Be $uninstallText
+        $installText | Should -BeExactly $uninstallText
     }
 }

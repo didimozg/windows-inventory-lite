@@ -209,7 +209,15 @@ function Convert-OpenSshKeyToPpk {
 
     # [System.IO.File]::ReadAllText, not Get-Content -Raw: this script
     # declares #requires -Version 2.0, and -Raw is a PS 3.0+ parameter.
-    $raw = [System.IO.File]::ReadAllText($KeyPath)
+    # Resolved through Get-Item first, not passed $KeyPath directly:
+    # [System.IO.File]::ReadAllText resolves a relative path against
+    # [Environment]::CurrentDirectory (the process's real working
+    # directory), while the Test-Path check above resolves against
+    # PowerShell's own current location (Get-Location) - the two can differ
+    # after a Set-Location earlier in the same session, which would let a
+    # relative -KeyPath pass Test-Path here and then fail inside .NET with a
+    # confusing raw "file not found" error.
+    $raw = [System.IO.File]::ReadAllText((Get-Item -LiteralPath $KeyPath).FullName)
     $lines = $raw -split "`n" | Where-Object { $_ -notmatch '-----BEGIN|-----END' -and $_.Trim() -ne '' }
     $blob = [Convert]::FromBase64String(($lines -join '').Trim())
 
@@ -456,25 +464,32 @@ if ($MyInvocation.InvocationName -ne '.') {
         $script:ConvertedKeyPath = $tempPlaceholder + '.ppk'
         Remove-Item -LiteralPath $tempPlaceholder -Force -ErrorAction SilentlyContinue
         try {
-            Convert-OpenSshKeyToPpk -KeyPath $KeyPath -OutputPath $script:ConvertedKeyPath
-
             # The converted .ppk is a fully decrypted RSA private key, alive
             # for the entire script run across every target in $ComputerName,
-            # its path visible in process listings via -i - it gets the same
-            # restricted-ACL treatment as the -pwfile temp file (see
-            # Invoke-PlinkWithAuth), rather than just inheriting %TEMP%'s
-            # own ACL.
+            # its path visible in process listings via -i. The empty output
+            # file is created and locked down to only the current user
+            # BEFORE Convert-OpenSshKeyToPpk writes the key content into it
+            # (rather than restricting the ACL only after conversion
+            # returns) - the same ACL-before-content ordering the -pwfile
+            # temp file already uses in Invoke-PlinkWithAuth, so the
+            # plaintext key never sits at inherited %TEMP% permissions even
+            # briefly. [System.IO.File]::WriteAllText inside
+            # Convert-OpenSshKeyToPpk overwrites this existing file in
+            # place, which does not disturb the ACL just applied to it.
             # -Path, not -LiteralPath: this script requires only PS 2.0
             # (#requires above), and Get-Acl/Set-Acl only gained -LiteralPath
             # in PS 3.0. $script:ConvertedKeyPath is always a script-built
             # path, never wildcard-shaped, so -Path's wildcard expansion is a
             # safe substitute here.
+            New-Item -Path $script:ConvertedKeyPath -ItemType File -Force | Out-Null
             $acl = Get-Acl -Path $script:ConvertedKeyPath
             $acl.SetAccessRuleProtection($true, $false)
             $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
             $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($currentUser, 'FullControl', 'Allow')
             $acl.AddAccessRule($rule)
             Set-Acl -Path $script:ConvertedKeyPath -AclObject $acl
+
+            Convert-OpenSshKeyToPpk -KeyPath $KeyPath -OutputPath $script:ConvertedKeyPath
         }
         catch {
             # Conversion (or the ACL step) itself failed - the outer
