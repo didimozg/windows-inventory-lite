@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.62.0]
+
+### Added
+
+- **The server's debug log (`_logs/debug.log`, Settings > Diagnostics > "Enable debug log") is now viewable from the dashboard and automatically bounded in size and age.** Previously an admin had to open the file directly on the server's disk, and the file had no cap at all - a real troubleshooting session this project ran into grew it to roughly 100 printed pages before anyone thought to check. Two new settings, `Debug log retention (days)` (default 7) and `Debug log max size (MB)` (default 10), bound the file the same way the other three logs already are (oldest content dropped first, checked opportunistically on write, not a dedicated timer). A new Logging > Debug subtab renders the file's current content via a new `GET /api/v1/server/debug-log` endpoint, gated by the same session-cookie admin authorization every other dashboard data route already requires. Free-text search across the log was considered during design and deliberately deferred - see `docs/backlog.md`.
+
+267 self-tests (up from 257), 166/166 Pester unchanged (no `.ps1` file touched).
+
 ## [Windows client 0.5.2]
 
 ### Added
