@@ -276,6 +276,80 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
         }
     }
 
+    Context 'Convert-OpenSshKeyToPpk' {
+        BeforeAll {
+            $script:FixtureKeyPath = Join-Path -Path $script:ProjectRoot -ChildPath 'tests\fixtures\wil-test-fixture-key'
+        }
+
+        It 'converts the fixture RSA key to a structurally valid PPK v2 file' {
+            $outputPath = Join-Path -Path $TestDrive -ChildPath 'converted.ppk'
+            Convert-OpenSshKeyToPpk -KeyPath $script:FixtureKeyPath -OutputPath $outputPath
+
+            $content = Get-Content -LiteralPath $outputPath -Raw
+            $content | Should -Match '^PuTTY-User-Key-File-2: ssh-rsa'
+            $content | Should -Match 'Encryption: none'
+            $content | Should -Match 'Comment: wil-test-fixture-key'
+            $content | Should -Match 'Private-MAC: [0-9a-f]{40}'
+        }
+
+        It 'produces exactly the byte-for-byte PPK content already confirmed working against a real plink/pscp connection' {
+            # This exact output (including the MAC) was independently verified during
+            # this plan's own design phase: plink.exe -i <this-output> successfully ran
+            # a remote command, and pscp.exe -i <this-output> successfully copied a
+            # file, both against a real target. A mismatch here means a real
+            # regression in the conversion logic, not just a cosmetic difference.
+            $outputPath = Join-Path -Path $TestDrive -ChildPath 'converted-exact.ppk'
+            Convert-OpenSshKeyToPpk -KeyPath $script:FixtureKeyPath -OutputPath $outputPath
+
+            $expected = @'
+PuTTY-User-Key-File-2: ssh-rsa
+Encryption: none
+Comment: wil-test-fixture-key
+Public-Lines: 6
+AAAAB3NzaC1yc2EAAAADAQABAAABAQDaXjxxEC1RoXqHtQGWMzMpkBSPXklJSdk5
+tepo1EMuH955N68bqYiixAXbVWHj29CI/LcRiU+xr1XmBjpU0mvlYdNQs4u4IQIs
+bDXNlQzrC5Zdl2qp1vQLGZ+cWLMGh3EolXnWqb1I1INjrlTa2e3P6EFqD4tOpw1f
+TvG/0VnfTwI86Z/Rvciz9KwKXxbOedQcQ183wCok4JFsSD9RHmy3M2o/Lt474uYW
+QJproXlcdVQ/BoUObd4AO5kYYGz57sB8OS8919IayqycgojSLG1bp5KIgHqqaCzv
+dbTtzKdT4BHDTmCk8V3X+mapneThooh3qPIv5cwfak6yPNxr7Jx7
+Private-Lines: 14
+AAABAGtUbjjUTrIUwHj7SrBcsgT3wGNHYJYZKh/nfjPQQMTm/R5vdC4QggwedRJ9
+QQQSAsmSDRkdeIJJP9szrHAMjOPN1WORHFeAQeU7uqY1YIgWxe1ygwa/lGvwSDc8
+kaHf6IqeDaio/VRSv9G62hJHk0/hRGWxBjO+gCAcWU6Cw72x2v975VeuhVBaKpaG
+wuH0gO7z0x0zuDbttpdIcYfa+3sJJzIMBjJFYwrotBV8JYV74WLekkeDjff+Rc7C
+fNZv5rOuBLF8U6ShAphwqdtMnNKK2EhlFxY/JckO5PPjIXxqVJnHIPuB0AD61gN8
+R9mhAf59clHDlz9c85xnCbfshiEAAACBAPrNHeyaKiLgIChla63MDCwfFUb4sX83
+ygWNJnT9CYWrrX9Az4tLff0V4xunJqRaREnNNwDi17xJTGOQrwB3boNTfGjDiVzo
+mPdgr6mAAPWmKRmBZLyCtLoeoVhX+Iev9Mr9guWeM4HSH9Z4UQFX4GAWmKg3YYe+
+R8nI/2UovVU3AAAAgQDe5QMSFHt6226S9hkyU3biS4jusH26g4ALFbjY2pQY3+9Q
+WDcj538YHGfNjlc0PJPZ6X9+RcxSIih6shDj/66D5NRcLY8LfR3YgiXTDPHVHOhX
+Pd7exrm+F2WHIRDEUB+oRRTshnsjLVhs63DZEHF6r5Z/UdRmbycCd+vw5ZxU3QAA
+AIBLLYNSdo7Rdgf5/0JhapAiCHMBO50HTFBejohwfzOJ3dMU/cX1tPyht4DpPuhn
+vsvK6MjHypWZ53cvJno/5lIXIdvOAHeYX+PkjICWd5xcKDgSVMANp1itg7qUFmCb
+LIycEe1RD5cYal2crnOUU4jJsb9umUA9DenWRXxuS7CMCw==
+Private-MAC: 03f3a01d75da47d59ffa45cfb8ffd9a30492b684
+'@
+            # Normalize line endings before comparing - StringBuilder.AppendLine
+            # emits Environment.NewLine (CRLF on Windows), the here-string above
+            # may have been normalized to LF by tooling.
+            $actualNormalized = (Get-Content -LiteralPath $outputPath -Raw) -replace "`r`n", "`n"
+            $expectedNormalized = $expected -replace "`r`n", "`n"
+            $actualNormalized.TrimEnd("`n") | Should -Be $expectedNormalized.TrimEnd("`n")
+        }
+
+        It 'throws a clear error for a non-existent key path' {
+            { Convert-OpenSshKeyToPpk -KeyPath (Join-Path -Path $TestDrive -ChildPath 'does-not-exist') -OutputPath (Join-Path -Path $TestDrive -ChildPath 'out.ppk') } |
+                Should -Throw '*was not found*'
+        }
+
+        It 'throws a clear error for a non-openssh-key-v1 file' {
+            $badKey = Join-Path -Path $TestDrive -ChildPath 'not-a-key.txt'
+            Set-Content -LiteralPath $badKey -Value "-----BEGIN OPENSSH PRIVATE KEY-----`nAAAA`n-----END OPENSSH PRIVATE KEY-----" -Encoding ASCII
+            { Convert-OpenSshKeyToPpk -KeyPath $badKey -OutputPath (Join-Path -Path $TestDrive -ChildPath 'out.ppk') } |
+                Should -Throw '*not an OpenSSH private key*'
+        }
+    }
+
     Context 'Select-KnownHostsLineByFingerprint' {
         BeforeAll {
             # Real ssh-keyscan / ssh-keygen -lf output captured from a live host.
