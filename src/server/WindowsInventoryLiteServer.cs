@@ -9791,7 +9791,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (payload.ContainsKey("debugLogMaxSizeMb"))
             {
                 double debugLogMaxSizeMb;
-                string debugLogMaxSizeText = payload["debugLogMaxSizeMb"].ToString();
+                string debugLogMaxSizeText = Convert.ToString(payload["debugLogMaxSizeMb"]);
                 if (!Double.TryParse(debugLogMaxSizeText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out debugLogMaxSizeMb) && !Double.TryParse(debugLogMaxSizeText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.CurrentCulture, out debugLogMaxSizeMb))
                 {
                     SendText(stream, "{\"error\":\"debugLogMaxSizeMb must be between 1 and 1000\"}", "application/json; charset=utf-8", 400);
