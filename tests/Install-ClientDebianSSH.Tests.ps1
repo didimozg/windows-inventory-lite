@@ -136,7 +136,7 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
         Invoke-RemoteCommand -TargetComputer '192.0.2.10' -Command 'echo hi'
 
         Should -Invoke Invoke-PlinkWithAuth -Times 1 -ParameterFilter {
-            $ExePath -eq 'plink.exe' -and $ConvertedKeyPath -eq 'C:\fake\converted.ppk' -and ($Arguments -notcontains '-pwfile')
+            $ExePath -eq 'plink.exe' -and $ConvertedKeyPath -eq 'C:\fake\converted.ppk'
         }
     }
 
@@ -178,7 +178,7 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
         Copy-FileToRemote -TargetComputer '192.0.2.10' -LocalPath 'C:\fake\wil-linux-client' -RemotePath '/tmp/wil-linux-client-install/wil-linux-client'
 
         Should -Invoke Invoke-PlinkWithAuth -Times 1 -ParameterFilter {
-            $ExePath -eq 'pscp.exe' -and $ConvertedKeyPath -eq 'C:\fake\converted.ppk' -and ($Arguments -notcontains '-pwfile')
+            $ExePath -eq 'pscp.exe' -and $ConvertedKeyPath -eq 'C:\fake\converted.ppk'
         }
     }
 
@@ -203,6 +203,23 @@ Describe 'Windows Inventory Lite Install-ClientDebianSSH' {
                 $capturedPwFile = $Matches[1]
                 Test-Path -LiteralPath $capturedPwFile | Should -Be $false
             }
+        }
+
+        It 'uses -i with the converted key path and never touches -pwfile when ConvertedKeyPath is supplied' {
+            # A fake "plink" that just echoes its arguments, so the test can
+            # assert that the real function actually uses -i with the key path
+            # in the key-auth branch, not just that it happens to also
+            # include -i when password auth is also present.
+            $fakeExe = Join-Path -Path $TestDrive -ChildPath 'fake-plink-keyauth.cmd'
+            Set-Content -LiteralPath $fakeExe -Value '@echo off' -Encoding ASCII
+            Add-Content -LiteralPath $fakeExe -Value 'echo ARGS: %*' -Encoding ASCII
+            Add-Content -LiteralPath $fakeExe -Value 'exit /b 0' -Encoding ASCII
+
+            $output = Invoke-PlinkWithAuth -ExePath $fakeExe -Arguments @('-ssh', 'root@192.0.2.10', 'echo hi') -ConvertedKeyPath 'C:\fake\converted.ppk'
+
+            $output | Should -Match ([regex]::Escape('-i'))
+            $output | Should -Match ([regex]::Escape('C:\fake\converted.ppk'))
+            $output | Should -Not -Match ([regex]::Escape('-pwfile'))
         }
 
         It 'throws a clear, actionable error when plink/pscp fails on an untrusted host key under -batch' {

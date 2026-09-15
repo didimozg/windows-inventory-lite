@@ -61,7 +61,7 @@ Describe 'Windows Inventory Lite Uninstall-ClientDebianSSH' {
         Invoke-RemoteCommand -TargetComputer '192.0.2.10' -Command 'echo hi'
 
         Should -Invoke Invoke-PlinkWithAuth -Times 1 -ParameterFilter {
-            $ExePath -eq 'plink.exe' -and $ConvertedKeyPath -eq 'C:\fake\converted.ppk' -and ($Arguments -notcontains '-pwfile')
+            $ExePath -eq 'plink.exe' -and $ConvertedKeyPath -eq 'C:\fake\converted.ppk'
         }
     }
 }
