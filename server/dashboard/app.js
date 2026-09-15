@@ -1516,9 +1516,9 @@
       .then(data => {
         const statusElement = byId('linuxSshToolsStatus');
         if (data.plinkFound && data.pscpFound) {
-          statusElement.textContent = 'plink.exe/pscp.exe found - password-based SSH push is available. Key-based push works regardless.';
+          statusElement.textContent = 'plink.exe/pscp.exe found - both password- and key-based SSH push are available.';
         } else {
-          statusElement.textContent = 'plink.exe/pscp.exe not found - password-based SSH push will fail. See deploy\\linux-client\\NOTICE for how to obtain them. Key-based push works regardless.';
+          statusElement.textContent = 'plink.exe/pscp.exe not found - both password- and key-based SSH push will fail. See deploy\\linux-client\\NOTICE for how to obtain them.';
         }
       })
       .catch(error => {

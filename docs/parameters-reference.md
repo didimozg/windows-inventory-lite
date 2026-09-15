@@ -163,11 +163,11 @@ Requires a Go toolchain (<https://go.dev/dl/>) to rebuild from source. `Install-
 | `-ServerUrl` | `-` | HTTP(S) endpoint that receives Linux client JSON reports. Mandatory (install only). |
 | `-InstallPath` | `/opt/windows-inventory-lite` | Installation directory on the target host. Must be a real subdirectory under `/opt/` - a bare `/opt`, a path outside `/opt/`, or a `.`/`..` path segment is refused. |
 | `-CredentialUsername` | `-` | SSH username. Mandatory. |
-| `-KeyPath` | `-` | Path to an SSH private key, for key-based authentication. |
-| `-CredentialPassword` | `-` | `SecureString` password, for password-based authentication (requires `plink.exe`/`pscp.exe` in `deploy\linux-client\`; Windows' own OpenSSH client cannot authenticate with a password non-interactively). |
+| `-KeyPath` | `-` | Path to an RSA SSH private key (OpenSSH format), for key-based authentication. Converted internally to PuTTY's `.ppk` format before use - see below. |
+| `-CredentialPassword` | `-` | `SecureString` password, for password-based authentication. |
 | `-ExpectedHostKey` | `-` | Pinned `SHA256:...` host key fingerprint from a previous trust decision. When set, the push verifies the target presents a matching key before proceeding; when omitted, the first-ever contact with a host trusts on first use, same as the password path. |
 
-Password-based pushes additionally require `plink.exe`/`pscp.exe` (PuTTY) in `deploy\linux-client\` - see `deploy\linux-client\NOTICE` for provenance and how to obtain them.
+Both password- and key-based pushes require `plink.exe`/`pscp.exe` (PuTTY) in `deploy\linux-client\` - see `deploy\linux-client\NOTICE` for provenance and how to obtain them. Windows' own OpenSSH client is not used by this script at all: it cannot authenticate with a password non-interactively, and separately cannot negotiate the key-exchange algorithms some modern OpenSSH servers require. Key-based authentication requires an RSA key in OpenSSH format with no passphrase - other key types or a passphrase-protected key produce a clear error rather than a silent failure.
 
 ## server-config.json keys
 

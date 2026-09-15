@@ -400,7 +400,7 @@ Streams a ZIP of the Linux client bundle: the client binary, the four systemd un
 
 ### GET /api/v1/server/linux-ssh-tools-status
 
-Checks the *server host's own* local tooling, not anything about a client: whether `plink.exe` and `pscp.exe` (the PuTTY-suite binaries the server uses to SSH out to Linux clients) are present at either the installed-server location or the dev-tree location next to the running assembly. Response: `{"plinkFound": ..., "pscpFound": ...}`.
+Checks the *server host's own* local tooling, not anything about a client: whether `plink.exe` and `pscp.exe` (the PuTTY-suite binaries the server uses to SSH out to Linux clients, for both password- and key-based authentication) are present at either the installed-server location or the dev-tree location next to the running assembly. Response: `{"plinkFound": ..., "pscpFound": ...}`.
 
 ### POST /api/v1/server/linux-ssh-key
 
