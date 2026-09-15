@@ -258,8 +258,7 @@ namespace WindowsInventoryLite
         public int TokenOverlapHours;
         // Off by default - a plain-text file capturing AD lookups,
         // inventory-report traffic, and unhandled server errors. See
-        // DebugLogger.cs. Only meant for troubleshooting a specific
-        // deployment; not rotated or size-capped.
+        // DebugLogger.cs.
         public bool DebugLogEnabled;
         public string DebugLogPath;
         // Bounds _logs/debug.log's size and age - see DebugLogger.cs's
@@ -15923,27 +15922,70 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 ServerOptions options = new ServerOptions();
                 options.DataPath = tempDir;
                 options.DebugLogEnabled = true;
-                options.DebugLogRetentionDays = 3650;
-                options.DebugLogMaxSizeMb = 0.001; // ~1048 bytes - trivially small, forces a prune almost immediately
+                options.DebugLogRetentionDays = 3650; // Allow pre-seeded lines to survive age-based pruning
+                options.DebugLogMaxSizeMb = 0.01; // 10240 bytes
 
-                for (int i = 0; i < 50; i++)
+                string logPath = DebugLogger.ResolvePath(options);
+                string logsDir = Path.GetDirectoryName(logPath);
+                Directory.CreateDirectory(logsDir);
+
+                long maxSizeBytes = (long)(options.DebugLogMaxSizeMb * 1024 * 1024); // 10240
+                long slackBytes = Math.Max(maxSizeBytes / 10, 64L * 1024L); // 65536 (64 KB floor)
+                long threshold = maxSizeBytes + slackBytes; // 75776 bytes
+
+                // Pre-seed the file with enough data to definitely exceed the threshold.
+                // Each line: "2025-01-01T00:00:00.000Z [Test] old line N " + padding (~750 bytes each).
+                // 150 lines * 750 bytes = 112,500 bytes >> 75,776 byte threshold.
+                List<string> preseedLines = new List<string>();
+                for (int i = 0; i < 150; i++)
                 {
-                    DebugLogger.Log(options, "Client", "padding line number " + i + " " + new string('x', 60));
+                    string padding = new string('x', 700); // Timestamp (24) + " [Test] old line " (17) + digit(s) (1-3) + padding = ~750 bytes per line
+                    preseedLines.Add("2025-01-01T00:00:00.000Z [Test] old line " + i + " " + padding);
+                }
+                File.WriteAllLines(logPath, preseedLines, new UTF8Encoding(false));
+
+                FileInfo beforePrune = new FileInfo(logPath);
+                if (beforePrune.Length <= threshold)
+                {
+                    return "pre-seed file size " + beforePrune.Length + " bytes should exceed threshold " + threshold + " bytes; test setup failed";
                 }
 
-                string path = DebugLogger.ResolvePath(options);
-                long maxSizeBytes = (long)(options.DebugLogMaxSizeMb * 1024 * 1024);
-                long slackBytes = Math.Max(maxSizeBytes / 10, 64L * 1024L);
-                FileInfo info = new FileInfo(path);
-                if (info.Length > maxSizeBytes + slackBytes)
+                // Call Log() exactly once - PruneIfNeeded should trigger and reduce file size.
+                DebugLogger.Log(options, "Client", "Final test line to trigger pruning");
+
+                FileInfo afterPrune = new FileInfo(logPath);
+                if (afterPrune.Length > threshold)
                 {
-                    return "expected the file to have been pruned back under the size cap plus slack after 50 writes, actual size " + info.Length + " bytes, cap+slack " + (maxSizeBytes + slackBytes);
+                    return "expected the file to have been pruned below threshold " + threshold + " bytes after one Log() call, actual size " + afterPrune.Length + " bytes";
                 }
-                string[] survivingLines = File.ReadAllLines(path);
-                if (survivingLines.Length == 0 || survivingLines[survivingLines.Length - 1].IndexOf("padding line number 49") < 0)
+
+                string[] survivingLines = File.ReadAllLines(logPath, new UTF8Encoding(false));
+                if (survivingLines.Length == 0)
+                {
+                    return "expected at least one line to survive pruning";
+                }
+
+                // Verify the newest line (the one we just logged) survived.
+                bool newestLineFound = false;
+                foreach (string line in survivingLines)
+                {
+                    if (line.IndexOf("Final test line to trigger pruning") >= 0)
+                    {
+                        newestLineFound = true;
+                        break;
+                    }
+                }
+                if (!newestLineFound)
                 {
                     return "expected the newest line to survive pruning";
                 }
+
+                // Verify that at least one old pre-seeded line was dropped (pruning actually happened).
+                if (survivingLines.Length >= preseedLines.Count)
+                {
+                    return "expected at least one pre-seeded line to have been dropped, but " + survivingLines.Length + " lines remain out of " + preseedLines.Count + " pre-seeded";
+                }
+
                 return null;
             }
             finally
