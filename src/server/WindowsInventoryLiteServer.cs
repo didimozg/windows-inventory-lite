@@ -23,7 +23,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.61.5";
+        internal const string ProductVersion = "0.62.0";
 
         private static int Main(string[] args)
         {
@@ -13262,7 +13262,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips debugLogRetentionDays/debugLogMaxSizeMb", TestConfigureServerSettingsRoundTripsDebugLogCaps);
             allPassed &= SelfTestCheck(output, "SendDebugLog returns empty content when the log file does not exist", TestSendDebugLogReturnsEmptyContentWhenFileMissing);
             allPassed &= SelfTestCheck(output, "SendDebugLog round-trips real file content", TestSendDebugLogRoundTripsRealFileContent);
-            allPassed &= SelfTestCheck(output, "SendDebugLog handles large files with Cyrillic text exceeding the old 16MB limit", TestSendDebugLogLargeFileWithCyrillicExceeds16MbLimit);
+            allPassed &= SelfTestCheck(output, "SendDebugLog handles large files with non-ASCII content exceeding the old 16MB limit", TestSendDebugLogLargeFileWithNonAsciiExceeds16MbLimit);
             allPassed &= SelfTestCheck(output, "GetWindowsClientPackageVersions returns null,null when no package files exist", TestGetWindowsClientPackageVersionsReadsBothTargets);
             allPassed &= SelfTestCheck(output, "SendUnauthorized serves the embedded login page for a browser navigation to /, with no WWW-Authenticate", TestSendUnauthorizedServesLoginPageForBrowserNavigation);
             allPassed &= SelfTestCheck(output, "SendUnauthorized keeps the plain-text 401 body for API routes", TestSendUnauthorizedServesPlainTextForApiRequests);
@@ -14671,7 +14671,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
-        private static string TestSendDebugLogLargeFileWithCyrillicExceeds16MbLimit()
+        private static string TestSendDebugLogLargeFileWithNonAsciiExceeds16MbLimit()
         {
             // Proves that SendDebugLog can handle a file whose JSON-serialized
             // content exceeds the old shared CreateJsonSerializer() limit of 16MB.
@@ -14690,19 +14690,21 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 options.DebugLogRetentionDays = 7;
                 options.DebugLogMaxSizeMb = 1000;
 
-                // Write a large Cyrillic log line to trigger the escaping expansion.
-                // Use a repeating Cyrillic word (~3.5MB of UTF-8, becomes ~21MB when
-                // escaped as JSON \uXXXX sequences).
-                string cyrillicLine = "Тестовое сообщение на русском языке. ";  // Russian test message
+                // Write a large non-ASCII log line to trigger the escaping expansion.
+                // Repeats a synthetic marker (not natural-language text, to keep this
+                // source file English-only per this project's own convention) built
+                // from a non-ASCII symbol so JavaScriptSerializer must \uXXXX-escape
+                // it - ~3.5MB of UTF-8 on disk becomes ~21MB once escaped as JSON.
+                string nonAsciiMarker = "NonAsciiTestMarker: " + new string('★', 31) + ". ";
                 StringBuilder largeLog = new StringBuilder();
                 largeLog.Append("[");
                 largeLog.Append(DateTime.UtcNow.ToString("o"));
                 largeLog.Append("] Client: ");
-                // Repeat the Cyrillic line to build ~3.5MB of content
+                // Repeat the marker to build ~3.5MB of content
                 const int repeatCount = 100000;
                 for (int i = 0; i < repeatCount; i++)
                 {
-                    largeLog.Append(cyrillicLine);
+                    largeLog.Append(nonAsciiMarker);
                 }
                 DebugLogger.Log(options, "Client", largeLog.ToString());
 
@@ -14717,12 +14719,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     // The SendJson method prepends the HTTP status line to the body.
                     if (response.IndexOf("HTTP/1.1 200", StringComparison.Ordinal) < 0)
                     {
-                        return "expected HTTP 200 response for large Cyrillic log, got: " + response.Substring(0, Math.Min(200, response.Length));
+                        return "expected HTTP 200 response for large non-ASCII log, got: " + response.Substring(0, Math.Min(200, response.Length));
                     }
-                    // Also verify the Cyrillic content made it through (escaped, but present).
-                    if (response.IndexOf("Тестовое", StringComparison.Ordinal) < 0 && response.IndexOf("\\u0422\\u0435\\u0441\\u0442\\u043e\\u0432\\u043e\\u0435", StringComparison.Ordinal) < 0)
+                    // Also verify the marker content made it through (escaped, but present).
+                    if (response.IndexOf("NonAsciiTestMarker", StringComparison.Ordinal) < 0 && response.IndexOf("\\u2605", StringComparison.Ordinal) < 0)
                     {
-                        return "expected the large Cyrillic content to be present in the response";
+                        return "expected the large non-ASCII content to be present in the response";
                     }
                 }
                 return null;
