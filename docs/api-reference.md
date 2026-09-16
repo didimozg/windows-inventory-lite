@@ -57,6 +57,7 @@ Ingestion token always required on these three, regardless of `RequireIngestionT
 | GET | `/api/v1/software-repository/scan-status` | Basic Auth | Return the last share-discovery scan's result and candidate lists. |
 | POST | `/api/v1/software-repository/scan` | Basic Auth | Run a share-discovery scan now and return its result. |
 | GET | `/api/v1/software-repository/attempt-history` | Basic Auth | Return the persisted per-client install attempt log. |
+| DELETE | `/api/v1/software-repository/attempt-history` | Basic Auth | Clear the Software job attempt log immediately, independent of its 5000-entry/90-day cap. |
 | GET | `/api/v1/windows-updates` | Basic Auth | List the Windows Updates catalog. |
 | POST | `/api/v1/windows-updates` | Basic Auth | Add a Windows Updates catalog entry. |
 | PUT | `/api/v1/windows-updates/{id}` | Basic Auth | Update a Windows Updates catalog entry. |

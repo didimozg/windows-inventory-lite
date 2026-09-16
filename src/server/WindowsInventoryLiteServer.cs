@@ -6051,9 +6051,10 @@ namespace WindowsInventoryLite
 
         // Shared response shape for all four "clear now" endpoints, matching
         // this project's existing convention for a delete-shaped action
-        // (DeleteCertificateHistoryEntry returns {"status":"deleted"}) -
-        // clearedCount lets the dashboard show "Cleared 42 entries."
-        // instead of a bare confirmation.
+        // (DeleteCertificateHistoryEntry returns {"status":"deleted"}).
+        // clearedCount is for API/curl callers - the dashboard itself just
+        // re-fetches the now-empty view rather than displaying this count,
+        // since the emptied table is already its own confirmation.
         private void SendClearedResponse(Stream stream, int clearedCount)
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
@@ -6075,9 +6076,12 @@ namespace WindowsInventoryLite
             SendClearedResponse(stream, clearedCount);
         }
 
-        // Caller must already hold ingestionRejectionLogLock. Only called
-        // when a prune pass actually removed something - the common case
-        // (no pruning needed) never rewrites the file, only appends.
+        // Caller must already hold ingestionRejectionLogLock. Originally
+        // called only when a prune pass actually removed something - the
+        // common case (no pruning needed) never rewrites the file, only
+        // appends - but ClearIngestionRejectionLog below now also calls
+        // this unconditionally (with an already-emptied list) as its own
+        // rewrite step, so "only called on a prune" is no longer accurate.
         private void RewriteIngestionRejectionLogFileLocked()
         {
             JavaScriptSerializer serializer = CreateJsonSerializer();
@@ -6262,10 +6266,13 @@ namespace WindowsInventoryLite
             SendClearedResponse(stream, clearedCount);
         }
 
-        // Caller must already hold softwareJobAttemptLogLock. Only called
-        // from LoadSoftwareJobAttemptLogFromDisk's startup prune pass -
-        // RecordSoftwareJobAttempt above does its own inline rewrite when
-        // its own prune pass trips. Mirrors RewriteIngestionRejectionLogFileLocked.
+        // Caller must already hold softwareJobAttemptLogLock. Originally
+        // called only from LoadSoftwareJobAttemptLogFromDisk's startup
+        // prune pass - RecordSoftwareJobAttempt above does its own inline
+        // rewrite when its own prune pass trips - but ClearSoftwareJobAttemptLog
+        // above now also calls this unconditionally (with an
+        // already-emptied list) as its own rewrite step. Mirrors
+        // RewriteIngestionRejectionLogFileLocked.
         private void RewriteSoftwareJobAttemptLogFileLocked()
         {
             JavaScriptSerializer serializer = CreateJsonSerializer();
