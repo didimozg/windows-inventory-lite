@@ -6,6 +6,7 @@ using System.IO;
 using System.Management;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.ServiceProcess;
@@ -1893,34 +1894,63 @@ namespace WindowsInventoryLite
             options.Token = newToken;
             try
             {
-                using (RegistryKey serviceKey = Registry.LocalMachine.OpenSubKey(
-                    @"SYSTEM\CurrentControlSet\Services\WindowsInventoryLiteClient", true))
-                {
-                    if (serviceKey == null)
-                    {
-                        return;
-                    }
-                    List<string> lines = new List<string>();
-                    object existing = serviceKey.GetValue("Environment");
-                    string[] existingLines = existing as string[];
-                    if (existingLines != null)
-                    {
-                        foreach (string line in existingLines)
-                        {
-                            if (!line.StartsWith("WIL_INGESTION_TOKEN=", StringComparison.OrdinalIgnoreCase))
-                            {
-                                lines.Add(line);
-                            }
-                        }
-                    }
-                    lines.Add("WIL_INGESTION_TOKEN=" + newToken);
-                    serviceKey.SetValue("Environment", lines.ToArray(), RegistryValueKind.MultiString);
-                }
+                ApplyIngestionTokenToRegistryCore(Registry.LocalMachine, @"SYSTEM\CurrentControlSet\Services\WindowsInventoryLiteClient", newToken);
             }
             catch
             {
                 // Best-effort - see method comment above.
             }
+        }
+
+        // Testable core of ApplyLearnedIngestionToken - baseKey/subKeyPath
+        // are parameters so self-tests can point this at a scratch
+        // HKEY_CURRENT_USER location instead of the real
+        // HKEY_LOCAL_MACHINE service key, which a non-admin test process
+        // cannot write to (and must never touch even when it can).
+        internal static void ApplyIngestionTokenToRegistryCore(RegistryKey baseKey, string subKeyPath, string newToken)
+        {
+            using (RegistryKey serviceKey = baseKey.OpenSubKey(subKeyPath, true))
+            {
+                if (serviceKey == null)
+                {
+                    return;
+                }
+                List<string> lines = new List<string>();
+                object existing = serviceKey.GetValue("Environment");
+                string[] existingLines = existing as string[];
+                if (existingLines != null)
+                {
+                    foreach (string line in existingLines)
+                    {
+                        if (!line.StartsWith("WIL_INGESTION_TOKEN=", StringComparison.OrdinalIgnoreCase))
+                        {
+                            lines.Add(line);
+                        }
+                    }
+                }
+                lines.Add("WIL_INGESTION_TOKEN=" + newToken);
+                serviceKey.SetValue("Environment", lines.ToArray(), RegistryValueKind.MultiString);
+                RestrictServiceRegistryKeyAcl(serviceKey);
+            }
+        }
+
+        // Breaks ACL inheritance on the service's own registry key and
+        // grants only Administrators+SYSTEM - see
+        // Set-RestrictedServiceRegistryKeyAcl in Install-Client.ps1/
+        // Deploy-ClientGpo.ps1 for the install-time equivalent and the
+        // full reasoning (BUILTIN\Users inherits ReadKey by default,
+        // verified live). Applied every time the token is rewritten here,
+        // not just once at install, since nothing guarantees the key
+        // wasn't recreated with default inheritance since the last run.
+        internal static void RestrictServiceRegistryKeyAcl(RegistryKey serviceKey)
+        {
+            SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+            SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+            RegistrySecurity acl = serviceKey.GetAccessControl();
+            acl.SetAccessRuleProtection(true, false);
+            acl.AddAccessRule(new RegistryAccessRule(adminSid, RegistryRights.FullControl, InheritanceFlags.ContainerInherit, PropagationFlags.None, AccessControlType.Allow));
+            acl.AddAccessRule(new RegistryAccessRule(systemSid, RegistryRights.FullControl, InheritanceFlags.ContainerInherit, PropagationFlags.None, AccessControlType.Allow));
+            serviceKey.SetAccessControl(acl);
         }
 
         // Fixed name, not a per-run GUID - see this feature's design spec
@@ -2192,6 +2222,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "IsVersionNewer returns false for an older version", TestIsVersionNewerReturnsFalseForOlderVersion);
             allPassed &= SelfTestCheck(output, "IsVersionNewer returns false for an unparseable version", TestIsVersionNewerReturnsFalseForUnparseableVersion);
             allPassed &= SelfTestCheck(output, "IsVersionNewer handles differing segment counts", TestIsVersionNewerHandlesDifferingSegmentCounts);
+            allPassed &= SelfTestCheck(output, "ApplyIngestionTokenToRegistryCore restricts the key's ACL to Administrators+SYSTEM", TestApplyIngestionTokenToRegistryCoreRestrictsAcl);
             allPassed &= SelfTestCheck(output, "BuildSelfUpdateCmdScript's label graph is closed (no dangling goto targets)", TestBuildSelfUpdateCmdScriptLabelGraphIsClosed);
             allPassed &= SelfTestCheck(output, "BuildSelfUpdateCmdScript checks both move commands for errorlevel", TestBuildSelfUpdateCmdScriptChecksBothMoveCommandsForErrorlevel);
             allPassed &= SelfTestCheck(output, "BuildSelfUpdateCmdScript's wait loops are bounded", TestBuildSelfUpdateCmdScriptHasBoundedWaitLoops);
@@ -2281,6 +2312,74 @@ namespace WindowsInventoryLite
             if (!IsVersionNewer("1.2.1", "1.2"))
             {
                 return "expected \"1.2.1\" to be newer than \"1.2\" (missing segment on the shorter side treated as 0)";
+            }
+            return null;
+        }
+
+        private static string TestApplyIngestionTokenToRegistryCoreRestrictsAcl()
+        {
+            // HKEY_CURRENT_USER is writable by the test process without
+            // admin rights, unlike the real HKEY_LOCAL_MACHINE service key
+            // this logic targets in production - a scratch subkey here is
+            // the C# self-test equivalent of Pester's TestRegistry: drive.
+            string subKeyPath = @"Software\WilSelfTest\" + Guid.NewGuid().ToString("N");
+            try
+            {
+                using (RegistryKey scratchKey = Registry.CurrentUser.CreateSubKey(subKeyPath))
+                {
+                    if (scratchKey == null)
+                    {
+                        return "expected to create a scratch HKCU subkey for the test";
+                    }
+                }
+
+                InventoryCollector.ApplyIngestionTokenToRegistryCore(Registry.CurrentUser, subKeyPath, "test-token-123");
+
+                using (RegistryKey scratchKey = Registry.CurrentUser.OpenSubKey(subKeyPath, false))
+                {
+                    if (scratchKey == null)
+                    {
+                        return "expected the scratch subkey to still exist after ApplyIngestionTokenToRegistryCore";
+                    }
+                    string[] environment = scratchKey.GetValue("Environment") as string[];
+                    if (environment == null || Array.IndexOf(environment, "WIL_INGESTION_TOKEN=test-token-123") < 0)
+                    {
+                        return "expected the Environment value to contain the new token";
+                    }
+
+                    RegistrySecurity acl = scratchKey.GetAccessControl();
+                    SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                    SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                    bool sawAdmin = false;
+                    bool sawSystem = false;
+                    foreach (RegistryAccessRule rule in acl.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+                    {
+                        if (rule.IdentityReference.Equals(adminSid))
+                        {
+                            sawAdmin = true;
+                        }
+                        if (rule.IdentityReference.Equals(systemSid))
+                        {
+                            sawSystem = true;
+                        }
+                    }
+                    if (!sawAdmin || !sawSystem)
+                    {
+                        return "expected the ACL to grant both Administrators and SYSTEM, got admin=" + sawAdmin + " system=" + sawSystem;
+                    }
+                }
+            }
+            finally
+            {
+                // Single-argument overload only: the two-argument
+                // DeleteSubKeyTree(name, throwOnMissingSubKey) overload was
+                // added in .NET 4.0 and does not exist in the .NET 2.0/3.5
+                // mscorlib this project also builds against (confirmed via
+                // a real Net35 build failure, CS1501). The one-argument
+                // overload throws if the subkey is already gone, which the
+                // surrounding catch already swallows - same best-effort
+                // cleanup behavior either way.
+                try { Registry.CurrentUser.DeleteSubKeyTree(subKeyPath); } catch { }
             }
             return null;
         }
