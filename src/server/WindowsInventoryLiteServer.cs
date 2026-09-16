@@ -5520,18 +5520,25 @@ namespace WindowsInventoryLite
             // "Server refused our key" is plink's own real-time auth
             // rejection. The other two are Convert-OpenSshKeyToPpk (in
             // Install-ClientDebianSSH.ps1) refusing to even attempt the
-            // connection - a passphrase-protected key or a non-RSA key it
-            // cannot decrypt/convert. All three mean "this key cannot
-            // authenticate," and all three should fall back to the saved
-            // password in Global mode - found live during this feature's
-            // own final review: without this, an admin who had already
-            // saved a non-RSA/passphrase-protected key alongside a working
-            // password (harmless before this feature, since Global mode
-            // used to ignore the key entirely) would see a previously
-            // working Global push start failing outright.
+            // connection - a passphrase-protected key or an unsupported key
+            // type it cannot decrypt/convert. All three mean "this key
+            // cannot authenticate," and all three should fall back to the
+            // saved password in Global mode - found live during this
+            // feature's own final review: without this, an admin who had
+            // already saved an unsupported/passphrase-protected key
+            // alongside a working password (harmless before this feature,
+            // since Global mode used to ignore the key entirely) would see
+            // a previously working Global push start failing outright.
+            // "keys are supported for key-based push" (not the full message,
+            // which names the exact supported list) is deliberately the
+            // stable part of the match - the 2026-09-16 Ed25519/ECDSA
+            // support change already once altered the list of names between
+            // the parentheses, and matching only the trailing, list-
+            // independent phrase means this check survives the list
+            // changing again without needing a matching edit here.
             return combinedOutput.IndexOf("Server refused our key", StringComparison.OrdinalIgnoreCase) >= 0
                 || combinedOutput.IndexOf("is passphrase-protected", StringComparison.OrdinalIgnoreCase) >= 0
-                || combinedOutput.IndexOf("only RSA (ssh-rsa) keys are supported", StringComparison.OrdinalIgnoreCase) >= 0;
+                || combinedOutput.IndexOf("keys are supported for key-based push", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static readonly Regex HostKeyFingerprintFormatPattern = new Regex(@"^SHA256:[A-Za-z0-9+/]+=*$");
@@ -19840,9 +19847,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 return "expected true for the converter's passphrase-protected-key refusal";
             }
-            if (!IsSshKeyAuthRejected("'C:\\keys\\id_ed25519' is a 'ssh-ed25519' key - only RSA (ssh-rsa) keys are supported for key-based push."))
+            if (!IsSshKeyAuthRejected("'C:\\keys\\id_dsa' is a 'ssh-dss' key - only RSA (ssh-rsa), Ed25519 (ssh-ed25519), and ECDSA (ecdsa-sha2-nistp256/384/521) keys are supported for key-based push."))
             {
-                return "expected true for the converter's non-RSA-key refusal";
+                return "expected true for the converter's unsupported-key-type refusal";
             }
             if (IsSshKeyAuthRejected("Access denied\nFATAL ERROR: Configured password was not accepted"))
             {

@@ -513,7 +513,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         $script:ConvertedKeyPath = $tempPlaceholder + '.ppk'
         Remove-Item -LiteralPath $tempPlaceholder -Force -ErrorAction SilentlyContinue
         try {
-            # The converted .ppk is a fully decrypted RSA private key, alive
+            # The converted .ppk is a fully decrypted private key, alive
             # for the entire script run across every target in $ComputerName,
             # its path visible in process listings via -i. The empty output
             # file is created and locked down to only the current user
@@ -575,7 +575,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     finally {
         if ($script:ConvertedKeyPath) {
             # Same loud-on-failure overwrite-then-delete as the plink
-            # password file above - this is a decrypted RSA private key, not
+            # password file above - this is a decrypted private key, not
             # a file a silent best-effort delete is enough for.
             Clear-TempPasswordFile -Path $script:ConvertedKeyPath
         }
