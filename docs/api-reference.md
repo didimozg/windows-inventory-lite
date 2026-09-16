@@ -1,6 +1,6 @@
 # API Reference
 
-This is a practical lookup document for the server's HTTP API, not an OpenAPI/Swagger spec. It covers the real, current route surface: 73 routes (58 exact-match paths, 15 with a parameterized path segment) - down from 53 as of v0.42.0, which removed the four separate Linux install/uninstall job routes (`/api/v1/linux-client-install`, `/linux-client-uninstall`, and their GET list/detail equivalents) in favor of the unified `/api/v1/client-install`/`/client-uninstall` pair, up again with the two session endpoints, up again with the five license-key routes (the four-route `/api/v1/license-key-sources` catalog plus the `/api/v1/clients/{computerName}/license-keys` reveal endpoint), and up again with v0.56.0's sixteen software-distribution routes documented below. The counts were recounted from the routing chain when the v0.56.0 routes were added; the previous "45 exact-match" figure was one short of the real total at the time, so the jump from 56 to 73 is sixteen new routes plus that one-route correction. It does not cover the static dashboard asset routes (`/`, `/app.js`, `/styles.css`, `/favicon.svg`, `/brand-mark.png`), which serve dashboard files rather than API data.
+This is a practical lookup document for the server's HTTP API, not an OpenAPI/Swagger spec. It covers the real, current route surface: 77 routes (62 exact-match paths, 15 with a parameterized path segment) - down from 53 as of v0.42.0, which removed the four separate Linux install/uninstall job routes (`/api/v1/linux-client-install`, `/linux-client-uninstall`, and their GET list/detail equivalents) in favor of the unified `/api/v1/client-install`/`/client-uninstall` pair, up again with the two session endpoints, up again with the five license-key routes (the four-route `/api/v1/license-key-sources` catalog plus the `/api/v1/clients/{computerName}/license-keys` reveal endpoint), up again with v0.56.0's sixteen software-distribution routes documented below, and up again with v0.66.0's four `DELETE`-verb "clear now" routes (one per Logging subtab, each sharing its path with an already-documented `GET` route). The counts were recounted from the routing chain when the v0.56.0 routes were added; the previous "45 exact-match" figure was one short of the real total at the time, so the jump from 56 to 73 is sixteen new routes plus that one-route correction. It does not cover the static dashboard asset routes (`/`, `/app.js`, `/styles.css`, `/favicon.svg`, `/brand-mark.png`), which serve dashboard files rather than API data.
 
 ## Conventions
 
@@ -85,6 +85,7 @@ Ingestion token always required on these three, regardless of `RequireIngestionT
 | POST | `/api/v1/client-install` | Basic Auth | Queue a mode-aware (Auto/Force Windows/Force Linux) push-install job, WinRM and/or SSH, against one or more targets of either platform. |
 | POST | `/api/v1/client-uninstall` | Basic Auth | Queue a mode-aware push-uninstall job. |
 | GET | `/api/v1/client-install` | Basic Auth | List recent install/uninstall job summaries, both platforms. |
+| DELETE | `/api/v1/client-install` | Basic Auth | Clear the Installs log immediately - every saved job file plus the in-memory job cache. |
 | GET | `/api/v1/client-install/{jobId}` | Basic Auth | Return full detail for one install/uninstall job, including per-target protocol attempts. |
 | POST | `/api/v1/linux-client-install/trust-host-key` | Basic Auth | Manually trust (pin) a Linux target's SSH host key. |
 
@@ -309,6 +310,10 @@ curl -X POST https://server:8443/api/v1/client-install \
 
 Lists install/uninstall job summaries across both platforms: `{"defaultRetentionDays": ..., "jobs": [...]}`. Each summary has `id`, `action`, `status`, `createdAt`, `startedAt`, `completedAt`, `mode`, `serverUrl`, `username` (falls back to the SSH username when the job had no WinRM username), `retentionDays`, `targetCount`, `resultCount`, `failedCount` - counts only, not the full per-target result list. As a side effect, every call also prunes job files older than their retention window from disk. A job saved before v0.42.0 has no `mode` field (reads as an empty string, shown as a legacy Windows job by the dashboard).
 
+### DELETE /api/v1/client-install
+
+Clears the Installs log immediately, independent of `retentionDays` - deletes every saved job file plus the in-memory job cache. Response: `{"status": "cleared", "clearedCount": N}`. Recorded to the debug log (category `Server`) when it happens.
+
 ### GET /api/v1/client-install/{jobId}
 
 Returns one job's full detail, including the per-target `results` array. Each result carries the existing summary fields (`target`, `status`, `message`, `protocol` - which protocol the summary reflects, `output`/`error`) plus a new `attempts` array: one entry per protocol actually tried (`protocol`, `status`, `message`, `output`/`error`, timestamps, and for an `ssh` attempt only, `hostKeyTrust`/`hostKeyStatus`/`hostKeyFingerprint`). A force-mode job's `attempts` always has exactly one entry; an Auto-mode job that tried both protocols has two. Neither this endpoint nor the list endpoint above ever returns a `password`/`sshPassword`/`token`/SSH-key-path field. `404 {"error": "job not found"}` if the ID matches neither an in-memory job nor a persisted job file.
@@ -477,6 +482,10 @@ curl -X POST https://server:8443/api/v1/server/ingestion-token/regenerate -u adm
 
 Returns the server's log of rejected ingestion-token attempts, most-recent-first: `{"entries": [...]}` where each entry has `timestampUtc`, `sourceIp`, `hostname` (a best-effort reverse-DNS lookup of `sourceIp` - can be `null`; an attacker controls what PTR record their own IP resolves to, if any, so never treat it as a verified identity), `endpoint` (which ingestion route), `reason` (`"missing"` or `"mismatched"`), and `matchedClient` (the known client's name if matched by source IP, else `null`). `ingestionRejectionLogRetentionDays` and `ingestionRejectionLogMaxEntries` are targets the log is kept close to, not an exact real-time bound: both are re-checked on every new rejection and again at server startup (not on a timer), and the count cap is enforced in batches for write efficiency, so entry count can transiently run over `ingestionRejectionLogMaxEntries` by a small margin, or entries can briefly outlive `ingestionRejectionLogRetentionDays`, between prune passes.
 
+### DELETE /api/v1/server/ingestion-rejections
+
+Clears the Ingestion Rejections log immediately, independent of `ingestionRejectionLogRetentionDays`/`ingestionRejectionLogMaxEntries`. Response: `{"status": "cleared", "clearedCount": N}`. Recorded to the debug log (category `Server`) when it happens.
+
 ### GET /api/v1/server/debug-log
 
 Returns the current content of the optional debug log (`debugLogEnabled`/`debugLogPath` above): `{content, sizeBytes, path}`, where `content` is the raw file text (not parsed into lines), `sizeBytes` is the file's current size on disk, and `path` is the resolved file path (`DebugLogPath` if set, otherwise `DataPath\_logs\debug.log`). `content` is an empty string, not an error, before the debug log has ever been enabled or written - the same "nothing yet" convention the other logs on this page use. The file is automatically bounded by `debugLogRetentionDays` and `debugLogMaxSizeMb` (see `POST /api/v1/server/settings` above) the same way `ingestionRejectionLogRetentionDays`/`ingestionRejectionLogMaxEntries` bound the rejection log just above - oldest lines are dropped first, checked opportunistically on write rather than on a timer, so the file can transiently exceed the configured size by a small margin between prune passes.
@@ -484,6 +493,10 @@ Returns the current content of the optional debug log (`debugLogEnabled`/`debugL
 ```bash
 curl -X GET https://server:8443/api/v1/server/debug-log -u admin:password
 ```
+
+### DELETE /api/v1/server/debug-log
+
+Deletes the debug log file immediately, regardless of `debugLogEnabled`'s current value. Response: `{"status": "cleared", "clearedCount": N}` where `N` is the number of lines the file had. Recorded to the debug log (category `Server`) AFTER the delete - if debug logging is currently on, this becomes the new file's first line, proving exactly when and that it was cleared.
 
 ### POST /api/v1/server/login
 
@@ -597,6 +610,10 @@ Runs a scan synchronously and returns the same shape as the status endpoint. Tak
 ### GET /api/v1/software-repository/attempt-history
 
 Returns `{"attempts": [...]}`, each `{timestampUtc, computerName, catalogType, entryId, success, exitCode, errorMessage}`, oldest first. `catalogType` is `windowsUpdate` or `thirdPartySoftware`. Capped at 5000 entries and 90 days, pruned on write.
+
+### DELETE /api/v1/software-repository/attempt-history
+
+Clears the Software job attempt log immediately, independent of its own 5000-entry/90-day cap. Response: `{"status": "cleared", "clearedCount": N}`. Recorded to the debug log (category `Server`) when it happens.
 
 ### GET /api/v1/windows-updates and GET /api/v1/third-party-software
 

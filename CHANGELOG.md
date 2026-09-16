@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.66.0]
+
+### Added
+
+- **Every Logging subtab (Ingestion, Installs, Software, Debug) now has a "Clear log" button that empties it immediately, independent of its own automatic age/count retention policy.** Previously the only way to shrink any of these four logs was to wait for its own retention window - no admin-facing way existed to force-clear one on demand. Gated by a plain browser confirmation (matching this dashboard's existing bar for every other irreversible "Delete"-shaped action, not a stronger multi-step gate) and recorded to the debug log when clearing happens, so an admin clearing a log right after a real incident doesn't erase the only trace it happened. Four new `DELETE` endpoints, one per log, matching each log's own existing `GET` route.
+
 ## [Windows client 0.5.3]
 
 ### Fixed
