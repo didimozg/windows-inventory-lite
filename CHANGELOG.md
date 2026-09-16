@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [Windows client 0.5.3]
+
+### Fixed
+
+- **The Windows client persisted server-learned state (interval overrides, the license key source catalog) through two separate files with two separate read/write function pairs** (`learned-config.json` for intervals, a standalone `license-key-sources-cache.json` for license keys) despite both being the exact same shape of thing - a JSON blob written after a successful report, read back to survive a restart. Unified into one file (`learned-config.json`, unchanged name and shape for the fields it already held) and one read/write pair (`LoadLearnedState`/`SaveLearnedState`), with `ApplyInventoryAckResponse` now loading the shared state once per ack, letting each recognized field mutate it, and saving once at the end rather than once per field. The wire format (every JSON key name in the ack response) is completely unchanged - this is a client-internal persistence refactor only, with no effect on the server or on what an old client sees from a new server or vice versa. 5 new self-tests, including one proving the specific property this refactor exists to guarantee: a report that updates only one learned field never loses a different field a previous report already persisted.
+
+Windows client 0.5.2 -> 0.5.3 (PATCH - behavior-preserving refactor, no production behavior change). Server/dashboard version untouched.
+
 ## [Linux client 0.2.3]
 
 No functional change - version bump only, to re-exercise the client self-update mechanism end-to-end against the live fleet (a version-only rebuild is exactly the trigger `applySelfUpdate` reacts to). `linux-client/prebuilt/wil-linux-client` and its `.version` sidecar rebuilt to match.
