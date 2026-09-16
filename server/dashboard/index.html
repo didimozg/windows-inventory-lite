@@ -833,6 +833,9 @@
 
         <section id="loggingView" class="hidden" aria-label="Ingestion rejection log">
           <p class="cert-hint">Requests to the inventory-ingestion endpoints rejected for a missing or wrong token. Correlated to a known client by source IP when that IP matches the client's most recent successful report - a best-effort heuristic, not a guarantee (see Settings &gt; Server &gt; Log retention for retention settings).</p>
+          <div class="view-toolbar">
+            <button id="ingestionRejectionsClearButton" class="danger-button-ghost" type="button">Clear log</button>
+          </div>
           <div class="table-wrap">
             <table>
               <thead>
@@ -855,17 +858,24 @@
           <p class="cert-hint">Raw content of the server's debug log (Settings &gt; Diagnostics). Empty until "Enable debug log" is turned on and at least one entry has been written. Oldest lines are dropped automatically once the configured retention/size cap is exceeded.</p>
           <div class="pkg-buttons">
             <button id="debugLogRefreshButton" class="export-button" type="button">Refresh</button>
+            <button id="debugLogClearButton" class="danger-button-ghost" type="button">Clear log</button>
             <span id="debugLogMeta" class="cert-hint"></span>
           </div>
           <pre id="debugLogContent" class="debug-log-content"></pre>
         </section>
 
         <section id="installHistoryView" class="install-panel card-glow hidden" aria-label="Saved client action logs">
+          <div class="view-toolbar">
+            <button id="installHistoryClearButton" class="danger-button-ghost" type="button">Clear log</button>
+          </div>
           <div id="installHistory" class="install-history empty">No saved client action logs.</div>
           <div id="installHistoryJobDetail" class="install-status empty">Select a job above to see its details.</div>
         </section>
 
         <section id="softwareJobHistoryView" class="hidden" aria-label="Software job attempt history">
+          <div class="view-toolbar">
+            <button id="softwareJobHistoryClearButton" class="danger-button-ghost" type="button">Clear log</button>
+          </div>
           <div class="table-wrap">
             <table>
               <thead>

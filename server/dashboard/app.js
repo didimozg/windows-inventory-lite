@@ -1264,6 +1264,23 @@
       });
   }
 
+  function clearInstallHistory() {
+    if (!window.confirm('Clear the entire Installs log? This cannot be undone.')) return;
+    byId('installHistoryClearButton').disabled = true;
+    fetch('/api/v1/client-install', { method: 'DELETE', cache: 'no-store' })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Clear failed');
+        loadInstallHistory();
+      })
+      .catch(error => {
+        window.alert(`Clear failed: ${error.message}`);
+      })
+      .finally(() => {
+        byId('installHistoryClearButton').disabled = false;
+      });
+  }
+
   function pollInstallJob(jobId, onComplete = loadInstallHistory, timerKey = 'installPollTimer', onProgress = null) {
     fetch(`/api/v1/client-install/${encodeURIComponent(jobId)}`, { cache: 'no-store' })
       .then(response => {
@@ -4044,6 +4061,23 @@
       .catch(() => {});
   }
 
+  function clearSoftwareJobHistory() {
+    if (!window.confirm('Clear the entire Software job attempt log? This cannot be undone.')) return;
+    byId('softwareJobHistoryClearButton').disabled = true;
+    fetch('/api/v1/software-repository/attempt-history', { method: 'DELETE', cache: 'no-store' })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Clear failed');
+        loadSoftwareJobHistory();
+      })
+      .catch(error => {
+        window.alert(`Clear failed: ${error.message}`);
+      })
+      .finally(() => {
+        byId('softwareJobHistoryClearButton').disabled = false;
+      });
+  }
+
   function promoteThirdPartySoftwareCandidate(relativePath) {
     openThirdPartySoftwareForm(null);
     byId('thirdPartySoftwareRelativePath').value = relativePath;
@@ -4757,6 +4791,23 @@
       });
   }
 
+  function clearIngestionRejectionLog() {
+    if (!window.confirm('Clear the entire Ingestion Rejections log? This cannot be undone.')) return;
+    byId('ingestionRejectionsClearButton').disabled = true;
+    fetch('/api/v1/server/ingestion-rejections', { method: 'DELETE', cache: 'no-store' })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Clear failed');
+        loadIngestionRejectionLog();
+      })
+      .catch(error => {
+        window.alert(`Clear failed: ${error.message}`);
+      })
+      .finally(() => {
+        byId('ingestionRejectionsClearButton').disabled = false;
+      });
+  }
+
   function loadDebugLog() {
     fetch('/api/v1/server/debug-log', { cache: 'no-store' })
       .then(response => {
@@ -4775,6 +4826,23 @@
       .catch(error => {
         byId('debugLogContent').textContent = `Log unavailable: ${error.message}`;
         byId('debugLogMeta').textContent = '';
+      });
+  }
+
+  function clearDebugLog() {
+    if (!window.confirm('Clear the entire Debug log? This cannot be undone.')) return;
+    byId('debugLogClearButton').disabled = true;
+    fetch('/api/v1/server/debug-log', { method: 'DELETE', cache: 'no-store' })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Clear failed');
+        loadDebugLog();
+      })
+      .catch(error => {
+        window.alert(`Clear failed: ${error.message}`);
+      })
+      .finally(() => {
+        byId('debugLogClearButton').disabled = false;
       });
   }
 
@@ -5565,6 +5633,10 @@
   byId('loggingSubtabSoftware').addEventListener('click', () => setView('logging', 'software'));
   byId('loggingSubtabDebug').addEventListener('click', () => setView('logging', 'debug'));
   byId('debugLogRefreshButton').addEventListener('click', loadDebugLog);
+  byId('ingestionRejectionsClearButton').addEventListener('click', clearIngestionRejectionLog);
+  byId('debugLogClearButton').addEventListener('click', clearDebugLog);
+  byId('installHistoryClearButton').addEventListener('click', clearInstallHistory);
+  byId('softwareJobHistoryClearButton').addEventListener('click', clearSoftwareJobHistory);
   byId('deployTab').addEventListener('click', () => setView('deploy', 'actions'));
   byId('settingsTab').addEventListener('click', () => setView('settings', 'server'));
 
