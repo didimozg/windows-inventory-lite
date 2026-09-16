@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [Linux client 0.2.3]
+
+No functional change - version bump only, to re-exercise the client self-update mechanism end-to-end against the live fleet (a version-only rebuild is exactly the trigger `applySelfUpdate` reacts to). `linux-client/prebuilt/wil-linux-client` and its `.version` sidecar rebuilt to match.
+
+## [0.64.0]
+
+### Added
+
+- **A new "Software install window" setting (Settings > Windows) restricts when the Windows client is allowed to actually run pending Windows Update/third-party-software catalog jobs, with a stateless per-request jitter ramp so a fleet doesn't converge on the exact same instant when the window opens.** Previously, `SoftwareCheckIntervalHours` controlled only how often a client checked in - once it found a job, it ran immediately regardless of time of day, which could mean installs (and any resulting reboot) landing during business hours, and no coordination at all between machines that happened to check in around the same moment. Off by default (existing behavior unchanged unless explicitly configured): a UTC time-of-day window (supporting a range that spans midnight, e.g. 22:00-06:00), plus an admin-configurable jitter period (default 30 minutes) that ramps admission probability from 0% right as the window opens up to 100% once the jitter period has elapsed, spreading different machines' first successful check-in across that ramp-up instead of all of them landing in the same instant. Enforced entirely server-side in `SendClientSoftwareJobs` (the endpoint the client's job-check timer already calls) - `WindowsInventoryLiteClient.cs` itself is unchanged; a deferred job is indistinguishable from "nothing assigned yet" from the client's point of view.
+
 ## [0.63.0]
 
 ### Added
