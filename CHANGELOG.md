@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.63.0]
+
+### Added
+
+- **Global-mode SSH pushes (Deploy > Actions/Updates, and the scheduled Linux update push) now use a saved SSH key as well as a saved password, with an admin-configurable priority and automatic per-target fallback.** Previously, "Global" auth mode always attempted password auth and silently ignored a saved key entirely - a live bug report showed a Global-mode push failing with `Configured password was not accepted` against a target where the saved password was stale but a valid key was also saved, while manually selecting "SSH key" mode against the same target worked immediately. A new Settings > Linux "Global mode priority" dropdown (`key-first`, the default, or `password-first`) decides which credential is tried first when both are configured; if the primary is rejected specifically for a credential reason (wrong password, refused key - never a host-key mismatch or any other failure), the other is retried automatically for that one machine, independent of every other machine in the same batch push. Job results now show which method actually succeeded when a fallback occurred.
+
 ## [0.62.2]
 
 ### Fixed

@@ -371,7 +371,7 @@ Same purpose as the Windows equivalent: lists Linux clients on an outdated `clie
 
 ### GET /api/v1/linux-client-updates/credentials and POST /api/v1/linux-client-updates/credentials
 
-GET: `{"configured", "username", "hasPassword", "hasStoredKey", "keyUploadedAtUtc"}` - never the password or key contents. POST accepts `username`, `password` (blank keeps the existing one unless `clear` is set), `clear`.
+GET: `{"configured", "username", "hasPassword", "hasStoredKey", "keyUploadedAtUtc", "authPriority"}` - never the password or key contents. `authPriority` is `"key-first"` (default) or `"password-first"`, and decides which saved credential "Global" SSH auth mode tries first when both are configured. POST accepts `username`, `password` (blank keeps the existing one unless `clear` is set), `clear`, `authPriority` (optional, `"key-first"` or `"password-first"` - `400` if anything else is sent).
 
 ### GET /api/v1/linux-client-updates/schedule and POST /api/v1/linux-client-updates/schedule
 
