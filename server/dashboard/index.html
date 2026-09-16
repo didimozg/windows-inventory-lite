@@ -445,12 +445,20 @@
                 Linux update password
                 <input id="linuxCredsPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current one">
               </label>
+              <label class="pkg-token-field">
+                Global mode priority
+                <select id="linuxAuthPriority">
+                  <option value="key-first">SSH key first</option>
+                  <option value="password-first">Password first</option>
+                </select>
+              </label>
               <div class="pkg-buttons">
                 <button id="linuxCredsSaveButton" class="primary-button" type="button">Save</button>
                 <button id="linuxCredsClearButton" class="danger-button-ghost" type="button">Delete saved credentials</button>
               </div>
             </div>
             <p id="linuxSshToolsStatus" class="cert-hint">Checking plink.exe/pscp.exe status...</p>
+            <p class="cert-hint">"Global mode priority" only takes effect when both a password and an SSH key are saved - if only one is configured, that one is always used, same as before this setting existed. On a rejection specific to the primary method (wrong password, refused key), the other is tried automatically for that machine.</p>
             <div id="linuxCredsMessage" class="pkg-message hidden"></div>
             <h2 class="settings-block-title">SSH key</h2>
             <p id="linuxSshKeyStatus" class="pkg-status">Loading SSH key status...</p>

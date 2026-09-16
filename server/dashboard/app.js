@@ -1499,6 +1499,7 @@
           ? `Key configured, uploaded ${formatDateTime(data.keyUploadedAtUtc)}`
           : 'No key configured.';
         byId('linuxSshKeyDeleteButton').disabled = !data.hasStoredKey;
+        byId('linuxAuthPriority').value = data.authPriority || 'key-first';
       })
       .catch(error => {
         showSavedMessage(byId('linuxCredsMessage'), `Status unavailable: ${error.message}`, true);
@@ -1529,13 +1530,14 @@
   function saveLinuxUpdateCredentials() {
     const username = byId('linuxCredsUsername').value.trim();
     const password = byId('linuxCredsPassword').value;
+    const authPriority = byId('linuxAuthPriority').value;
 
     byId('linuxCredsSaveButton').disabled = true;
     fetch('/api/v1/linux-client-updates/credentials', {
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password })
+      body: JSON.stringify({ username, password, authPriority })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, data })))
       .then(({ ok, data }) => {

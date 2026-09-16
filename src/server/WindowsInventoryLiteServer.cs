@@ -144,6 +144,12 @@ namespace WindowsInventoryLite
         public string LinuxUpdateUsername;
         public string LinuxUpdatePassword;
         public string LinuxUpdateKeyPath;
+        // "key-first" (default) or "password-first" - governs Global auth
+        // mode's priority when BOTH a password and an SSH key are saved (see
+        // ResolveGlobalSshAuthMode). Irrelevant otherwise - a single
+        // configured credential is always used regardless of this value,
+        // same as before this setting existed.
+        public string LinuxUpdateAuthPriority;
         public string SoftwareRepositoryPath;
         public string SoftwareRepositoryUsername;
         public string SoftwareRepositoryPassword;
@@ -878,6 +884,10 @@ namespace WindowsInventoryLite
                 if (String.IsNullOrEmpty(options.LinuxUpdateKeyPath))
                 {
                     options.LinuxUpdateKeyPath = GetConfigString(config, "LinuxUpdateKeyPath");
+                }
+                if (String.IsNullOrEmpty(options.LinuxUpdateAuthPriority))
+                {
+                    options.LinuxUpdateAuthPriority = GetConfigString(config, "LinuxUpdateAuthPriority");
                 }
                 if (String.IsNullOrEmpty(options.SoftwareRepositoryPath))
                 {
@@ -3656,6 +3666,7 @@ namespace WindowsInventoryLite
             result["hasPassword"] = !String.IsNullOrEmpty(options.LinuxUpdatePassword);
             result["hasStoredKey"] = hasStoredKey;
             result["keyUploadedAtUtc"] = hasStoredKey ? File.GetLastWriteTimeUtc(keyPath).ToString("yyyy-MM-ddTHH:mm:ssZ") : null;
+            result["authPriority"] = options.LinuxUpdateAuthPriority == "password-first" ? "password-first" : "key-first";
             JavaScriptSerializer serializer = CreateJsonSerializer();
             SendJson(stream, serializer.Serialize(result));
         }
@@ -3700,6 +3711,19 @@ namespace WindowsInventoryLite
             Dictionary<string, string> updates = new Dictionary<string, string>();
             updates["LinuxUpdateUsername"] = username ?? "";
             updates["LinuxUpdatePassword"] = password ?? "";
+
+            if (payload.ContainsKey("authPriority"))
+            {
+                string authPriority = Convert.ToString(payload["authPriority"]);
+                if (!String.IsNullOrEmpty(authPriority) && authPriority != "key-first" && authPriority != "password-first")
+                {
+                    SendText(stream, "{\"error\":\"authPriority must be 'key-first' or 'password-first'\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.LinuxUpdateAuthPriority = authPriority;
+                updates["LinuxUpdateAuthPriority"] = authPriority ?? "";
+            }
+
             SaveServerConfigValues(updates);
 
             SendLinuxUpdateCredentialsStatus(stream);
