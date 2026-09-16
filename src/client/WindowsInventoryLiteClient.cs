@@ -1677,15 +1677,19 @@ namespace WindowsInventoryLite
             File.WriteAllText(path, value, new UTF8Encoding(false));
         }
 
-        // The server's response to POST /api/v1/inventory carries the
-        // current admin-managed license key source catalog. The client has
-        // no other channel to pull server config (see the license-key
-        // collection design doc), so this cache file - written after every
-        // successful report, read at the START of the next collection cycle
-        // - is how the catalog reaches this client. A missing or corrupt
-        // cache file is a normal "nothing to look for yet" state, never an
-        // error: GetLicenseKeys() (added in the next task) tolerates it by
-        // returning an empty list.
+        // The server's response to POST /api/v1/inventory can carry two
+        // independent things worth persisting past this process's own
+        // lifetime: the admin-managed license key source catalog
+        // (top-level "licenseKeySources" - the client has no other
+        // channel to pull it, see the license-key collection design doc)
+        // and interval overrides (nested under "config", see
+        // ApplyConfigFromServer). Both are merged into one shared
+        // learned-state dictionary and written to disk together, at most
+        // once per ack - see GetLearnedStateCachePath below for the
+        // unified file both this method and GetLicenseKeys() read from. A
+        // missing or corrupt cache file is a normal "nothing learned yet"
+        // state, never an error - LoadLearnedState() returns an empty
+        // dictionary rather than throwing or returning null.
         private void ApplyInventoryAckResponse(string responseBody)
         {
             if (String.IsNullOrEmpty(responseBody))
