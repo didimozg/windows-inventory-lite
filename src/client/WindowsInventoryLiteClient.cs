@@ -156,10 +156,9 @@ namespace WindowsInventoryLite
             protected override void OnStart(string[] args)
             {
                 // A throwaway InventoryCollector, used only to reach its
-                // LoadLearnedConfig() - the file it reads lives next to the
-                // license-key-sources cache, which is InventoryCollector's
-                // own concept, not this service's.
-                Dictionary<string, object> learnedConfig = new InventoryCollector(options).LoadLearnedConfig();
+                // LoadLearnedState() - the shared learned-state cache file
+                // is InventoryCollector's own concept, not this service's.
+                Dictionary<string, object> learnedConfig = new InventoryCollector(options).LoadLearnedState();
                 if (learnedConfig != null)
                 {
                     if (learnedConfig.ContainsKey("intervalHours"))
@@ -1227,23 +1226,21 @@ namespace WindowsInventoryLite
         private List<LicenseKeySource> LoadLicenseKeySourcesCache()
         {
             List<LicenseKeySource> result = new List<LicenseKeySource>();
-            string path = GetLicenseKeySourcesCachePath();
-            if (!File.Exists(path))
+            Dictionary<string, object> learned = LoadLearnedState();
+            object raw;
+            if (!learned.TryGetValue("licenseKeySources", out raw))
+            {
+                return result;
+            }
+            ArrayList rawList = raw as ArrayList;
+            if (rawList == null)
             {
                 return result;
             }
 
             try
             {
-                JavaScriptSerializer serializer = new JavaScriptSerializer();
-                string json = File.ReadAllText(path, Encoding.UTF8);
-                ArrayList raw = serializer.Deserialize<ArrayList>(json);
-                if (raw == null)
-                {
-                    return result;
-                }
-
-                foreach (object item in raw)
+                foreach (object item in rawList)
                 {
                     Dictionary<string, object> record = item as Dictionary<string, object>;
                     if (record == null)
@@ -1689,39 +1686,6 @@ namespace WindowsInventoryLite
         // cache file is a normal "nothing to look for yet" state, never an
         // error: GetLicenseKeys() (added in the next task) tolerates it by
         // returning an empty list.
-        private string GetLicenseKeySourcesCachePath()
-        {
-            // options.OutputPath may be a directory or a literal .json file path
-            // (see CollectAndSave's own localPath resolution above) - mirror that
-            // same branch here so the cache never lands under a file-as-directory.
-            string baseDir = options.OutputPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
-                ? Path.GetDirectoryName(options.OutputPath)
-                : options.OutputPath;
-            return Path.Combine(baseDir, "license-key-sources-cache.json");
-        }
-
-        private void SaveLicenseKeySourcesCache(object rawLicenseKeySources)
-        {
-            ArrayList sources = rawLicenseKeySources as ArrayList;
-            if (sources == null)
-            {
-                return;
-            }
-
-            try
-            {
-                JavaScriptSerializer serializer = new JavaScriptSerializer();
-                string json = serializer.Serialize(sources);
-                WriteText(GetLicenseKeySourcesCachePath(), json);
-            }
-            catch
-            {
-                // Caching the list is a best-effort convenience for the
-                // next collection cycle - a write failure here must never
-                // affect the inventory report that has already succeeded.
-            }
-        }
-
         private void ApplyInventoryAckResponse(string responseBody)
         {
             if (String.IsNullOrEmpty(responseBody))
@@ -1737,13 +1701,30 @@ namespace WindowsInventoryLite
                 {
                     return;
                 }
-                if (response.ContainsKey("licenseKeySources"))
+                Dictionary<string, object> learned = LoadLearnedState();
+                bool learnedChanged = false;
+
+                if (response.ContainsKey("licenseKeySources") && response["licenseKeySources"] is ArrayList)
                 {
-                    SaveLicenseKeySourcesCache(response["licenseKeySources"]);
+                    // Matches the old SaveLicenseKeySourcesCache's exact
+                    // behavior: unconditional overwrite whenever the
+                    // field is present, no comparison against the
+                    // previously cached value.
+                    learned["licenseKeySources"] = response["licenseKeySources"];
+                    learnedChanged = true;
                 }
+
                 if (response.ContainsKey("config"))
                 {
-                    ApplyConfigFromServer(response["config"] as Dictionary<string, object>);
+                    if (ApplyConfigFromServer(response["config"] as Dictionary<string, object>, learned))
+                    {
+                        learnedChanged = true;
+                    }
+                }
+
+                if (learnedChanged)
+                {
+                    SaveLearnedState(learned);
                 }
             }
             catch
@@ -1753,97 +1734,107 @@ namespace WindowsInventoryLite
             }
         }
 
-        // Local marker file - not the license-key-sources cache, a
-        // separate small file next to it (same directory,
-        // GetLicenseKeySourcesCachePath()'s own containing folder) - so a
-        // config value learned from the server over the inventory ack
-        // survives a service restart instead of reverting to whatever
-        // was baked into the service's own command line at install time.
-        private string GetLearnedConfigCachePath()
+        // Everything the server can push down to an already-running
+        // client that needs to survive a process restart, keyed by the
+        // same names the ack response itself uses (intervalHours,
+        // softwareCheckIntervalHours, licenseKeySources) - one JSON
+        // object, one file, read once and written once per ack that
+        // actually changes something. The ingestion token is the one
+        // exception: it lives in the service's own registry Environment
+        // value instead, since a restart's SCM-launched process needs to
+        // see it as an environment variable before this code ever runs
+        // again - see ApplyLearnedIngestionToken.
+        private string GetLearnedStateCachePath()
         {
-            string directory = Path.GetDirectoryName(GetLicenseKeySourcesCachePath());
-            return Path.Combine(directory, "learned-config.json");
-        }
-
-        private void SaveLearnedConfig(int intervalHours, int softwareCheckIntervalHours)
-        {
-            try
-            {
-                Dictionary<string, object> learned = new Dictionary<string, object>();
-                learned["intervalHours"] = intervalHours;
-                learned["softwareCheckIntervalHours"] = softwareCheckIntervalHours;
-                JavaScriptSerializer serializer = new JavaScriptSerializer();
-                WriteText(GetLearnedConfigCachePath(), serializer.Serialize(learned));
-            }
-            catch
-            {
-                // Best-effort persistence, same reasoning as
-                // SaveLicenseKeySourcesCache - never let this fail an
-                // already-accepted report.
-            }
+            string baseDir = options.OutputPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
+                ? Path.GetDirectoryName(options.OutputPath)
+                : options.OutputPath;
+            return Path.Combine(baseDir, "learned-config.json");
         }
 
         // Called once at startup, before the two Timer objects are
         // created, so a service restart mid-overlap or after an interval
         // change picks up the learned value instead of the original
-        // command-line-parsed one. Returns null (caller keeps the
-        // command-line value) if no learned config exists yet or it
-        // fails to parse - a brand-new install has never contacted the
-        // server successfully, so the command-line value is correctly
-        // the only thing to fall back on.
+        // command-line-parsed one. Returns an empty (never null)
+        // dictionary if no learned state exists yet or it fails to parse
+        // - a brand-new install has never contacted the server
+        // successfully, so the command-line value is correctly the only
+        // thing to fall back on.
         //
         // internal rather than private: InventoryService.OnStart() (a
         // different top-level-sibling class, not nested inside this one)
         // needs to call this before creating its own timer/
         // softwareCheckTimer fields, the same cross-class reason PostJson
         // just above is internal instead of private.
-        internal Dictionary<string, object> LoadLearnedConfig()
+        internal Dictionary<string, object> LoadLearnedState()
         {
             try
             {
-                string path = GetLearnedConfigCachePath();
+                string path = GetLearnedStateCachePath();
                 if (!File.Exists(path))
                 {
-                    return null;
+                    return new Dictionary<string, object>();
                 }
                 JavaScriptSerializer serializer = new JavaScriptSerializer();
-                return serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                Dictionary<string, object> loaded = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                return loaded ?? new Dictionary<string, object>();
             }
             catch
             {
-                return null;
+                return new Dictionary<string, object>();
             }
         }
 
-        // Applies intervalHours/softwareCheckIntervalHours/ingestionToken
-        // learned from the inventory ack. Only mutates options and (for a
-        // changed interval) persists learned-config.json here - it does
-        // NOT reschedule the Timer objects itself, because those are
-        // private fields of InventoryService (the outer, service-hosting
-        // class in this same file), not of this InventoryCollector - a
-        // fresh InventoryCollector is instantiated by InventoryService for
-        // every single collection cycle and has no reference back to the
-        // timers that scheduled it. InventoryService.Collect() reschedules
-        // both timers itself immediately after this method returns, by
-        // comparing options' values before/after this call.
-        private void ApplyConfigFromServer(Dictionary<string, object> config)
+        private void SaveLearnedState(Dictionary<string, object> learned)
+        {
+            try
+            {
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                WriteText(GetLearnedStateCachePath(), serializer.Serialize(learned));
+            }
+            catch
+            {
+                // Best-effort persistence, same reasoning as before - a
+                // write failure here must never affect an inventory
+                // report that has already succeeded.
+            }
+        }
+
+        // Applies intervalHours/softwareCheckIntervalHours/ingestionToken/
+        // update learned from the inventory ack. Mutates options directly
+        // for all four; additionally mutates the caller-owned `learned`
+        // dict (persisted by the caller, ApplyInventoryAckResponse, once
+        // per ack rather than once per field here) for the two interval
+        // fields only - ingestionToken goes to the registry
+        // (ApplyLearnedIngestionToken) and update triggers an immediate
+        // action (ApplySelfUpdateFromServer), neither is cache-file
+        // content. Does NOT reschedule the Timer objects itself, because
+        // those are private fields of InventoryService (the outer,
+        // service-hosting class in this same file), not of this
+        // InventoryCollector - a fresh InventoryCollector is instantiated
+        // by InventoryService for every single collection cycle and has
+        // no reference back to the timers that scheduled it.
+        // InventoryService.Collect() reschedules both timers itself
+        // immediately after this method returns, by comparing options'
+        // values before/after this call. Returns whether anything was
+        // added to `learned` (the caller uses this to decide whether a
+        // save is needed at all).
+        private bool ApplyConfigFromServer(Dictionary<string, object> config, Dictionary<string, object> learned)
         {
             if (config == null)
             {
-                return;
+                return false;
             }
 
             bool changed = false;
-            int newIntervalHours = options.IntervalHours;
-            int newSoftwareCheckIntervalHours = options.SoftwareCheckIntervalHours;
 
             if (config.ContainsKey("intervalHours"))
             {
                 int parsedInterval;
                 if (Int32.TryParse(Convert.ToString(config["intervalHours"]), out parsedInterval) && parsedInterval >= 1 && parsedInterval <= 24 && parsedInterval != options.IntervalHours)
                 {
-                    newIntervalHours = parsedInterval;
                     options.IntervalHours = parsedInterval;
+                    learned["intervalHours"] = parsedInterval;
                     changed = true;
                 }
             }
@@ -1853,15 +1844,10 @@ namespace WindowsInventoryLite
                 int parsedSoftwareInterval;
                 if (Int32.TryParse(Convert.ToString(config["softwareCheckIntervalHours"]), out parsedSoftwareInterval) && parsedSoftwareInterval >= 1 && parsedSoftwareInterval <= 24 && parsedSoftwareInterval != options.SoftwareCheckIntervalHours)
                 {
-                    newSoftwareCheckIntervalHours = parsedSoftwareInterval;
                     options.SoftwareCheckIntervalHours = parsedSoftwareInterval;
+                    learned["softwareCheckIntervalHours"] = parsedSoftwareInterval;
                     changed = true;
                 }
-            }
-
-            if (changed)
-            {
-                SaveLearnedConfig(newIntervalHours, newSoftwareCheckIntervalHours);
             }
 
             if (config.ContainsKey("ingestionToken"))
@@ -1881,6 +1867,8 @@ namespace WindowsInventoryLite
                     ApplySelfUpdateFromServer(update);
                 }
             }
+
+            return changed;
         }
 
         // Writes WIL_INGESTION_TOKEN into this service's own registry
@@ -2214,6 +2202,11 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns TaskRunFailed when schtasks /Run fails", TestApplySelfUpdateFromServerCoreReturnsTaskRunFailedWhenSchtasksRunFails);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns Applied and writes the expected files", TestApplySelfUpdateFromServerCoreReturnsAppliedAndWritesExpectedFiles);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns Error when download throws", TestApplySelfUpdateFromServerCoreReturnsErrorWhenDownloadThrows);
+            allPassed &= SelfTestCheck(output, "LoadLearnedState returns an empty (not null) dictionary when no cache file exists", TestLoadLearnedStateReturnsEmptyDictWhenNoFileExists);
+            allPassed &= SelfTestCheck(output, "SaveLearnedState/LoadLearnedState round-trip a dictionary with mixed value types", TestSaveLearnedStateRoundTripsMixedValueTypes);
+            allPassed &= SelfTestCheck(output, "ApplyInventoryAckResponse does not lose a previously-learned field when a later ack only carries a different one", TestApplyInventoryAckResponsePreservesUnrelatedLearnedFields);
+            allPassed &= SelfTestCheck(output, "ApplyConfigFromServer ignores an out-of-range interval and applies an in-range one", TestApplyConfigFromServerValidatesIntervalRange);
+            allPassed &= SelfTestCheck(output, "LoadLicenseKeySourcesCache parses a source written via ApplyInventoryAckResponse", TestLoadLicenseKeySourcesCacheParsesEntryWrittenThroughAckResponse);
             return allPassed;
         }
 
@@ -2677,6 +2670,167 @@ namespace WindowsInventoryLite
             finally
             {
                 try { Directory.Delete(dir, true); } catch { }
+            }
+        }
+
+        private static string TestLoadLearnedStateReturnsEmptyDictWhenNoFileExists()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-learnedstate-empty-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(tempDir);
+                ClientOptions options = new ClientOptions();
+                options.OutputPath = tempDir;
+                InventoryCollector collector = new InventoryCollector(options);
+
+                Dictionary<string, object> result = collector.LoadLearnedState();
+                if (result == null)
+                {
+                    return "expected a non-null empty dictionary when no cache file exists, got null";
+                }
+                if (result.Count != 0)
+                {
+                    return "expected an empty dictionary when no cache file exists, got " + result.Count + " entries";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
+        private static string TestSaveLearnedStateRoundTripsMixedValueTypes()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-learnedstate-roundtrip-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(tempDir);
+                ClientOptions options = new ClientOptions();
+                options.OutputPath = tempDir;
+                InventoryCollector collector = new InventoryCollector(options);
+
+                Dictionary<string, object> toSave = new Dictionary<string, object>();
+                toSave["intervalHours"] = 8;
+                ArrayList sources = new ArrayList();
+                Dictionary<string, object> oneSource = new Dictionary<string, object>();
+                oneSource["product"] = "Test Product";
+                oneSource["registryHive"] = "HKEY_LOCAL_MACHINE";
+                oneSource["registryPath"] = @"SOFTWARE\Test";
+                oneSource["valueName"] = "Key";
+                sources.Add(oneSource);
+                toSave["licenseKeySources"] = sources;
+
+                collector.SaveLearnedState(toSave);
+                Dictionary<string, object> loaded = collector.LoadLearnedState();
+
+                if (!loaded.ContainsKey("intervalHours") || Convert.ToInt32(loaded["intervalHours"]) != 8)
+                {
+                    return "expected intervalHours=8 to round-trip, got: " + (loaded.ContainsKey("intervalHours") ? loaded["intervalHours"].ToString() : "(missing)");
+                }
+                if (!loaded.ContainsKey("licenseKeySources"))
+                {
+                    return "expected licenseKeySources to round-trip, key is missing";
+                }
+                ArrayList loadedSources = loaded["licenseKeySources"] as ArrayList;
+                if (loadedSources == null || loadedSources.Count != 1)
+                {
+                    return "expected exactly one license key source to round-trip";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
+        private static string TestApplyInventoryAckResponsePreservesUnrelatedLearnedFields()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-learnedstate-preserve-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(tempDir);
+                ClientOptions options = new ClientOptions();
+                options.OutputPath = tempDir;
+                options.IntervalHours = 6;
+                InventoryCollector collector = new InventoryCollector(options);
+
+                string ackWithLicenseKeysOnly = "{\"licenseKeySources\":[{\"product\":\"P\",\"registryHive\":\"HKEY_LOCAL_MACHINE\",\"registryPath\":\"SOFTWARE\\\\P\",\"valueName\":\"V\"}]}";
+                collector.ApplyInventoryAckResponse(ackWithLicenseKeysOnly);
+
+                string ackWithIntervalOnly = "{\"config\":{\"intervalHours\":9}}";
+                collector.ApplyInventoryAckResponse(ackWithIntervalOnly);
+
+                Dictionary<string, object> learned = collector.LoadLearnedState();
+                if (!learned.ContainsKey("licenseKeySources"))
+                {
+                    return "expected licenseKeySources to survive a later ack that only touched intervalHours";
+                }
+                if (!learned.ContainsKey("intervalHours") || Convert.ToInt32(learned["intervalHours"]) != 9)
+                {
+                    return "expected intervalHours=9 to be applied by the second ack";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
+        private static string TestApplyConfigFromServerValidatesIntervalRange()
+        {
+            ClientOptions options = new ClientOptions();
+            options.IntervalHours = 6;
+            InventoryCollector collector = new InventoryCollector(options);
+            Dictionary<string, object> learned = new Dictionary<string, object>();
+
+            Dictionary<string, object> outOfRangeConfig = new Dictionary<string, object>();
+            outOfRangeConfig["intervalHours"] = 0;
+            bool changedOutOfRange = collector.ApplyConfigFromServer(outOfRangeConfig, learned);
+            if (changedOutOfRange || learned.ContainsKey("intervalHours") || options.IntervalHours != 6)
+            {
+                return "expected an out-of-range intervalHours (0) to be ignored entirely";
+            }
+
+            Dictionary<string, object> inRangeConfig = new Dictionary<string, object>();
+            inRangeConfig["intervalHours"] = 12;
+            bool changedInRange = collector.ApplyConfigFromServer(inRangeConfig, learned);
+            if (!changedInRange || !learned.ContainsKey("intervalHours") || options.IntervalHours != 12)
+            {
+                return "expected an in-range, different intervalHours (12) to be applied to both options and learned";
+            }
+            return null;
+        }
+
+        private static string TestLoadLicenseKeySourcesCacheParsesEntryWrittenThroughAckResponse()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-learnedstate-licensekeys-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(tempDir);
+                ClientOptions options = new ClientOptions();
+                options.OutputPath = tempDir;
+                InventoryCollector collector = new InventoryCollector(options);
+
+                string ack = "{\"licenseKeySources\":[{\"product\":\"KriptoPro\",\"registryHive\":\"HKEY_LOCAL_MACHINE\",\"registryPath\":\"SOFTWARE\\\\WOW6432Node\\\\Test\",\"valueName\":\"SerialNumber\"}]}";
+                collector.ApplyInventoryAckResponse(ack);
+
+                List<LicenseKeySource> parsed = collector.LoadLicenseKeySourcesCache();
+                if (parsed.Count != 1)
+                {
+                    return "expected exactly one parsed license key source, got " + parsed.Count;
+                }
+                if (parsed[0].Product != "KriptoPro" || parsed[0].ValueName != "SerialNumber")
+                {
+                    return "expected the parsed source's fields to match what was written, got Product='" + parsed[0].Product + "' ValueName='" + parsed[0].ValueName + "'";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
             }
         }
 
