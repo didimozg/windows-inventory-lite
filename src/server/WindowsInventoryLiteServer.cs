@@ -2696,6 +2696,13 @@ namespace WindowsInventoryLite
                 }
             }
 
+            bool admitted = ShouldAdmitSoftwareInstallWindowRequest(DateTime.UtcNow, options.SoftwareInstallWindowEnabled, options.SoftwareInstallWindowStartUtc, options.SoftwareInstallWindowEndUtc, options.SoftwareInstallWindowJitterMinutes, NextSoftwareInstallWindowRandomSample());
+            if (!admitted && jobs.Count > 0)
+            {
+                DebugLogger.Log(options, "Schedule", jobs.Count + " software job(s) for '" + DebugLogger.SanitizeForLog(computerName) + "' deferred by the software install window.");
+                jobs = new ArrayList();
+            }
+
             JavaScriptSerializer serializer = CreateJsonSerializer();
             Dictionary<string, object> response = new Dictionary<string, object>();
             response["jobs"] = jobs;
@@ -10192,6 +10199,21 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return sb.ToString();
         }
 
+        // Mirrors GenerateRandomToken's own reasoning: RandomNumberGenerator.Create()
+        // per call, not a shared System.Random instance (not thread-safe,
+        // and this server handles concurrent requests from many clients at
+        // once).
+        private static double NextSoftwareInstallWindowRandomSample()
+        {
+            byte[] bytes = new byte[4];
+            using (RandomNumberGenerator rng = RandomNumberGenerator.Create())
+            {
+                rng.GetBytes(bytes);
+            }
+            uint value = BitConverter.ToUInt32(bytes, 0);
+            return value / ((double)uint.MaxValue + 1);
+        }
+
         private void SendIngestionTokenStatus(Stream stream)
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
@@ -13637,6 +13659,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ShouldAdmitSoftwareInstallWindowRequest is false outside the window regardless of sample", TestShouldAdmitSoftwareInstallWindowRequestOutsideWindowAlwaysFalse);
             allPassed &= SelfTestCheck(output, "ShouldAdmitSoftwareInstallWindowRequest inside the window compares the sample against the ramp probability", TestShouldAdmitSoftwareInstallWindowRequestInsideWindowComparesSample);
             allPassed &= SelfTestCheck(output, "ShouldAdmitSoftwareInstallWindowRequest fails open when the configured window is unparsable", TestShouldAdmitSoftwareInstallWindowRequestFailsOpenOnBadConfig);
+            allPassed &= SelfTestCheck(output, "SendClientSoftwareJobs withholds a targeted job outside the configured install window, and delivers it once the window is disabled", TestSendClientSoftwareJobsWithheldOutsideInstallWindow);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall updates a target's stored clientVersion", TestPatchClientReportVersionAfterInstallUpdatesVersion);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall's lastInstalledAtUtc is cleared once a real report overwrites the file", TestPatchClientReportVersionAfterInstallFieldClearedByRealReport);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall is a no-op when the target has no stored report yet", TestPatchClientReportVersionAfterInstallMissingReport);
@@ -16469,6 +16492,79 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return "expected true (fail open) when the configured start time is unparsable";
             }
             return null;
+        }
+
+        private static string TestSendClientSoftwareJobsWithheldOutsideInstallWindow()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-software-jobs-installwindow-test-" + Guid.NewGuid().ToString("N"));
+            options.Token = "shared-secret";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> updates = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "kb-window-test";
+                entry["name"] = "Window Test KB";
+                entry["relativePath"] = @"windows-updates\test.msu";
+                entry["arguments"] = "/quiet";
+                entry["requiresReboot"] = true;
+                entry["enabled"] = true;
+                entry["targets"] = "WINDOW-TEST-PC";
+                updates.Add(entry);
+                server.SaveWindowsUpdates(updates);
+
+                // A narrow window computed relative to the real wall clock at
+                // test-run time, not a fixed clock time - a hardcoded window
+                // (e.g. "02:00-04:00") would make this test flaky depending on
+                // when it happens to run. Six hours ahead of "now" for 30
+                // minutes is guaranteed to exclude the current time of day.
+                DateTime windowStart = DateTime.UtcNow.AddHours(6);
+                DateTime windowEnd = windowStart.AddMinutes(30);
+                options.SoftwareInstallWindowEnabled = true;
+                options.SoftwareInstallWindowStartUtc = windowStart.ToString("HH:mm");
+                options.SoftwareInstallWindowEndUtc = windowEnd.ToString("HH:mm");
+                options.SoftwareInstallWindowJitterMinutes = 30;
+
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client/software-jobs?computerName=WINDOW-TEST-PC";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "shared-secret";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendClientSoftwareJobs(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("\"jobs\":[]", StringComparison.Ordinal) < 0)
+                {
+                    return "expected an empty jobs array while the install window is enabled and excludes the current time, got: " + responseText;
+                }
+
+                options.SoftwareInstallWindowEnabled = false;
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendClientSoftwareJobs(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("\"id\":\"kb-window-test\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the targeted catalog entry to appear once the install window feature is disabled, got: " + responseText;
+                }
+
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
         }
 
         private static string TestPatchClientReportVersionAfterInstallUpdatesVersion()
