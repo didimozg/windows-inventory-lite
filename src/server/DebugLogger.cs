@@ -83,6 +83,35 @@ namespace WindowsInventoryLite
             }
         }
 
+        // Deletes the debug log file entirely, returning how many lines it
+        // had (0 if it didn't exist). Works regardless of whether
+        // DebugLogEnabled is currently on - the enabled flag only gates
+        // new writes (see Log above), never reads or clears; a leftover
+        // file from an earlier session where logging was on is just as
+        // clearable as a freshly-written one.
+        internal static int Clear(ServerOptions options)
+        {
+            lock (writeLock)
+            {
+                string path = ResolvePath(options);
+                if (!File.Exists(path))
+                {
+                    return 0;
+                }
+                int lineCount;
+                try
+                {
+                    lineCount = File.ReadAllLines(path, Encoding.UTF8).Length;
+                }
+                catch
+                {
+                    lineCount = 0;
+                }
+                File.Delete(path);
+                return lineCount;
+            }
+        }
+
         // Checked on every write but only pays for a read+rewrite when
         // genuinely over budget - mirrors RecordIngestionRejection's own
         // "count > maxEntries + slack OR oldest entry aged out" dual

@@ -2061,6 +2061,10 @@ namespace WindowsInventoryLite
                     {
                         SendClientInstallJobs(stream);
                     }
+                    else if (request.Method == "DELETE" && request.Path == "/api/v1/client-install")
+                    {
+                        ClearInstallJobLogs(stream);
+                    }
                     else if (request.Method == "GET" && request.Path.StartsWith("/api/v1/client-install/", StringComparison.OrdinalIgnoreCase))
                     {
                         SendClientInstallJob(stream, request);
@@ -2201,9 +2205,17 @@ namespace WindowsInventoryLite
                     {
                         SendIngestionRejectionLog(stream);
                     }
+                    else if (request.Method == "DELETE" && request.Path == "/api/v1/server/ingestion-rejections")
+                    {
+                        ClearIngestionRejectionLog(stream);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/server/debug-log")
                     {
                         SendDebugLog(stream);
+                    }
+                    else if (request.Method == "DELETE" && request.Path == "/api/v1/server/debug-log")
+                    {
+                        ClearDebugLog(stream);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/licenses")
                     {
@@ -2288,6 +2300,10 @@ namespace WindowsInventoryLite
                     else if (request.Method == "GET" && request.Path == "/api/v1/software-repository/attempt-history")
                     {
                         SendSoftwareJobAttemptHistory(stream);
+                    }
+                    else if (request.Method == "DELETE" && request.Path == "/api/v1/software-repository/attempt-history")
+                    {
+                        ClearSoftwareJobAttemptLog(stream);
                     }
                     else if (request.Method == "GET" && (request.Path == "/" || request.Path == "/index.html"))
                     {
@@ -6033,6 +6049,32 @@ namespace WindowsInventoryLite
             QueueReverseDnsLookup(request.RemoteAddress);
         }
 
+        // Shared response shape for all four "clear now" endpoints, matching
+        // this project's existing convention for a delete-shaped action
+        // (DeleteCertificateHistoryEntry returns {"status":"deleted"}) -
+        // clearedCount lets the dashboard show "Cleared 42 entries."
+        // instead of a bare confirmation.
+        private void SendClearedResponse(Stream stream, int clearedCount)
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["status"] = "cleared";
+            result["clearedCount"] = clearedCount;
+            SendJson(stream, CreateJsonSerializer().Serialize(result));
+        }
+
+        private void ClearIngestionRejectionLog(Stream stream)
+        {
+            int clearedCount;
+            lock (ingestionRejectionLogLock)
+            {
+                clearedCount = ingestionRejectionLog.Count;
+                ingestionRejectionLog.Clear();
+                RewriteIngestionRejectionLogFileLocked();
+            }
+            DebugLogger.Log(options, "Server", "Admin cleared the Ingestion Rejections log (" + clearedCount + " entries).");
+            SendClearedResponse(stream, clearedCount);
+        }
+
         // Caller must already hold ingestionRejectionLogLock. Only called
         // when a prune pass actually removed something - the common case
         // (no pruning needed) never rewrites the file, only appends.
@@ -6050,7 +6092,23 @@ namespace WindowsInventoryLite
                 sb.Append(serializer.Serialize(line));
                 sb.Append(Environment.NewLine);
             }
-            File.WriteAllText(GetIngestionRejectionLogPath(), sb.ToString(), new UTF8Encoding(false));
+            string path = GetIngestionRejectionLogPath();
+            // Historically safe to skip this check - this function's only two
+            // callers (RecordIngestionRejection's own inline prune, and
+            // LoadIngestionRejectionLogFromDisk's startup prune pass) never ran
+            // before the directory already existed. ClearIngestionRejectionLog
+            // breaks that assumption: an admin can clear an EMPTY log on a
+            // fresh server where nothing has ever rejected an ingestion
+            // attempt, so _logs may not exist yet - discovered via a live
+            // smoke test, not the self-tests (which always seed one entry
+            // first via RecordIngestionRejection, which creates the directory
+            // as its own side effect).
+            string directory = Path.GetDirectoryName(path);
+            if (!String.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+            File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
         }
 
         private string GetSoftwareJobAttemptLogPath()
@@ -6191,6 +6249,19 @@ namespace WindowsInventoryLite
             }
         }
 
+        private void ClearSoftwareJobAttemptLog(Stream stream)
+        {
+            int clearedCount;
+            lock (softwareJobAttemptLogLock)
+            {
+                clearedCount = softwareJobAttemptLog.Count;
+                softwareJobAttemptLog.Clear();
+                RewriteSoftwareJobAttemptLogFileLocked();
+            }
+            DebugLogger.Log(options, "Server", "Admin cleared the Software job attempt log (" + clearedCount + " entries).");
+            SendClearedResponse(stream, clearedCount);
+        }
+
         // Caller must already hold softwareJobAttemptLogLock. Only called
         // from LoadSoftwareJobAttemptLogFromDisk's startup prune pass -
         // RecordSoftwareJobAttempt above does its own inline rewrite when
@@ -6204,7 +6275,18 @@ namespace WindowsInventoryLite
                 sb.Append(serializer.Serialize(entry.ToDictionary()));
                 sb.Append(Environment.NewLine);
             }
-            File.WriteAllText(GetSoftwareJobAttemptLogPath(), sb.ToString(), new UTF8Encoding(false));
+            string path = GetSoftwareJobAttemptLogPath();
+            // Same reasoning as RewriteIngestionRejectionLogFileLocked's own
+            // directory guard - ClearSoftwareJobAttemptLog can call this on a
+            // fresh server where _logs was never created (no software job
+            // attempt has ever been recorded), which this function's other
+            // two callers never had to handle.
+            string directory = Path.GetDirectoryName(path);
+            if (!String.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+            File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
         }
 
         private static List<SoftwareJobAttempt> PruneSoftwareJobAttempts(List<SoftwareJobAttempt> entries, DateTime nowUtc, int retentionDays, int maxEntries)
@@ -6325,6 +6407,36 @@ namespace WindowsInventoryLite
             }
 
             return File.ReadAllText(path, Encoding.UTF8);
+        }
+
+        private void ClearInstallJobLogs(Stream stream)
+        {
+            int clearedCount = 0;
+            lock (installJobsLock)
+            {
+                string directory = GetInstallJobDirectory();
+                if (Directory.Exists(directory))
+                {
+                    foreach (string file in Directory.GetFiles(directory, "*.json"))
+                    {
+                        try
+                        {
+                            File.Delete(file);
+                            clearedCount++;
+                        }
+                        catch
+                        {
+                            // Best-effort, same reasoning as
+                            // CleanupInstallJobLogs' own per-file try/catch
+                            // below - one locked/in-use file must not abort
+                            // clearing the rest.
+                        }
+                    }
+                }
+                installJobs.Clear();
+            }
+            DebugLogger.Log(options, "Server", "Admin cleared the Installs log (" + clearedCount + " entries).");
+            SendClearedResponse(stream, clearedCount);
         }
 
         private void CleanupInstallJobLogs()
@@ -10260,6 +10372,17 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendJson(stream, serializer.Serialize(result));
         }
 
+        private void ClearDebugLog(Stream stream)
+        {
+            int clearedCount = DebugLogger.Clear(options);
+            // Logged AFTER the delete - if debug logging happens to be on,
+            // this line becomes the new file's first entry, a useful side
+            // effect (proves exactly when and that it was cleared) rather
+            // than something to avoid.
+            DebugLogger.Log(options, "Server", "Admin cleared the Debug log (" + clearedCount + " lines).");
+            SendClearedResponse(stream, clearedCount);
+        }
+
         private void SendIngestionRejectionLog(Stream stream)
         {
             List<IngestionRejectionEntry> snapshot;
@@ -13786,6 +13909,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "RecordIngestionRejection still enforces day-based retention continuously even when the count-based batch gate never trips", TestRecordIngestionRejectionEnforcesRetentionContinuously);
             allPassed &= SelfTestCheck(output, "PruneSoftwareJobAttempts keeps the newest entries within a count cap", TestPruneSoftwareJobAttemptsKeepsNewestWithinCap);
             allPassed &= SelfTestCheck(output, "RecordSoftwareJobAttempt appends the entry to the software-job-attempts.jsonl log file", TestRecordSoftwareJobAttemptAppendsToLogFile);
+            allPassed &= SelfTestCheck(output, "ClearIngestionRejectionLog empties the in-memory list and the on-disk file", TestClearIngestionRejectionLogEmptiesListAndFile);
+            allPassed &= SelfTestCheck(output, "ClearSoftwareJobAttemptLog empties the in-memory list and the on-disk file", TestClearSoftwareJobAttemptLogEmptiesListAndFile);
+            allPassed &= SelfTestCheck(output, "ClearInstallJobLogs deletes every per-job file and the in-memory dictionary", TestClearInstallJobLogsDeletesAllFiles);
+            allPassed &= SelfTestCheck(output, "DebugLogger.Clear deletes the file and returns its line count, 0 for a missing file", TestDebugLoggerClearDeletesFileAndReturnsLineCount);
             allPassed &= SelfTestCheck(output, "LookupCatalogEntryName returns the matching catalog entry's current name", TestLookupCatalogEntryNameFindsMatchingEntry);
             allPassed &= SelfTestCheck(output, "LookupCatalogEntryName returns null for an entry id that is not in the catalog", TestLookupCatalogEntryNameReturnsNullWhenMissing);
             allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobResults snapshots the catalog entry's name onto the recorded attempt", TestReceiveSoftwareJobResultsSnapshotsEntryName);
@@ -15967,6 +16094,178 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestClearIngestionRejectionLogEmptiesListAndFile()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-clear-ingestion-" + Guid.NewGuid().ToString("N"));
+            // Without these, a bare `new ServerOptions()` defaults
+            // IngestionRejectionLogRetentionDays to 0, which makes
+            // RecordIngestionRejection's own inline age-based prune check
+            // (oldestEntryAgedOut) treat the entry recorded a few ticks
+            // ago as already out of retention and prune it away before
+            // ClearIngestionRejectionLog ever runs - matches this file's
+            // own established defaults for this option (e.g.
+            // TestRecordIngestionRejectionEnforcesRetentionContinuously).
+            options.IngestionRejectionLogRetentionDays = 30;
+            options.IngestionRejectionLogMaxEntries = 5000;
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext fakeRequest = new RequestContext();
+                fakeRequest.RemoteAddress = IPAddress.Parse("192.168.1.100");
+                server.RecordIngestionRejection(fakeRequest, "test-endpoint", "mismatched");
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ClearIngestionRejectionLog(stream);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("\"clearedCount\":1", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected clearedCount:1 in the response, got: " + responseText;
+                    }
+                }
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendIngestionRejectionLog(stream);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("\"entries\":[]", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected an empty entries array after clearing, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestClearSoftwareJobAttemptLogEmptiesListAndFile()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-clear-software-" + Guid.NewGuid().ToString("N"));
+            // Without these, a bare `new ServerOptions()` defaults
+            // SoftwareJobAttemptLogRetentionDays to 0, which makes
+            // RecordSoftwareJobAttempt's own inline age-based prune check
+            // (oldestEntryAgedOut) treat the entry recorded a few ticks
+            // ago as already out of retention and prune it away before
+            // ClearSoftwareJobAttemptLog ever runs - matches
+            // TestRecordSoftwareJobAttemptAppendsToLogFile's own setup.
+            options.SoftwareJobAttemptLogRetentionDays = 90;
+            options.SoftwareJobAttemptLogMaxEntries = 5000;
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                SoftwareJobAttempt attempt = new SoftwareJobAttempt();
+                attempt.TimestampUtc = DateTime.UtcNow;
+                attempt.ComputerName = "TEST-PC";
+                attempt.CatalogType = "windowsUpdate";
+                attempt.EntryId = "kb-test";
+                attempt.EntryName = "Test KB";
+                attempt.Success = true;
+                attempt.ExitCode = 0;
+                server.RecordSoftwareJobAttempt(attempt);
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ClearSoftwareJobAttemptLog(stream);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("\"clearedCount\":1", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected clearedCount:1 in the response, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestClearInstallJobLogsDeletesAllFiles()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-clear-installs-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                InstallJob job = new InstallJob();
+                job.Id = Guid.NewGuid().ToString("N");
+                job.Action = "install";
+                job.Status = "completed";
+                job.CreatedAtUtc = DateTime.UtcNow;
+                job.Targets = new ArrayList();
+                job.Results = new ArrayList();
+                server.SaveInstallJob(job);
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ClearInstallJobLogs(stream);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("\"clearedCount\":1", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected clearedCount:1 in the response, got: " + responseText;
+                    }
+                }
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendClientInstallJobs(stream);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("\"jobs\":[]", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected an empty jobs array after clearing, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestDebugLoggerClearDeletesFileAndReturnsLineCount()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-clear-debuglog-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = tempDir;
+                options.DebugLogEnabled = true;
+
+                int clearedWhenMissing = DebugLogger.Clear(options);
+                if (clearedWhenMissing != 0)
+                {
+                    return "expected 0 for a missing file, got " + clearedWhenMissing;
+                }
+
+                DebugLogger.Log(options, "Server", "line one");
+                DebugLogger.Log(options, "Server", "line two");
+                int clearedCount = DebugLogger.Clear(options);
+                if (clearedCount != 2)
+                {
+                    return "expected 2 lines cleared, got " + clearedCount;
+                }
+                if (File.Exists(DebugLogger.ResolvePath(options)))
+                {
+                    return "expected the debug log file to be deleted after Clear";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
             }
         }
 
