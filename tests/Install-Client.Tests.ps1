@@ -72,6 +72,35 @@ Describe 'Windows Inventory Lite Install-Client client-data layout' {
         $environment | Should -BeNullOrEmpty
     }
 
+    It 'Set-RestrictedServiceRegistryKeyAcl removes BUILTIN\Users and grants only Administrators+SYSTEM' {
+        $registryRoot = 'TestRegistry:\Services'
+        $serviceName = 'FakeServiceAcl1'
+        $servicePath = Join-Path -Path $registryRoot -ChildPath $serviceName
+        New-Item -Path $servicePath -Force | Out-Null
+
+        # TestRegistry: keys inherit a permissive ACL from their real parent
+        # (HKCU\Software\Pester\...) that includes BUILTIN\Users - the same
+        # shape the real HKLM\SYSTEM\CurrentControlSet\Services subkey has,
+        # which is exactly the gap this function closes. If this ever stops
+        # being true (a Pester internals change), this test would silently
+        # pass for the wrong reason - the assertions below check the
+        # POST-condition regardless, so that risk is contained.
+        Set-RestrictedServiceRegistryKeyAcl -ServiceName $serviceName -ServiceRegistryRoot $registryRoot
+
+        $acl = Get-Acl -Path $servicePath
+        $identities = $acl.Access | ForEach-Object { $_.IdentityReference.Value }
+        $identities | Should -Not -Contain 'BUILTIN\Users'
+        $identities | Should -Not -Contain 'Everyone'
+        $identities | Should -Not -Contain 'NT AUTHORITY\Authenticated Users'
+
+        $adminSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+        $systemSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+        $adminAccount = $adminSid.Translate([System.Security.Principal.NTAccount]).Value
+        $systemAccount = $systemSid.Translate([System.Security.Principal.NTAccount]).Value
+        $identities | Should -Contain $adminAccount
+        $identities | Should -Contain $systemAccount
+    }
+
     It 'Remove-LegacyClientFiles deletes the old bare-root exe and client-version.txt when the new path differs' {
         $legacyRoot = Join-Path -Path $TestDrive -ChildPath 'legacy'
         New-Item -Path $legacyRoot -ItemType Directory -Force | Out-Null

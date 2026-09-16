@@ -358,6 +358,39 @@ function Set-ServiceEnvironmentToken {
     }
 }
 
+# Breaks ACL inheritance on the service's own registry key and grants
+# only Administrators+SYSTEM. HKLM\SYSTEM\CurrentControlSet\Services\<name>
+# subkeys inherit BUILTIN\Users: ReadKey from their parent by default -
+# verified live on a real Windows 10 box - which otherwise lets ANY local
+# user read WIL_INGESTION_TOKEN out of this key's Environment value and
+# use it to authenticate to the server (including pulling the
+# software-repository share password in plaintext via
+# GET /api/v1/client/software-repository-connection). Uses well-known
+# SIDs, not literal 'Administrators'/'SYSTEM' strings, for the same
+# non-English-locale reason Set-RestrictedFileAcl documents.
+# -ServiceRegistryRoot defaults to the real Services key but is overridable
+# so Pester can point this at TestRegistry: instead of writing into live
+# HKLM\SYSTEM\CurrentControlSet\Services during a test run.
+function Set-RestrictedServiceRegistryKeyAcl {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ServiceName,
+
+        [string]$ServiceRegistryRoot = 'HKLM:\SYSTEM\CurrentControlSet\Services'
+    )
+    $adminSid  = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+    $systemSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+    $servicePath = Join-Path -Path $ServiceRegistryRoot -ChildPath $ServiceName
+    $acl = Get-Acl -Path $servicePath
+    $acl.SetAccessRuleProtection($true, $false)
+    $inheritFlags = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit
+    $adminRule  = New-Object System.Security.AccessControl.RegistryAccessRule($adminSid, 'FullControl', $inheritFlags, [System.Security.AccessControl.PropagationFlags]::None, 'Allow')
+    $systemRule = New-Object System.Security.AccessControl.RegistryAccessRule($systemSid, 'FullControl', $inheritFlags, [System.Security.AccessControl.PropagationFlags]::None, 'Allow')
+    $acl.AddAccessRule($adminRule)
+    $acl.AddAccessRule($systemRule)
+    Set-Acl -Path $servicePath -AclObject $acl
+}
+
 # Deletes the pre-client-data-layout exe/version marker from the shared
 # WindowsInventoryLite root once the service has been successfully
 # recreated pointing at its new client-data location - mirrors the
@@ -519,6 +552,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         if ((Get-ServiceEnvironmentToken -ServiceName $ServiceName) -ne [string]$Token) {
             Write-DeployLog "Updating ingestion token for existing service."
             Set-ServiceEnvironmentToken -ServiceName $ServiceName -SharedToken $Token
+            Set-RestrictedServiceRegistryKeyAcl -ServiceName $ServiceName
         }
         $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
         if ($service -and $service.Status -ne 'Running') {
@@ -559,6 +593,7 @@ if ($MyInvocation.InvocationName -ne '.') {
 
     Invoke-ServiceCreate -ServiceName $ServiceName -BinPath $desiredCommand -DisplayName 'Windows Inventory Lite' -FailureMessage 'Failed to create service.' | Out-Null
     Set-ServiceEnvironmentToken -ServiceName $ServiceName -SharedToken $Token
+    Set-RestrictedServiceRegistryKeyAcl -ServiceName $ServiceName
     Invoke-ServiceControl -Arguments @('description', $ServiceName, "Collects Windows, Office, activation, and software inventory for Windows Inventory Lite. Version $installedVersion.") -FailureMessage 'Failed to set service description.' | Out-Null
     Invoke-ServiceControl -Arguments @('start', $ServiceName) -FailureMessage 'Failed to start service.' | Out-Null
 

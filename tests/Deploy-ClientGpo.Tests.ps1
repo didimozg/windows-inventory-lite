@@ -128,6 +128,23 @@ Describe 'Windows Inventory Lite Deploy-ClientGpo client-data layout' {
         Get-ServiceEnvironmentToken -ServiceName $serviceName -ServiceRegistryRoot $registryRoot | Should -Be ''
     }
 
+    It 'Set-RestrictedServiceRegistryKeyAcl removes BUILTIN\Users and grants only Administrators+SYSTEM' {
+        $registryRoot = 'TestRegistry:\Services'
+        $serviceName = 'FakeGpoServiceAcl1'
+        $servicePath = Join-Path -Path $registryRoot -ChildPath $serviceName
+        New-Item -Path $servicePath -Force | Out-Null
+
+        Set-RestrictedServiceRegistryKeyAcl -ServiceName $serviceName -ServiceRegistryRoot $registryRoot
+
+        $acl = Get-Acl -Path $servicePath
+        $identities = $acl.Access | ForEach-Object { $_.IdentityReference.Value }
+        $identities | Should -Not -Contain 'BUILTIN\Users'
+
+        $adminSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+        $adminAccount = $adminSid.Translate([System.Security.Principal.NTAccount]).Value
+        $identities | Should -Contain $adminAccount
+    }
+
     It 'Remove-LegacyClientFiles deletes the old bare-root exe and client-version.txt when the new path differs' {
         $script:LogPath = Join-Path -Path $TestDrive -ChildPath 'test-deploy.log'
         $legacyRoot = Join-Path -Path $TestDrive -ChildPath 'legacy'
