@@ -10,6 +10,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 No functional change - version bump only, to re-exercise the client self-update mechanism end-to-end against the live fleet (a version-only rebuild is exactly the trigger `applySelfUpdate` reacts to). `linux-client/prebuilt/wil-linux-client` and its `.version` sidecar rebuilt to match.
 
+## [0.65.0]
+
+### Added
+
+- **`Convert-OpenSshKeyToPpk` (the in-process OpenSSH-to-PPK converter behind SSH key-auth pushes, `Install-ClientDebianSSH.ps1`/`Uninstall-ClientDebianSSH.ps1`) now supports Ed25519 and ECDSA (nistp256/384/521) keys, not just RSA.** The Windows-native `ssh.exe` this converter replaced for key-auth handled these key types fine against any target it could otherwise reach, so RSA-only (shipped 2026-09-15) was a real capability narrowing for anyone using a modern key - `ssh-keygen`'s own default since OpenSSH 8.5 is Ed25519, not RSA. Ed25519's PPK private-key content is its 32-byte seed alone; ECDSA's is its private scalar alone - both independently cross-checked against Python's `cryptography` library parsing real fixture keys through its own, separately-implemented OpenSSH-key loader, before implementation. An unsupported key type (e.g. DSA) still produces a clear, specific error rather than being silently mishandled.
+
+### Fixed
+
+- **`ToBase64Lines` (the same script pair) returned its line list bareback, which PowerShell's pipeline-output unwrapping collapses to a plain string whenever the list has exactly one element** - silently reachable only by the new Ed25519 and ECDSA-nistp256 key types (their private-key material is short enough to base64-encode onto a single 64-character line; RSA's own output never fits in fewer than several lines, so this was never triggered before). Under this file's `Set-StrictMode -Version 2.0`, the resulting `.Count` access on what was assumed to still be a list throws `PropertyNotFoundException` - found and fixed during this same feature's own implementation, before it ever shipped broken.
+
 ## [0.64.0]
 
 ### Added

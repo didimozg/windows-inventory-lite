@@ -53,10 +53,10 @@ or install one Windows client directly:
 .\src\Install-Client.ps1 -ServerUrl 'http://<server>:8080/api/v1/inventory' -IntervalHours 6
 ```
 
-or push a Linux client over SSH using an RSA private key in OpenSSH format:
+or push a Linux client over SSH using an RSA, Ed25519, or ECDSA private key in OpenSSH format:
 
 ```powershell
-.\src\Install-ClientDebianSSH.ps1 -ComputerName 192.0.2.10 -ServerUrl 'https://<server>/api/v1/linux/inventory' -CredentialUsername root -KeyPath C:\path\to\id_rsa
+.\src\Install-ClientDebianSSH.ps1 -ComputerName 192.0.2.10 -ServerUrl 'https://<server>/api/v1/linux/inventory' -CredentialUsername root -KeyPath C:\path\to\id_ed25519
 ```
 
 Full parameters for every script, every `server-config.json` key, GPO deployment, and remote WinRM pushes are in [docs/parameters-reference.md](./docs/parameters-reference.md).
