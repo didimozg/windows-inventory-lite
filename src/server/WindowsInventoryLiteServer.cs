@@ -5371,7 +5371,25 @@ namespace WindowsInventoryLite
 
         internal static bool IsSshKeyAuthRejected(string combinedOutput)
         {
-            return !String.IsNullOrEmpty(combinedOutput) && combinedOutput.IndexOf("Server refused our key", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (String.IsNullOrEmpty(combinedOutput))
+            {
+                return false;
+            }
+            // "Server refused our key" is plink's own real-time auth
+            // rejection. The other two are Convert-OpenSshKeyToPpk (in
+            // Install-ClientDebianSSH.ps1) refusing to even attempt the
+            // connection - a passphrase-protected key or a non-RSA key it
+            // cannot decrypt/convert. All three mean "this key cannot
+            // authenticate," and all three should fall back to the saved
+            // password in Global mode - found live during this feature's
+            // own final review: without this, an admin who had already
+            // saved a non-RSA/passphrase-protected key alongside a working
+            // password (harmless before this feature, since Global mode
+            // used to ignore the key entirely) would see a previously
+            // working Global push start failing outright.
+            return combinedOutput.IndexOf("Server refused our key", StringComparison.OrdinalIgnoreCase) >= 0
+                || combinedOutput.IndexOf("is passphrase-protected", StringComparison.OrdinalIgnoreCase) >= 0
+                || combinedOutput.IndexOf("only RSA (ssh-rsa) keys are supported", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static readonly Regex HostKeyFingerprintFormatPattern = new Regex(@"^SHA256:[A-Za-z0-9+/]+=*$");
@@ -6748,6 +6766,8 @@ namespace WindowsInventoryLite
                     if (attemptResult.ContainsKey("hostKeyTrust")) attempt["hostKeyTrust"] = attemptResult["hostKeyTrust"];
                     if (attemptResult.ContainsKey("hostKeyStatus")) attempt["hostKeyStatus"] = attemptResult["hostKeyStatus"];
                     if (attemptResult.ContainsKey("hostKeyFingerprint")) attempt["hostKeyFingerprint"] = attemptResult["hostKeyFingerprint"];
+                    if (attemptResult.ContainsKey("sshCredentialFallback")) attempt["sshCredentialFallback"] = attemptResult["sshCredentialFallback"];
+                    if (attemptResult.ContainsKey("sshCredentialFallbackFrom")) attempt["sshCredentialFallbackFrom"] = attemptResult["sshCredentialFallbackFrom"];
                 }
                 attempts.Add(attempt);
 
@@ -6790,6 +6810,8 @@ namespace WindowsInventoryLite
                 if (lastAttemptResult.ContainsKey("hostKeyTrust")) result["hostKeyTrust"] = lastAttemptResult["hostKeyTrust"];
                 if (lastAttemptResult.ContainsKey("hostKeyStatus")) result["hostKeyStatus"] = lastAttemptResult["hostKeyStatus"];
                 if (lastAttemptResult.ContainsKey("hostKeyFingerprint")) result["hostKeyFingerprint"] = lastAttemptResult["hostKeyFingerprint"];
+                if (lastAttemptResult.ContainsKey("sshCredentialFallback")) result["sshCredentialFallback"] = lastAttemptResult["sshCredentialFallback"];
+                if (lastAttemptResult.ContainsKey("sshCredentialFallbackFrom")) result["sshCredentialFallbackFrom"] = lastAttemptResult["sshCredentialFallbackFrom"];
             }
             return result;
         }
@@ -19242,6 +19264,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (!IsSshKeyAuthRejected("FATAL ERROR: Server refused our key"))
             {
                 return "expected true for the real plink key-rejection message";
+            }
+            if (!IsSshKeyAuthRejected("'C:\\keys\\id_rsa' is passphrase-protected (cipher 'aes256-ctr'). Automated key-auth pushes require a passphrase-less private key - this is an existing requirement, not new."))
+            {
+                return "expected true for the converter's passphrase-protected-key refusal";
+            }
+            if (!IsSshKeyAuthRejected("'C:\\keys\\id_ed25519' is a 'ssh-ed25519' key - only RSA (ssh-rsa) keys are supported for key-based push."))
+            {
+                return "expected true for the converter's non-RSA-key refusal";
             }
             if (IsSshKeyAuthRejected("Access denied\nFATAL ERROR: Configured password was not accepted"))
             {

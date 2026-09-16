@@ -1906,6 +1906,18 @@ th.sort-desc::after {
   grid-template-columns: minmax(200px, 420px) minmax(200px, 420px) auto;
 }
 
+/* "Linux Client update credentials" gained a 4th field (Global mode
+   priority - a two-option dropdown, not a text field needing 420px) -
+   .client-update-grid's plain 3-column template left it filling the
+   entire trailing auto track (measured live at 945px wide on a 1920px
+   screen), pushing Save/"Delete saved credentials" onto their own row
+   below the username field. A dedicated modifier, not a change to
+   .client-update-grid itself, so the other users of that class (all
+   ≤3 fields) stay unaffected. */
+.linux-update-credentials-grid {
+  grid-template-columns: minmax(200px, 420px) minmax(200px, 420px) minmax(160px, 220px) auto;
+}
+
 /* Four short numeric fields (threshold/window/duration/session lifetime) -
    narrower tracks than .client-update-grid's credential-shaped fields,
    matching this block's actual content instead of stretching digits-only
