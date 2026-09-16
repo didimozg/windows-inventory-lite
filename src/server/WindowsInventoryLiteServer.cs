@@ -4087,14 +4087,18 @@ namespace WindowsInventoryLite
             }
 
             string keyPath = GetLinuxSshKeyFilePath();
-            string authMode = File.Exists(keyPath) ? "key" : "credentials";
             string username = options.LinuxUpdateUsername;
             string password = options.LinuxUpdatePassword;
-            if (String.IsNullOrEmpty(username) || (authMode == "credentials" && String.IsNullOrEmpty(password)))
+            bool hasPassword = !String.IsNullOrEmpty(username) && !String.IsNullOrEmpty(password);
+            bool hasKey = !String.IsNullOrEmpty(username) && File.Exists(keyPath);
+            if (!hasPassword && !hasKey)
             {
                 DebugLogger.Log(options, "Schedule", "Scheduled Linux client update push skipped: no saved Linux credentials configured.");
                 return;
             }
+            string authMode;
+            bool allowCredentialFallback;
+            ResolveGlobalSshAuthMode(hasPassword, hasKey, options.LinuxUpdateAuthPriority, out authMode, out allowCredentialFallback);
 
             string pushValidationError;
             if (!TryValidateLinuxPushValues(serverUrl, token, installPath, out pushValidationError))
@@ -4117,6 +4121,8 @@ namespace WindowsInventoryLite
             job.IntervalHours = intervalHours;
             job.StatusIntervalMinutes = statusIntervalMinutes;
             job.SshAuthMode = authMode;
+            job.SshEffectiveAuthMode = authMode;
+            job.AllowSshCredentialFallback = allowCredentialFallback;
             job.SshUsername = username;
             job.SshPassword = password;
             job.SshKeyPath = keyPath;
@@ -4389,6 +4395,8 @@ namespace WindowsInventoryLite
             string sshUsername = "";
             string sshPassword = "";
             string sshKeyPath = "";
+            string sshEffectiveAuthMode = "credentials";
+            bool allowSshCredentialFallback = false;
             bool trustNewHostKeys = false;
             int intervalHours = options.LinuxDefaultIntervalHours;
             int statusIntervalMinutes = options.LinuxDefaultStatusIntervalMinutes;
@@ -4399,6 +4407,7 @@ namespace WindowsInventoryLite
                 sshUsername = Convert.ToString(payload.ContainsKey("sshUsername") ? payload["sshUsername"] : "");
                 sshPassword = Convert.ToString(payload.ContainsKey("sshPassword") ? payload["sshPassword"] : "");
                 sshKeyPath = GetLinuxSshKeyFilePath();
+                sshEffectiveAuthMode = sshAuthMode;
 
                 if (sshAuthMode == "global")
                 {
@@ -4410,6 +4419,13 @@ namespace WindowsInventoryLite
                     // identity" fallback (there is no anonymous SSH), so
                     // this is a hard error rather than a silent
                     // empty-credential fallback when nothing resolves.
+                    //
+                    // 2026-09-16: now also considers a saved SSH key, not
+                    // just the password - previously "Global" silently
+                    // ignored a saved key entirely, always attempting
+                    // password auth even when the password was stale and
+                    // the key was current (see docs/superpowers/specs/
+                    // 2026-09-16-linux-ssh-auth-priority-fallback-design.md).
                     sshUsername = options.LinuxUpdateUsername;
                     sshPassword = options.LinuxUpdatePassword;
                     if (String.IsNullOrEmpty(sshUsername) || String.IsNullOrEmpty(sshPassword))
@@ -4421,11 +4437,14 @@ namespace WindowsInventoryLite
                         // equivalent exists), which the check below
                         // catches the same as "nothing configured at all".
                     }
-                    if (String.IsNullOrEmpty(sshUsername) || String.IsNullOrEmpty(sshPassword))
+                    bool hasPassword = !String.IsNullOrEmpty(sshUsername) && !String.IsNullOrEmpty(sshPassword);
+                    bool hasKey = !String.IsNullOrEmpty(sshUsername) && File.Exists(sshKeyPath);
+                    if (!hasPassword && !hasKey)
                     {
                         SendText(stream, "{\"error\":\"No Linux credentials available for Global mode - save them in Settings > Linux > Linux Client update credentials, configure a non-service-identity AD account, or select Manual credentials/SSH key instead.\"}", "application/json; charset=utf-8", 400);
                         return;
                     }
+                    ResolveGlobalSshAuthMode(hasPassword, hasKey, options.LinuxUpdateAuthPriority, out sshEffectiveAuthMode, out allowSshCredentialFallback);
                 }
                 else if (sshAuthMode == "manual" || sshAuthMode == "credentials")
                 {
@@ -4652,6 +4671,8 @@ namespace WindowsInventoryLite
             job.Force = force;
             job.AddToTrustedHosts = addToTrustedHosts;
             job.SshAuthMode = sshAuthMode;
+            job.SshEffectiveAuthMode = sshEffectiveAuthMode;
+            job.AllowSshCredentialFallback = allowSshCredentialFallback;
             job.SshUsername = sshUsername;
             job.SshPassword = sshPassword;
             job.SshKeyPath = sshKeyPath;
@@ -4802,7 +4823,8 @@ namespace WindowsInventoryLite
                     target, job.Action, job.Mode,
                     job.ServerUrl, job.Token,
                     job.Username, job.Password, job.Force, job.AddToTrustedHosts,
-                    job.SshAuthMode, job.SshUsername, job.SshPassword, job.SshKeyPath, job.TrustNewHostKeys,
+                    job.SshEffectiveAuthMode, job.SshUsername, job.SshPassword, job.SshKeyPath, job.TrustNewHostKeys,
+                    job.AllowSshCredentialFallback,
                     job.IntervalHours, job.StatusIntervalMinutes, job.InstallPath,
                     job.SoftwareCheckIntervalHours,
                     AutoDetectProbeTimeoutMs);
@@ -4914,12 +4936,12 @@ namespace WindowsInventoryLite
             return "$__wilUser = [Console]::In.ReadLine(); $__wilPass = [Console]::In.ReadLine(); $__wilSecurePass = ConvertTo-SecureString -String $__wilPass -AsPlainText -Force; ";
         }
 
-        private Dictionary<string, object> RunLinuxClientInstallTarget(string target, string serverUrl, string token, int intervalHours, int statusIntervalMinutes, string installPath, string authMode, string username, string password, string keyPath, bool trustNewHostKeys)
+        private Dictionary<string, object> RunLinuxClientInstallTarget(string target, string serverUrl, string token, int intervalHours, int statusIntervalMinutes, string installPath, string authMode, string username, string password, string keyPath, bool trustNewHostKeys, bool allowCredentialFallback)
         {
-            return RunLinuxClientInstallTarget(target, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, authMode, username, password, keyPath, trustNewHostKeys, false);
+            return RunLinuxClientInstallTarget(target, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, authMode, username, password, keyPath, trustNewHostKeys, allowCredentialFallback, false);
         }
 
-        private Dictionary<string, object> RunLinuxClientInstallTarget(string target, string serverUrl, string token, int intervalHours, int statusIntervalMinutes, string installPath, string authMode, string username, string password, string keyPath, bool trustNewHostKeys, bool isBulkAutoRetry)
+        private Dictionary<string, object> RunLinuxClientInstallTarget(string target, string serverUrl, string token, int intervalHours, int statusIntervalMinutes, string installPath, string authMode, string username, string password, string keyPath, bool trustNewHostKeys, bool allowCredentialFallback, bool isBulkAutoRetry)
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["target"] = target;
@@ -5071,11 +5093,37 @@ namespace WindowsInventoryLite
                             result["message"] = "Could not update the Linux SSH known-hosts trust store: " + ex.Message;
                             return result;
                         }
-                        return RunLinuxClientInstallTarget(target, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, authMode, username, password, keyPath, trustNewHostKeys, true);
+                        return RunLinuxClientInstallTarget(target, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, authMode, username, password, keyPath, trustNewHostKeys, allowCredentialFallback, true);
                     case "unknown":
                         result["hostKeyStatus"] = "unknown";
                         result["hostKeyFingerprint"] = parsedFingerprint;
                         break;
+                }
+            }
+
+            // Credential-type fallback: only reachable when this attempt's
+            // failure was NOT classified as a host-key issue above
+            // (hostKeyClassification == null) - a host-key mismatch or
+            // unknown-key failure must never trigger a credential retry,
+            // since retrying auth against a possibly-spoofed or
+            // not-yet-verified host is unsafe. allowCredentialFallback is
+            // only ever true when Global mode resolved both a password and
+            // a key (see ResolveGlobalSshAuthMode) - an explicit
+            // single-method auth mode never falls back.
+            if (GetStringValue(result, "status") == "failed" && hostKeyClassification == null && allowCredentialFallback)
+            {
+                string authFailureOutput = GetStringValue(result, "output") + "\n" + GetStringValue(result, "error");
+                bool credentialRejected = usingKey ? IsSshKeyAuthRejected(authFailureOutput) : IsSshPasswordAuthRejected(authFailureOutput);
+                if (credentialRejected)
+                {
+                    string fallbackAuthMode = usingKey ? "credentials" : "key";
+                    // allowCredentialFallback: false on this recursive call -
+                    // exactly one fallback attempt per target, never a
+                    // second retry if the fallback itself also fails.
+                    Dictionary<string, object> fallbackResult = RunLinuxClientInstallTarget(target, serverUrl, token, intervalHours, statusIntervalMinutes, installPath, fallbackAuthMode, username, password, keyPath, trustNewHostKeys, false, false);
+                    fallbackResult["sshCredentialFallback"] = true;
+                    fallbackResult["sshCredentialFallbackFrom"] = usingKey ? "key" : "credentials";
+                    return fallbackResult;
                 }
             }
 
@@ -5090,6 +5138,27 @@ namespace WindowsInventoryLite
             }
 
             return result;
+        }
+
+        // Shared by the manual "Global" auth-mode resolution (Deploy >
+        // Actions/Updates) and the scheduled Linux client update push - the
+        // two independent places that resolve SSH credentials automatically
+        // rather than from an explicit per-request choice. Priority-first
+        // when both are configured; falls straight through to whichever one
+        // exists when only one is. The caller remains responsible for the
+        // hard-error case where neither resolves - this function assumes at
+        // least one of hasPassword/hasKey is true and always returns a
+        // usable mode either way.
+        internal static void ResolveGlobalSshAuthMode(bool hasPassword, bool hasKey, string authPriority, out string effectiveAuthMode, out bool allowCredentialFallback)
+        {
+            if (hasPassword && hasKey)
+            {
+                effectiveAuthMode = authPriority == "password-first" ? "credentials" : "key";
+                allowCredentialFallback = true;
+                return;
+            }
+            effectiveAuthMode = hasKey ? "key" : "credentials";
+            allowCredentialFallback = false;
         }
 
         // Decides how a failed non-key SSH attempt should be classified from
@@ -5134,7 +5203,7 @@ namespace WindowsInventoryLite
             return null;
         }
 
-        private Dictionary<string, object> RunLinuxClientUninstallTarget(string target, string authMode, string username, string password, string keyPath, string installPath)
+        private Dictionary<string, object> RunLinuxClientUninstallTarget(string target, string authMode, string username, string password, string keyPath, string installPath, bool allowCredentialFallback)
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["target"] = target;
@@ -5207,7 +5276,21 @@ namespace WindowsInventoryLite
                 + "& " + QuotePowerShellLiteral(options.LinuxSshUninstallerPath) + " "
                 + argsBuilder.ToString();
 
-            return RunLinuxSshProcess(commandBody, authMode, username, password, keyPath, result);
+            Dictionary<string, object> sshResult = RunLinuxSshProcess(commandBody, authMode, username, password, keyPath, result);
+            if (allowCredentialFallback && GetStringValue(sshResult, "status") == "failed")
+            {
+                string combinedOutput = GetStringValue(sshResult, "output") + "\n" + GetStringValue(sshResult, "error");
+                bool credentialRejected = usingKey ? IsSshKeyAuthRejected(combinedOutput) : IsSshPasswordAuthRejected(combinedOutput);
+                if (credentialRejected)
+                {
+                    string fallbackAuthMode = usingKey ? "credentials" : "key";
+                    Dictionary<string, object> fallbackResult = RunLinuxClientUninstallTarget(target, fallbackAuthMode, username, password, keyPath, installPath, false);
+                    fallbackResult["sshCredentialFallback"] = true;
+                    fallbackResult["sshCredentialFallbackFrom"] = usingKey ? "key" : "credentials";
+                    return fallbackResult;
+                }
+            }
+            return sshResult;
         }
 
         // Reading stdout then stderr sequentially via ReadToEnd() can deadlock:
@@ -5273,6 +5356,22 @@ namespace WindowsInventoryLite
 
             result["completedAt"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
             return result;
+        }
+
+        // Both confirmed live against a real target this session - the
+        // exact plink/pscp wording a rejected password vs. a rejected key
+        // produces. Used only to decide whether a Global-mode fallback
+        // retry is warranted (see RunLinuxClientInstallTarget/
+        // RunLinuxClientUninstallTarget) - never checked for an explicit,
+        // single-method auth mode, which has no fallback concept.
+        internal static bool IsSshPasswordAuthRejected(string combinedOutput)
+        {
+            return !String.IsNullOrEmpty(combinedOutput) && combinedOutput.IndexOf("Configured password was not accepted", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        internal static bool IsSshKeyAuthRejected(string combinedOutput)
+        {
+            return !String.IsNullOrEmpty(combinedOutput) && combinedOutput.IndexOf("Server refused our key", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static readonly Regex HostKeyFingerprintFormatPattern = new Regex(@"^SHA256:[A-Za-z0-9+/]+=*$");
@@ -6591,6 +6690,7 @@ namespace WindowsInventoryLite
             string serverUrl, string token,
             string winRmUsername, string winRmPassword, bool force, bool addToTrustedHosts,
             string sshAuthMode, string sshUsername, string sshPassword, string sshKeyPath, bool trustNewHostKeys,
+            bool allowSshCredentialFallback,
             int intervalHours, int statusIntervalMinutes, string installPath,
             int softwareCheckIntervalHours,
             int probeTimeoutMs)
@@ -6630,8 +6730,8 @@ namespace WindowsInventoryLite
                 else
                 {
                     attemptResult = action == "uninstall"
-                        ? RunLinuxClientUninstallTarget(target, sshAuthMode, sshUsername, sshPassword, sshKeyPath, installPath)
-                        : RunLinuxClientInstallTarget(target, ToLinuxServerUrl(serverUrl), token, intervalHours, statusIntervalMinutes, installPath, sshAuthMode, sshUsername, sshPassword, sshKeyPath, trustNewHostKeys);
+                        ? RunLinuxClientUninstallTarget(target, sshAuthMode, sshUsername, sshPassword, sshKeyPath, installPath, allowSshCredentialFallback)
+                        : RunLinuxClientInstallTarget(target, ToLinuxServerUrl(serverUrl), token, intervalHours, statusIntervalMinutes, installPath, sshAuthMode, sshUsername, sshPassword, sshKeyPath, trustNewHostKeys, allowSshCredentialFallback);
                 }
 
                 Dictionary<string, object> attempt = BuildAttemptResult(protocol, GetStringValue(attemptResult, "status"), GetStringValue(attemptResult, "message"), GetStringValue(attemptResult, "output"), GetStringValue(attemptResult, "error"));
@@ -8200,6 +8300,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             public string SshUsername;
             public string SshPassword;
             public string SshKeyPath;
+            public string SshEffectiveAuthMode;
+            public bool AllowSshCredentialFallback;
             public int IntervalHours;
             public int StatusIntervalMinutes;
             public string InstallPath;
@@ -13486,6 +13588,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns 'bulk-auto' for a brand-new target with auto-trust enabled", TestClassifyHostKeyFailureBulkAutoForNewTarget);
             allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns 'unknown' for a brand-new target when auto-trust is disabled", TestClassifyHostKeyFailureUnknownWhenAutoTrustDisabled);
             allPassed &= SelfTestCheck(output, "ClassifyHostKeyFailure returns null for a failure unrelated to host keys", TestClassifyHostKeyFailureNullForNonHostKeyFailure);
+            allPassed &= SelfTestCheck(output, "ResolveGlobalSshAuthMode prefers key when both are configured and priority is key-first (or unset)", TestResolveGlobalSshAuthModeKeyFirstWhenBothConfigured);
+            allPassed &= SelfTestCheck(output, "ResolveGlobalSshAuthMode prefers password when both are configured and priority is password-first", TestResolveGlobalSshAuthModePasswordFirstWhenBothConfigured);
+            allPassed &= SelfTestCheck(output, "ResolveGlobalSshAuthMode uses the key with no fallback when only the key is configured", TestResolveGlobalSshAuthModeKeyOnlyNoFallback);
+            allPassed &= SelfTestCheck(output, "ResolveGlobalSshAuthMode uses the password with no fallback when only the password is configured", TestResolveGlobalSshAuthModePasswordOnlyNoFallback);
+            allPassed &= SelfTestCheck(output, "IsSshPasswordAuthRejected matches plink's real password-rejection wording, ignores unrelated failures", TestIsSshPasswordAuthRejectedMatchesRealWording);
+            allPassed &= SelfTestCheck(output, "IsSshKeyAuthRejected matches plink's real key-rejection wording, ignores unrelated failures", TestIsSshKeyAuthRejectedMatchesRealWording);
             allPassed &= SelfTestCheck(output, "trust-host-key fingerprint format validation accepts SHA256:... and rejects everything else", TestTrustLinuxHostKeyRejectsMalformedFingerprint);
             allPassed &= SelfTestCheck(output, "IsValidSshTarget accepts hostnames and IPv4 literals", TestIsValidSshTargetAcceptsHostnamesAndIPv4);
             allPassed &= SelfTestCheck(output, "IsValidSshTarget rejects shell-injection shapes, flag-lookalikes, and empty values", TestIsValidSshTargetRejectsInjectionAndEmpty);
@@ -19056,6 +19164,96 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return null;
         }
 
+        private static string TestResolveGlobalSshAuthModeKeyFirstWhenBothConfigured()
+        {
+            string effectiveAuthMode;
+            bool allowCredentialFallback;
+            ResolveGlobalSshAuthMode(true, true, "key-first", out effectiveAuthMode, out allowCredentialFallback);
+            if (effectiveAuthMode != "key" || !allowCredentialFallback)
+            {
+                return "expected ('key', true), got ('" + effectiveAuthMode + "', " + allowCredentialFallback + ")";
+            }
+            // Also confirm an unset/blank priority defaults to key-first,
+            // matching this feature's own documented default before an
+            // admin ever configures the setting.
+            ResolveGlobalSshAuthMode(true, true, "", out effectiveAuthMode, out allowCredentialFallback);
+            if (effectiveAuthMode != "key" || !allowCredentialFallback)
+            {
+                return "blank priority: expected ('key', true), got ('" + effectiveAuthMode + "', " + allowCredentialFallback + ")";
+            }
+            return null;
+        }
+
+        private static string TestResolveGlobalSshAuthModePasswordFirstWhenBothConfigured()
+        {
+            string effectiveAuthMode;
+            bool allowCredentialFallback;
+            ResolveGlobalSshAuthMode(true, true, "password-first", out effectiveAuthMode, out allowCredentialFallback);
+            if (effectiveAuthMode != "credentials" || !allowCredentialFallback)
+            {
+                return "expected ('credentials', true), got ('" + effectiveAuthMode + "', " + allowCredentialFallback + ")";
+            }
+            return null;
+        }
+
+        private static string TestResolveGlobalSshAuthModeKeyOnlyNoFallback()
+        {
+            string effectiveAuthMode;
+            bool allowCredentialFallback;
+            ResolveGlobalSshAuthMode(false, true, "password-first", out effectiveAuthMode, out allowCredentialFallback);
+            if (effectiveAuthMode != "key" || allowCredentialFallback)
+            {
+                return "expected ('key', false) even with password-first priority (no password configured), got ('" + effectiveAuthMode + "', " + allowCredentialFallback + ")";
+            }
+            return null;
+        }
+
+        private static string TestResolveGlobalSshAuthModePasswordOnlyNoFallback()
+        {
+            string effectiveAuthMode;
+            bool allowCredentialFallback;
+            ResolveGlobalSshAuthMode(true, false, "key-first", out effectiveAuthMode, out allowCredentialFallback);
+            if (effectiveAuthMode != "credentials" || allowCredentialFallback)
+            {
+                return "expected ('credentials', false) even with key-first priority (no key configured), got ('" + effectiveAuthMode + "', " + allowCredentialFallback + ")";
+            }
+            return null;
+        }
+
+        private static string TestIsSshPasswordAuthRejectedMatchesRealWording()
+        {
+            if (!IsSshPasswordAuthRejected("Access denied\nFATAL ERROR: Configured password was not accepted"))
+            {
+                return "expected true for the real plink password-rejection message";
+            }
+            if (IsSshPasswordAuthRejected("plink: Network error: Connection timed out"))
+            {
+                return "expected false for an unrelated failure";
+            }
+            if (IsSshPasswordAuthRejected(null))
+            {
+                return "expected false for null input";
+            }
+            return null;
+        }
+
+        private static string TestIsSshKeyAuthRejectedMatchesRealWording()
+        {
+            if (!IsSshKeyAuthRejected("FATAL ERROR: Server refused our key"))
+            {
+                return "expected true for the real plink key-rejection message";
+            }
+            if (IsSshKeyAuthRejected("Access denied\nFATAL ERROR: Configured password was not accepted"))
+            {
+                return "expected false for a password-rejection message, not a key one";
+            }
+            if (IsSshKeyAuthRejected(null))
+            {
+                return "expected false for null input";
+            }
+            return null;
+        }
+
         private static string TestTrustLinuxHostKeyRejectsMalformedFingerprint()
         {
             // Calls the same IsValidHostKeyFingerprint helper the endpoint
@@ -19844,7 +20042,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 InventoryServer server = new InventoryServer(options);
 
                 System.Reflection.MethodInfo runMethod = typeof(InventoryServer).GetMethod("RunLinuxClientUninstallTarget", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                object resultObj = runMethod.Invoke(server, new object[] { "192.0.2.10", "manual", "root", "x", null, "/etc" });
+                object resultObj = runMethod.Invoke(server, new object[] { "192.0.2.10", "manual", "root", "x", null, "/etc", false });
                 Dictionary<string, object> result = (Dictionary<string, object>)resultObj;
 
                 if (GetStringValue(result, "status") != "failed")

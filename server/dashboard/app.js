@@ -1079,6 +1079,9 @@
       const hostKeyBadge = result.hostKeyStatus === 'changed'
         ? '<span class="usb-badge">HOST KEY CHANGED</span>'
         : (result.hostKeyStatus === 'unknown' ? '<span class="usb-badge">HOST KEY UNKNOWN</span>' : '');
+      const credentialFallbackBadge = result.sshCredentialFallback
+        ? `<span class="usb-badge">FELL BACK TO ${escapeHtml((result.sshCredentialFallbackFrom === 'key' ? 'PASSWORD' : 'SSH KEY'))}</span>`
+        : '';
       const attempts = result.attempts || [];
       const hasMultipleAttempts = attempts.length > 1;
       const targetCell = hasMultipleAttempts
@@ -1087,7 +1090,7 @@
       const protocolNote = result.protocol ? ` (${escapeHtml(result.protocol)})` : '';
       return `<tr>
       <td>${targetCell}</td>
-      <td>${escapeHtml(result.status)}${protocolNote}${hostKeyBadge}</td>
+      <td>${escapeHtml(result.status)}${protocolNote}${hostKeyBadge}${credentialFallbackBadge}</td>
       <td>${escapeHtml(result.message)}</td>
       <td><pre class="install-output">${escapeHtml((result.error || result.output || '').trim())}</pre>${trustControl}</td>
     </tr>${renderAttemptRows(job.id, index, hasMultipleAttempts ? attempts : null)}`;
