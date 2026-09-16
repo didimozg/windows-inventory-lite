@@ -308,32 +308,48 @@ function Invoke-NativeAllowingStderr {
     }
 }
 
-# Converts an OpenSSH-format RSA private key (the openssh-key-v1 container
-# ssh-keygen has produced by default since OpenSSH 7.8 - what any admin's
-# key looks like today) to PuTTY's own .ppk v2 format, entirely in-process
-# (no external tool). plink.exe/pscp.exe cannot read an OpenSSH-format key
-# directly via -i - confirmed live, "Unable to use key file ... (OpenSSH
-# SSH-2 private key (new format))". puttygen.exe and Pageant were both
-# investigated as alternatives and ruled out (see this project's design
-# doc history for 2026-09-15's SSH key-auth work): Windows' puttygen.exe
-# is GUI-only and rejects every documented command-line conversion flag;
-# Pageant cannot load this key format either. PPK v2 (not the newer v3) is
-# used deliberately - still fully readable by current plink/pscp, and far
-# simpler to generate correctly than v3's Argon2id-based MAC key
-# derivation. RSA only - other key types throw a clear, specific error
-# rather than being silently mishandled. Encrypted (passphrase-protected)
-# keys also throw a clear error: this project's automated key-auth pushes
-# already require a passphrase-less key today (ssh.exe's own -i had no
-# passphrase-prompt handling either), so this is an existing requirement,
-# not a new limitation.
+# Converts an OpenSSH-format private key (the openssh-key-v1 container
+# ssh-keygen has produced by default since OpenSSH 7.8) to PuTTY's own .ppk
+# v2 format, entirely in-process (no external tool). plink.exe/pscp.exe
+# cannot read an OpenSSH-format key directly via -i - confirmed live,
+# "Unable to use key file ... (OpenSSH SSH-2 private key (new format))".
+# puttygen.exe and Pageant were both investigated as alternatives and ruled
+# out (see this project's design doc history for 2026-09-15's SSH key-auth
+# work): Windows' puttygen.exe is GUI-only and rejects every documented
+# command-line conversion flag; Pageant cannot load this key format either.
+# PPK v2 (not the newer v3) is used deliberately - still fully readable by
+# current plink/pscp, and far simpler to generate correctly than v3's
+# Argon2id-based MAC key derivation (which only matters for a
+# passphrase-protected key - irrelevant here, since encrypted keys are
+# rejected outright regardless of PPK version). RSA, Ed25519, and ECDSA
+# (nistp256/384/521) are supported - any other key type throws a clear,
+# specific error rather than being silently mishandled. Encrypted
+# (passphrase-protected) keys also throw a clear error, for every key
+# type: this project's automated key-auth pushes already require a
+# passphrase-less key today (ssh.exe's own -i had no passphrase-prompt
+# handling either), so this is an existing requirement, not a new
+# limitation.
 #
-# The exact field order and MAC computation below are live-tested, not
-# derived from documentation alone: a prototype using this exact logic
+# The exact field order and MAC computation are live-tested, not derived
+# from documentation alone - for RSA: a prototype using this exact logic
 # converted a real key and both plink.exe and pscp.exe successfully
-# authenticated against a real target using the result. The first attempt
-# at the PPK private-key field order (p, q, iqmp, d) was wrong and failed
+# authenticated against a real target using the result (the first attempt
+# at the PPK private-key field order, p/q/iqmp/d, was wrong and failed
 # with "Unable to load private key (createkey failed)" - the correct
-# order, confirmed working, is d, p, q, iqmp.
+# order, confirmed working, is d, p, q, iqmp).
+#
+# Ed25519/ECDSA support (2026-09-16): the raw key material each new
+# branch extracts (Ed25519's 32-byte seed, ECDSA's private scalar d) was
+# independently cross-checked against Python's `cryptography` library
+# parsing the same real key files through its own, separately-implemented
+# OpenSSH-key loader - see docs/superpowers/specs/2026-09-16-ed25519-
+# ecdsa-key-support-design.md for the full verification. The live
+# plink.exe/pscp.exe authentication round-trip for these two new key
+# types (the step that actually caught RSA's own field-order mistake
+# above) is the user's own deferred follow-up test, not yet performed as
+# of this comment - treat any live-test failure the same way RSA's was
+# resolved: trust the real error message, not this comment's own
+# reasoning, and correct the field layout from there.
 function Convert-OpenSshKeyToPpk {
     param(
         [string]$KeyPath,
@@ -410,20 +426,44 @@ function Convert-OpenSshKeyToPpk {
     $po = 8
 
     $keytype = [System.Text.Encoding]::ASCII.GetString((Read-SshString $privSection ([ref]$po)))
-    if ($keytype -ne 'ssh-rsa') {
-        throw "'$KeyPath' is a '$keytype' key - only RSA (ssh-rsa) keys are supported for key-based push."
+
+    switch -Regex ($keytype) {
+        '^ssh-rsa$' {
+            [void](Read-SshString $privSection ([ref]$po))  # n - already present in $publicBlobBytes, not needed again
+            [void](Read-SshString $privSection ([ref]$po))  # e - ditto
+            $d = Read-SshString $privSection ([ref]$po)
+            $iqmp = Read-SshString $privSection ([ref]$po)
+            $p = Read-SshString $privSection ([ref]$po)
+            $q = Read-SshString $privSection ([ref]$po)
+            # PPK's own field order for RSA is d, p, q, iqmp - NOT OpenSSH's n,e,d,iqmp,p,q order.
+            $privateBlobBytes = (Write-SshString $d) + (Write-SshString $p) + (Write-SshString $q) + (Write-SshString $iqmp)
+        }
+        '^ssh-ed25519$' {
+            [void](Read-SshString $privSection ([ref]$po))  # pubkey - already present in $publicBlobBytes, not needed again
+            $privkey = Read-SshString $privSection ([ref]$po)  # 64 bytes: 32-byte seed + 32-byte pubkey, concatenated
+            $seed = $privkey[0..31]
+            # PPK's Ed25519 private-key content is the 32-byte seed alone,
+            # not the 64-byte OpenSSH concatenated form - independently
+            # cross-checked against Python's cryptography library, see
+            # this function's own doc comment above.
+            $privateBlobBytes = Write-SshString $seed
+        }
+        '^ecdsa-sha2-nistp(256|384|521)$' {
+            [void](Read-SshString $privSection ([ref]$po))  # curve-name - already implied by $keytype/$publicBlobBytes
+            [void](Read-SshString $privSection ([ref]$po))  # Q (public point) - already present in $publicBlobBytes
+            $d = Read-SshString $privSection ([ref]$po)
+            # PPK's ECDSA private-key content is the private scalar d
+            # alone, as one SSH-wire mpint string - independently
+            # cross-checked against Python's cryptography library, see
+            # this function's own doc comment above.
+            $privateBlobBytes = Write-SshString $d
+        }
+        default {
+            throw "'$KeyPath' is a '$keytype' key - only RSA (ssh-rsa), Ed25519 (ssh-ed25519), and ECDSA (ecdsa-sha2-nistp256/384/521) keys are supported for key-based push."
+        }
     }
 
-    [void](Read-SshString $privSection ([ref]$po))  # n - already present in $publicBlobBytes, not needed again
-    [void](Read-SshString $privSection ([ref]$po))  # e - ditto
-    $d = Read-SshString $privSection ([ref]$po)
-    $iqmp = Read-SshString $privSection ([ref]$po)
-    $p = Read-SshString $privSection ([ref]$po)
-    $q = Read-SshString $privSection ([ref]$po)
     $comment = [System.Text.Encoding]::UTF8.GetString((Read-SshString $privSection ([ref]$po)))
-
-    # PPK's own field order for RSA is d, p, q, iqmp - NOT OpenSSH's n,e,d,iqmp,p,q order.
-    $privateBlobBytes = (Write-SshString $d) + (Write-SshString $p) + (Write-SshString $q) + (Write-SshString $iqmp)
 
     function ToBase64Lines {
         param([byte[]]$Bytes, [int]$Width = 64)
@@ -432,13 +472,22 @@ function Convert-OpenSshKeyToPpk {
         for ($i = 0; $i -lt $b64.Length; $i += $Width) {
             $lines.Add($b64.Substring($i, [Math]::Min($Width, $b64.Length - $i)))
         }
-        return $lines
+        # ,$lines (not $lines): a single-element List<string>, returned bare,
+        # is enumerated by PowerShell's own output pipeline and collapses into
+        # a plain scalar [string] - under this script's Set-StrictMode -Version
+        # 2.0, that scalar's own .Count access then throws PropertyNotFoundException
+        # ("Cannot find 'Count' property"), the same PS 5.1 scalar-vs-array quirk
+        # already worked around elsewhere in this function (Read-SshString's own
+        # zero-length case). RSA's own Public-Lines/Private-Lines are always >1
+        # line, so this never surfaced before Ed25519/ECDSA nistp256's much
+        # shorter Private-Lines (exactly 1 line) exposed it.
+        return ,$lines
     }
 
     $macKey = [System.Security.Cryptography.SHA1]::Create().ComputeHash([System.Text.Encoding]::ASCII.GetBytes("putty-private-key-file-mac-key"))
     $mac = New-Object System.Security.Cryptography.HMACSHA1
     $mac.Key = $macKey
-    $macData = (Write-SshString ([System.Text.Encoding]::ASCII.GetBytes("ssh-rsa"))) `
+    $macData = (Write-SshString ([System.Text.Encoding]::ASCII.GetBytes($keytype))) `
         + (Write-SshString ([System.Text.Encoding]::ASCII.GetBytes("none"))) `
         + (Write-SshString ([System.Text.Encoding]::UTF8.GetBytes($comment))) `
         + (Write-SshString $publicBlobBytes) `
@@ -449,7 +498,7 @@ function Convert-OpenSshKeyToPpk {
     $privLines = ToBase64Lines $privateBlobBytes
 
     $out = New-Object System.Text.StringBuilder
-    [void]$out.AppendLine("PuTTY-User-Key-File-2: ssh-rsa")
+    [void]$out.AppendLine("PuTTY-User-Key-File-2: $keytype")
     [void]$out.AppendLine("Encryption: none")
     [void]$out.AppendLine("Comment: $comment")
     [void]$out.AppendLine("Public-Lines: $($pubLines.Count)")
