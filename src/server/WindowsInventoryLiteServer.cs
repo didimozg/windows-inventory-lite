@@ -279,6 +279,16 @@ namespace WindowsInventoryLite
         // field and WindowsInventoryLiteClient.cs's ApplyConfigFromServer.
         public int WindowsDefaultIntervalHours;
         public int WindowsDefaultSoftwareCheckIntervalHours;
+        // Restricts when the Windows client is allowed to actually run
+        // pending windowsUpdate/thirdPartySoftware catalog jobs (does not
+        // affect how often it checks in - SoftwareCheckIntervalHours above
+        // is unrelated and unchanged). Off by default - a fleet that never
+        // touches this behaves exactly as before this feature existed. See
+        // ShouldAdmitSoftwareInstallWindowRequest for how these are used.
+        public bool SoftwareInstallWindowEnabled;
+        public string SoftwareInstallWindowStartUtc;
+        public string SoftwareInstallWindowEndUtc;
+        public int SoftwareInstallWindowJitterMinutes;
         // Set only by RegenerateIngestionToken (never directly via
         // /api/v1/server/settings) - the token being phased out and when
         // it stops being accepted. Both empty ("") when there is no
@@ -362,6 +372,10 @@ namespace WindowsInventoryLite
             options.LinuxDefaultInstallPath = "/opt/windows-inventory-lite";
             options.WindowsDefaultIntervalHours = 6;
             options.WindowsDefaultSoftwareCheckIntervalHours = 6;
+            options.SoftwareInstallWindowEnabled = false;
+            options.SoftwareInstallWindowStartUtc = "02:00";
+            options.SoftwareInstallWindowEndUtc = "04:00";
+            options.SoftwareInstallWindowJitterMinutes = 30;
             options.PreviousToken = "";
             options.PreviousTokenExpiresUtc = "";
             options.TokenOverlapHours = 24;
@@ -931,6 +945,36 @@ namespace WindowsInventoryLite
                 if (String.IsNullOrEmpty(options.LinuxUpdateScheduleLastRunUtc))
                 {
                     options.LinuxUpdateScheduleLastRunUtc = GetConfigString(config, "LinuxUpdateScheduleLastRunUtc") ?? "";
+                }
+                if (!options.SoftwareInstallWindowEnabled)
+                {
+                    string softwareInstallWindowEnabledText = GetConfigString(config, "SoftwareInstallWindowEnabled");
+                    options.SoftwareInstallWindowEnabled = String.Equals(softwareInstallWindowEnabledText, "true", StringComparison.OrdinalIgnoreCase);
+                }
+                if (options.SoftwareInstallWindowStartUtc == "02:00")
+                {
+                    string softwareInstallWindowStartUtcText = GetConfigString(config, "SoftwareInstallWindowStartUtc");
+                    if (!String.IsNullOrEmpty(softwareInstallWindowStartUtcText))
+                    {
+                        options.SoftwareInstallWindowStartUtc = softwareInstallWindowStartUtcText;
+                    }
+                }
+                if (options.SoftwareInstallWindowEndUtc == "04:00")
+                {
+                    string softwareInstallWindowEndUtcText = GetConfigString(config, "SoftwareInstallWindowEndUtc");
+                    if (!String.IsNullOrEmpty(softwareInstallWindowEndUtcText))
+                    {
+                        options.SoftwareInstallWindowEndUtc = softwareInstallWindowEndUtcText;
+                    }
+                }
+                if (options.SoftwareInstallWindowJitterMinutes == 30)
+                {
+                    string softwareInstallWindowJitterMinutesText = GetConfigString(config, "SoftwareInstallWindowJitterMinutes");
+                    int softwareInstallWindowJitterMinutesFromConfig;
+                    if (!String.IsNullOrEmpty(softwareInstallWindowJitterMinutesText) && Int32.TryParse(softwareInstallWindowJitterMinutesText, out softwareInstallWindowJitterMinutesFromConfig) && softwareInstallWindowJitterMinutesFromConfig >= 0 && softwareInstallWindowJitterMinutesFromConfig <= 1440)
+                    {
+                        options.SoftwareInstallWindowJitterMinutes = softwareInstallWindowJitterMinutesFromConfig;
+                    }
                 }
                 if (options.ClientUpdateScheduleMode == "off")
                 {
@@ -2951,6 +2995,93 @@ namespace WindowsInventoryLite
                 return nowUtc >= lastRunUtc.Value.AddHours(Math.Max(1, intervalHours));
             }
             return false;
+        }
+
+        internal static bool TryParseTimeOfDay(string value, out TimeSpan timeOfDay)
+        {
+            timeOfDay = TimeSpan.Zero;
+            if (String.IsNullOrEmpty(value))
+            {
+                return false;
+            }
+            DateTime parsed;
+            if (!DateTime.TryParseExact(value, "HH\\:mm", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out parsed))
+            {
+                return false;
+            }
+            timeOfDay = parsed.TimeOfDay;
+            return true;
+        }
+
+        // Handles a window that spans midnight (windowStart > windowEnd,
+        // e.g. 22:00-06:00) explicitly. A window with identical start/end
+        // is treated as "no restriction" (always true) - an admin who ends
+        // up with equal values almost certainly made an editing mistake,
+        // and "always open" is the safe interpretation (equivalent to the
+        // feature being off), never "always closed" (which would silently
+        // block every install forever).
+        internal static bool IsWithinSoftwareInstallWindow(TimeSpan nowTimeOfDayUtc, TimeSpan windowStart, TimeSpan windowEnd)
+        {
+            if (windowStart == windowEnd)
+            {
+                return true;
+            }
+            if (windowStart < windowEnd)
+            {
+                return nowTimeOfDayUtc >= windowStart && nowTimeOfDayUtc < windowEnd;
+            }
+            return nowTimeOfDayUtc >= windowStart || nowTimeOfDayUtc < windowEnd;
+        }
+
+        // The spread-out mechanism: a ramp from 0% at the instant the
+        // window opens up to 100% once jitterMinutes have elapsed since
+        // window open - after that point the window behaves exactly as if
+        // there were no jitter at all. Assumes the caller has already
+        // confirmed IsWithinSoftwareInstallWindow is true for
+        // nowTimeOfDayUtc; behavior for a time outside the window is
+        // undefined.
+        internal static double GetSoftwareInstallWindowAdmitProbability(TimeSpan nowTimeOfDayUtc, TimeSpan windowStart, TimeSpan windowEnd, int jitterMinutes)
+        {
+            double windowDurationMinutes = windowStart < windowEnd
+                ? (windowEnd - windowStart).TotalMinutes
+                : (TimeSpan.FromHours(24) - windowStart + windowEnd).TotalMinutes;
+            if (windowDurationMinutes <= 0)
+            {
+                return 1.0;
+            }
+            double elapsedMinutes = nowTimeOfDayUtc >= windowStart
+                ? (nowTimeOfDayUtc - windowStart).TotalMinutes
+                : (TimeSpan.FromHours(24) - windowStart + nowTimeOfDayUtc).TotalMinutes;
+            double effectiveJitterMinutes = Math.Max(1.0, Math.Min(jitterMinutes, windowDurationMinutes));
+            return Math.Min(1.0, elapsedMinutes / effectiveJitterMinutes);
+        }
+
+        // Single entry point SendClientSoftwareJobs uses. randomSample is
+        // caller-injected (normally a fresh cryptographically random [0,1)
+        // value - see NextSoftwareInstallWindowRandomSample) so this
+        // function stays pure and directly self-testable with fixed
+        // inputs.
+        internal static bool ShouldAdmitSoftwareInstallWindowRequest(DateTime nowUtc, bool enabled, string windowStartUtcText, string windowEndUtcText, int jitterMinutes, double randomSample)
+        {
+            if (!enabled)
+            {
+                return true;
+            }
+            TimeSpan windowStart, windowEnd;
+            if (!TryParseTimeOfDay(windowStartUtcText, out windowStart) || !TryParseTimeOfDay(windowEndUtcText, out windowEnd))
+            {
+                // Fail open - defense in depth only, since
+                // ConfigureServerSettings already rejects an unparsable
+                // window at save time whenever the feature is enabled.
+                return true;
+            }
+            TimeSpan nowTimeOfDayUtc = nowUtc.TimeOfDay;
+            if (!IsWithinSoftwareInstallWindow(nowTimeOfDayUtc, windowStart, windowEnd))
+            {
+                return false;
+            }
+            double admitProbability = GetSoftwareInstallWindowAdmitProbability(nowTimeOfDayUtc, windowStart, windowEnd, jitterMinutes);
+            return randomSample < admitProbability;
         }
 
         // Returns true when a raw config value is still plaintext and
@@ -9441,6 +9572,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             result["linuxDefaultInstallPath"] = options.LinuxDefaultInstallPath;
             result["windowsDefaultIntervalHours"] = options.WindowsDefaultIntervalHours;
             result["windowsDefaultSoftwareCheckIntervalHours"] = options.WindowsDefaultSoftwareCheckIntervalHours;
+            result["softwareInstallWindowEnabled"] = options.SoftwareInstallWindowEnabled;
+            result["softwareInstallWindowStartUtc"] = options.SoftwareInstallWindowStartUtc;
+            result["softwareInstallWindowEndUtc"] = options.SoftwareInstallWindowEndUtc;
+            result["softwareInstallWindowJitterMinutes"] = options.SoftwareInstallWindowJitterMinutes;
             result["tokenOverlapHours"] = options.TokenOverlapHours;
             result["loginLockoutThreshold"] = options.LoginLockoutThreshold;
             result["loginLockoutWindowMinutes"] = options.LoginLockoutWindowMinutes;
@@ -9833,6 +9968,36 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 }
                 options.WindowsDefaultSoftwareCheckIntervalHours = windowsDefaultSoftwareCheckIntervalHours;
                 updates["WindowsDefaultSoftwareCheckIntervalHours"] = windowsDefaultSoftwareCheckIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("softwareInstallWindowEnabled"))
+            {
+                bool softwareInstallWindowEnabled = Convert.ToBoolean(payload["softwareInstallWindowEnabled"]);
+                string softwareInstallWindowStartUtc = payload.ContainsKey("softwareInstallWindowStartUtc") ? Convert.ToString(payload["softwareInstallWindowStartUtc"]) : options.SoftwareInstallWindowStartUtc;
+                string softwareInstallWindowEndUtc = payload.ContainsKey("softwareInstallWindowEndUtc") ? Convert.ToString(payload["softwareInstallWindowEndUtc"]) : options.SoftwareInstallWindowEndUtc;
+                int softwareInstallWindowJitterMinutes = options.SoftwareInstallWindowJitterMinutes;
+                if (payload.ContainsKey("softwareInstallWindowJitterMinutes") && (!Int32.TryParse(Convert.ToString(payload["softwareInstallWindowJitterMinutes"]), out softwareInstallWindowJitterMinutes) || softwareInstallWindowJitterMinutes < 0 || softwareInstallWindowJitterMinutes > 1440))
+                {
+                    SendText(stream, "{\"error\":\"softwareInstallWindowJitterMinutes must be between 0 and 1440\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                // Format validation only when the restriction is actually
+                // being enabled - an admin turning it off must never be
+                // blocked by stale/blank time fields left over from before.
+                TimeSpan parsedWindowStart, parsedWindowEnd;
+                if (softwareInstallWindowEnabled && (!TryParseTimeOfDay(softwareInstallWindowStartUtc, out parsedWindowStart) || !TryParseTimeOfDay(softwareInstallWindowEndUtc, out parsedWindowEnd)))
+                {
+                    SendText(stream, "{\"error\":\"softwareInstallWindowStartUtc and softwareInstallWindowEndUtc must be in 'HH:mm' format\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.SoftwareInstallWindowEnabled = softwareInstallWindowEnabled;
+                options.SoftwareInstallWindowStartUtc = softwareInstallWindowStartUtc;
+                options.SoftwareInstallWindowEndUtc = softwareInstallWindowEndUtc;
+                options.SoftwareInstallWindowJitterMinutes = softwareInstallWindowJitterMinutes;
+                updates["SoftwareInstallWindowEnabled"] = softwareInstallWindowEnabled.ToString();
+                updates["SoftwareInstallWindowStartUtc"] = softwareInstallWindowStartUtc ?? "";
+                updates["SoftwareInstallWindowEndUtc"] = softwareInstallWindowEndUtc ?? "";
+                updates["SoftwareInstallWindowJitterMinutes"] = softwareInstallWindowJitterMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
             }
 
             if (payload.ContainsKey("tokenOverlapHours"))
@@ -13462,6 +13627,16 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'once' is never due with no target time set", TestShouldRunClientUpdateScheduleOnceMissingTarget);
             allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'interval' is due immediately with no previous run", TestShouldRunClientUpdateScheduleIntervalNoPreviousRun);
             allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'interval' respects the interval window", TestShouldRunClientUpdateScheduleIntervalDueAndNotDue);
+            allPassed &= SelfTestCheck(output, "TryParseTimeOfDay accepts 'HH:mm', rejects bad formats and empty", TestTryParseTimeOfDayAcceptsValidRejectsInvalid);
+            allPassed &= SelfTestCheck(output, "IsWithinSoftwareInstallWindow handles a normal (non-wrapping) range", TestIsWithinSoftwareInstallWindowNormalRange);
+            allPassed &= SelfTestCheck(output, "IsWithinSoftwareInstallWindow handles a midnight-spanning range", TestIsWithinSoftwareInstallWindowMidnightWrap);
+            allPassed &= SelfTestCheck(output, "IsWithinSoftwareInstallWindow treats identical start/end as always open", TestIsWithinSoftwareInstallWindowEqualStartEndAlwaysOpen);
+            allPassed &= SelfTestCheck(output, "GetSoftwareInstallWindowAdmitProbability ramps from 0 at window-open to 1.0 at open+jitter and stays 1.0 after", TestGetSoftwareInstallWindowAdmitProbabilityRampsCorrectly);
+            allPassed &= SelfTestCheck(output, "GetSoftwareInstallWindowAdmitProbability computes elapsed time correctly across a midnight wrap", TestGetSoftwareInstallWindowAdmitProbabilityMidnightWrapElapsed);
+            allPassed &= SelfTestCheck(output, "ShouldAdmitSoftwareInstallWindowRequest is always true when disabled, regardless of time or sample", TestShouldAdmitSoftwareInstallWindowRequestDisabledAlwaysTrue);
+            allPassed &= SelfTestCheck(output, "ShouldAdmitSoftwareInstallWindowRequest is false outside the window regardless of sample", TestShouldAdmitSoftwareInstallWindowRequestOutsideWindowAlwaysFalse);
+            allPassed &= SelfTestCheck(output, "ShouldAdmitSoftwareInstallWindowRequest inside the window compares the sample against the ramp probability", TestShouldAdmitSoftwareInstallWindowRequestInsideWindowComparesSample);
+            allPassed &= SelfTestCheck(output, "ShouldAdmitSoftwareInstallWindowRequest fails open when the configured window is unparsable", TestShouldAdmitSoftwareInstallWindowRequestFailsOpenOnBadConfig);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall updates a target's stored clientVersion", TestPatchClientReportVersionAfterInstallUpdatesVersion);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall's lastInstalledAtUtc is cleared once a real report overwrites the file", TestPatchClientReportVersionAfterInstallFieldClearedByRealReport);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall is a no-op when the target has no stored report yet", TestPatchClientReportVersionAfterInstallMissingReport);
@@ -16116,6 +16291,182 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (InventoryServer.ShouldRunClientUpdateSchedule(now, "interval", null, fresh, 24))
             {
                 return "expected mode 'interval' to not be due when lastRunUtc is within intervalHours";
+            }
+            return null;
+        }
+
+        private static string TestTryParseTimeOfDayAcceptsValidRejectsInvalid()
+        {
+            TimeSpan parsed;
+            if (!InventoryServer.TryParseTimeOfDay("02:00", out parsed) || parsed != TimeSpan.FromHours(2))
+            {
+                return "expected '02:00' to parse as 2 hours, got " + parsed;
+            }
+            if (!InventoryServer.TryParseTimeOfDay("23:59", out parsed) || parsed != new TimeSpan(23, 59, 0))
+            {
+                return "expected '23:59' to parse correctly, got " + parsed;
+            }
+            if (InventoryServer.TryParseTimeOfDay("25:00", out parsed))
+            {
+                return "expected '25:00' (invalid hour) to fail to parse";
+            }
+            if (InventoryServer.TryParseTimeOfDay("not-a-time", out parsed))
+            {
+                return "expected a non-time string to fail to parse";
+            }
+            if (InventoryServer.TryParseTimeOfDay("", out parsed))
+            {
+                return "expected an empty string to fail to parse";
+            }
+            if (InventoryServer.TryParseTimeOfDay(null, out parsed))
+            {
+                return "expected null to fail to parse";
+            }
+            return null;
+        }
+
+        private static string TestIsWithinSoftwareInstallWindowNormalRange()
+        {
+            TimeSpan start = TimeSpan.FromHours(2);
+            TimeSpan end = TimeSpan.FromHours(4);
+            if (!InventoryServer.IsWithinSoftwareInstallWindow(TimeSpan.FromHours(3), start, end))
+            {
+                return "expected 03:00 to be inside 02:00-04:00";
+            }
+            if (InventoryServer.IsWithinSoftwareInstallWindow(TimeSpan.FromHours(1), start, end))
+            {
+                return "expected 01:00 to be outside 02:00-04:00";
+            }
+            if (InventoryServer.IsWithinSoftwareInstallWindow(TimeSpan.FromHours(5), start, end))
+            {
+                return "expected 05:00 to be outside 02:00-04:00";
+            }
+            if (!InventoryServer.IsWithinSoftwareInstallWindow(start, start, end))
+            {
+                return "expected the exact start instant to be inside (inclusive start)";
+            }
+            if (InventoryServer.IsWithinSoftwareInstallWindow(end, start, end))
+            {
+                return "expected the exact end instant to be outside (exclusive end)";
+            }
+            return null;
+        }
+
+        private static string TestIsWithinSoftwareInstallWindowMidnightWrap()
+        {
+            TimeSpan start = TimeSpan.FromHours(22);
+            TimeSpan end = TimeSpan.FromHours(6);
+            if (!InventoryServer.IsWithinSoftwareInstallWindow(TimeSpan.FromHours(23), start, end))
+            {
+                return "expected 23:00 to be inside a 22:00-06:00 wrapping window";
+            }
+            if (!InventoryServer.IsWithinSoftwareInstallWindow(TimeSpan.FromHours(1), start, end))
+            {
+                return "expected 01:00 to be inside a 22:00-06:00 wrapping window (after midnight)";
+            }
+            if (InventoryServer.IsWithinSoftwareInstallWindow(TimeSpan.FromHours(12), start, end))
+            {
+                return "expected 12:00 (midday) to be outside a 22:00-06:00 wrapping window";
+            }
+            return null;
+        }
+
+        private static string TestIsWithinSoftwareInstallWindowEqualStartEndAlwaysOpen()
+        {
+            TimeSpan same = TimeSpan.FromHours(2);
+            if (!InventoryServer.IsWithinSoftwareInstallWindow(TimeSpan.FromHours(0), same, same))
+            {
+                return "expected an identical start/end to be treated as always open (midnight)";
+            }
+            if (!InventoryServer.IsWithinSoftwareInstallWindow(TimeSpan.FromHours(23), same, same))
+            {
+                return "expected an identical start/end to be treated as always open (23:00)";
+            }
+            return null;
+        }
+
+        private static string TestGetSoftwareInstallWindowAdmitProbabilityRampsCorrectly()
+        {
+            TimeSpan start = TimeSpan.FromHours(2);
+            TimeSpan end = TimeSpan.FromHours(4);
+            double atOpen = InventoryServer.GetSoftwareInstallWindowAdmitProbability(start, start, end, 30);
+            if (atOpen != 0.0)
+            {
+                return "expected probability 0.0 exactly at window open, got " + atOpen;
+            }
+            double atHalfJitter = InventoryServer.GetSoftwareInstallWindowAdmitProbability(start.Add(TimeSpan.FromMinutes(15)), start, end, 30);
+            if (Math.Abs(atHalfJitter - 0.5) > 0.0001)
+            {
+                return "expected probability ~0.5 at half the jitter period, got " + atHalfJitter;
+            }
+            double atFullJitter = InventoryServer.GetSoftwareInstallWindowAdmitProbability(start.Add(TimeSpan.FromMinutes(30)), start, end, 30);
+            if (atFullJitter != 1.0)
+            {
+                return "expected probability 1.0 exactly at open+jitter, got " + atFullJitter;
+            }
+            double wellPastJitter = InventoryServer.GetSoftwareInstallWindowAdmitProbability(start.Add(TimeSpan.FromMinutes(90)), start, end, 30);
+            if (wellPastJitter != 1.0)
+            {
+                return "expected probability to stay 1.0 well past the jitter period (still inside the window), got " + wellPastJitter;
+            }
+            return null;
+        }
+
+        private static string TestGetSoftwareInstallWindowAdmitProbabilityMidnightWrapElapsed()
+        {
+            TimeSpan start = TimeSpan.FromHours(23);
+            TimeSpan end = TimeSpan.FromHours(1);
+            // 00:30 is 90 minutes after 23:00, wrapping past midnight.
+            double probability = InventoryServer.GetSoftwareInstallWindowAdmitProbability(TimeSpan.FromMinutes(30), start, end, 60);
+            if (probability != 1.0)
+            {
+                return "expected probability 1.0 90 minutes after a 23:00 window-open with a 60-minute jitter, got " + probability;
+            }
+            return null;
+        }
+
+        private static string TestShouldAdmitSoftwareInstallWindowRequestDisabledAlwaysTrue()
+        {
+            DateTime midday = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            if (!InventoryServer.ShouldAdmitSoftwareInstallWindowRequest(midday, false, "02:00", "04:00", 30, 0.999))
+            {
+                return "expected true when the feature is disabled, even with a sample near 1.0";
+            }
+            return null;
+        }
+
+        private static string TestShouldAdmitSoftwareInstallWindowRequestOutsideWindowAlwaysFalse()
+        {
+            DateTime midday = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            if (InventoryServer.ShouldAdmitSoftwareInstallWindowRequest(midday, true, "02:00", "04:00", 30, 0.0))
+            {
+                return "expected false at 12:00 UTC outside a 02:00-04:00 window, even with a sample of 0.0";
+            }
+            return null;
+        }
+
+        private static string TestShouldAdmitSoftwareInstallWindowRequestInsideWindowComparesSample()
+        {
+            // 02:15 is 15 minutes into a 02:00-04:00 window with a 30-minute
+            // jitter - admit probability is 0.5 (see the ramp test above).
+            DateTime insideWindow = new DateTime(2026, 1, 1, 2, 15, 0, DateTimeKind.Utc);
+            if (!InventoryServer.ShouldAdmitSoftwareInstallWindowRequest(insideWindow, true, "02:00", "04:00", 30, 0.1))
+            {
+                return "expected true when the sample (0.1) is below the admit probability (0.5)";
+            }
+            if (InventoryServer.ShouldAdmitSoftwareInstallWindowRequest(insideWindow, true, "02:00", "04:00", 30, 0.9))
+            {
+                return "expected false when the sample (0.9) is above the admit probability (0.5)";
+            }
+            return null;
+        }
+
+        private static string TestShouldAdmitSoftwareInstallWindowRequestFailsOpenOnBadConfig()
+        {
+            DateTime midday = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+            if (!InventoryServer.ShouldAdmitSoftwareInstallWindowRequest(midday, true, "not-a-time", "04:00", 30, 0.999))
+            {
+                return "expected true (fail open) when the configured start time is unparsable";
             }
             return null;
         }

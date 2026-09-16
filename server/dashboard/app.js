@@ -2763,6 +2763,11 @@
     });
   }
 
+  function updateSoftwareInstallWindowFieldVisibility() {
+    const enabled = byId('softwareInstallWindowEnabled').checked;
+    byId('softwareInstallWindowFields').classList.toggle('hidden', !enabled);
+  }
+
   function updateAdSyncIntervalField() {
     const isTimerMode = byId('generalAdSyncMode').value === 'timer';
     byId('generalAdSyncIntervalField').classList.toggle('hidden', !isTimerMode);
@@ -2909,6 +2914,11 @@
         byId('windowsDefaultIntervalHours').value = data.windowsDefaultIntervalHours || 6;
         byId('windowsDefaultSoftwareCheckIntervalHours').value = data.windowsDefaultSoftwareCheckIntervalHours || 6;
         byId('windowsEnableClientSelfUpdate').checked = !!data.enableWindowsClientSelfUpdate;
+        byId('softwareInstallWindowEnabled').checked = !!data.softwareInstallWindowEnabled;
+        byId('softwareInstallWindowStartUtc').value = data.softwareInstallWindowStartUtc || '02:00';
+        byId('softwareInstallWindowEndUtc').value = data.softwareInstallWindowEndUtc || '04:00';
+        byId('softwareInstallWindowJitterMinutes').value = data.softwareInstallWindowJitterMinutes != null ? data.softwareInstallWindowJitterMinutes : 30;
+        updateSoftwareInstallWindowFieldVisibility();
       })
       .catch(error => {
         showSavedMessage(byId('windowsSettingsMessage'), `Settings unavailable: ${error.message}`, true);
@@ -3076,7 +3086,11 @@
         adComputerImportOUs: byId('generalAdComputerImportOUs').value,
         windowsDefaultIntervalHours: Number.parseInt(byId('windowsDefaultIntervalHours').value, 10) || 6,
         windowsDefaultSoftwareCheckIntervalHours: Number.parseInt(byId('windowsDefaultSoftwareCheckIntervalHours').value, 10) || 6,
-        enableWindowsClientSelfUpdate: byId('windowsEnableClientSelfUpdate').checked
+        enableWindowsClientSelfUpdate: byId('windowsEnableClientSelfUpdate').checked,
+        softwareInstallWindowEnabled: byId('softwareInstallWindowEnabled').checked,
+        softwareInstallWindowStartUtc: byId('softwareInstallWindowStartUtc').value,
+        softwareInstallWindowEndUtc: byId('softwareInstallWindowEndUtc').value,
+        softwareInstallWindowJitterMinutes: Number.parseInt(byId('softwareInstallWindowJitterMinutes').value, 10) || 0
       })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, data })))
@@ -5670,6 +5684,7 @@
   byId('windowsSettingsSaveButton').addEventListener('click', saveWindowsSettings);
   byId('linuxSettingsSaveButton').addEventListener('click', saveLinuxSettings);
   byId('generalAdUseServiceIdentity').addEventListener('change', updateAdIdentityFields);
+  byId('softwareInstallWindowEnabled').addEventListener('change', updateSoftwareInstallWindowFieldVisibility);
   byId('generalAdSyncMode').addEventListener('change', updateAdSyncIntervalField);
   byId('updatesScheduleMode').addEventListener('change', updateScheduleFieldVisibility);
   byId('updatesScheduleSaveButton').addEventListener('click', saveClientUpdateSchedule);

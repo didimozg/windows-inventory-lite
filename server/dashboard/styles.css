@@ -1723,6 +1723,21 @@ th.sort-desc::after {
   display: grid;
 }
 
+/* Software install window's enable checkbox - same orphan .check-label
+   root cause as .windows-self-update-field/.linux-self-update-field
+   above (sits directly in its own .settings-block, not inside a
+   .pkg-grid, so .check-label's own grid-template-columns/align-items
+   never apply without display:grid here). Unlike those two, a
+   margin-bottom is needed: what follows this checkbox is the
+   .windows-defaults-grid fields group, not a .cert-hint - and
+   .pkg-grid carries no margin-top of its own (same reasoning as
+   .ingestion-require-token-field above, which needs the same fix for
+   the same "grid directly below a checkbox" reason). */
+.software-install-window-toggle-field {
+  display: grid;
+  margin-bottom: var(--space-md);
+}
+
 .pkg-grid {
   display: grid;
   grid-template-columns: minmax(240px, 2fr) minmax(160px, 1fr) 110px auto;

@@ -331,6 +331,28 @@
             </div>
           </div>
           <div class="settings-block">
+            <h3 class="settings-block-title">Software install window</h3>
+            <p class="cert-hint">Restricts when clients are allowed to actually install pending Windows Updates/software catalog jobs - does not change how often they check in. Times are UTC. Off by default (installs run as soon as a job is assigned, same as before this setting existed). The spread-out period gradually ramps up admission from 0% right when the window opens to 100% once that many minutes have passed, so a fleet whose clients happen to check in around the same moment doesn't all start installing at once.</p>
+            <label class="check-label software-install-window-toggle-field">
+              <input id="softwareInstallWindowEnabled" type="checkbox">
+              Restrict installs to a time window
+            </label>
+            <div id="softwareInstallWindowFields" class="pkg-grid windows-defaults-grid hidden">
+              <label class="pkg-token-field">
+                Window start (UTC)
+                <input id="softwareInstallWindowStartUtc" type="time" value="02:00">
+              </label>
+              <label class="pkg-token-field">
+                Window end (UTC)
+                <input id="softwareInstallWindowEndUtc" type="time" value="04:00">
+              </label>
+              <label class="pkg-token-field">
+                Spread-out period (minutes)
+                <input id="softwareInstallWindowJitterMinutes" type="number" min="0" max="1440" value="30">
+              </label>
+            </div>
+          </div>
+          <div class="settings-block">
             <h3 class="settings-block-title">Client self-update</h3>
             <label class="check-label windows-self-update-field">
               <input id="windowsEnableClientSelfUpdate" type="checkbox">
