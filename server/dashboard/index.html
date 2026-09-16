@@ -332,7 +332,7 @@
           </div>
           <div class="settings-block">
             <h3 class="settings-block-title">Software install window</h3>
-            <p class="cert-hint">Restricts when clients are allowed to actually install pending Windows Updates/software catalog jobs - does not change how often they check in. Times are UTC. Off by default (installs run as soon as a job is assigned, same as before this setting existed). The spread-out period gradually ramps up admission from 0% right when the window opens to 100% once that many minutes have passed, so a fleet whose clients happen to check in around the same moment doesn't all start installing at once.</p>
+            <p class="cert-hint">Restricts when clients are allowed to actually install pending Windows Updates/software catalog jobs - does not change how often they check in. Times are UTC. Off by default (installs run as soon as a job is assigned, same as before this setting existed). The spread-out period gradually ramps up admission from 0% right when the window opens to 100% once that many minutes have passed, so a fleet whose clients happen to check in around the same moment doesn't all start installing at once. Make the window at least as wide as the software check interval below (or shorter than the interval and clients will poll on a fixed schedule from their own service start - a narrower window can miss a machine's actual poll times entirely, deferring its jobs until its next poll happens to land inside the window).</p>
             <label class="check-label software-install-window-toggle-field">
               <input id="softwareInstallWindowEnabled" type="checkbox">
               Restrict installs to a time window

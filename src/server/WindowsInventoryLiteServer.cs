@@ -3022,11 +3022,15 @@ namespace WindowsInventoryLite
 
         // Handles a window that spans midnight (windowStart > windowEnd,
         // e.g. 22:00-06:00) explicitly. A window with identical start/end
-        // is treated as "no restriction" (always true) - an admin who ends
-        // up with equal values almost certainly made an editing mistake,
-        // and "always open" is the safe interpretation (equivalent to the
-        // feature being off), never "always closed" (which would silently
-        // block every install forever).
+        // is treated as "no restriction" (membership always true) - an
+        // admin who ends up with equal values almost certainly made an
+        // editing mistake, and "always open" is the safe interpretation,
+        // never "always closed" (which would silently block every install
+        // forever). Note this only affects window MEMBERSHIP - the jitter
+        // ramp in GetSoftwareInstallWindowAdmitProbability still applies
+        // its own brief admission ramp at that exact minute each day, so
+        // this is not quite "fully equivalent to the feature being off,"
+        // just never a permanent block.
         internal static bool IsWithinSoftwareInstallWindow(TimeSpan nowTimeOfDayUtc, TimeSpan windowStart, TimeSpan windowEnd)
         {
             if (windowStart == windowEnd)
@@ -10001,7 +10005,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 options.SoftwareInstallWindowStartUtc = softwareInstallWindowStartUtc;
                 options.SoftwareInstallWindowEndUtc = softwareInstallWindowEndUtc;
                 options.SoftwareInstallWindowJitterMinutes = softwareInstallWindowJitterMinutes;
-                updates["SoftwareInstallWindowEnabled"] = softwareInstallWindowEnabled.ToString();
+                updates["SoftwareInstallWindowEnabled"] = softwareInstallWindowEnabled ? "true" : "false";
                 updates["SoftwareInstallWindowStartUtc"] = softwareInstallWindowStartUtc ?? "";
                 updates["SoftwareInstallWindowEndUtc"] = softwareInstallWindowEndUtc ?? "";
                 updates["SoftwareInstallWindowJitterMinutes"] = softwareInstallWindowJitterMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -13626,6 +13630,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings validates sessionLifetimeHours is between 1 and 720", TestConfigureServerSettingsValidatesSessionLifetimeHours);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips softwareJobAttemptLogRetentionDays/MaxEntries", TestConfigureServerSettingsRoundTripsSoftwareJobAttemptLogRetention);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips windowsDefaultIntervalHours/SoftwareCheckIntervalHours/tokenOverlapHours", TestConfigureServerSettingsRoundTripsWindowsDefaultsAndTokenOverlap);
+            allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips the software install window and validates its fields", TestConfigureServerSettingsRoundTripsSoftwareInstallWindow);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips showUsbStorageIndicator", TestConfigureServerSettingsRoundTripsShowUsbStorageIndicator);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips enableWindowsClientSelfUpdate/enableLinuxClientSelfUpdate", TestConfigureServerSettingsRoundTripsSelfUpdateToggles);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips debugLogRetentionDays/debugLogMaxSizeMb", TestConfigureServerSettingsRoundTripsDebugLogCaps);
@@ -14853,6 +14858,125 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (responseText.IndexOf("\"windowsDefaultIntervalHours\":12", StringComparison.Ordinal) < 0 || responseText.IndexOf("\"windowsDefaultSoftwareCheckIntervalHours\":8", StringComparison.Ordinal) < 0 || responseText.IndexOf("\"tokenOverlapHours\":48", StringComparison.Ordinal) < 0)
                 {
                     return "expected GET /api/v1/server/settings to echo back the saved values, got: " + responseText;
+                }
+
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestConfigureServerSettingsRoundTripsSoftwareInstallWindow()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.EnableHttp = true;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-softwareinstallwindow-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                // 1. Enabling with valid start/end/jitter updates the live
+                // options object and is echoed back in the POST's own response.
+                RequestContext enableRequest = new RequestContext();
+                enableRequest.Method = "POST";
+                enableRequest.Path = "/api/v1/server/settings";
+                enableRequest.Headers = new Dictionary<string, string>();
+                enableRequest.Body = "{\"softwareInstallWindowEnabled\":true,\"softwareInstallWindowStartUtc\":\"22:00\",\"softwareInstallWindowEndUtc\":\"06:00\",\"softwareInstallWindowJitterMinutes\":45}";
+
+                string enableResponse;
+                using (MemoryStream enableStream = new MemoryStream())
+                {
+                    server.ConfigureServerSettings(enableStream, enableRequest);
+                    enableResponse = Encoding.UTF8.GetString(enableStream.ToArray());
+                }
+
+                if (!options.SoftwareInstallWindowEnabled || options.SoftwareInstallWindowStartUtc != "22:00" || options.SoftwareInstallWindowEndUtc != "06:00" || options.SoftwareInstallWindowJitterMinutes != 45)
+                {
+                    return "expected the live options object to be updated, got enabled=" + options.SoftwareInstallWindowEnabled + " start=" + options.SoftwareInstallWindowStartUtc + " end=" + options.SoftwareInstallWindowEndUtc + " jitter=" + options.SoftwareInstallWindowJitterMinutes;
+                }
+
+                if (enableResponse.IndexOf("200 OK", StringComparison.Ordinal) < 0 || enableResponse.IndexOf("\"softwareInstallWindowEnabled\":true", StringComparison.Ordinal) < 0 || enableResponse.IndexOf("\"softwareInstallWindowStartUtc\":\"22:00\"", StringComparison.Ordinal) < 0 || enableResponse.IndexOf("\"softwareInstallWindowEndUtc\":\"06:00\"", StringComparison.Ordinal) < 0 || enableResponse.IndexOf("\"softwareInstallWindowJitterMinutes\":45", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the POST response to echo back the saved window settings, got: " + enableResponse;
+                }
+
+                // 2. Out-of-range jitter is rejected with a 400 and leaves the
+                // live options object untouched.
+                RequestContext badJitterRequest = new RequestContext();
+                badJitterRequest.Method = "POST";
+                badJitterRequest.Path = "/api/v1/server/settings";
+                badJitterRequest.Headers = new Dictionary<string, string>();
+                badJitterRequest.Body = "{\"softwareInstallWindowEnabled\":true,\"softwareInstallWindowStartUtc\":\"22:00\",\"softwareInstallWindowEndUtc\":\"06:00\",\"softwareInstallWindowJitterMinutes\":2000}";
+
+                string badJitterResponse;
+                using (MemoryStream badJitterStream = new MemoryStream())
+                {
+                    server.ConfigureServerSettings(badJitterStream, badJitterRequest);
+                    badJitterResponse = Encoding.UTF8.GetString(badJitterStream.ToArray());
+                }
+
+                if (badJitterResponse.IndexOf("400 Bad Request", StringComparison.Ordinal) < 0 || badJitterResponse.IndexOf("softwareInstallWindowJitterMinutes must be between 0 and 1440", StringComparison.Ordinal) < 0)
+                {
+                    return "expected an out-of-range jitter to be rejected with the expected 400 error, got: " + badJitterResponse;
+                }
+
+                if (options.SoftwareInstallWindowJitterMinutes != 45)
+                {
+                    return "expected the rejected jitter update to leave the live options object unchanged, got " + options.SoftwareInstallWindowJitterMinutes;
+                }
+
+                // 3. Enabling with a malformed start/end time is rejected with a 400.
+                RequestContext badTimeRequest = new RequestContext();
+                badTimeRequest.Method = "POST";
+                badTimeRequest.Path = "/api/v1/server/settings";
+                badTimeRequest.Headers = new Dictionary<string, string>();
+                badTimeRequest.Body = "{\"softwareInstallWindowEnabled\":true,\"softwareInstallWindowStartUtc\":\"not-a-time\",\"softwareInstallWindowEndUtc\":\"06:00\",\"softwareInstallWindowJitterMinutes\":45}";
+
+                string badTimeResponse;
+                using (MemoryStream badTimeStream = new MemoryStream())
+                {
+                    server.ConfigureServerSettings(badTimeStream, badTimeRequest);
+                    badTimeResponse = Encoding.UTF8.GetString(badTimeStream.ToArray());
+                }
+
+                if (badTimeResponse.IndexOf("400 Bad Request", StringComparison.Ordinal) < 0 || badTimeResponse.IndexOf("softwareInstallWindowStartUtc and softwareInstallWindowEndUtc must be in 'HH:mm' format", StringComparison.Ordinal) < 0)
+                {
+                    return "expected a malformed start/end time while enabling to be rejected with the expected 400 error, got: " + badTimeResponse;
+                }
+
+                if (options.SoftwareInstallWindowStartUtc != "22:00")
+                {
+                    return "expected the rejected time-format update to leave the live options object unchanged, got start=" + options.SoftwareInstallWindowStartUtc;
+                }
+
+                // 4. Disabling skips format validation entirely, even with a
+                // malformed start/end time left over from before.
+                RequestContext disableRequest = new RequestContext();
+                disableRequest.Method = "POST";
+                disableRequest.Path = "/api/v1/server/settings";
+                disableRequest.Headers = new Dictionary<string, string>();
+                disableRequest.Body = "{\"softwareInstallWindowEnabled\":false,\"softwareInstallWindowStartUtc\":\"not-a-time\",\"softwareInstallWindowEndUtc\":\"also-not-a-time\"}";
+
+                string disableResponse;
+                using (MemoryStream disableStream = new MemoryStream())
+                {
+                    server.ConfigureServerSettings(disableStream, disableRequest);
+                    disableResponse = Encoding.UTF8.GetString(disableStream.ToArray());
+                }
+
+                if (disableResponse.IndexOf("200 OK", StringComparison.Ordinal) < 0)
+                {
+                    return "expected disabling the window with a malformed start/end time to be accepted (format validation skipped), got: " + disableResponse;
+                }
+
+                if (options.SoftwareInstallWindowEnabled || options.SoftwareInstallWindowStartUtc != "not-a-time")
+                {
+                    return "expected options to reflect the disabled window and its (unvalidated) time fields, got enabled=" + options.SoftwareInstallWindowEnabled + " start=" + options.SoftwareInstallWindowStartUtc;
                 }
 
                 return null;
@@ -16524,8 +16648,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 DateTime windowStart = DateTime.UtcNow.AddHours(6);
                 DateTime windowEnd = windowStart.AddMinutes(30);
                 options.SoftwareInstallWindowEnabled = true;
-                options.SoftwareInstallWindowStartUtc = windowStart.ToString("HH:mm");
-                options.SoftwareInstallWindowEndUtc = windowEnd.ToString("HH:mm");
+                options.SoftwareInstallWindowStartUtc = windowStart.ToString("HH\\:mm", System.Globalization.CultureInfo.InvariantCulture);
+                options.SoftwareInstallWindowEndUtc = windowEnd.ToString("HH\\:mm", System.Globalization.CultureInfo.InvariantCulture);
                 options.SoftwareInstallWindowJitterMinutes = 30;
 
                 RequestContext request = new RequestContext();
