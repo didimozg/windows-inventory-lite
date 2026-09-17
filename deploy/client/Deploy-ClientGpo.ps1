@@ -336,9 +336,10 @@ function Get-ServiceEnvironmentToken {
 # Writes the ingestion token into the service's own registry Environment
 # value (a REG_MULTI_SZ the Service Control Manager injects into the process
 # environment at start) instead of the service command line - see
-# Get-DesiredServiceCommand's comment above for why. HKLM\SYSTEM is
-# writable/readable only by Administrators and SYSTEM by default, so no
-# separate ACL step is needed here.
+# Get-DesiredServiceCommand's comment above for why.
+# HKLM\SYSTEM\CurrentControlSet\Services\<name> subkeys inherit
+# BUILTIN\Users: ReadKey from their parent by default (verified live) - the
+# separate Set-RestrictedServiceRegistryKeyAcl call below closes this.
 function Set-ServiceEnvironmentToken {
     param(
         [Parameter(Mandatory = $true)]

@@ -205,9 +205,11 @@ function Get-ClientServiceCommand {
 # REG_MULTI_SZ the Service Control Manager injects into the process
 # environment at start) instead of the service command line. This is the
 # Windows-native equivalent of the Linux client's mode-600 EnvironmentFile
-# (New-SystemdEnvFile / Install-ClientDebianSSH.ps1): HKLM\SYSTEM is
-# writable/readable only by Administrators and SYSTEM by default, so no
-# separate ACL step is needed here. `sc.exe create` (Invoke-ServiceCreate)
+# (New-SystemdEnvFile / Install-ClientDebianSSH.ps1).
+# HKLM\SYSTEM\CurrentControlSet\Services\<name> subkeys inherit
+# BUILTIN\Users: ReadKey from their parent by default (verified live) - the
+# separate Set-RestrictedServiceRegistryKeyAcl call below closes this.
+# `sc.exe create` (Invoke-ServiceCreate)
 # does not expose a way to set this value itself, so it is written directly
 # to the registry right after the service key exists. An empty/absent token
 # clears any stale value a previous install may have left (relevant on a

@@ -87,18 +87,39 @@ Describe 'Windows Inventory Lite Install-Client client-data layout' {
         # POST-condition regardless, so that risk is contained.
         Set-RestrictedServiceRegistryKeyAcl -ServiceName $serviceName -ServiceRegistryRoot $registryRoot
 
-        $acl = Get-Acl -Path $servicePath
-        $identities = $acl.Access | ForEach-Object { $_.IdentityReference.Value }
-        $identities | Should -Not -Contain 'BUILTIN\Users'
-        $identities | Should -Not -Contain 'Everyone'
-        $identities | Should -Not -Contain 'NT AUTHORITY\Authenticated Users'
+        # Registry KEY_READ-class access (unlike NTFS Get-Acl, which only
+        # needs READ_CONTROL - implicitly granted to an object's owner) has
+        # no owner-implicit bypass. So once the ACL above is locked to
+        # Administrators+SYSTEM only, an Administrator can still read it
+        # back, but a non-admin test identity - including this key's own
+        # creator - can no longer even open it for read. Branch on the
+        # current identity so the assertion is meaningful in both kinds of
+        # environment instead of being permanently red on a non-admin box.
+        $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if ($isAdmin) {
+            $acl = Get-Acl -Path $servicePath
+            $identities = $acl.Access | ForEach-Object { $_.IdentityReference.Value }
+            $identities | Should -Not -Contain 'BUILTIN\Users'
+            $identities | Should -Not -Contain 'Everyone'
+            $identities | Should -Not -Contain 'NT AUTHORITY\Authenticated Users'
 
-        $adminSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
-        $systemSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
-        $adminAccount = $adminSid.Translate([System.Security.Principal.NTAccount]).Value
-        $systemAccount = $systemSid.Translate([System.Security.Principal.NTAccount]).Value
-        $identities | Should -Contain $adminAccount
-        $identities | Should -Contain $systemAccount
+            $adminSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+            $systemSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+            $adminAccount = $adminSid.Translate([System.Security.Principal.NTAccount]).Value
+            $systemAccount = $systemSid.Translate([System.Security.Principal.NTAccount]).Value
+            $identities | Should -Contain $adminAccount
+            $identities | Should -Contain $systemAccount
+        }
+        else {
+            # Confirmed empirically: Get-Acl on an access-denied registry
+            # path does not throw (even with -ErrorAction Stop) - it
+            # silently returns $null. The same call would have returned a
+            # real ACL before the fix, via the inherited BUILTIN\Users
+            # grant it just removed - the null result itself is proof the
+            # restriction works.
+            $deniedAcl = Get-Acl -Path $servicePath -ErrorAction SilentlyContinue
+            $deniedAcl | Should -BeNullOrEmpty
+        }
     }
 
     It 'Remove-LegacyClientFiles deletes the old bare-root exe and client-version.txt when the new path differs' {

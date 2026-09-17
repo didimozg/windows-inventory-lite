@@ -2335,37 +2335,72 @@ namespace WindowsInventoryLite
 
                 InventoryCollector.ApplyIngestionTokenToRegistryCore(Registry.CurrentUser, subKeyPath, "test-token-123");
 
-                using (RegistryKey scratchKey = Registry.CurrentUser.OpenSubKey(subKeyPath, false))
+                // Registry KEY_READ-class access (unlike NTFS, where
+                // Get-Acl/GetAccessControl only needs READ_CONTROL -
+                // implicitly granted to an object's owner) has no
+                // owner-implicit bypass. So once ApplyIngestionTokenToRegistryCore
+                // has locked this key to Administrators+SYSTEM only, an
+                // Administrator can still open it for read, but a
+                // non-admin identity - including this key's own creator -
+                // can no longer even open it. Branch on the current
+                // identity so this self-test is meaningful in both kinds
+                // of environment instead of always failing on a non-admin box.
+                bool isAdmin = new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
+                if (isAdmin)
                 {
-                    if (scratchKey == null)
+                    using (RegistryKey scratchKey = Registry.CurrentUser.OpenSubKey(subKeyPath, false))
                     {
-                        return "expected the scratch subkey to still exist after ApplyIngestionTokenToRegistryCore";
-                    }
-                    string[] environment = scratchKey.GetValue("Environment") as string[];
-                    if (environment == null || Array.IndexOf(environment, "WIL_INGESTION_TOKEN=test-token-123") < 0)
-                    {
-                        return "expected the Environment value to contain the new token";
-                    }
+                        if (scratchKey == null)
+                        {
+                            return "expected the scratch subkey to still exist after ApplyIngestionTokenToRegistryCore";
+                        }
+                        string[] environment = scratchKey.GetValue("Environment") as string[];
+                        if (environment == null || Array.IndexOf(environment, "WIL_INGESTION_TOKEN=test-token-123") < 0)
+                        {
+                            return "expected the Environment value to contain the new token";
+                        }
 
-                    RegistrySecurity acl = scratchKey.GetAccessControl();
-                    SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-                    SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
-                    bool sawAdmin = false;
-                    bool sawSystem = false;
-                    foreach (RegistryAccessRule rule in acl.GetAccessRules(true, false, typeof(SecurityIdentifier)))
-                    {
-                        if (rule.IdentityReference.Equals(adminSid))
+                        RegistrySecurity acl = scratchKey.GetAccessControl();
+                        SecurityIdentifier adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+                        SecurityIdentifier systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+                        bool sawAdmin = false;
+                        bool sawSystem = false;
+                        foreach (RegistryAccessRule rule in acl.GetAccessRules(true, false, typeof(SecurityIdentifier)))
                         {
-                            sawAdmin = true;
+                            if (rule.IdentityReference.Equals(adminSid))
+                            {
+                                sawAdmin = true;
+                            }
+                            if (rule.IdentityReference.Equals(systemSid))
+                            {
+                                sawSystem = true;
+                            }
                         }
-                        if (rule.IdentityReference.Equals(systemSid))
+                        if (!sawAdmin || !sawSystem)
                         {
-                            sawSystem = true;
+                            return "expected the ACL to grant both Administrators and SYSTEM, got admin=" + sawAdmin + " system=" + sawSystem;
                         }
                     }
-                    if (!sawAdmin || !sawSystem)
+                }
+                else
+                {
+                    // The identical OpenSubKey call would have succeeded
+                    // before the fix, via this identity's own ownership of
+                    // the key it just created - the denial itself is proof
+                    // the restriction works.
+                    try
                     {
-                        return "expected the ACL to grant both Administrators and SYSTEM, got admin=" + sawAdmin + " system=" + sawSystem;
+                        using (RegistryKey scratchKey = Registry.CurrentUser.OpenSubKey(subKeyPath, false))
+                        {
+                            if (scratchKey != null)
+                            {
+                                return "expected OpenSubKey to be denied for a non-admin identity after the ACL was restricted, but it succeeded";
+                            }
+                        }
+                    }
+                    catch (System.Security.SecurityException)
+                    {
+                        // Expected: the restricted ACL denies this non-admin identity read access.
                     }
                 }
             }
