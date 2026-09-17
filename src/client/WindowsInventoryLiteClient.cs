@@ -1983,7 +1983,7 @@ namespace WindowsInventoryLite
         // any real signature - safe, since RequireSignatureForSelfUpdate
         // defaults to false and this constant is only consulted when an
         // admin has explicitly opted in via --require-signed-self-update.
-        internal const string SelfUpdatePublicKeyModulusBase64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        internal const string SelfUpdatePublicKeyModulusBase64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
         internal const string SelfUpdatePublicKeyExponentBase64 = "AQAB";
 
         // Builds the plain cmd.exe script (not PowerShell - this client's
@@ -2112,7 +2112,28 @@ namespace WindowsInventoryLite
             try
             {
                 string exePath = Process.GetCurrentProcess().MainModule.FileName;
-                ApplySelfUpdateFromServerCore(update, exePath, Program.ProductVersion, options, HttpGetBytes, RunHelperProcess, Convert.FromBase64String(SelfUpdatePublicKeyModulusBase64), Convert.FromBase64String(SelfUpdatePublicKeyExponentBase64));
+                // Decoded in its own try/catch, separate from the outer one,
+                // so a malformed pinned-key constant (e.g. a copy-paste
+                // mistake when Task 5's real key is installed) degrades
+                // ONLY the signature-verification feature - by passing null
+                // keys through, which VerifyRsaSignature already fails
+                // closed on - rather than aborting this entire self-update
+                // attempt before the HTTPS/hash checks even run. A bad
+                // constant must never be able to silently disable
+                // self-update fleet-wide regardless of whether an admin
+                // even uses --require-signed-self-update.
+                byte[] publicKeyModulus = null;
+                byte[] publicKeyExponent = null;
+                try
+                {
+                    publicKeyModulus = Convert.FromBase64String(SelfUpdatePublicKeyModulusBase64);
+                    publicKeyExponent = Convert.FromBase64String(SelfUpdatePublicKeyExponentBase64);
+                }
+                catch (FormatException keyEx)
+                {
+                    DebugLogger.Log(options, "SelfUpdate", "Pinned self-update public key constant is not valid base64 - signature verification will fail closed if required, but self-update itself will still proceed: " + keyEx.Message);
+                }
+                ApplySelfUpdateFromServerCore(update, exePath, Program.ProductVersion, options, HttpGetBytes, RunHelperProcess, publicKeyModulus, publicKeyExponent);
             }
             catch (Exception ex)
             {
@@ -2321,6 +2342,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns SignatureRequired when RequireSignatureForSelfUpdate is true and no signature was advertised", TestApplySelfUpdateFromServerCoreReturnsSignatureRequiredWhenMissing);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns SignatureMismatch when the advertised signature does not verify", TestApplySelfUpdateFromServerCoreReturnsSignatureMismatchForBadSignature);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns Applied when a genuinely valid RSA signature is provided and required", TestApplySelfUpdateFromServerCoreAppliesWithValidSignature);
+            allPassed &= SelfTestCheck(output, "The pinned self-update public key constants are valid base64", TestSelfUpdatePublicKeyConstantsAreValidBase64);
             allPassed &= SelfTestCheck(output, "LoadLearnedState returns an empty (not null) dictionary when no cache file exists", TestLoadLearnedStateReturnsEmptyDictWhenNoFileExists);
             allPassed &= SelfTestCheck(output, "SaveLearnedState/LoadLearnedState round-trip a dictionary with mixed value types", TestSaveLearnedStateRoundTripsMixedValueTypes);
             allPassed &= SelfTestCheck(output, "ApplyInventoryAckResponse does not lose a previously-learned field when a later ack only carries a different one", TestApplyInventoryAckResponsePreservesUnrelatedLearnedFields);
@@ -2859,6 +2881,40 @@ namespace WindowsInventoryLite
                 try { File.Delete(exePath + ".new"); } catch { }
                 try { File.Delete(Path.Combine(Path.GetDirectoryName(exePath), "wil-self-update.cmd")); } catch { }
             }
+        }
+
+        // Guards against the exact regression a final review caught in this
+        // feature: the pinned key constants are consumed by
+        // Convert.FromBase64String at real-wrapper call time
+        // (ApplySelfUpdateFromServer), never by ApplySelfUpdateFromServerCore
+        // itself, so every other self-test in this file - which all call
+        // Core directly - gave 0 FAIL even while the shipped Modulus
+        // constant was, for one commit, invalid base64 that would have
+        // thrown on every real self-update attempt regardless of either
+        // flag. This test is the one place that actually exercises the
+        // real constants' decodability.
+        private static string TestSelfUpdatePublicKeyConstantsAreValidBase64()
+        {
+            byte[] modulus;
+            byte[] exponent;
+            try
+            {
+                modulus = Convert.FromBase64String(SelfUpdatePublicKeyModulusBase64);
+                exponent = Convert.FromBase64String(SelfUpdatePublicKeyExponentBase64);
+            }
+            catch (FormatException ex)
+            {
+                return "expected both pinned public key constants to be valid base64, but decoding threw: " + ex.Message;
+            }
+            if (modulus.Length == 0)
+            {
+                return "expected a non-empty decoded modulus";
+            }
+            if (exponent.Length == 0)
+            {
+                return "expected a non-empty decoded exponent";
+            }
+            return null;
         }
 
         private static string TestApplySelfUpdateFromServerCoreReturnsNoHashAdvertisedWhenHashIsEmpty()
