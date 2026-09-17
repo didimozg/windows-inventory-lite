@@ -44,6 +44,8 @@ func main() {
 	token := flag.String("token", "", "Ingestion token for standalone runs; systemd-managed runs get it from the WIL_INGESTION_TOKEN environment variable instead")
 	mode := flag.String("mode", "full", "Report mode: 'full' (complete inventory) or 'status' (lightweight running-services check)")
 	showVersion := flag.Bool("version", false, "Print the client version and exit")
+	requireHTTPSSelfUpdate := flag.Bool("require-https-self-update", false, "Refuse to self-update unless the server URL is https")
+	requireSignedSelfUpdate := flag.Bool("require-signed-self-update", false, "Refuse to self-update unless the server advertises a valid RSA signature for the payload")
 	flag.Parse()
 
 	if *showVersion {
@@ -109,7 +111,7 @@ func main() {
 	// systemd execs ExecStart directly (no shell, no PATH lookup), so
 	// argv[0] as seen by this process is byte-for-byte that same absolute
 	// path.
-	if selfUpdateErr := ApplySelfUpdate(responseBody, os.Args[0], downloadURLFromServerURL(*serverURL), ingestionToken); selfUpdateErr != nil {
+	if selfUpdateErr := ApplySelfUpdate(responseBody, os.Args[0], downloadURLFromServerURL(*serverURL), ingestionToken, ClientVersion, *requireHTTPSSelfUpdate, *requireSignedSelfUpdate); selfUpdateErr != nil {
 		log.Printf("self-update failed (report already accepted): %v", selfUpdateErr)
 	}
 

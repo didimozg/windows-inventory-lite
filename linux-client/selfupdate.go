@@ -2,14 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto"
+	"crypto/rsa"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -23,6 +29,7 @@ type selfUpdateResponse struct {
 		Update struct {
 			Version string `json:"version"`
 			SHA256  string `json:"sha256"`
+			Sig     string `json:"sig"`
 		} `json:"update"`
 	} `json:"config"`
 }
@@ -34,6 +41,77 @@ type selfUpdateResponse struct {
 type downloadFunc func(url, token string) ([]byte, error)
 type verifyFunc func(binaryPath string) error
 type isRootFunc func() bool
+
+// isVersionNewer/parseVersionParts port the Windows client's own
+// IsVersionNewer/ParseVersionParts (WindowsInventoryLiteClient.cs) -
+// same dotted-integer-segment comparison, same "unparseable counts as
+// not newer" rule. Ported rather than shared because the two clients
+// don't share a build - see this project's own established precedent
+// for this class of unavoidable cross-language duplication (already
+// used for the self-update download/verify injection pattern).
+func isVersionNewer(candidateVersion string, currentVersion string) bool {
+	candidateParts := parseVersionParts(candidateVersion)
+	currentParts := parseVersionParts(currentVersion)
+	if candidateParts == nil || currentParts == nil {
+		return false
+	}
+	length := len(candidateParts)
+	if len(currentParts) > length {
+		length = len(currentParts)
+	}
+	for i := 0; i < length; i++ {
+		candidatePart := 0
+		if i < len(candidateParts) {
+			candidatePart = candidateParts[i]
+		}
+		currentPart := 0
+		if i < len(currentParts) {
+			currentPart = currentParts[i]
+		}
+		if candidatePart != currentPart {
+			return candidatePart > currentPart
+		}
+	}
+	return false
+}
+
+func parseVersionParts(version string) []int {
+	if version == "" {
+		return nil
+	}
+	segments := strings.Split(version, ".")
+	parts := make([]int, len(segments))
+	for i, segment := range segments {
+		value, err := strconv.Atoi(strings.TrimSpace(segment))
+		if err != nil {
+			return nil
+		}
+		parts[i] = value
+	}
+	return parts
+}
+
+// verifySelfUpdateSignature checks an RSA/SHA256/PKCS#1v1.5 signature -
+// the same scheme Sign-ClientRelease.ps1 produces via .NET's
+// RSACryptoServiceProvider.SignData, and the Windows client's own
+// VerifyRsaSignature checks. Returns false (never panics) for any
+// malformed input.
+func verifySelfUpdateSignature(data []byte, signatureBase64 string, publicKeyModulusBase64 string, publicKeyExponent int) bool {
+	if signatureBase64 == "" || publicKeyModulusBase64 == "" {
+		return false
+	}
+	signature, err := base64.StdEncoding.DecodeString(signatureBase64)
+	if err != nil {
+		return false
+	}
+	modulusBytes, err := base64.StdEncoding.DecodeString(publicKeyModulusBase64)
+	if err != nil {
+		return false
+	}
+	publicKey := rsa.PublicKey{N: new(big.Int).SetBytes(modulusBytes), E: publicKeyExponent}
+	hashed := sha256.Sum256(data)
+	return rsa.VerifyPKCS1v15(&publicKey, crypto.SHA256, hashed[:], signature) == nil
+}
 
 // isRunningAsRoot is the real root check - a bare inline os.Geteuid() == 0
 // call (config.go's own convention for this class of privileged operation)
@@ -48,13 +126,21 @@ func isRunningAsRoot() bool {
 	return os.Geteuid() == 0
 }
 
+// selfUpdatePublicKeyModulusBase64/selfUpdatePublicKeyExponent are
+// placeholders until the project owner runs the one-time key-generation
+// step (docs/self-update-signing.md) and pastes the real values here - a
+// placeholder key can never verify any real signature, which is safe
+// since --require-signed-self-update is off by default.
+var selfUpdatePublicKeyModulusBase64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+const selfUpdatePublicKeyExponent = 65537
+
 // ApplySelfUpdate is the real entry point called from the main report
 // loop.
-func ApplySelfUpdate(body []byte, binaryPath string, downloadURL string, token string) error {
-	return applySelfUpdate(body, binaryPath, downloadURL, token, downloadClientPackage, verifyBinaryLaunches, isRunningAsRoot)
+func ApplySelfUpdate(body []byte, binaryPath string, downloadURL string, token string, currentVersion string, requireHTTPS bool, requireSignature bool) error {
+	return applySelfUpdate(body, binaryPath, downloadURL, token, currentVersion, requireHTTPS, requireSignature, downloadClientPackage, verifyBinaryLaunches, isRunningAsRoot, selfUpdatePublicKeyModulusBase64, selfUpdatePublicKeyExponent)
 }
 
-func applySelfUpdate(body []byte, binaryPath string, downloadURL string, token string, download downloadFunc, verify verifyFunc, isRoot isRootFunc) error {
+func applySelfUpdate(body []byte, binaryPath string, downloadURL string, token string, currentVersion string, requireHTTPS bool, requireSignature bool, download downloadFunc, verify verifyFunc, isRoot isRootFunc, publicKeyModulusBase64 string, publicKeyExponent int) error {
 	if len(body) == 0 {
 		return nil
 	}
@@ -71,13 +157,20 @@ func applySelfUpdate(body []byte, binaryPath string, downloadURL string, token s
 		return nil
 	}
 
+	if !isVersionNewer(response.Config.Update.Version, currentVersion) {
+		// Only ever move forward - same reasoning as the Windows client's
+		// own IsVersionNewer check: a stale rebuild or a restored old
+		// backup on the server would otherwise silently downgrade every
+		// self-update-enabled Linux client that reports in while it's in
+		// that state.
+		return nil
+	}
+
+	if requireHTTPS && !strings.HasPrefix(downloadURL, "https://") {
+		return nil
+	}
+
 	if !isRoot() {
-		// Swapping the running binary needs write access to its own
-		// install directory (typically /opt/windows-inventory-lite,
-		// root-owned) - same reasoning as config.go's own os.Geteuid()
-		// gates on its privileged rewrites. Skip rather than fail: the
-		// next run (which may or may not be root, depending on
-		// deployment) sees the same update advertised again and retries.
 		return nil
 	}
 
@@ -89,10 +182,13 @@ func applySelfUpdate(body []byte, binaryPath string, downloadURL string, token s
 	sum := sha256.Sum256(newContent)
 	actualHash := hex.EncodeToString(sum[:])
 	if actualHash != response.Config.Update.SHA256 {
-		// Hash mismatch - never touch the real binary. The server will
-		// keep advertising the same update; retried automatically on the
-		// next run.
 		return nil
+	}
+
+	if requireSignature {
+		if !verifySelfUpdateSignature(newContent, response.Config.Update.Sig, publicKeyModulusBase64, publicKeyExponent) {
+			return nil
+		}
 	}
 
 	backupPath := binaryPath + ".bak"
