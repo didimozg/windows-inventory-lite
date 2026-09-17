@@ -35,7 +35,13 @@ param(
     [string]$ClientExecutablePath,
 
     [Parameter()]
-    [switch]$NoRun
+    [switch]$NoRun,
+
+    [Parameter()]
+    [switch]$RequireHttpsSelfUpdate,
+
+    [Parameter()]
+    [switch]$RequireSignedSelfUpdate
 )
 
 Set-StrictMode -Version 2.0
@@ -180,7 +186,9 @@ function Get-ClientServiceCommand {
         [int]$SoftwareHours = 6,
         [string]$SharePath,
         [string]$OutputDirectory,
-        [string]$DebugLogPath
+        [string]$DebugLogPath,
+        [switch]$RequireHttpsSelfUpdate,
+        [switch]$RequireSignedSelfUpdate
     )
 
     # The ingestion token is deliberately NOT accepted as a parameter here: it
@@ -196,6 +204,12 @@ function Get-ClientServiceCommand {
     }
     $command += ' --output "' + (ConvertTo-ServiceArgValue $OutputDirectory) + '"'
     $command += ' --debug-log-path "' + (ConvertTo-ServiceArgValue $DebugLogPath) + '"'
+    if ($RequireHttpsSelfUpdate) {
+        $command += ' --require-https-self-update'
+    }
+    if ($RequireSignedSelfUpdate) {
+        $command += ' --require-signed-self-update'
+    }
 
     return $command
 }
@@ -405,7 +419,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     # abort mid-install with no way back except a fresh reinstall.
     $clientVersion = (& $servicePath --version 2>$null | Select-Object -First 1)
 
-    $serviceCommand = Get-ClientServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SoftwareHours $SoftwareCheckIntervalHours -SharePath $ServerSharePath -OutputDirectory $InstallPath -DebugLogPath $debugLogPath
+    $serviceCommand = Get-ClientServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SoftwareHours $SoftwareCheckIntervalHours -SharePath $ServerSharePath -OutputDirectory $InstallPath -DebugLogPath $debugLogPath -RequireHttpsSelfUpdate:$RequireHttpsSelfUpdate -RequireSignedSelfUpdate:$RequireSignedSelfUpdate
 
     Invoke-ServiceCreate -ServiceName $serviceName -BinPath $serviceCommand -DisplayName 'Windows Inventory Lite' -FailureMessage "Failed to create service. Run PowerShell as Administrator." | Out-Null
     Set-ServiceEnvironmentToken -ServiceName $serviceName -SharedToken $Token

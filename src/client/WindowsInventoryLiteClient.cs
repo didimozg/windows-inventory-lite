@@ -740,6 +740,15 @@ namespace WindowsInventoryLite
         public bool SkipSoftware;
         public bool ShowVersion;
         public bool RunSelfTest;
+        // Client-side, install-time security posture for self-update - NOT
+        // server-pushed. A flag delivered inside the same HTTP response
+        // this feature defends against forgery on would let the same
+        // attacker simply omit/falsify it, defeating its own purpose. Both
+        // default false so an existing self-update-enabled deployment is
+        // never silently broken by upgrading to a client build that knows
+        // about these flags - an admin opts in deliberately per install.
+        public bool RequireHttpsForSelfUpdate;
+        public bool RequireSignatureForSelfUpdate;
         // Off by default - a plain-text log file capturing each collection
         // cycle's outcome (success or the full exception on failure). See
         // DebugLogger below. Independent of the Windows Event Log write
@@ -774,6 +783,14 @@ namespace WindowsInventoryLite
                 else if (key == "--skip-software")
                 {
                     options.SkipSoftware = true;
+                }
+                else if (key == "--require-https-self-update")
+                {
+                    options.RequireHttpsForSelfUpdate = true;
+                }
+                else if (key == "--require-signed-self-update")
+                {
+                    options.RequireSignatureForSelfUpdate = true;
                 }
                 else if ((key == "--share" || key == "--server-share") && i + 1 < args.Length)
                 {
@@ -1960,6 +1977,15 @@ namespace WindowsInventoryLite
         // something an admin can whitelist once in their AV product.
         internal const string SelfUpdateTaskName = "WindowsInventoryLiteClient-SelfUpdate";
 
+        // Placeholder until the project owner runs the one-time key
+        // generation step (docs/self-update-signing.md) and pastes the
+        // real Modulus/Exponent here. A placeholder key can never verify
+        // any real signature - safe, since RequireSignatureForSelfUpdate
+        // defaults to false and this constant is only consulted when an
+        // admin has explicitly opted in via --require-signed-self-update.
+        internal const string SelfUpdatePublicKeyModulusBase64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        internal const string SelfUpdatePublicKeyExponentBase64 = "AQAB";
+
         // Builds the plain cmd.exe script (not PowerShell - this client's
         // fleet includes real PowerShell 2.0 machines, and native cmd.exe
         // has no such floor) that a one-shot Scheduled Task runs to
@@ -2054,8 +2080,11 @@ namespace WindowsInventoryLite
             NoBuildForTarget,
             AlreadyCurrent,
             NotNewer,
+            HttpsRequired,
             NoHashAdvertised,
             HashMismatch,
+            SignatureRequired,
+            SignatureMismatch,
             TaskCreateFailed,
             TaskRunFailed,
             Applied,
@@ -2083,11 +2112,40 @@ namespace WindowsInventoryLite
             try
             {
                 string exePath = Process.GetCurrentProcess().MainModule.FileName;
-                ApplySelfUpdateFromServerCore(update, exePath, Program.ProductVersion, options, HttpGetBytes, RunHelperProcess);
+                ApplySelfUpdateFromServerCore(update, exePath, Program.ProductVersion, options, HttpGetBytes, RunHelperProcess, Convert.FromBase64String(SelfUpdatePublicKeyModulusBase64), Convert.FromBase64String(SelfUpdatePublicKeyExponentBase64));
             }
             catch (Exception ex)
             {
                 DebugLogger.Log(options, "SelfUpdate", "Self-update attempt failed (report already accepted, will retry next cycle): " + ex);
+            }
+        }
+
+        // Verifies an RSA/SHA256/PKCS#1v1.5 signature - the same scheme
+        // Sign-ClientRelease.ps1 produces via RSACryptoServiceProvider.SignData.
+        // Returns false (never throws) for any malformed input - a
+        // verification helper failing closed on bad input is exactly the
+        // behavior a signature check needs.
+        private static bool VerifyRsaSignature(byte[] data, string signatureBase64, byte[] publicKeyModulus, byte[] publicKeyExponent)
+        {
+            if (String.IsNullOrEmpty(signatureBase64) || publicKeyModulus == null || publicKeyExponent == null)
+            {
+                return false;
+            }
+            try
+            {
+                byte[] signature = Convert.FromBase64String(signatureBase64);
+                RSAParameters publicKeyParams = new RSAParameters();
+                publicKeyParams.Modulus = publicKeyModulus;
+                publicKeyParams.Exponent = publicKeyExponent;
+                using (RSACryptoServiceProvider rsa = new RSACryptoServiceProvider())
+                {
+                    rsa.ImportParameters(publicKeyParams);
+                    return rsa.VerifyData(data, "SHA256", signature);
+                }
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -2108,7 +2166,7 @@ namespace WindowsInventoryLite
         // test context (it early-returns whenever options.DebugLogEnabled is
         // false, the default for a freshly-constructed ClientOptions), so no
         // test needs to guard against it.
-        internal static SelfUpdateOutcome ApplySelfUpdateFromServerCore(Dictionary<string, object> update, string exePath, string currentVersion, ClientOptions options, Func<string, string, byte[]> download, Func<string, string, bool> runHelperProcess)
+        internal static SelfUpdateOutcome ApplySelfUpdateFromServerCore(Dictionary<string, object> update, string exePath, string currentVersion, ClientOptions options, Func<string, string, byte[]> download, Func<string, string, bool> runHelperProcess, byte[] publicKeyModulus, byte[] publicKeyExponent)
         {
             string target = Environment.Version.Major >= 4 ? "net40" : "net35";
             string versionKey = target == "net40" ? "versionNet40" : "versionNet35";
@@ -2144,6 +2202,11 @@ namespace WindowsInventoryLite
                 DebugLogger.Log(options, "SelfUpdate", "Server advertised version " + newVersion + " for target " + target + ", but it is not newer than this client's own " + currentVersion + " - ignoring (would be a downgrade, or the version string could not be compared).");
                 return SelfUpdateOutcome.NotNewer;
             }
+            if (options.RequireHttpsForSelfUpdate && !(options.ServerUrl ?? "").StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                DebugLogger.Log(options, "SelfUpdate", "RequireHttpsForSelfUpdate is set and ServerUrl is not https - refusing to self-update over an unencrypted transport.");
+                return SelfUpdateOutcome.HttpsRequired;
+            }
             string expectedSha256 = Convert.ToString(update[hashKey]);
             if (String.IsNullOrEmpty(expectedSha256))
             {
@@ -2169,6 +2232,22 @@ namespace WindowsInventoryLite
                 {
                     DebugLogger.Log(options, "SelfUpdate", "Downloaded build's hash did not match the advertised " + hashKey + " - aborting, will retry next cycle.");
                     return SelfUpdateOutcome.HashMismatch;
+                }
+
+                if (options.RequireSignatureForSelfUpdate)
+                {
+                    string sigKey = target == "net40" ? "sigNet40" : "sigNet35";
+                    string signatureBase64 = update.ContainsKey(sigKey) ? Convert.ToString(update[sigKey]) : null;
+                    if (String.IsNullOrEmpty(signatureBase64))
+                    {
+                        DebugLogger.Log(options, "SelfUpdate", "RequireSignatureForSelfUpdate is set but the server did not advertise a " + sigKey + " - refusing to self-update.");
+                        return SelfUpdateOutcome.SignatureRequired;
+                    }
+                    if (!VerifyRsaSignature(downloadedBytes, signatureBase64, publicKeyModulus, publicKeyExponent))
+                    {
+                        DebugLogger.Log(options, "SelfUpdate", "RequireSignatureForSelfUpdate is set and the advertised " + sigKey + " did not verify against the pinned public key - refusing to self-update.");
+                        return SelfUpdateOutcome.SignatureMismatch;
+                    }
                 }
 
                 File.WriteAllBytes(newExePath, downloadedBytes);
@@ -2237,6 +2316,11 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns TaskRunFailed when schtasks /Run fails", TestApplySelfUpdateFromServerCoreReturnsTaskRunFailedWhenSchtasksRunFails);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns Applied and writes the expected files", TestApplySelfUpdateFromServerCoreReturnsAppliedAndWritesExpectedFiles);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns Error when download throws", TestApplySelfUpdateFromServerCoreReturnsErrorWhenDownloadThrows);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns HttpsRequired when RequireHttpsForSelfUpdate is true and ServerUrl is http", TestApplySelfUpdateFromServerCoreReturnsHttpsRequiredForHttpServerUrl);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore proceeds when RequireHttpsForSelfUpdate is true and ServerUrl is https", TestApplySelfUpdateFromServerCoreProceedsWhenHttpsSatisfied);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns SignatureRequired when RequireSignatureForSelfUpdate is true and no signature was advertised", TestApplySelfUpdateFromServerCoreReturnsSignatureRequiredWhenMissing);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns SignatureMismatch when the advertised signature does not verify", TestApplySelfUpdateFromServerCoreReturnsSignatureMismatchForBadSignature);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns Applied when a genuinely valid RSA signature is provided and required", TestApplySelfUpdateFromServerCoreAppliesWithValidSignature);
             allPassed &= SelfTestCheck(output, "LoadLearnedState returns an empty (not null) dictionary when no cache file exists", TestLoadLearnedStateReturnsEmptyDictWhenNoFileExists);
             allPassed &= SelfTestCheck(output, "SaveLearnedState/LoadLearnedState round-trip a dictionary with mixed value types", TestSaveLearnedStateRoundTripsMixedValueTypes);
             allPassed &= SelfTestCheck(output, "ApplyInventoryAckResponse does not lose a previously-learned field when a later ack only carries a different one", TestApplyInventoryAckResponsePreservesUnrelatedLearnedFields);
@@ -2541,7 +2625,7 @@ namespace WindowsInventoryLite
             update["version"] = "9.9.9";
 
             ClientOptions options = new ClientOptions();
-            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true);
+            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true, null, null);
 
             if (outcome != SelfUpdateOutcome.NoBuildForTarget)
             {
@@ -2566,7 +2650,7 @@ namespace WindowsInventoryLite
             update["versionNet40"] = "9.9.9";
 
             ClientOptions options = new ClientOptions();
-            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true);
+            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true, null, null);
 
             if (outcome != SelfUpdateOutcome.NoBuildForTarget)
             {
@@ -2579,7 +2663,7 @@ namespace WindowsInventoryLite
         {
             Dictionary<string, object> update = BuildSelfTestUpdateAck("0.5.1", "aaaa");
             ClientOptions options = new ClientOptions();
-            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true);
+            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true, null, null);
 
             if (outcome != SelfUpdateOutcome.AlreadyCurrent)
             {
@@ -2592,13 +2676,189 @@ namespace WindowsInventoryLite
         {
             Dictionary<string, object> update = BuildSelfTestUpdateAck("0.5.0", "aaaa");
             ClientOptions options = new ClientOptions();
-            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true);
+            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true, null, null);
 
             if (outcome != SelfUpdateOutcome.NotNewer)
             {
                 return "expected NotNewer when the advertised version is older than the current one, got " + outcome;
             }
             return null;
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreReturnsHttpsRequiredForHttpServerUrl()
+        {
+            // Both targets' keys are set (mirroring BuildSelfTestUpdateAck's
+            // own rationale above) since this compiled self-test binary runs
+            // as EITHER net35 or net40 depending on which built exe invokes
+            // it - setting only one target's keys would make this test fail
+            // with NoBuildForTarget whenever it runs under the other target.
+            Dictionary<string, object> update = new Dictionary<string, object>();
+            update["versionNet35"] = "9.9.9";
+            update["sha256Net35"] = "irrelevant-not-reached";
+            update["versionNet40"] = "9.9.9";
+            update["sha256Net40"] = "irrelevant-not-reached";
+            ClientOptions options = new ClientOptions();
+            options.ServerUrl = "http://server.example.local/api/v1/inventory";
+            options.RequireHttpsForSelfUpdate = true;
+            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true, null, null);
+            if (outcome != SelfUpdateOutcome.HttpsRequired)
+            {
+                return "expected HttpsRequired, got " + outcome;
+            }
+            return null;
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreProceedsWhenHttpsSatisfied()
+        {
+            string exePath = Path.Combine(Path.GetTempPath(), "wil-selftest-httpsok-" + Guid.NewGuid().ToString("N") + ".exe");
+            byte[] newContent = Encoding.ASCII.GetBytes("new-build-content");
+            string hash;
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                hash = BitConverter.ToString(sha256.ComputeHash(newContent)).Replace("-", "").ToLowerInvariant();
+            }
+            // Both targets' keys are set - see the comment on
+            // TestApplySelfUpdateFromServerCoreReturnsHttpsRequiredForHttpServerUrl
+            // above for why.
+            Dictionary<string, object> update = new Dictionary<string, object>();
+            update["versionNet35"] = "9.9.9";
+            update["sha256Net35"] = hash;
+            update["versionNet40"] = "9.9.9";
+            update["sha256Net40"] = hash;
+            ClientOptions options = new ClientOptions();
+            options.ServerUrl = "https://server.example.local/api/v1/inventory";
+            options.RequireHttpsForSelfUpdate = true;
+            try
+            {
+                SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options, (url, token) => newContent, (fileName, arguments) => true, null, null);
+                if (outcome != SelfUpdateOutcome.Applied)
+                {
+                    return "expected Applied when ServerUrl is https and RequireHttpsForSelfUpdate is true, got " + outcome;
+                }
+                return null;
+            }
+            finally
+            {
+                try { File.Delete(exePath + ".new"); } catch { }
+                try { File.Delete(Path.Combine(Path.GetDirectoryName(exePath), "wil-self-update.cmd")); } catch { }
+            }
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreReturnsSignatureRequiredWhenMissing()
+        {
+            // Both targets' keys are set - see the comment on
+            // TestApplySelfUpdateFromServerCoreReturnsHttpsRequiredForHttpServerUrl
+            // above for why. The signature check sits AFTER the hash-match
+            // check (Core only reaches it once the downloaded bytes are
+            // already proven to be what the server advertised) - so the hash
+            // must genuinely match the injected download below (new
+            // byte[0]), not an arbitrary placeholder, or the hash check
+            // itself would return HashMismatch before the signature check is
+            // ever reached. This is the well-known SHA-256 of an empty byte
+            // array.
+            Dictionary<string, object> update = new Dictionary<string, object>();
+            update["versionNet35"] = "9.9.9";
+            update["sha256Net35"] = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+            update["versionNet40"] = "9.9.9";
+            update["sha256Net40"] = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+            ClientOptions options = new ClientOptions();
+            options.ServerUrl = "https://server.example.local/api/v1/inventory";
+            options.RequireSignatureForSelfUpdate = true;
+            RSACryptoServiceProvider testKey = new RSACryptoServiceProvider(2048);
+            RSAParameters testPublic = testKey.ExportParameters(false);
+            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true, testPublic.Modulus, testPublic.Exponent);
+            if (outcome != SelfUpdateOutcome.NoHashAdvertised && outcome != SelfUpdateOutcome.SignatureRequired)
+            {
+                return "expected NoHashAdvertised (hash check runs first) or SignatureRequired, got " + outcome;
+            }
+            return null;
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreReturnsSignatureMismatchForBadSignature()
+        {
+            string exePath = Path.Combine(Path.GetTempPath(), "wil-selftest-badsig-" + Guid.NewGuid().ToString("N") + ".exe");
+            byte[] newContent = Encoding.ASCII.GetBytes("new-build-content-for-signature-test");
+            string hash;
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                hash = BitConverter.ToString(sha256.ComputeHash(newContent)).Replace("-", "").ToLowerInvariant();
+            }
+            // Both targets' keys are set - see the comment on
+            // TestApplySelfUpdateFromServerCoreReturnsHttpsRequiredForHttpServerUrl
+            // above for why.
+            string badSignature = Convert.ToBase64String(Encoding.ASCII.GetBytes("not-a-real-signature"));
+            Dictionary<string, object> update = new Dictionary<string, object>();
+            update["versionNet35"] = "9.9.9";
+            update["sha256Net35"] = hash;
+            update["sigNet35"] = badSignature;
+            update["versionNet40"] = "9.9.9";
+            update["sha256Net40"] = hash;
+            update["sigNet40"] = badSignature;
+            ClientOptions options = new ClientOptions();
+            options.ServerUrl = "https://server.example.local/api/v1/inventory";
+            options.RequireSignatureForSelfUpdate = true;
+            RSACryptoServiceProvider testKey = new RSACryptoServiceProvider(2048);
+            RSAParameters testPublic = testKey.ExportParameters(false);
+            try
+            {
+                SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options, (url, token) => newContent, (fileName, arguments) => true, testPublic.Modulus, testPublic.Exponent);
+                if (outcome != SelfUpdateOutcome.SignatureMismatch)
+                {
+                    return "expected SignatureMismatch, got " + outcome;
+                }
+                if (File.Exists(exePath + ".new"))
+                {
+                    return "expected the staged .new file to NOT be written when signature verification fails";
+                }
+                return null;
+            }
+            finally
+            {
+                try { File.Delete(exePath + ".new"); } catch { }
+            }
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreAppliesWithValidSignature()
+        {
+            string exePath = Path.Combine(Path.GetTempPath(), "wil-selftest-goodsig-" + Guid.NewGuid().ToString("N") + ".exe");
+            byte[] newContent = Encoding.ASCII.GetBytes("new-build-content-with-a-real-valid-signature");
+            string hash;
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                hash = BitConverter.ToString(sha256.ComputeHash(newContent)).Replace("-", "").ToLowerInvariant();
+            }
+            RSACryptoServiceProvider testKey = new RSACryptoServiceProvider(2048);
+            byte[] signature = testKey.SignData(newContent, "SHA256");
+            RSAParameters testPublic = testKey.ExportParameters(false);
+
+            // Both targets' keys are set - see the comment on
+            // TestApplySelfUpdateFromServerCoreReturnsHttpsRequiredForHttpServerUrl
+            // above for why.
+            string signatureBase64 = Convert.ToBase64String(signature);
+            Dictionary<string, object> update = new Dictionary<string, object>();
+            update["versionNet35"] = "9.9.9";
+            update["sha256Net35"] = hash;
+            update["sigNet35"] = signatureBase64;
+            update["versionNet40"] = "9.9.9";
+            update["sha256Net40"] = hash;
+            update["sigNet40"] = signatureBase64;
+            ClientOptions options = new ClientOptions();
+            options.ServerUrl = "https://server.example.local/api/v1/inventory";
+            options.RequireSignatureForSelfUpdate = true;
+            try
+            {
+                SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options, (url, token) => newContent, (fileName, arguments) => true, testPublic.Modulus, testPublic.Exponent);
+                if (outcome != SelfUpdateOutcome.Applied)
+                {
+                    return "expected Applied with a genuinely valid signature, got " + outcome;
+                }
+                return null;
+            }
+            finally
+            {
+                try { File.Delete(exePath + ".new"); } catch { }
+                try { File.Delete(Path.Combine(Path.GetDirectoryName(exePath), "wil-self-update.cmd")); } catch { }
+            }
         }
 
         private static string TestApplySelfUpdateFromServerCoreReturnsNoHashAdvertisedWhenHashIsEmpty()
@@ -2609,7 +2869,7 @@ namespace WindowsInventoryLite
             update["sha256Net35"] = "";
             update["sha256Net40"] = "";
             ClientOptions options = new ClientOptions();
-            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true);
+            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true, null, null);
 
             if (outcome != SelfUpdateOutcome.NoHashAdvertised)
             {
@@ -2631,7 +2891,7 @@ namespace WindowsInventoryLite
                 Dictionary<string, object> update = BuildSelfTestUpdateAck("9.9.9", "0000000000000000000000000000000000000000000000000000000000000000");
                 ClientOptions options = new ClientOptions();
                 options.ServerUrl = "http://example.invalid/api/v1/inventory";
-                SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options, (url, token) => Encoding.ASCII.GetBytes("downloaded-content-that-does-not-match-the-hash"), (fileName, arguments) => true);
+                SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options, (url, token) => Encoding.ASCII.GetBytes("downloaded-content-that-does-not-match-the-hash"), (fileName, arguments) => true, null, null);
 
                 if (outcome != SelfUpdateOutcome.HashMismatch)
                 {
@@ -2669,7 +2929,7 @@ namespace WindowsInventoryLite
                 Dictionary<string, object> update = BuildSelfTestUpdateAck("9.9.9", actualHash);
                 ClientOptions options = new ClientOptions();
                 options.ServerUrl = "http://example.invalid/api/v1/inventory";
-                SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options, (url, token) => newContent, (fileName, arguments) => false);
+                SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options, (url, token) => newContent, (fileName, arguments) => false, null, null);
 
                 if (outcome != SelfUpdateOutcome.TaskCreateFailed)
                 {
@@ -2703,7 +2963,7 @@ namespace WindowsInventoryLite
                 ClientOptions options = new ClientOptions();
                 options.ServerUrl = "http://example.invalid/api/v1/inventory";
                 SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options, (url, token) => newContent,
-                    (fileName, arguments) => arguments.IndexOf("/Create", StringComparison.OrdinalIgnoreCase) >= 0);
+                    (fileName, arguments) => arguments.IndexOf("/Create", StringComparison.OrdinalIgnoreCase) >= 0, null, null);
 
                 if (outcome != SelfUpdateOutcome.TaskRunFailed)
                 {
@@ -2736,7 +2996,7 @@ namespace WindowsInventoryLite
                 Dictionary<string, object> update = BuildSelfTestUpdateAck("9.9.9", actualHash);
                 ClientOptions options = new ClientOptions();
                 options.ServerUrl = "http://example.invalid/api/v1/inventory";
-                SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options, (url, token) => newContent, (fileName, arguments) => true);
+                SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options, (url, token) => newContent, (fileName, arguments) => true, null, null);
 
                 if (outcome != SelfUpdateOutcome.Applied)
                 {
@@ -2788,7 +3048,7 @@ namespace WindowsInventoryLite
                 options.ServerUrl = "http://example.invalid/api/v1/inventory";
                 SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options,
                     (url, token) => { throw new InvalidOperationException("simulated download failure"); },
-                    (fileName, arguments) => true);
+                    (fileName, arguments) => true, null, null);
 
                 if (outcome != SelfUpdateOutcome.Error)
                 {

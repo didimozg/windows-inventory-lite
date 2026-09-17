@@ -40,7 +40,13 @@ param(
     [string]$PackageClientPath,
 
     [Parameter()]
-    [switch]$Force
+    [switch]$Force,
+
+    [Parameter()]
+    [switch]$RequireHttpsSelfUpdate,
+
+    [Parameter()]
+    [switch]$RequireSignedSelfUpdate
 )
 
 Set-StrictMode -Version 2.0
@@ -274,7 +280,9 @@ function Get-DesiredServiceCommand {
         [int]$Hours,
         [int]$SoftwareHours = 6,
         [string]$OutputDirectory,
-        [string]$DebugLogPath
+        [string]$DebugLogPath,
+        [switch]$RequireHttpsSelfUpdate,
+        [switch]$RequireSignedSelfUpdate
     )
 
     # The ingestion token is deliberately NOT accepted as a parameter here: it
@@ -288,6 +296,12 @@ function Get-DesiredServiceCommand {
     $command = '"' + (ConvertTo-ServiceArgValue $ServicePath) + '" --server-url "' + (ConvertTo-ServiceArgValue $Url) + '" --interval-hours ' + $Hours + ' --software-check-interval-hours ' + $SoftwareHours
     $command += ' --output "' + (ConvertTo-ServiceArgValue $OutputDirectory) + '"'
     $command += ' --debug-log-path "' + (ConvertTo-ServiceArgValue $DebugLogPath) + '"'
+    if ($RequireHttpsSelfUpdate) {
+        $command += ' --require-https-self-update'
+    }
+    if ($RequireSignedSelfUpdate) {
+        $command += ' --require-signed-self-update'
+    }
 
     return $command
 }
@@ -536,7 +550,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     $debugLogPath = Join-Path -Path $InstallPath -ChildPath '_logs\debug-client.log'
     $packageVersion = Get-ExeVersion -Path $PackageClientPath
     $installedVersion = Get-InstalledVersion -InstallDirectory $InstallPath
-    $desiredCommand = Get-DesiredServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SoftwareHours $SoftwareCheckIntervalHours -OutputDirectory $InstallPath -DebugLogPath $debugLogPath
+    $desiredCommand = Get-DesiredServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SoftwareHours $SoftwareCheckIntervalHours -OutputDirectory $InstallPath -DebugLogPath $debugLogPath -RequireHttpsSelfUpdate:$RequireHttpsSelfUpdate -RequireSignedSelfUpdate:$RequireSignedSelfUpdate
     $currentCommand = Get-ServiceBinaryPath
     $serviceExists = Test-ServiceExists
     $needsInstall = $Force -or (-not $serviceExists) -or ($packageVersion -ne $installedVersion) -or ($currentCommand -ne $desiredCommand)

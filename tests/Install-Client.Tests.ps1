@@ -42,6 +42,18 @@ Describe 'Windows Inventory Lite Install-Client client-data layout' {
         $command | Should -Not -Match '--token'
     }
 
+    It 'Get-ClientServiceCommand appends --require-https-self-update and --require-signed-self-update when both switches are set' {
+        $command = Get-ClientServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharePath '' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log' -RequireHttpsSelfUpdate -RequireSignedSelfUpdate
+        $command | Should -Match '--require-https-self-update'
+        $command | Should -Match '--require-signed-self-update'
+    }
+
+    It 'Get-ClientServiceCommand omits both flags when neither switch is set' {
+        $command = Get-ClientServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharePath '' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
+        $command | Should -Not -Match '--require-https-self-update'
+        $command | Should -Not -Match '--require-signed-self-update'
+    }
+
     It 'Set-ServiceEnvironmentToken writes WIL_INGESTION_TOKEN to the Environment value' {
         # TestRegistry: is a Pester-managed scratch registry key, torn down
         # automatically after this test - real HKLM\SYSTEM is never touched.
