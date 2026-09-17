@@ -2439,11 +2439,21 @@ namespace WindowsInventoryLite
             {
                 updateInfo["versionNet35"] = net35Version;
                 updateInfo["sha256Net35"] = ComputeFileSha256(net35Path);
+                string sigNet35Path = net35Path + ".sig";
+                if (File.Exists(sigNet35Path))
+                {
+                    updateInfo["sigNet35"] = File.ReadAllText(sigNet35Path).Trim();
+                }
             }
             if (net40Version != null && File.Exists(net40Path))
             {
                 updateInfo["versionNet40"] = net40Version;
                 updateInfo["sha256Net40"] = ComputeFileSha256(net40Path);
+                string sigNet40Path = net40Path + ".sig";
+                if (File.Exists(sigNet40Path))
+                {
+                    updateInfo["sigNet40"] = File.ReadAllText(sigNet40Path).Trim();
+                }
             }
             if (!updateInfo.ContainsKey("sha256Net35") && !updateInfo.ContainsKey("sha256Net40"))
             {
@@ -3760,6 +3770,11 @@ namespace WindowsInventoryLite
             Dictionary<string, object> updateInfo = new Dictionary<string, object>();
             updateInfo["version"] = currentVersion;
             updateInfo["sha256"] = ComputeFileSha256(binaryPath);
+            string sigPath = binaryPath + ".sig";
+            if (File.Exists(sigPath))
+            {
+                updateInfo["sig"] = File.ReadAllText(sigPath).Trim();
+            }
             return updateInfo;
         }
 
@@ -13872,6 +13887,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ReceiveInventory omits update when EnableWindowsClientSelfUpdate is false", TestReceiveInventoryOmitsUpdateWhenSelfUpdateDisabled);
             allPassed &= SelfTestCheck(output, "ReceiveInventory includes update with a sha256 when the reported version differs and self-update is enabled", TestReceiveInventoryIncludesUpdateWhenVersionDiffersAndEnabled);
             allPassed &= SelfTestCheck(output, "ReceiveInventory advertises separate, correctly-matched sha256 hashes for net35 and net40", TestReceiveInventoryAdvertisesSeparateHashesPerTarget);
+            allPassed &= SelfTestCheck(output, "BuildWindowsClientUpdateInfo includes a sigNet40 field when a .sig sidecar file exists next to the net40 exe", TestBuildWindowsClientUpdateInfoIncludesSignatureWhenSidecarExists);
+            allPassed &= SelfTestCheck(output, "BuildWindowsClientUpdateInfo omits sigNet40 when no .sig sidecar file exists", TestBuildWindowsClientUpdateInfoOmitsSignatureWhenNoSidecarExists);
             allPassed &= SelfTestCheck(output, "ReceiveInventory omits update (and its GetExeVersion/hash cost) for an anonymous caller when RequireIngestionToken is off", TestReceiveInventoryOmitsUpdateForAnonymousCallerWhenTokenNotRequired);
             allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate rejects a request with no ingestion token", TestDownloadClientPackageUpdateRejectsMissingToken);
             allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate rejects an invalid target value with 400", TestDownloadClientPackageUpdateRejectsInvalidTarget);
@@ -13880,6 +13897,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate accepts the previous token within its overlap window", TestDownloadClientPackageUpdateAcceptsPreviousTokenWithinOverlap);
             allPassed &= SelfTestCheck(output, "ReceiveLinuxInventory omits update when EnableLinuxClientSelfUpdate is false", TestReceiveLinuxInventoryOmitsUpdateWhenSelfUpdateDisabled);
             allPassed &= SelfTestCheck(output, "ReceiveLinuxInventory includes update with the built version when it differs and self-update is enabled", TestReceiveLinuxInventoryIncludesUpdateWhenVersionDiffersAndEnabled);
+            allPassed &= SelfTestCheck(output, "BuildLinuxClientUpdateInfo includes a sig field when a .sig sidecar file exists next to the binary", TestBuildLinuxClientUpdateInfoIncludesSignatureWhenSidecarExists);
             allPassed &= SelfTestCheck(output, "DownloadLinuxClientPackageUpdate rejects a request with no ingestion token", TestDownloadLinuxClientPackageUpdateRejectsMissingToken);
             allPassed &= SelfTestCheck(output, "DownloadLinuxClientPackageUpdate returns 404 when the target file does not exist", TestDownloadLinuxClientPackageUpdateReturns404WhenFileMissing);
             allPassed &= SelfTestCheck(output, "DownloadLinuxClientPackageUpdate returns 200 with the exact binary bytes on a valid token", TestDownloadLinuxClientPackageUpdateReturns200WithFileBytesOnValidToken);
@@ -18476,6 +18494,101 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
+        private static string TestBuildWindowsClientUpdateInfoIncludesSignatureWhenSidecarExists()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-sigpkg-" + Guid.NewGuid().ToString("N"));
+            options.ClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-sigclientpkg-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.ClientPackagePath);
+            try
+            {
+                // GetExeVersion does NOT read a PE version resource - it
+                // actually launches the file with "--version" and reads its
+                // stdout (confirmed by reading GetExeVersion's own body).
+                // Copying this test process's own exe (the server exe) would
+                // spawn a second copy of the SERVER as a subprocess - the
+                // exact fragile approach TestReceiveInventoryIncludesUpdate-
+                // WhenVersionDiffersAndEnabled's own comment already rejected.
+                // Build-Server.ps1 always builds both client targets before
+                // --self-test runs, so copy the real, already-built
+                // WindowsInventoryLiteClient-net40.exe from the build
+                // directory instead, matching that same established
+                // convention.
+                string realNet40Path = Path.Combine(Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location), "WindowsInventoryLiteClient-net40.exe");
+                if (!File.Exists(realNet40Path))
+                {
+                    // Same missing-precondition case documented in
+                    // TestReceiveInventoryIncludesUpdateWhenVersionDiffersAndEnabled:
+                    // some harnesses build the server exe under test into an
+                    // isolated path with no client exes alongside it.
+                    return null;
+                }
+                string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
+                File.Copy(realNet40Path, net40Path, true);
+                File.WriteAllText(net40Path + ".sig", "ZmFrZS1zaWduYXR1cmU=");
+
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo buildMethod = typeof(InventoryServer).GetMethod("BuildWindowsClientUpdateInfo", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Dictionary<string, object> updateInfo = (Dictionary<string, object>)buildMethod.Invoke(server, new object[] { "0.0.0-older-than-anything" });
+                if (updateInfo == null)
+                {
+                    return "expected a non-null update info dict when a real, newer-versioned package exists";
+                }
+                if (!updateInfo.ContainsKey("sigNet40") || (string)updateInfo["sigNet40"] != "ZmFrZS1zaWduYXR1cmU=")
+                {
+                    return "expected sigNet40 to equal the .sig sidecar file's content, got: " + (updateInfo.ContainsKey("sigNet40") ? updateInfo["sigNet40"] : "(missing)");
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.ClientPackagePath, true); } catch { }
+            }
+        }
+
+        private static string TestBuildWindowsClientUpdateInfoOmitsSignatureWhenNoSidecarExists()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-nosigpkg-" + Guid.NewGuid().ToString("N"));
+            options.ClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-nosigclientpkg-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.ClientPackagePath);
+            try
+            {
+                // See TestBuildWindowsClientUpdateInfoIncludesSignatureWhenSidecarExists's
+                // own comment for why a real, already-built client exe is
+                // copied here rather than a fake file or this test process's
+                // own exe.
+                string realNet40Path = Path.Combine(Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location), "WindowsInventoryLiteClient-net40.exe");
+                if (!File.Exists(realNet40Path))
+                {
+                    return null;
+                }
+                string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
+                File.Copy(realNet40Path, net40Path, true);
+
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo buildMethod = typeof(InventoryServer).GetMethod("BuildWindowsClientUpdateInfo", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Dictionary<string, object> updateInfo = (Dictionary<string, object>)buildMethod.Invoke(server, new object[] { "0.0.0-older-than-anything" });
+                if (updateInfo == null)
+                {
+                    return "expected a non-null update info dict when a real, newer-versioned package exists";
+                }
+                if (updateInfo.ContainsKey("sigNet40"))
+                {
+                    return "expected sigNet40 to be absent when no .sig sidecar file exists, got: " + updateInfo["sigNet40"];
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.ClientPackagePath, true); } catch { }
+            }
+        }
+
         // Guards against a real amplification finding: BuildWindowsClientUpdateInfo
         // spawns two real GetExeVersion subprocesses (each up to a 5s
         // WaitForExit) and hashes two real files - this must never be
@@ -18842,6 +18955,48 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 try { Directory.Delete(options.DataPath, true); } catch { }
                 try { Directory.Delete(options.LinuxDataPath, true); } catch { }
+                try { Directory.Delete(options.LinuxClientPackagePath, true); } catch { }
+            }
+        }
+
+        private static string TestBuildLinuxClientUpdateInfoIncludesSignatureWhenSidecarExists()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxsigpkg-" + Guid.NewGuid().ToString("N"));
+            options.LinuxClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxsigclientpkg-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.LinuxClientPackagePath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                // GetLinuxClientPackageVersion reads a sidecar
+                // "<binary>.version" file (confirmed by reading its own
+                // body) - Build-LinuxClient.ps1's own $versionSidecarPath
+                // confirms the same "wil-linux-client.version" convention.
+                // Unlike the Windows package, the Linux binary itself is
+                // never executed to get its version, so a plain text file
+                // is enough here - no real binary needed.
+                string versionSidecarPath = Path.Combine(options.LinuxClientPackagePath, "wil-linux-client.version");
+                File.WriteAllText(versionSidecarPath, "9.9.9");
+                string binaryPath = Path.Combine(options.LinuxClientPackagePath, "wil-linux-client");
+                File.WriteAllText(binaryPath, "fake-linux-binary-content");
+                File.WriteAllText(binaryPath + ".sig", "ZmFrZS1saW51eC1zaWduYXR1cmU=");
+
+                System.Reflection.MethodInfo buildMethod = typeof(InventoryServer).GetMethod("BuildLinuxClientUpdateInfo", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Dictionary<string, object> updateInfo = (Dictionary<string, object>)buildMethod.Invoke(server, new object[] { "0.0.0-older" });
+                if (updateInfo == null)
+                {
+                    return "expected a non-null update info dict";
+                }
+                if (!updateInfo.ContainsKey("sig") || (string)updateInfo["sig"] != "ZmFrZS1saW51eC1zaWduYXR1cmU=")
+                {
+                    return "expected sig to equal the .sig sidecar file's content, got: " + (updateInfo.ContainsKey("sig") ? updateInfo["sig"] : "(missing)");
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
                 try { Directory.Delete(options.LinuxClientPackagePath, true); } catch { }
             }
         }
