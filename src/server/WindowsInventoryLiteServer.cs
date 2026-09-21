@@ -9655,34 +9655,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private List<Dictionary<string, object>> LoadCertificateHistory()
         {
-            string path = GetCertificateHistoryFilePath();
-            if (!File.Exists(path))
-            {
-                return new List<Dictionary<string, object>>();
-            }
-
-            List<Dictionary<string, object>> history = new List<Dictionary<string, object>>();
-            try
-            {
-                JavaScriptSerializer serializer = CreateJsonSerializer();
-                string json = File.ReadAllText(path, Encoding.UTF8);
-                ArrayList raw = serializer.Deserialize<ArrayList>(json);
-                if (raw != null)
-                {
-                    foreach (object item in raw)
-                    {
-                        Dictionary<string, object> record = item as Dictionary<string, object>;
-                        if (record != null)
-                        {
-                            history.Add(record);
-                        }
-                    }
-                }
-            }
-            catch
-            {
-            }
-            return history;
+            return LoadJsonRecordList(GetCertificateHistoryFilePath());
         }
 
         private void SaveCertificateHistory(List<Dictionary<string, object>> history)
@@ -9734,14 +9707,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private static string ExtractCertificateHistoryId(string path)
         {
-            const string prefix = "/api/v1/server/certificate/history/";
-            string id = path.Substring(prefix.Length);
-            int queryStart = id.IndexOf('?');
-            if (queryStart >= 0)
-            {
-                id = id.Substring(0, queryStart);
-            }
-            return Uri.UnescapeDataString(id).Trim();
+            return ExtractIdFromPath(path, "/api/v1/server/certificate/history/");
         }
 
         // Removes one entry from the certificate history log. This only ever
@@ -11830,34 +11796,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private List<Dictionary<string, object>> LoadLicenses()
         {
-            string path = GetLicensesFilePath();
-            if (!File.Exists(path))
-            {
-                return new List<Dictionary<string, object>>();
-            }
-
-            List<Dictionary<string, object>> licenses = new List<Dictionary<string, object>>();
-            try
-            {
-                JavaScriptSerializer serializer = CreateJsonSerializer();
-                string json = File.ReadAllText(path, Encoding.UTF8);
-                ArrayList raw = serializer.Deserialize<ArrayList>(json);
-                if (raw != null)
-                {
-                    foreach (object item in raw)
-                    {
-                        Dictionary<string, object> record = item as Dictionary<string, object>;
-                        if (record != null)
-                        {
-                            licenses.Add(record);
-                        }
-                    }
-                }
-            }
-            catch
-            {
-            }
-            return licenses;
+            return LoadJsonRecordList(GetLicensesFilePath());
         }
 
         private void SaveLicenses(List<Dictionary<string, object>> licenses)
@@ -11881,14 +11820,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private static string ExtractLicenseId(string path)
         {
-            const string prefix = "/api/v1/licenses/";
-            string id = path.Substring(prefix.Length);
-            int queryStart = id.IndexOf('?');
-            if (queryStart >= 0)
-            {
-                id = id.Substring(0, queryStart);
-            }
-            return Uri.UnescapeDataString(id).Trim();
+            return ExtractIdFromPath(path, "/api/v1/licenses/");
         }
 
         // Accepts the raw "computers" payload value (expected to be a JSON array
@@ -12086,34 +12018,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private List<Dictionary<string, object>> LoadLicenseKeySources()
         {
-            string path = GetLicenseKeySourcesFilePath();
-            if (!File.Exists(path))
-            {
-                return new List<Dictionary<string, object>>();
-            }
-
-            List<Dictionary<string, object>> sources = new List<Dictionary<string, object>>();
-            try
-            {
-                JavaScriptSerializer serializer = CreateJsonSerializer();
-                string json = File.ReadAllText(path, Encoding.UTF8);
-                ArrayList raw = serializer.Deserialize<ArrayList>(json);
-                if (raw != null)
-                {
-                    foreach (object item in raw)
-                    {
-                        Dictionary<string, object> record = item as Dictionary<string, object>;
-                        if (record != null)
-                        {
-                            sources.Add(record);
-                        }
-                    }
-                }
-            }
-            catch
-            {
-            }
-            return sources;
+            return LoadJsonRecordList(GetLicenseKeySourcesFilePath());
         }
 
         private void SaveLicenseKeySources(List<Dictionary<string, object>> sources)
@@ -12162,14 +12067,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private static string ExtractLicenseKeySourceId(string path)
         {
-            const string prefix = "/api/v1/license-key-sources/";
-            string id = path.Substring(prefix.Length);
-            int queryStart = id.IndexOf('?');
-            if (queryStart >= 0)
-            {
-                id = id.Substring(0, queryStart);
-            }
-            return Uri.UnescapeDataString(id).Trim();
+            return ExtractIdFromPath(path, "/api/v1/license-key-sources/");
         }
 
         private void SendLicenseKeySources(Stream stream)
@@ -12356,19 +12254,15 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendJson(stream, "{\"status\":\"deleted\"}");
         }
 
-        private string GetWindowsUpdatesDirectory()
+        // Shared body of every simple "deserialize a JSON array of record
+        // dicts from a file, or empty list if missing/corrupt" catalog
+        // loader (licenses, license key sources, Windows updates,
+        // third-party software, certificate history). Deliberately NOT
+        // used by LoadLinuxKnownHosts, which has different failure
+        // semantics on purpose - a corrupt trust store must surface as an
+        // error, not silently read as "nothing trusted."
+        private List<Dictionary<string, object>> LoadJsonRecordList(string path)
         {
-            return Path.Combine(options.DataPath, "_windows-updates");
-        }
-
-        private string GetWindowsUpdatesFilePath()
-        {
-            return Path.Combine(GetWindowsUpdatesDirectory(), "windows-updates.json");
-        }
-
-        private List<Dictionary<string, object>> LoadWindowsUpdates()
-        {
-            string path = GetWindowsUpdatesFilePath();
             if (!File.Exists(path))
             {
                 return new List<Dictionary<string, object>>();
@@ -12398,6 +12292,34 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return entries;
         }
 
+        // Shared body of every "strip this route's own prefix and any
+        // query string, then URL-decode" id extractor.
+        private static string ExtractIdFromPath(string path, string prefix)
+        {
+            string id = path.Substring(prefix.Length);
+            int queryStart = id.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                id = id.Substring(0, queryStart);
+            }
+            return Uri.UnescapeDataString(id).Trim();
+        }
+
+        private string GetWindowsUpdatesDirectory()
+        {
+            return Path.Combine(options.DataPath, "_windows-updates");
+        }
+
+        private string GetWindowsUpdatesFilePath()
+        {
+            return Path.Combine(GetWindowsUpdatesDirectory(), "windows-updates.json");
+        }
+
+        private List<Dictionary<string, object>> LoadWindowsUpdates()
+        {
+            return LoadJsonRecordList(GetWindowsUpdatesFilePath());
+        }
+
         private void SaveWindowsUpdates(List<Dictionary<string, object>> entries)
         {
             string directory = GetWindowsUpdatesDirectory();
@@ -12413,14 +12335,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private static string ExtractWindowsUpdateId(string path)
         {
-            const string prefix = "/api/v1/windows-updates/";
-            string id = path.Substring(prefix.Length);
-            int queryStart = id.IndexOf('?');
-            if (queryStart >= 0)
-            {
-                id = id.Substring(0, queryStart);
-            }
-            return Uri.UnescapeDataString(id).Trim();
+            return ExtractIdFromPath(path, "/api/v1/windows-updates/");
         }
 
         private void SendWindowsUpdates(Stream stream)
@@ -12677,34 +12592,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private List<Dictionary<string, object>> LoadThirdPartySoftware()
         {
-            string path = GetThirdPartySoftwareFilePath();
-            if (!File.Exists(path))
-            {
-                return new List<Dictionary<string, object>>();
-            }
-
-            List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
-            try
-            {
-                JavaScriptSerializer serializer = CreateJsonSerializer();
-                string json = File.ReadAllText(path, Encoding.UTF8);
-                ArrayList raw = serializer.Deserialize<ArrayList>(json);
-                if (raw != null)
-                {
-                    foreach (object item in raw)
-                    {
-                        Dictionary<string, object> record = item as Dictionary<string, object>;
-                        if (record != null)
-                        {
-                            entries.Add(record);
-                        }
-                    }
-                }
-            }
-            catch
-            {
-            }
-            return entries;
+            return LoadJsonRecordList(GetThirdPartySoftwareFilePath());
         }
 
         private void SaveThirdPartySoftware(List<Dictionary<string, object>> entries)
@@ -12757,14 +12645,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private static string ExtractThirdPartySoftwareId(string path)
         {
-            const string prefix = "/api/v1/third-party-software/";
-            string id = path.Substring(prefix.Length);
-            int queryStart = id.IndexOf('?');
-            if (queryStart >= 0)
-            {
-                id = id.Substring(0, queryStart);
-            }
-            return Uri.UnescapeDataString(id).Trim();
+            return ExtractIdFromPath(path, "/api/v1/third-party-software/");
         }
 
         private void SendThirdPartySoftware(Stream stream)
@@ -14106,6 +13987,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "License key sources CRUD storage round-trips through disk", TestLicenseKeySourcesCrudRoundTrip);
             allPassed &= SelfTestCheck(output, "Windows updates catalog CRUD storage round-trips through disk", TestWindowsUpdatesCrudRoundTrip);
             allPassed &= SelfTestCheck(output, "Third-party software catalog CRUD storage round-trips through disk", TestThirdPartySoftwareCrudRoundTrip);
+            allPassed &= SelfTestCheck(output, "LoadJsonRecordList returns an empty list when the file does not exist", TestLoadJsonRecordListReturnsEmptyWhenFileMissing);
+            allPassed &= SelfTestCheck(output, "LoadJsonRecordList round-trips a real record list written by SaveWindowsUpdates", TestLoadJsonRecordListRoundTripsRealFile);
+            allPassed &= SelfTestCheck(output, "ExtractIdFromPath strips the given prefix and query string, and decodes escaping", TestExtractIdFromPathStripsPrefixAndDecodes);
             allPassed &= SelfTestCheck(output, "BuildLicenseKeySourcesForClientResponse omits admin-only fields", TestBuildLicenseKeySourcesForClientResponseTrimsToClientFields);
             allPassed &= SelfTestCheck(output, "SaveServerConfigValues leaves the final config file with a restricted ACL, no leftover .tmp file", TestSaveServerConfigValuesRestrictsTempFileBeforeWritingContent);
             allPassed &= SelfTestCheck(output, "Linux known-hosts store round-trips and overwrites by host:port", TestLinuxKnownHostsRoundTrip);
@@ -20208,6 +20092,70 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 try { Directory.Delete(dataPath, true); } catch { }
             }
+        }
+
+        private static string TestLoadJsonRecordListReturnsEmptyWhenFileMissing()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-loadjsonempty-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo loadMethod = typeof(InventoryServer).GetMethod("LoadJsonRecordList", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                List<Dictionary<string, object>> result = (List<Dictionary<string, object>>)loadMethod.Invoke(server, new object[] { Path.Combine(options.DataPath, "does-not-exist.json") });
+                if (result == null || result.Count != 0)
+                {
+                    return "expected an empty (not null) list for a missing file";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestLoadJsonRecordListRoundTripsRealFile()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-loadjsonreal-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                string path = Path.Combine(options.DataPath, "records.json");
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                List<Dictionary<string, object>> written = new List<Dictionary<string, object>>();
+                Dictionary<string, object> record = new Dictionary<string, object>();
+                record["id"] = "abc123";
+                record["name"] = "Test Record";
+                written.Add(record);
+                File.WriteAllText(path, serializer.Serialize(written), new UTF8Encoding(false));
+
+                System.Reflection.MethodInfo loadMethod = typeof(InventoryServer).GetMethod("LoadJsonRecordList", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                List<Dictionary<string, object>> loaded = (List<Dictionary<string, object>>)loadMethod.Invoke(server, new object[] { path });
+                if (loaded.Count != 1 || Convert.ToString(loaded[0]["id"]) != "abc123")
+                {
+                    return "expected the record list to round-trip through LoadJsonRecordList";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestExtractIdFromPathStripsPrefixAndDecodes()
+        {
+            System.Reflection.MethodInfo extractMethod = typeof(InventoryServer).GetMethod("ExtractIdFromPath", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            string id = (string)extractMethod.Invoke(null, new object[] { "/api/v1/windows-updates/abc%20123?foo=bar", "/api/v1/windows-updates/" });
+            if (id != "abc 123")
+            {
+                return "expected ExtractIdFromPath to strip the prefix, drop the query string, and URL-decode, got: " + id;
+            }
+            return null;
         }
 
         private static string TestBuildLicenseKeySourcesForClientResponseTrimsToClientFields()
