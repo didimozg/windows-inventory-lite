@@ -4710,18 +4710,18 @@ namespace WindowsInventoryLite
             // Force Linux (and Auto, which may resolve a target to SSH)
             // rejects any target with characters invalid in a
             // hostname/IPv4 address up front, the all-or-nothing pre-check
-            // StartLinuxClientAction always applied. Force Windows skips
-            // this entirely - NetBIOS names can legally contain '_', which
-            // this check would wrongly reject.
-            if (mode != "force-windows")
+            // StartLinuxClientAction always applied. Force Windows can't
+            // reuse that same pattern - NetBIOS names can legally contain
+            // '_', which it would wrongly reject - so it is now validated
+            // with a NetBIOS-aware pattern instead of skipped entirely.
+            foreach (string candidate in targets)
             {
-                foreach (string candidate in targets)
+                bool valid = mode == "force-windows" ? IsValidWindowsPushTarget(candidate) : IsValidSshTarget(candidate);
+                if (!valid)
                 {
-                    if (!IsValidSshTarget(candidate))
-                    {
-                        SendText(stream, "{\"error\":\"one or more targets contain characters that are not valid in a hostname or IPv4 address (only letters, digits, '.' and '-' are allowed)\"}", "application/json; charset=utf-8", 400);
-                        return;
-                    }
+                    string allowedChars = mode == "force-windows" ? "letters, digits, '.', '-', and '_'" : "letters, digits, '.' and '-'";
+                    SendText(stream, "{\"error\":\"one or more targets contain characters that are not valid in a hostname or IPv4 address (only " + allowedChars + " are allowed)\"}", "application/json; charset=utf-8", 400);
+                    return;
                 }
             }
 
@@ -5597,6 +5597,19 @@ namespace WindowsInventoryLite
         internal static bool IsValidSshTarget(string target)
         {
             return !String.IsNullOrEmpty(target) && target.Length <= 253 && SshTargetFormatPattern.IsMatch(target);
+        }
+
+        // NetBIOS-aware sibling of IsValidSshTarget for the one push path
+        // (force-windows/WinRM) that must legally accept an underscore in a
+        // computer name - IsValidSshTarget's own pattern (hostname/IPv4
+        // literal only) would wrongly reject those. Still a strict
+        // allowlist, not a denylist: letters, digits, '.', '-', '_' only,
+        // matching this project's existing reject-don't-escape convention.
+        private static readonly Regex WindowsPushTargetFormatPattern = new Regex(@"^[A-Za-z0-9][A-Za-z0-9._\-]*\z");
+
+        internal static bool IsValidWindowsPushTarget(string target)
+        {
+            return !String.IsNullOrEmpty(target) && target.Length <= 253 && WindowsPushTargetFormatPattern.IsMatch(target);
         }
 
         // ValidatePosixShellSafe only screens for shell metacharacters - it has
@@ -7099,9 +7112,44 @@ namespace WindowsInventoryLite
             return result;
         }
 
+        // Windows CommandLineToArgvW-compatible quoting: a run of N
+        // backslashes immediately followed by a literal quote becomes 2N+1
+        // backslashes followed by an escaped quote; a run of N backslashes
+        // at the very END of the argument (immediately before the closing
+        // quote this function adds) becomes 2N backslashes, so the closing
+        // quote itself is never misread as escaped. The previous version
+        // only escaped the quote character itself, leaving a preceding
+        // backslash run unescaped - CommandLineToArgvW then reads that
+        // backslash-quote pair as an escaped literal quote instead of the
+        // argument terminator, letting text after it be parsed as
+        // additional, attacker-influenced command-line arguments.
         private static string QuoteArgument(string value)
         {
-            return "\"" + value.Replace("\"", "\\\"") + "\"";
+            StringBuilder result = new StringBuilder();
+            result.Append('"');
+            int backslashCount = 0;
+            foreach (char c in value)
+            {
+                if (c == '\\')
+                {
+                    backslashCount++;
+                    continue;
+                }
+                if (c == '"')
+                {
+                    result.Append('\\', backslashCount * 2 + 1);
+                    result.Append('"');
+                }
+                else
+                {
+                    result.Append('\\', backslashCount);
+                    result.Append(c);
+                }
+                backslashCount = 0;
+            }
+            result.Append('\\', backslashCount * 2);
+            result.Append('"');
+            return result.ToString();
         }
 
         private static bool ContainsIpAddressTarget(ArrayList targets)
@@ -13982,6 +14030,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "trust-host-key fingerprint format validation accepts SHA256:... and rejects everything else", TestTrustLinuxHostKeyRejectsMalformedFingerprint);
             allPassed &= SelfTestCheck(output, "IsValidSshTarget accepts hostnames and IPv4 literals", TestIsValidSshTargetAcceptsHostnamesAndIPv4);
             allPassed &= SelfTestCheck(output, "IsValidSshTarget rejects shell-injection shapes, flag-lookalikes, and empty values", TestIsValidSshTargetRejectsInjectionAndEmpty);
+            allPassed &= SelfTestCheck(output, "QuoteArgument doubles a backslash run immediately preceding the closing quote", TestQuoteArgumentDoublesTrailingBackslashes);
+            allPassed &= SelfTestCheck(output, "QuoteArgument escapes an embedded quote preceded by a backslash without breaking the argument boundary", TestQuoteArgumentHandlesBackslashBeforeEmbeddedQuote);
+            allPassed &= SelfTestCheck(output, "IsValidWindowsPushTarget accepts a NetBIOS name containing an underscore", TestIsValidWindowsPushTargetAcceptsUnderscore);
+            allPassed &= SelfTestCheck(output, "IsValidWindowsPushTarget rejects a target with a shell metacharacter", TestIsValidWindowsPushTargetRejectsMetacharacter);
             allPassed &= SelfTestCheck(output, "IsValidLinuxInstallPath accepts a real multi-segment absolute path", TestIsValidLinuxInstallPathAcceptsMultiSegmentPath);
             allPassed &= SelfTestCheck(output, "IsValidLinuxInstallPath rejects a bare top-level directory, a relative path, and empty/null", TestIsValidLinuxInstallPathRejectsTopLevelAndInvalid);
             allPassed &= SelfTestCheck(output, "IsValidCatalogRelativePath accepts a path inside the right subfolder, rejects traversal and other subfolders", TestIsValidCatalogRelativePathAcceptsCorrectSubfolderRejectsEverythingElse);
@@ -20404,6 +20456,53 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 {
                     return "expected target '" + target + "' to be rejected, but IsValidSshTarget accepted it";
                 }
+            }
+            return null;
+        }
+
+        private static string TestQuoteArgumentDoublesTrailingBackslashes()
+        {
+            System.Reflection.MethodInfo quoteMethod = typeof(InventoryServer).GetMethod("QuoteArgument", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            string quoted = (string)quoteMethod.Invoke(null, new object[] { @"C:\some\path\" });
+            // A trailing backslash immediately before the CLOSING quote must
+            // be doubled too, or CommandLineToArgvW reads the closing quote
+            // itself as escaped rather than as the argument terminator.
+            if (quoted != "\"C:\\some\\path\\\\\"")
+            {
+                return "expected a trailing backslash to be doubled before the closing quote, got: " + quoted;
+            }
+            return null;
+        }
+
+        private static string TestQuoteArgumentHandlesBackslashBeforeEmbeddedQuote()
+        {
+            System.Reflection.MethodInfo quoteMethod = typeof(InventoryServer).GetMethod("QuoteArgument", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            string quoted = (string)quoteMethod.Invoke(null, new object[] { @"a\""b" });
+            // Input: a \ " b (backslash then literal quote). Correct
+            // CommandLineToArgvW-compatible escaping doubles the backslash
+            // (since it precedes a quote) then escapes the quote itself:
+            // a \\ \" b, wrapped in quotes.
+            if (quoted != "\"a\\\\\\\"b\"")
+            {
+                return "expected the backslash before an embedded quote to be doubled and the quote itself escaped, got: " + quoted;
+            }
+            return null;
+        }
+
+        private static string TestIsValidWindowsPushTargetAcceptsUnderscore()
+        {
+            if (!InventoryServer.IsValidWindowsPushTarget("WORKSTATION_01"))
+            {
+                return "expected a NetBIOS name containing an underscore to be accepted";
+            }
+            return null;
+        }
+
+        private static string TestIsValidWindowsPushTargetRejectsMetacharacter()
+        {
+            if (InventoryServer.IsValidWindowsPushTarget("host;calc.exe"))
+            {
+                return "expected a target containing a shell metacharacter to be rejected";
             }
             return null;
         }
