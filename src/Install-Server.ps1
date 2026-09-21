@@ -1004,6 +1004,9 @@ Copy-Item -LiteralPath $winRmInstallerSource -Destination $winRmInstallerPath -F
 $winRmUninstallerSource = Join-Path -Path $PSScriptRoot -ChildPath 'Uninstall-ClientWinRM.ps1'
 $winRmUninstallerPath = Join-Path -Path $InstallPath -ChildPath 'Uninstall-ClientWinRM.ps1'
 Copy-Item -LiteralPath $winRmUninstallerSource -Destination $winRmUninstallerPath -Force
+$winRmCommonSource = Join-Path -Path $PSScriptRoot -ChildPath 'WilWinRmCommon.ps1'
+$winRmCommonPath = Join-Path -Path $InstallPath -ChildPath 'WilWinRmCommon.ps1'
+Copy-Item -LiteralPath $winRmCommonSource -Destination $winRmCommonPath -Force
 $linuxSshInstallerSource = Join-Path -Path $PSScriptRoot -ChildPath 'Install-ClientDebianSSH.ps1'
 $linuxSshInstallerPath = Join-Path -Path $InstallPath -ChildPath 'Install-ClientDebianSSH.ps1'
 Copy-Item -LiteralPath $linuxSshInstallerSource -Destination $linuxSshInstallerPath -Force

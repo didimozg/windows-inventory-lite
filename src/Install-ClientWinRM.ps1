@@ -65,11 +65,7 @@ $ErrorActionPreference = 'Stop'
 # file to unit-test the pure functions in it without needing an elevated
 # test session. Same pattern already applied to Install-Server.ps1,
 # Install-Client.ps1, and Install-Wizard.ps1.
-function Test-IsElevatedAdmin {
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
-    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
-}
+. (Join-Path -Path $PSScriptRoot -ChildPath 'WilWinRmCommon.ps1')
 
 $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $scriptDirectory) {
@@ -97,136 +93,6 @@ $hadFailure = $false
 
 if (-not $Credential -and $CredentialUsername -and $CredentialPassword) {
     $Credential = New-Object System.Management.Automation.PSCredential($CredentialUsername, $CredentialPassword)
-}
-
-# WinRM connection failures throw System.Management.Automation.Remoting.
-# PSRemotingTransportException with the OS's own localized message text
-# (Russian on a Russian-locale target, English on an English one, etc.) -
-# unreadable to an admin whose own console is a different language, and a
-# wall of internal WS-Management troubleshooting text either way. Classify
-# by the exception TYPE and its .ErrorCode (a stable, documented WSMan
-# HRESULT, not locale text) instead of matching on the message string.
-# Only -2144108103 (name resolution failure) is mapped with real
-# confidence here - every other PSRemotingTransportException falls into
-# one shared "WinRM unreachable" bucket, which covers the connection-
-# refused/timeout/service-not-configured case from real fleet reports but
-# is not itself split further, since verifying additional specific codes
-# needs a real failing WinRM target this dev machine doesn't have. The
-# original message is always appended, so misclassifying a less-common
-# code never hides the real detail - it only adds a friendlier headline.
-function Get-FriendlyConnectionError {
-    param([System.Exception]$Exception)
-
-    if ($Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException]) {
-        if ($Exception.ErrorCode -eq -2144108103) {
-            $friendly = 'Computer unreachable - could not resolve its name. Try again later.'
-        }
-        else {
-            $friendly = 'WinRM service is not reachable on this computer - check that WinRM is configured and running (winrm quickconfig), and that the computer is online.'
-        }
-        return "$friendly (original error: $($Exception.Message))"
-    }
-
-    return $Exception.Message
-}
-
-function New-InventorySession {
-    param([string]$TargetComputer)
-
-    if ($Credential) {
-        return New-PSSession -ComputerName $TargetComputer -Credential $Credential
-    }
-
-    return New-PSSession -ComputerName $TargetComputer
-}
-
-# TrustedHosts is itself a comma-delimited list, and WSMan treats * and ? as
-# wildcards - a $TargetComputer containing any of these could inject an
-# unintended additional entry (including a bare * that trusts every host
-# WinRM will ever connect to from this machine) instead of being added as
-# the single literal hostname/IP this function assumes. $TargetComputer is
-# already computer-name-shaped by the time a server-driven push reaches
-# here, but this script can also run standalone with an operator-typed
-# -ComputerName, so it is validated again here rather than trusted blindly.
-function Test-ValidTrustedHostsEntry {
-    param([string]$TargetComputer)
-    return [bool]($TargetComputer -and ($TargetComputer -notmatch '[,*?\s]'))
-}
-
-# Returns $true only when this call actually added a new entry - the
-# caller uses that to know which entries it is responsible for removing
-# again once this run's work is done (Remove-TargetFromTrustedHosts below).
-# An entry that was already present (including a pre-existing "*") is left
-# alone entirely, both here and on removal - this function only ever
-# manages entries it itself created.
-function Add-TargetToTrustedHosts {
-    param([string]$TargetComputer)
-
-    if (-not (Test-ValidTrustedHostsEntry -TargetComputer $TargetComputer)) {
-        throw "TargetComputer '$TargetComputer' contains a character not allowed in a WinRM TrustedHosts entry (comma, wildcard, or whitespace)."
-    }
-
-    $current = ''
-    try {
-        $item = Get-Item -LiteralPath WSMan:\localhost\Client\TrustedHosts -ErrorAction Stop
-        $current = [string]$item.Value
-    }
-    catch {
-        throw "Failed to read WinRM TrustedHosts. Run this script on a host with WinRM client support."
-    }
-
-    if ($current -eq '*') {
-        return $false
-    }
-
-    $items = @()
-    if ($current) {
-        $items = @($current.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-    }
-
-    foreach ($item in $items) {
-        if ($item -ieq $TargetComputer) {
-            return $false
-        }
-    }
-
-    $items += $TargetComputer
-    Set-Item -LiteralPath WSMan:\localhost\Client\TrustedHosts -Value ($items -join ',') -Force | Out-Null
-    return $true
-}
-
-# Undoes exactly one prior Add-TargetToTrustedHosts call for the same
-# TargetComputer - called only for entries this script's own run added
-# (see the $addedTrustedHosts tracking below), never for whatever was
-# already configured before this run started. Trusting a WinRM target is a
-# standing widening of this machine's attack surface (no mutual auth the
-# way domain/Kerberos targets get), so it should not outlive the single
-# push operation that needed it.
-function Remove-TargetFromTrustedHosts {
-    param([string]$TargetComputer)
-
-    $current = ''
-    try {
-        $item = Get-Item -LiteralPath WSMan:\localhost\Client\TrustedHosts -ErrorAction Stop
-        $current = [string]$item.Value
-    }
-    catch {
-        return
-    }
-
-    if (-not $current -or $current -eq '*') {
-        return
-    }
-
-    $items = @($current.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -ine $TargetComputer })
-    Set-Item -LiteralPath WSMan:\localhost\Client\TrustedHosts -Value ($items -join ',') -Force | Out-Null
-}
-
-function Test-IpAddress {
-    param([string]$Value)
-
-    $address = $null
-    return [System.Net.IPAddress]::TryParse($Value, [ref]$address)
 }
 
 function Get-RemoteClientPackagePath {
