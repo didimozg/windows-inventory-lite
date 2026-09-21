@@ -6,6 +6,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.68.0] - Server hardening & duplication cleanup (full-project review, Workstream 2 of 3)
+
+### Fixed
+
+- Four POST device-ingestion routes now run the CSRF/Content-Type gate before being dispatched, closing a gap reachable only when `RequireIngestionToken` is off.
+- `QuoteArgument` now correctly doubles a backslash run preceding a quote (standard Windows argument-escaping rule) instead of only escaping the quote itself; `force-windows` push targets are validated again (NetBIOS-aware pattern) instead of skipping validation entirely.
+- `SecretProtector` now logs a DPAPI encryption failure to the Windows Event Log with the real field name, instead of a hardcoded "AD password" message via the opt-in debug log; `GET /api/v1/server/settings` exposes `encryptionAtRestDegraded`.
+- The Linux update schedule now clears a missed one-time push instead of firing it late and unannounced at the next service start, matching the Windows schedule's own existing behavior.
+
+### Added
+
+- A client report whose source IP changes from a previously-known one for the same computer name is now flagged (`identityIssue`) for admin review, without blocking the report.
+- `docs/threat-model.md` documents two invariants that already limit a forged report's practical impact, and corrects the device-ingestion-endpoint count from two to four.
+
+### Changed (internal, no behavior change)
+
+- `BuildSecurityHeaders` replaces 5 hand-assembled copies of the same response-header block.
+- `LoadJsonRecordList`/`ExtractIdFromPath` primitives now back all 5 simple catalog stores (licenses, license key sources, Windows updates, third-party software, certificate history).
+- `SoftwareCatalogSpec` consolidates the Windows-Updates/Third-Party-Software catalog CRUD handlers.
+- `UpdateClientDescriptionCore`/`DeleteClientReportCore` consolidate the Windows/Linux client-description-edit and client-delete handler pairs.
+- `src/WilLinuxSshCommon.ps1`, `src/WilWinRmCommon.ps1`, `src/WilAclCommon.ps1` replace several previously-duplicated PowerShell functions shared between the Install-*/Uninstall-* script pairs that run on the server host - including a real fix to `Invoke-PlinkWithAuth`'s host-key-changed warning, which had drifted to give the wrong advice in the uninstaller's copy.
+- Removed dead `ParseDpkgSearchOutput` from the Linux client (superseded by `ParseDpkgSearchBatchOutput`, zero production callers).
+
 ## [0.67.0]
 
 ### Added
