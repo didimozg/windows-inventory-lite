@@ -54,40 +54,6 @@ func TestParseServiceUnitsJSONTruncatedOutputReturnsError(t *testing.T) {
 	}
 }
 
-func TestParseDpkgSearchOutputSuccessSinglePackage(t *testing.T) {
-	name, ok := ParseDpkgSearchOutput("radarr: /lib/systemd/system/radarr.service\n")
-	if !ok {
-		t.Fatal("expected ok=true for a valid dpkg -S success line")
-	}
-	if name != "radarr" {
-		t.Errorf("got package name %q, want %q", name, "radarr")
-	}
-}
-
-func TestParseDpkgSearchOutputSuccessMultiplePackagesUsesFirst(t *testing.T) {
-	name, ok := ParseDpkgSearchOutput("pkg1, pkg2: /some/shared/path\n")
-	if !ok {
-		t.Fatal("expected ok=true")
-	}
-	if name != "pkg1" {
-		t.Errorf("got package name %q, want %q (the first listed)", name, "pkg1")
-	}
-}
-
-func TestParseDpkgSearchOutputNoMatchReturnsNotOk(t *testing.T) {
-	_, ok := ParseDpkgSearchOutput("dpkg-query: no path found matching pattern /custom/my-service.service\n")
-	if ok {
-		t.Fatal("expected ok=false when dpkg -S finds no owning package")
-	}
-}
-
-func TestParseDpkgSearchOutputEmptyReturnsNotOk(t *testing.T) {
-	_, ok := ParseDpkgSearchOutput("")
-	if ok {
-		t.Fatal("expected ok=false for empty output")
-	}
-}
-
 func TestBuildServiceInfoExcludesBaseOsPackage(t *testing.T) {
 	unit := RunningUnit{Unit: "ssh.service", Description: "OpenBSD Secure Shell server"}
 	packages := map[string]PackageInfo{

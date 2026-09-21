@@ -48,33 +48,6 @@ func ParseServiceUnitsJSON(jsonOutput string) ([]RunningUnit, error) {
 	return units, nil
 }
 
-// ParseDpkgSearchOutput parses `dpkg -S <path>`'s output. On success it
-// looks like "packagename: /path/to/file" (or "pkg1, pkg2: /path" if
-// multiple packages claim the same file - the first listed package is
-// used, which is good enough for a systemd unit file, effectively never
-// shared between packages in practice). On failure (no owning package)
-// dpkg prints a "no path found matching pattern" message instead - ok is
-// false in that case, and for any other unrecognized output shape.
-func ParseDpkgSearchOutput(output string) (packageName string, ok bool) {
-	trimmed := strings.TrimSpace(output)
-	if trimmed == "" {
-		return "", false
-	}
-	if strings.Contains(trimmed, "no path found matching pattern") {
-		return "", false
-	}
-	colonIndex := strings.Index(trimmed, ":")
-	if colonIndex <= 0 {
-		return "", false
-	}
-	namesPart := trimmed[:colonIndex]
-	firstName := strings.TrimSpace(strings.Split(namesPart, ",")[0])
-	if firstName == "" {
-		return "", false
-	}
-	return firstName, true
-}
-
 // ParseDpkgSearchBatchOutput parses the output of ONE `dpkg -S path1 path2 ...`
 // invocation covering many paths at once. Success lines look like
 // "packagename: /path/to/file"; unowned paths produce a "no path found matching
@@ -194,7 +167,7 @@ func ListRunningServiceUnits() ([]RunningUnit, error) {
 // dpkg per running service) - not unit tested itself, matches this
 // project's own established pattern for I/O-heavy collectors (see
 // BuildReport's own comment in report.go); the pure decision logic it
-// calls (ParseServiceUnitsJSON, ParseDpkgSearchOutput, BuildServiceInfo)
+// calls (ParseServiceUnitsJSON, ParseDpkgSearchBatchOutput, BuildServiceInfo)
 // is fully covered in services_test.go above.
 func CollectRunningServices() ([]ServiceInfo, error) {
 	units, err := ListRunningServiceUnits()
