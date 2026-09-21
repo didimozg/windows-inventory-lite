@@ -1182,6 +1182,13 @@ namespace WindowsInventoryLite
         private readonly ListenerSlot httpSlot = new ListenerSlot();
         private readonly ListenerSlot httpsSlot = new ListenerSlot();
         private volatile X509Certificate2 serverCertificate;
+        // Set true the first time SecretProtector.Protect falls back to
+        // plaintext for any secret during this process's lifetime -
+        // surfaced read-only via GET /api/v1/server/settings
+        // (encryptionAtRestDegraded) so the dashboard can show it. Never
+        // reset to false automatically - a DPAPI failure that happened once
+        // is worth an admin's attention even if a later call succeeds.
+        private bool secretEncryptionDegraded;
         private readonly object adSyncTimerLock = new object();
         private Timer adSyncTimer;
         private readonly object clientUpdateScheduleTimerLock = new object();
@@ -2376,7 +2383,10 @@ namespace WindowsInventoryLite
         // field (which registry path produced the key) is left untouched -
         // it carries no secret value and is needed unencrypted for the
         // dashboard's bulk client listing (see Task 4).
-        private static void EncryptInventoryLicenseKeys(Dictionary<string, object> inventory, ServerOptions options)
+        // Instance (not static) so a failed encrypt can flag
+        // secretEncryptionDegraded on this server instance - see that
+        // field's own comment.
+        private void EncryptInventoryLicenseKeys(Dictionary<string, object> inventory, ServerOptions options)
         {
             if (!inventory.ContainsKey("licenses"))
             {
@@ -2398,7 +2408,12 @@ namespace WindowsInventoryLite
                 }
 
                 string plaintextKey = Convert.ToString(license["key"]);
-                license["key"] = SecretProtector.Protect(plaintextKey, options);
+                bool licenseKeyEncrypted;
+                license["key"] = SecretProtector.Protect(plaintextKey, options, "license key", out licenseKeyEncrypted);
+                if (!licenseKeyEncrypted)
+                {
+                    secretEncryptionDegraded = true;
+                }
             }
         }
 
@@ -9765,6 +9780,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             // hasPassword field - lets the dashboard show a saved-password
             // indicator without ever exposing the value itself.
             result["adPasswordConfigured"] = !String.IsNullOrEmpty(options.AdPassword);
+            result["encryptionAtRestDegraded"] = secretEncryptionDegraded;
             result["adComputerImportOUs"] = options.AdComputerImportOUs;
             result["preferredLinuxSubnet"] = options.PreferredLinuxSubnet;
             result["linuxDefaultIntervalHours"] = options.LinuxDefaultIntervalHours;
@@ -10937,7 +10953,19 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 foreach (KeyValuePair<string, string> pair in updates)
                 {
-                    config[pair.Key] = EncryptedConfigKeys.Contains(pair.Key) ? SecretProtector.Protect(pair.Value, options) : pair.Value;
+                    if (EncryptedConfigKeys.Contains(pair.Key))
+                    {
+                        bool fieldEncrypted;
+                        config[pair.Key] = SecretProtector.Protect(pair.Value, options, pair.Key, out fieldEncrypted);
+                        if (!fieldEncrypted)
+                        {
+                            secretEncryptionDegraded = true;
+                        }
+                    }
+                    else
+                    {
+                        config[pair.Key] = pair.Value;
+                    }
                 }
 
                 string json = serializer.Serialize(config);
@@ -13881,6 +13909,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "DebugLogger.Log sanitizes an embedded CR/LF so a multi-line message still writes exactly one physical line", TestDebugLoggerLogSanitizesEmbeddedNewlines);
             allPassed &= SelfTestCheck(output, "SecretProtector round-trips a value through Protect/Unprotect", TestSecretProtectorRoundTrip);
             allPassed &= SelfTestCheck(output, "SecretProtector.Unprotect passes through a legacy plaintext value", TestSecretProtectorLegacyPlaintext);
+            allPassed &= SelfTestCheck(output, "SecretProtector.Protect reports the real field name and success flag when encryption succeeds", TestSecretProtectorReportsFieldNameAndSuccessOnSuccess);
+            allPassed &= SelfTestCheck(output, "SecretProtector.Protect falls back to plaintext and reports failure with the real field name when the underlying protect call throws", TestSecretProtectorFallsBackAndReportsFailureWithFieldName);
             allPassed &= SelfTestCheck(output, "EncryptInventoryLicenseKeys DPAPI-protects each licenses[].key in place", TestEncryptInventoryLicenseKeysProtectsPlaintextKeys);
             allPassed &= SelfTestCheck(output, "NeedsMigration flags a plaintext value", TestNeedsMigrationPlaintextValue);
             allPassed &= SelfTestCheck(output, "NeedsMigration does not flag an already-encrypted or empty value", TestNeedsMigrationAlreadyEncryptedOrEmpty);
@@ -17440,7 +17470,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         {
             ServerOptions options = new ServerOptions();
             string original = "Sup3r$ecret AD password with spaces";
-            string protectedValue = SecretProtector.Protect(original, options);
+            bool ignoredSuccess;
+            string protectedValue = SecretProtector.Protect(original, options, "test field", out ignoredSuccess);
             if (protectedValue == original)
             {
                 return "expected Protect to change the value (encrypt it), it returned the plaintext unchanged";
@@ -17458,7 +17489,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             // second encryption pass - otherwise a caller that accidentally
             // re-saves a stored value (rather than fresh plaintext) would
             // corrupt it, since Unprotect only ever decrypts once.
-            string protectedTwice = SecretProtector.Protect(protectedValue, options);
+            string protectedTwice = SecretProtector.Protect(protectedValue, options, "test field", out ignoredSuccess);
             if (protectedTwice != protectedValue)
             {
                 return "expected Protect to be a no-op on an already-'dpapi:'-prefixed value, got a different value";
@@ -17477,9 +17508,46 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return null;
         }
 
+        private static string TestSecretProtectorReportsFieldNameAndSuccessOnSuccess()
+        {
+            ServerOptions options = new ServerOptions();
+            bool encryptedSuccessfully;
+            string result = SecretProtector.Protect("plain-value", options, "WebPassword", out encryptedSuccessfully);
+            if (!encryptedSuccessfully)
+            {
+                return "expected a normal Protect call on this machine to succeed";
+            }
+            if (!result.StartsWith("dpapi:", StringComparison.Ordinal))
+            {
+                return "expected the protected value to carry the dpapi: prefix";
+            }
+            return null;
+        }
+
+        private static string TestSecretProtectorFallsBackAndReportsFailureWithFieldName()
+        {
+            string loggedMessage = null;
+            bool encryptedSuccessfully;
+            string result = SecretProtector.ProtectCore("plain-value", "SoftwareRepositoryPassword", bytes => { throw new InvalidOperationException("simulated DPAPI failure"); }, message => { loggedMessage = message; }, out encryptedSuccessfully);
+            if (encryptedSuccessfully)
+            {
+                return "expected encryptedSuccessfully to be false when the underlying protect call throws";
+            }
+            if (result != "plain-value")
+            {
+                return "expected the plaintext to be returned unchanged on failure, got: " + result;
+            }
+            if (loggedMessage == null || loggedMessage.IndexOf("SoftwareRepositoryPassword", StringComparison.Ordinal) < 0)
+            {
+                return "expected the failure message to name the actual field (SoftwareRepositoryPassword), got: " + loggedMessage;
+            }
+            return null;
+        }
+
         private static string TestEncryptInventoryLicenseKeysProtectsPlaintextKeys()
         {
             ServerOptions options = new ServerOptions();
+            InventoryServer server = new InventoryServer(options);
             Dictionary<string, object> inventory = new Dictionary<string, object>();
             ArrayList licenses = new ArrayList();
             Dictionary<string, object> entry = new Dictionary<string, object>();
@@ -17489,7 +17557,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             licenses.Add(entry);
             inventory["licenses"] = licenses;
 
-            EncryptInventoryLicenseKeys(inventory, options);
+            server.EncryptInventoryLicenseKeys(inventory, options);
 
             string protectedKey = Convert.ToString(entry["key"]);
             if (protectedKey == "PLAINTEXT123")
@@ -21581,7 +21649,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 Dictionary<string, object> entry = new Dictionary<string, object>();
                 entry["product"] = "Test Product";
                 entry["source"] = @"HKLM\SOFTWARE\Test\TestValue";
-                entry["key"] = SecretProtector.Protect("REAL-KEY-VALUE", options);
+                bool ignoredSuccess;
+                entry["key"] = SecretProtector.Protect("REAL-KEY-VALUE", options, "test field", out ignoredSuccess);
                 licenses.Add(entry);
                 report["licenses"] = licenses;
                 File.WriteAllText(Path.Combine(dataPath, "TEST-PC.json"), serializer.Serialize(report), Encoding.UTF8);

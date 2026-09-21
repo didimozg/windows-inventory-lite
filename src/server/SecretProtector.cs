@@ -19,37 +19,60 @@ namespace WindowsInventoryLite
     {
         private const string Prefix = "dpapi:";
 
-        internal static string Protect(string plaintext, ServerOptions options)
+        internal static string Protect(string plaintext, ServerOptions options, string fieldName, out bool encryptedSuccessfully)
         {
+            return ProtectCore(plaintext, fieldName,
+                bytes => ProtectedData.Protect(bytes, null, DataProtectionScope.LocalMachine),
+                message => LogProtectionFailure(options, message),
+                out encryptedSuccessfully);
+        }
+
+        // Testable core - protectBytes/onFailure are injected so a self-test
+        // can force the failure path deterministically (a real DPAPI
+        // failure can't be reliably triggered from a test) and assert the
+        // exact failure message, matching this project's established
+        // dependency-injection pattern for hard-to-fake OS operations.
+        internal static string ProtectCore(string plaintext, string fieldName, Func<byte[], byte[]> protectBytes, Action<string> onFailure, out bool encryptedSuccessfully)
+        {
+            encryptedSuccessfully = true;
             if (String.IsNullOrEmpty(plaintext))
             {
                 return plaintext;
             }
             if (plaintext.StartsWith(Prefix, StringComparison.Ordinal))
             {
-                // Already protected - a caller passing back a previously
-                // stored value (rather than a fresh plaintext one) must not
-                // be encrypted a second time, which would make Unprotect's
-                // single decrypt pass return the still-prefixed inner
-                // string instead of the real password.
+                // Already protected - see the class-level comment.
                 return plaintext;
             }
             try
             {
-                byte[] encrypted = ProtectedData.Protect(Encoding.UTF8.GetBytes(plaintext), null, DataProtectionScope.LocalMachine);
+                byte[] encrypted = protectBytes(Encoding.UTF8.GetBytes(plaintext));
                 return Prefix + Convert.ToBase64String(encrypted);
             }
             catch
             {
-                // If DPAPI is unavailable for some reason, fall back to
-                // storing the plaintext rather than losing the value
-                // entirely - matches this project's existing "AD sync
-                // must degrade, never hard-fail" posture. Logged (when the
-                // opt-in debug log is enabled) because this is a
-                // confidentiality control failing silently, unlike most of
-                // this project's other degrade-gracefully paths.
-                DebugLogger.Log(options, "Error", "AD password could not be encrypted at rest (DPAPI unavailable) - stored in plaintext instead.");
+                encryptedSuccessfully = false;
+                onFailure(fieldName + " could not be encrypted at rest (DPAPI unavailable) - stored in plaintext instead.");
                 return plaintext;
+            }
+        }
+
+        private static void LogProtectionFailure(ServerOptions options, string message)
+        {
+            // Logged via the Windows Event Log, not only the opt-in debug
+            // log (which is off by default and would otherwise let this
+            // confidentiality-control failure go completely unnoticed) -
+            // matches this project's existing EventLog.WriteEntry pattern
+            // used for other confidentiality/availability-relevant events
+            // (e.g. the missing-certificate and listener-startup-failure
+            // warnings elsewhere in WindowsInventoryLiteServer.cs).
+            DebugLogger.Log(options, "Error", message);
+            try
+            {
+                System.Diagnostics.EventLog.WriteEntry("WindowsInventoryLite", message, System.Diagnostics.EventLogEntryType.Warning);
+            }
+            catch
+            {
             }
         }
 
