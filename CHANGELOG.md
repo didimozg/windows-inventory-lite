@@ -6,6 +6,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.67.0]
+
+### Added
+
+- **The server now serves a detached signature alongside each client self-update package's hash, when one exists.** `BuildWindowsClientUpdateInfo`/`BuildLinuxClientUpdateInfo` include `sigNet35`/`sigNet40`/`sig` fields (base64) whenever a `.sig` sidecar file sits next to the corresponding package file - produced by the new `src/Sign-ClientRelease.ps1` (see `docs/self-update-signing.md`). No new server settings: whether a client requires/verifies the signature is a client-side, install-time decision (see the Windows/Linux client entries below), not something a possibly-forged HTTP response should be able to toggle.
+
+### Fixed
+
+- **Windows client self-update integrity relied on a hash delivered over the same channel as the update itself** - detecting corruption, not tampering. A LAN attacker able to intercept an inventory report could forge the ack's `config.update` and get an arbitrary payload executed as SYSTEM on every self-update-enabled client, verified only against a hash the same attacker controls. Closed via the client-side changes below - this server-side change only supplies the signature data those changes verify.
+- **`HKLM\SYSTEM\CurrentControlSet\Services\WindowsInventoryLiteClient`'s ACL let any local user read the fleet's ingestion token.** Windows service registry subkeys inherit `BUILTIN\Users: ReadKey` from their parent by default - verified live - so any local account on any managed Windows machine could read `WIL_INGESTION_TOKEN` and use it against the server, including pulling the software-repository share password in plaintext via the existing connection-info endpoint. This is a client-side fix (see the Windows client entry below); noted here since it closes a real server-facing exposure.
+
+## [Windows client 0.6.0]
+
+### Added
+
+- **Two new install-time flags, `-RequireHttpsSelfUpdate`/`-RequireSignedSelfUpdate` (both off by default), let an admin require HTTPS and/or a valid RSA/SHA256/PKCS#1v1.5 signature before the client will apply a self-update.** Deliberately client-side settings, not server-pushed - a flag delivered in the same response this feature defends against forgery on would let the same attacker simply omit it. The signature itself is verified against a public key pinned in the client binary; the matching private key is self-managed by whoever builds releases (`docs/self-update-signing.md`), no external CA involved. Both default off so no currently-working self-update deployment is silently affected until an admin opts in.
+
+### Fixed
+
+- **`HKLM\SYSTEM\CurrentControlSet\Services\WindowsInventoryLiteClient`'s registry key is now explicitly restricted to Administrators+SYSTEM**, at install time (`Install-Client.ps1`, `Deploy-ClientGpo.ps1`) and on every runtime ingestion-token rewrite (`ApplyLearnedIngestionToken`) - closing the `BUILTIN\Users: ReadKey` inheritance gap described above. Verified via a real ACL read-back in both Pester and the client's own self-test suite (admin-aware: an Administrator identity gets the full assertion, a non-admin identity's read being denied is itself the proof the restriction works, since the same read would have succeeded before the fix).
+
+Windows client 0.5.3 -> 0.6.0 (MINOR - new capability, not just a bugfix). Server/Linux-client versions bumped alongside it in this same release for the shared self-update-hardening theme, not because of any cross-component dependency.
+
+## [Linux client 0.3.0]
+
+### Added
+
+- Same two enforcement flags as the Windows client above (`--require-https-self-update`/`--require-signed-self-update`, both off by default), verified via `crypto/rsa.VerifyPKCS1v15` against the same signature format.
+
+### Fixed
+
+- **The Linux client applied any server-advertised self-update version+hash with no check that it was actually newer than the running binary.** A stale rebuild or a restored old backup left in `LinuxClientPackagePath` could silently roll the entire Linux fleet backwards, with hash verification passing (the hash matches the old-but-authentic build) and no warning. The Windows client has always guarded against exactly this; the Linux client now ports the same `IsVersionNewer`/`ParseVersionParts` logic and refuses to apply anything not strictly newer than its own version.
+
 ## [0.66.0]
 
 ### Added
