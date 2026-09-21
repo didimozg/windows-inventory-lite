@@ -3402,31 +3402,7 @@ namespace WindowsInventoryLite
 
         private void DeleteClient(Stream stream, RequestContext request)
         {
-            const string prefix = "/api/v1/clients/";
-            string rawComputerName = request.Path.Substring(prefix.Length);
-            int queryStart = rawComputerName.IndexOf('?');
-            if (queryStart >= 0)
-            {
-                rawComputerName = rawComputerName.Substring(0, queryStart);
-            }
-
-            string computerName = Uri.UnescapeDataString(rawComputerName).Trim();
-            if (String.IsNullOrEmpty(computerName))
-            {
-                SendText(stream, "{\"error\":\"computer name is required\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-
-            string fileName = SanitizeFileName(computerName) + ".json";
-            string path = Path.Combine(options.DataPath, fileName);
-            if (!File.Exists(path))
-            {
-                SendText(stream, "{\"error\":\"client not found\"}", "application/json; charset=utf-8", 404);
-                return;
-            }
-
-            File.Delete(path);
-            SendJson(stream, "{\"status\":\"deleted\"}");
+            DeleteClientReportCore(stream, request, "/api/v1/clients/", options.DataPath, "computer name");
         }
 
         // Manual Description edit, only reachable while AD Description
@@ -3435,28 +3411,29 @@ namespace WindowsInventoryLite
         // is not a security boundary. Writes the same adDescription field
         // AD Description Sync itself writes; adSyncStatus/adSyncedAt are
         // untouched here (ComputeAdSyncFields carries them forward
-        // separately on the next inventory report).
-        private void UpdateClientDescription(Stream stream, RequestContext request)
+        // separately on the next inventory report). Shared by both the
+        // Windows (UpdateClientDescription) and Linux
+        // (UpdateLinuxClientDescription) adapters below - identical rule,
+        // only the URL prefix, identifier label, and data directory differ.
+        private void UpdateClientDescriptionCore(Stream stream, RequestContext request, string pathPrefix, string pathSuffix, string dataPath, string identifierLabel)
         {
-            const string prefix = "/api/v1/clients/";
-            const string suffix = "/description";
             string rawPath = request.Path;
             int queryStart = rawPath.IndexOf('?');
             if (queryStart >= 0)
             {
                 rawPath = rawPath.Substring(0, queryStart);
             }
-            if (!rawPath.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            if (!rawPath.EndsWith(pathSuffix, StringComparison.OrdinalIgnoreCase))
             {
                 SendText(stream, "{\"error\":\"not found\"}", "application/json; charset=utf-8", 404);
                 return;
             }
 
-            string rawComputerName = rawPath.Substring(prefix.Length, rawPath.Length - prefix.Length - suffix.Length);
-            string computerName = Uri.UnescapeDataString(rawComputerName).Trim();
-            if (String.IsNullOrEmpty(computerName))
+            string rawIdentifier = rawPath.Substring(pathPrefix.Length, rawPath.Length - pathPrefix.Length - pathSuffix.Length);
+            string identifier = Uri.UnescapeDataString(rawIdentifier).Trim();
+            if (String.IsNullOrEmpty(identifier))
             {
-                SendText(stream, "{\"error\":\"computer name is required\"}", "application/json; charset=utf-8", 400);
+                SendText(stream, "{\"error\":\"" + identifierLabel + " is required\"}", "application/json; charset=utf-8", 400);
                 return;
             }
 
@@ -3489,7 +3466,7 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
+            string path = Path.Combine(dataPath, SanitizeFileName(identifier) + ".json");
             lock (reportFileLock)
             {
                 if (!File.Exists(path))
@@ -3520,6 +3497,38 @@ namespace WindowsInventoryLite
             response["status"] = "ok";
             response["description"] = description;
             SendJson(stream, serializer.Serialize(response));
+        }
+
+        private void DeleteClientReportCore(Stream stream, RequestContext request, string pathPrefix, string dataPath, string identifierLabel)
+        {
+            string rawIdentifier = request.Path.Substring(pathPrefix.Length);
+            int queryStart = rawIdentifier.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                rawIdentifier = rawIdentifier.Substring(0, queryStart);
+            }
+
+            string identifier = Uri.UnescapeDataString(rawIdentifier).Trim();
+            if (String.IsNullOrEmpty(identifier))
+            {
+                SendText(stream, "{\"error\":\"" + identifierLabel + " is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string path = Path.Combine(dataPath, SanitizeFileName(identifier) + ".json");
+            if (!File.Exists(path))
+            {
+                SendText(stream, "{\"error\":\"client not found\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+
+            File.Delete(path);
+            SendJson(stream, "{\"status\":\"deleted\"}");
+        }
+
+        private void UpdateClientDescription(Stream stream, RequestContext request)
+        {
+            UpdateClientDescriptionCore(stream, request, "/api/v1/clients/", "/description", options.DataPath, "computer name");
         }
 
         // Ingests a Linux client report - fully independent of
@@ -4396,121 +4405,13 @@ namespace WindowsInventoryLite
 
         private void DeleteLinuxClient(Stream stream, RequestContext request)
         {
-            const string prefix = "/api/v1/linux/clients/";
-            string rawHostname = request.Path.Substring(prefix.Length);
-            int queryStart = rawHostname.IndexOf('?');
-            if (queryStart >= 0)
-            {
-                rawHostname = rawHostname.Substring(0, queryStart);
-            }
-
-            string hostname = Uri.UnescapeDataString(rawHostname).Trim();
-            if (String.IsNullOrEmpty(hostname))
-            {
-                SendText(stream, "{\"error\":\"hostname is required\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-
-            string path = Path.Combine(options.LinuxDataPath, SanitizeFileName(hostname) + ".json");
-            if (!File.Exists(path))
-            {
-                SendText(stream, "{\"error\":\"client not found\"}", "application/json; charset=utf-8", 404);
-                return;
-            }
-
-            File.Delete(path);
-            SendJson(stream, "{\"status\":\"deleted\"}");
+            DeleteClientReportCore(stream, request, "/api/v1/linux/clients/", options.LinuxDataPath, "hostname");
         }
 
-        // Manual Description edit for a Linux client - same rule as
-        // UpdateClientDescription: only reachable while AD Description
-        // Sync is off, enforced here (not just by the dashboard hiding the
-        // control). Writes the same adDescription field
-        // ComputeAdSyncFields/ApplyAdSyncFields already read/write.
+        // Same rule as UpdateClientDescription - see UpdateClientDescriptionCore.
         private void UpdateLinuxClientDescription(Stream stream, RequestContext request)
         {
-            const string prefix = "/api/v1/linux/clients/";
-            const string suffix = "/description";
-            string rawPath = request.Path;
-            int queryStart = rawPath.IndexOf('?');
-            if (queryStart >= 0)
-            {
-                rawPath = rawPath.Substring(0, queryStart);
-            }
-            if (!rawPath.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
-            {
-                SendText(stream, "{\"error\":\"not found\"}", "application/json; charset=utf-8", 404);
-                return;
-            }
-
-            string rawHostname = rawPath.Substring(prefix.Length, rawPath.Length - prefix.Length - suffix.Length);
-            string hostname = Uri.UnescapeDataString(rawHostname).Trim();
-            if (String.IsNullOrEmpty(hostname))
-            {
-                SendText(stream, "{\"error\":\"hostname is required\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-
-            if (options.AdDescriptionSyncEnabled)
-            {
-                SendText(stream, "{\"error\":\"Description is synced from AD - disable \\\"Sync Description from AD\\\" in Settings first.\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-
-            JavaScriptSerializer serializer = CreateJsonSerializer();
-            Dictionary<string, object> payload;
-            try
-            {
-                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
-                if (payload == null)
-                {
-                    throw new ArgumentException("empty body");
-                }
-            }
-            catch
-            {
-                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-
-            string description = payload.ContainsKey("description") ? Convert.ToString(payload["description"]) : "";
-            if (description.Length > 1024)
-            {
-                SendText(stream, "{\"error\":\"description must be 1024 characters or fewer\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-
-            string path = Path.Combine(options.LinuxDataPath, SanitizeFileName(hostname) + ".json");
-            lock (reportFileLock)
-            {
-                if (!File.Exists(path))
-                {
-                    SendText(stream, "{\"error\":\"client not found\"}", "application/json; charset=utf-8", 404);
-                    return;
-                }
-                Dictionary<string, object> record;
-                try
-                {
-                    record = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
-                }
-                catch
-                {
-                    SendText(stream, "{\"error\":\"client report could not be read\"}", "application/json; charset=utf-8", 500);
-                    return;
-                }
-                if (record == null)
-                {
-                    SendText(stream, "{\"error\":\"client report could not be read\"}", "application/json; charset=utf-8", 500);
-                    return;
-                }
-                record["adDescription"] = description;
-                File.WriteAllText(path, serializer.Serialize(record), new UTF8Encoding(false));
-            }
-
-            Dictionary<string, object> response = new Dictionary<string, object>();
-            response["status"] = "ok";
-            response["description"] = description;
-            SendJson(stream, serializer.Serialize(response));
+            UpdateClientDescriptionCore(stream, request, "/api/v1/linux/clients/", "/description", options.LinuxDataPath, "hostname");
         }
 
         private void StartClientAction(Stream stream, RequestContext request, string action)
@@ -13981,6 +13882,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "Windows updates catalog: Create->Update->Delete through the real CreateWindowsUpdate/UpdateWindowsUpdate/DeleteWindowsUpdate HTTP handlers, then a 404 on both after delete", TestWindowsUpdatesCrudHttpLifecycleThroughRealHandlers);
             allPassed &= SelfTestCheck(output, "Third-party software catalog: Create->Update->Delete through the real CreateThirdPartySoftware/UpdateThirdPartySoftware/DeleteThirdPartySoftware HTTP handlers, then a 404 on both after delete", TestThirdPartySoftwareCrudHttpLifecycleThroughRealHandlers);
             allPassed &= SelfTestCheck(output, "SoftwareCatalogSpec wiring is not cross-contaminated: a Windows-Updates entry never appears in the Third-Party-Software list, and cross-catalog Update/Delete attempts 404 with the OTHER catalog's own not-found message", TestSoftwareCatalogHandlersDoNotCrossContaminateBetweenCatalogs);
+            allPassed &= SelfTestCheck(output, "UpdateClientDescription succeeds while AD Description Sync is off, rejects with 400 while it's on, and DeleteClient removes the report file - through the real HTTP handlers", TestUpdateClientDescriptionAndDeleteClientHttpRoundTrip);
+            allPassed &= SelfTestCheck(output, "UpdateLinuxClientDescription succeeds while AD Description Sync is off, rejects with 400 while it's on, and DeleteLinuxClient removes the report file - through the real HTTP handlers", TestUpdateLinuxClientDescriptionAndDeleteLinuxClientHttpRoundTrip);
             return allPassed;
         }
 
@@ -22489,6 +22392,184 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // Exercises the shared UpdateClientDescriptionCore/DeleteClientReportCore
+        // methods (DUP-I7) through the real Windows-side HTTP handlers: Update
+        // succeeds while AD Description Sync is off, is rejected with 400 once
+        // it's on (the authorization gate consolidated by that refactor must
+        // still enforce this, not just the URL/label plumbing around it), and
+        // Delete removes the underlying report file.
+        private static string TestUpdateClientDescriptionAndDeleteClientHttpRoundTrip()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-client-description-http-crud-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                const string computerName = "TEST-PC-DESC";
+                string reportPath = Path.Combine(dataPath, computerName + ".json");
+                Dictionary<string, object> initialReport = new Dictionary<string, object>();
+                initialReport["computerName"] = computerName;
+                File.WriteAllText(reportPath, serializer.Serialize(initialReport), Encoding.UTF8);
+
+                Dictionary<string, object> updateBody = new Dictionary<string, object>();
+                updateBody["description"] = "Updated via HTTP round trip";
+
+                RequestContext updateRequest = new RequestContext();
+                updateRequest.Method = "POST";
+                updateRequest.Path = "/api/v1/clients/" + computerName + "/description";
+                updateRequest.Headers = new Dictionary<string, string>();
+                updateRequest.Body = serializer.Serialize(updateBody);
+
+                string updateResponseText;
+                using (MemoryStream updateStream = new MemoryStream())
+                {
+                    server.UpdateClientDescription(updateStream, updateRequest);
+                    updateResponseText = Encoding.UTF8.GetString(updateStream.ToArray());
+                }
+                if (updateResponseText.IndexOf("HTTP/1.1 200 OK", StringComparison.Ordinal) < 0)
+                {
+                    return "expected UpdateClientDescription to return 200 OK while AD Description Sync is off, got: " + updateResponseText;
+                }
+
+                Dictionary<string, object> storedReport = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(reportPath, Encoding.UTF8));
+                if (GetStringValue(storedReport, "adDescription") != "Updated via HTTP round trip")
+                {
+                    return "expected the report file's adDescription to be updated on disk after UpdateClientDescription";
+                }
+
+                options.AdDescriptionSyncEnabled = true;
+                string updateWhileSyncedResponseText;
+                using (MemoryStream updateWhileSyncedStream = new MemoryStream())
+                {
+                    server.UpdateClientDescription(updateWhileSyncedStream, updateRequest);
+                    updateWhileSyncedResponseText = Encoding.UTF8.GetString(updateWhileSyncedStream.ToArray());
+                }
+                if (updateWhileSyncedResponseText.IndexOf("HTTP/1.1 400 Bad Request", StringComparison.Ordinal) < 0 || updateWhileSyncedResponseText.IndexOf("synced from AD", StringComparison.Ordinal) < 0)
+                {
+                    return "expected UpdateClientDescription to reject with 400 while AD Description Sync is on, got: " + updateWhileSyncedResponseText;
+                }
+                options.AdDescriptionSyncEnabled = false;
+
+                RequestContext deleteRequest = new RequestContext();
+                deleteRequest.Method = "DELETE";
+                deleteRequest.Path = "/api/v1/clients/" + computerName;
+                deleteRequest.Headers = new Dictionary<string, string>();
+
+                string deleteResponseText;
+                using (MemoryStream deleteStream = new MemoryStream())
+                {
+                    server.DeleteClient(deleteStream, deleteRequest);
+                    deleteResponseText = Encoding.UTF8.GetString(deleteStream.ToArray());
+                }
+                if (deleteResponseText.IndexOf("HTTP/1.1 200 OK", StringComparison.Ordinal) < 0 || deleteResponseText.IndexOf("\"status\":\"deleted\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected DeleteClient to return 200 OK with a deleted status, got: " + deleteResponseText;
+                }
+                if (File.Exists(reportPath))
+                {
+                    return "expected DeleteClient to remove the report file from disk";
+                }
+
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // Mirrors TestUpdateClientDescriptionAndDeleteClientHttpRoundTrip for
+        // the Linux-side handlers, which share the same
+        // UpdateClientDescriptionCore/DeleteClientReportCore implementation
+        // via LinuxDataPath and the "hostname" identifier label.
+        private static string TestUpdateLinuxClientDescriptionAndDeleteLinuxClientHttpRoundTrip()
+        {
+            string linuxDataPath = Path.Combine(Path.GetTempPath(), "wil-linux-client-description-http-crud-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(linuxDataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.LinuxDataPath = linuxDataPath;
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                const string hostname = "test-host-desc";
+                string reportPath = Path.Combine(linuxDataPath, hostname + ".json");
+                Dictionary<string, object> initialReport = new Dictionary<string, object>();
+                initialReport["hostname"] = hostname;
+                File.WriteAllText(reportPath, serializer.Serialize(initialReport), Encoding.UTF8);
+
+                Dictionary<string, object> updateBody = new Dictionary<string, object>();
+                updateBody["description"] = "Updated via HTTP round trip";
+
+                RequestContext updateRequest = new RequestContext();
+                updateRequest.Method = "POST";
+                updateRequest.Path = "/api/v1/linux/clients/" + hostname + "/description";
+                updateRequest.Headers = new Dictionary<string, string>();
+                updateRequest.Body = serializer.Serialize(updateBody);
+
+                string updateResponseText;
+                using (MemoryStream updateStream = new MemoryStream())
+                {
+                    server.UpdateLinuxClientDescription(updateStream, updateRequest);
+                    updateResponseText = Encoding.UTF8.GetString(updateStream.ToArray());
+                }
+                if (updateResponseText.IndexOf("HTTP/1.1 200 OK", StringComparison.Ordinal) < 0)
+                {
+                    return "expected UpdateLinuxClientDescription to return 200 OK while AD Description Sync is off, got: " + updateResponseText;
+                }
+
+                Dictionary<string, object> storedReport = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(reportPath, Encoding.UTF8));
+                if (GetStringValue(storedReport, "adDescription") != "Updated via HTTP round trip")
+                {
+                    return "expected the report file's adDescription to be updated on disk after UpdateLinuxClientDescription";
+                }
+
+                options.AdDescriptionSyncEnabled = true;
+                string updateWhileSyncedResponseText;
+                using (MemoryStream updateWhileSyncedStream = new MemoryStream())
+                {
+                    server.UpdateLinuxClientDescription(updateWhileSyncedStream, updateRequest);
+                    updateWhileSyncedResponseText = Encoding.UTF8.GetString(updateWhileSyncedStream.ToArray());
+                }
+                if (updateWhileSyncedResponseText.IndexOf("HTTP/1.1 400 Bad Request", StringComparison.Ordinal) < 0 || updateWhileSyncedResponseText.IndexOf("synced from AD", StringComparison.Ordinal) < 0)
+                {
+                    return "expected UpdateLinuxClientDescription to reject with 400 while AD Description Sync is on, got: " + updateWhileSyncedResponseText;
+                }
+                options.AdDescriptionSyncEnabled = false;
+
+                RequestContext deleteRequest = new RequestContext();
+                deleteRequest.Method = "DELETE";
+                deleteRequest.Path = "/api/v1/linux/clients/" + hostname;
+                deleteRequest.Headers = new Dictionary<string, string>();
+
+                string deleteResponseText;
+                using (MemoryStream deleteStream = new MemoryStream())
+                {
+                    server.DeleteLinuxClient(deleteStream, deleteRequest);
+                    deleteResponseText = Encoding.UTF8.GetString(deleteStream.ToArray());
+                }
+                if (deleteResponseText.IndexOf("HTTP/1.1 200 OK", StringComparison.Ordinal) < 0 || deleteResponseText.IndexOf("\"status\":\"deleted\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected DeleteLinuxClient to return 200 OK with a deleted status, got: " + deleteResponseText;
+                }
+                if (File.Exists(reportPath))
+                {
+                    return "expected DeleteLinuxClient to remove the report file from disk";
+                }
+
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(linuxDataPath, true); } catch { }
             }
         }
 
