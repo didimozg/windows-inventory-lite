@@ -12381,7 +12381,23 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
-        private void CreateWindowsUpdate(Stream stream, RequestContext request)
+        // Shared shape of the Windows-Updates and Third-Party-Software
+        // catalogs - NOT used for Licenses/License-key-sources, which have
+        // genuinely different field sets. Load/Save are Func/Action
+        // delegates (not e.g. an enum switch) so each catalog's own
+        // existing LoadXxx/SaveXxx methods (already thin wrappers over
+        // LoadJsonRecordList as of the previous task) can be passed
+        // directly with no further indirection.
+        private sealed class SoftwareCatalogSpec
+        {
+            internal object Lock;
+            internal string Subfolder;
+            internal string NotFoundMessage;
+            internal Func<List<Dictionary<string, object>>> Load;
+            internal Action<List<Dictionary<string, object>>> Save;
+        }
+
+        private void CreateSoftwareCatalogEntry(Stream stream, RequestContext request, SoftwareCatalogSpec spec)
         {
             JavaScriptSerializer serializer = CreateJsonSerializer();
             Dictionary<string, object> payload;
@@ -12416,9 +12432,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 SendText(stream, "{\"error\":\"relativePath is required\"}", "application/json; charset=utf-8", 400);
                 return;
             }
-            if (!IsValidCatalogRelativePath(relativePath, "windows-updates"))
+            if (!IsValidCatalogRelativePath(relativePath, spec.Subfolder))
             {
-                SendText(stream, "{\"error\":\"relativePath must be a path inside the windows-updates subfolder, with no .. traversal outside it\"}", "application/json; charset=utf-8", 400);
+                SendText(stream, "{\"error\":\"relativePath must be a path inside the " + spec.Subfolder + " subfolder, with no .. traversal outside it\"}", "application/json; charset=utf-8", 400);
                 return;
             }
             // Deploy > Actions feeds the same delimited target text into an
@@ -12453,20 +12469,18 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             record["createdAt"] = nowUtc;
             record["updatedAt"] = nowUtc;
 
-            lock (windowsUpdatesLock)
+            lock (spec.Lock)
             {
-                List<Dictionary<string, object>> entries = LoadWindowsUpdates();
+                List<Dictionary<string, object>> entries = spec.Load();
                 entries.Add(record);
-                SaveWindowsUpdates(entries);
+                spec.Save(entries);
             }
 
             SendJson(stream, serializer.Serialize(record));
         }
 
-        private void UpdateWindowsUpdate(Stream stream, RequestContext request)
+        private void UpdateSoftwareCatalogEntry(Stream stream, RequestContext request, SoftwareCatalogSpec spec, string id)
         {
-            string id = ExtractWindowsUpdateId(request.Path);
-
             JavaScriptSerializer serializer = CreateJsonSerializer();
             Dictionary<string, object> payload;
             try
@@ -12500,9 +12514,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 SendText(stream, "{\"error\":\"relativePath is required\"}", "application/json; charset=utf-8", 400);
                 return;
             }
-            if (!IsValidCatalogRelativePath(relativePath, "windows-updates"))
+            if (!IsValidCatalogRelativePath(relativePath, spec.Subfolder))
             {
-                SendText(stream, "{\"error\":\"relativePath must be a path inside the windows-updates subfolder, with no .. traversal outside it\"}", "application/json; charset=utf-8", 400);
+                SendText(stream, "{\"error\":\"relativePath must be a path inside the " + spec.Subfolder + " subfolder, with no .. traversal outside it\"}", "application/json; charset=utf-8", 400);
                 return;
             }
             if (!String.IsNullOrEmpty(targets))
@@ -12518,9 +12532,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 }
             }
 
-            lock (windowsUpdatesLock)
+            lock (spec.Lock)
             {
-                List<Dictionary<string, object>> entries = LoadWindowsUpdates();
+                List<Dictionary<string, object>> entries = spec.Load();
                 Dictionary<string, object> record = null;
                 for (int i = 0; i < entries.Count; i++)
                 {
@@ -12533,7 +12547,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 if (record == null)
                 {
-                    SendText(stream, "{\"error\":\"windows update entry not found\"}", "application/json; charset=utf-8", 404);
+                    SendText(stream, "{\"error\":\"" + spec.NotFoundMessage + "\"}", "application/json; charset=utf-8", 404);
                     return;
                 }
 
@@ -12545,18 +12559,16 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 record["targets"] = targets;
                 record["updatedAt"] = DateTime.UtcNow.ToString("o");
 
-                SaveWindowsUpdates(entries);
+                spec.Save(entries);
                 SendJson(stream, serializer.Serialize(record));
             }
         }
 
-        private void DeleteWindowsUpdate(Stream stream, RequestContext request)
+        private void DeleteSoftwareCatalogEntry(Stream stream, SoftwareCatalogSpec spec, string id)
         {
-            string id = ExtractWindowsUpdateId(request.Path);
-
-            lock (windowsUpdatesLock)
+            lock (spec.Lock)
             {
-                List<Dictionary<string, object>> entries = LoadWindowsUpdates();
+                List<Dictionary<string, object>> entries = spec.Load();
                 int indexToRemove = -1;
                 for (int i = 0; i < entries.Count; i++)
                 {
@@ -12569,15 +12581,48 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 if (indexToRemove < 0)
                 {
-                    SendText(stream, "{\"error\":\"windows update entry not found\"}", "application/json; charset=utf-8", 404);
+                    SendText(stream, "{\"error\":\"" + spec.NotFoundMessage + "\"}", "application/json; charset=utf-8", 404);
                     return;
                 }
 
                 entries.RemoveAt(indexToRemove);
-                SaveWindowsUpdates(entries);
+                spec.Save(entries);
             }
 
             SendJson(stream, "{\"status\":\"deleted\"}");
+        }
+
+        private void CreateWindowsUpdate(Stream stream, RequestContext request)
+        {
+            SoftwareCatalogSpec spec = new SoftwareCatalogSpec();
+            spec.Lock = windowsUpdatesLock;
+            spec.Subfolder = "windows-updates";
+            spec.NotFoundMessage = "windows update entry not found";
+            spec.Load = LoadWindowsUpdates;
+            spec.Save = SaveWindowsUpdates;
+            CreateSoftwareCatalogEntry(stream, request, spec);
+        }
+
+        private void UpdateWindowsUpdate(Stream stream, RequestContext request)
+        {
+            SoftwareCatalogSpec spec = new SoftwareCatalogSpec();
+            spec.Lock = windowsUpdatesLock;
+            spec.Subfolder = "windows-updates";
+            spec.NotFoundMessage = "windows update entry not found";
+            spec.Load = LoadWindowsUpdates;
+            spec.Save = SaveWindowsUpdates;
+            UpdateSoftwareCatalogEntry(stream, request, spec, ExtractWindowsUpdateId(request.Path));
+        }
+
+        private void DeleteWindowsUpdate(Stream stream, RequestContext request)
+        {
+            SoftwareCatalogSpec spec = new SoftwareCatalogSpec();
+            spec.Lock = windowsUpdatesLock;
+            spec.Subfolder = "windows-updates";
+            spec.NotFoundMessage = "windows update entry not found";
+            spec.Load = LoadWindowsUpdates;
+            spec.Save = SaveWindowsUpdates;
+            DeleteSoftwareCatalogEntry(stream, spec, ExtractWindowsUpdateId(request.Path));
         }
 
         private string GetThirdPartySoftwareDirectory()
@@ -12664,194 +12709,35 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private void CreateThirdPartySoftware(Stream stream, RequestContext request)
         {
-            JavaScriptSerializer serializer = CreateJsonSerializer();
-            Dictionary<string, object> payload;
-            try
-            {
-                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
-                if (payload == null)
-                {
-                    throw new ArgumentException("empty body");
-                }
-            }
-            catch
-            {
-                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-
-            string name = Convert.ToString(payload.ContainsKey("name") ? payload["name"] : "").Trim();
-            string relativePath = Convert.ToString(payload.ContainsKey("relativePath") ? payload["relativePath"] : "").Trim();
-            string arguments = Convert.ToString(payload.ContainsKey("arguments") ? payload["arguments"] : "").Trim();
-            string targets = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "").Trim();
-            bool requiresReboot = payload.ContainsKey("requiresReboot") && Convert.ToBoolean(payload["requiresReboot"]);
-            bool enabled = !payload.ContainsKey("enabled") || Convert.ToBoolean(payload["enabled"]);
-
-            if (String.IsNullOrEmpty(name))
-            {
-                SendText(stream, "{\"error\":\"name is required\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-            if (String.IsNullOrEmpty(relativePath))
-            {
-                SendText(stream, "{\"error\":\"relativePath is required\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-            if (!IsValidCatalogRelativePath(relativePath, "third-party-software"))
-            {
-                SendText(stream, "{\"error\":\"relativePath must be a path inside the third-party-software subfolder, with no .. traversal outside it\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-            if (!String.IsNullOrEmpty(targets))
-            {
-                foreach (string expandedTarget in ExpandInstallTargets(targets))
-                {
-                    IPAddress parsedIp;
-                    if (IPAddress.TryParse(expandedTarget, out parsedIp))
-                    {
-                        SendJsonError(stream, "targets must be computer names - this feature assigns jobs by the client's own reported computer name, not by connecting to an IP, so an IP address or range will never match any client: " + expandedTarget, 400);
-                        return;
-                    }
-                }
-            }
-
-            string nowUtc = DateTime.UtcNow.ToString("o");
-            Dictionary<string, object> record = new Dictionary<string, object>();
-            record["id"] = Guid.NewGuid().ToString("N");
-            record["name"] = name;
-            record["relativePath"] = relativePath;
-            record["arguments"] = arguments;
-            record["requiresReboot"] = requiresReboot;
-            record["enabled"] = enabled;
-            record["targets"] = targets;
-            record["createdAt"] = nowUtc;
-            record["updatedAt"] = nowUtc;
-
-            lock (thirdPartySoftwareLock)
-            {
-                List<Dictionary<string, object>> entries = LoadThirdPartySoftware();
-                entries.Add(record);
-                SaveThirdPartySoftware(entries);
-            }
-
-            SendJson(stream, serializer.Serialize(record));
+            SoftwareCatalogSpec spec = new SoftwareCatalogSpec();
+            spec.Lock = thirdPartySoftwareLock;
+            spec.Subfolder = "third-party-software";
+            spec.NotFoundMessage = "third-party software entry not found";
+            spec.Load = LoadThirdPartySoftware;
+            spec.Save = SaveThirdPartySoftware;
+            CreateSoftwareCatalogEntry(stream, request, spec);
         }
 
         private void UpdateThirdPartySoftware(Stream stream, RequestContext request)
         {
-            string id = ExtractThirdPartySoftwareId(request.Path);
-
-            JavaScriptSerializer serializer = CreateJsonSerializer();
-            Dictionary<string, object> payload;
-            try
-            {
-                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
-                if (payload == null)
-                {
-                    throw new ArgumentException("empty body");
-                }
-            }
-            catch
-            {
-                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-
-            string name = Convert.ToString(payload.ContainsKey("name") ? payload["name"] : "").Trim();
-            string relativePath = Convert.ToString(payload.ContainsKey("relativePath") ? payload["relativePath"] : "").Trim();
-            string arguments = Convert.ToString(payload.ContainsKey("arguments") ? payload["arguments"] : "").Trim();
-            string targets = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "").Trim();
-            bool requiresReboot = payload.ContainsKey("requiresReboot") && Convert.ToBoolean(payload["requiresReboot"]);
-            bool enabled = !payload.ContainsKey("enabled") || Convert.ToBoolean(payload["enabled"]);
-
-            if (String.IsNullOrEmpty(name))
-            {
-                SendText(stream, "{\"error\":\"name is required\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-            if (String.IsNullOrEmpty(relativePath))
-            {
-                SendText(stream, "{\"error\":\"relativePath is required\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-            if (!IsValidCatalogRelativePath(relativePath, "third-party-software"))
-            {
-                SendText(stream, "{\"error\":\"relativePath must be a path inside the third-party-software subfolder, with no .. traversal outside it\"}", "application/json; charset=utf-8", 400);
-                return;
-            }
-            if (!String.IsNullOrEmpty(targets))
-            {
-                foreach (string expandedTarget in ExpandInstallTargets(targets))
-                {
-                    IPAddress parsedIp;
-                    if (IPAddress.TryParse(expandedTarget, out parsedIp))
-                    {
-                        SendJsonError(stream, "targets must be computer names - this feature assigns jobs by the client's own reported computer name, not by connecting to an IP, so an IP address or range will never match any client: " + expandedTarget, 400);
-                        return;
-                    }
-                }
-            }
-
-            lock (thirdPartySoftwareLock)
-            {
-                List<Dictionary<string, object>> entries = LoadThirdPartySoftware();
-                Dictionary<string, object> record = null;
-                for (int i = 0; i < entries.Count; i++)
-                {
-                    if (String.Equals(GetStringValue(entries[i], "id"), id, StringComparison.OrdinalIgnoreCase))
-                    {
-                        record = entries[i];
-                        break;
-                    }
-                }
-
-                if (record == null)
-                {
-                    SendText(stream, "{\"error\":\"third-party software entry not found\"}", "application/json; charset=utf-8", 404);
-                    return;
-                }
-
-                record["name"] = name;
-                record["relativePath"] = relativePath;
-                record["arguments"] = arguments;
-                record["requiresReboot"] = requiresReboot;
-                record["enabled"] = enabled;
-                record["targets"] = targets;
-                record["updatedAt"] = DateTime.UtcNow.ToString("o");
-
-                SaveThirdPartySoftware(entries);
-                SendJson(stream, serializer.Serialize(record));
-            }
+            SoftwareCatalogSpec spec = new SoftwareCatalogSpec();
+            spec.Lock = thirdPartySoftwareLock;
+            spec.Subfolder = "third-party-software";
+            spec.NotFoundMessage = "third-party software entry not found";
+            spec.Load = LoadThirdPartySoftware;
+            spec.Save = SaveThirdPartySoftware;
+            UpdateSoftwareCatalogEntry(stream, request, spec, ExtractThirdPartySoftwareId(request.Path));
         }
 
         private void DeleteThirdPartySoftware(Stream stream, RequestContext request)
         {
-            string id = ExtractThirdPartySoftwareId(request.Path);
-
-            lock (thirdPartySoftwareLock)
-            {
-                List<Dictionary<string, object>> entries = LoadThirdPartySoftware();
-                int indexToRemove = -1;
-                for (int i = 0; i < entries.Count; i++)
-                {
-                    if (String.Equals(GetStringValue(entries[i], "id"), id, StringComparison.OrdinalIgnoreCase))
-                    {
-                        indexToRemove = i;
-                        break;
-                    }
-                }
-
-                if (indexToRemove < 0)
-                {
-                    SendText(stream, "{\"error\":\"third-party software entry not found\"}", "application/json; charset=utf-8", 404);
-                    return;
-                }
-
-                entries.RemoveAt(indexToRemove);
-                SaveThirdPartySoftware(entries);
-            }
-
-            SendJson(stream, "{\"status\":\"deleted\"}");
+            SoftwareCatalogSpec spec = new SoftwareCatalogSpec();
+            spec.Lock = thirdPartySoftwareLock;
+            spec.Subfolder = "third-party-software";
+            spec.NotFoundMessage = "third-party software entry not found";
+            spec.Load = LoadThirdPartySoftware;
+            spec.Save = SaveThirdPartySoftware;
+            DeleteSoftwareCatalogEntry(stream, spec, ExtractThirdPartySoftwareId(request.Path));
         }
 
         private readonly object shareScanLock = new object();
