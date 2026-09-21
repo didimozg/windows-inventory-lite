@@ -1964,7 +1964,15 @@ namespace WindowsInventoryLite
                     RequestContext request = ReadRequest(stream);
                     IPEndPoint remoteEndPoint = client.Client.RemoteEndPoint as IPEndPoint;
                     request.RemoteAddress = remoteEndPoint != null ? remoteEndPoint.Address : IPAddress.None;
-                    if (request.Method == "POST" && request.Path == "/api/v1/inventory")
+                    if (IsCrossSiteRequestRejected(request))
+                    {
+                        SendText(stream, "{\"error\":\"Cross-site request rejected - Origin/Referer does not match this server.\"}", "application/json; charset=utf-8", 400);
+                    }
+                    else if (RequiresJsonContentType(request) && !HasJsonContentType(request))
+                    {
+                        SendText(stream, "{\"error\":\"Content-Type must be application/json.\"}", "application/json; charset=utf-8", 400);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/inventory")
                     {
                         ReceiveInventory(stream, request);
                     }
@@ -1999,14 +2007,6 @@ namespace WindowsInventoryLite
                     else if (IsBasicAuthLockedOut(request, out loginLockoutRetryAfterSeconds))
                     {
                         SendTooManyRequests(stream, loginLockoutRetryAfterSeconds);
-                    }
-                    else if (IsCrossSiteRequestRejected(request))
-                    {
-                        SendText(stream, "{\"error\":\"Cross-site request rejected - Origin/Referer does not match this server.\"}", "application/json; charset=utf-8", 400);
-                    }
-                    else if (RequiresJsonContentType(request) && !HasJsonContentType(request))
-                    {
-                        SendText(stream, "{\"error\":\"Content-Type must be application/json.\"}", "application/json; charset=utf-8", 400);
                     }
                     else if (request.Method == "POST" && request.Path == "/api/v1/server/login")
                     {
@@ -13913,6 +13913,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected falls back to Referer when Origin is absent", TestIsCrossSiteRequestRejectedFallsBackToRefererWhenOriginAbsent);
             allPassed &= SelfTestCheck(output, "IsCrossSiteRequestRejected fails closed on a malformed Origin header", TestIsCrossSiteRequestRejectedFailsClosedOnMalformedOrigin);
             allPassed &= SelfTestCheck(output, "RequiresJsonContentType is true only for a state-changing request with a non-empty body", TestRequiresJsonContentTypeOnlyForStateChangingRequestsWithABody);
+            allPassed &= SelfTestCheck(output, "A cross-site POST to /api/v1/inventory is rejected even when RequireIngestionToken is off", TestCrossSitePostToInventoryRejectedWhenTokenNotRequired);
             allPassed &= SelfTestCheck(output, "HasJsonContentType accepts application/json with or without a charset suffix, case-insensitively", TestHasJsonContentTypeAcceptsJsonWithOrWithoutCharsetSuffix);
             allPassed &= SelfTestCheck(output, "HasJsonContentType rejects form-encoded, text/plain, and missing Content-Type", TestHasJsonContentTypeRejectsFormAndTextPlainAndMissing);
             allPassed &= SelfTestCheck(output, "EvaluateLockoutState reports not-locked-out with no record or an elapsed lockout", TestEvaluateLockoutStateNotLockedOutCases);
@@ -19389,6 +19390,45 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return "expected a POST with a non-empty body to require a JSON Content-Type";
             }
             return null;
+        }
+
+        private static string TestCrossSitePostToInventoryRejectedWhenTokenNotRequired()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-csrfgate-" + Guid.NewGuid().ToString("N"));
+            options.RequireIngestionToken = false;
+            options.Port = 18080;
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/inventory";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["origin"] = "http://evil.example.com";
+                request.Headers["content-type"] = "application/json";
+                request.Body = "{\"computerName\":\"FORGED-PC\"}";
+                request.RemoteAddress = IPAddress.Loopback;
+
+                System.Reflection.MethodInfo isCrossSiteMethod = typeof(InventoryServer).GetMethod("IsCrossSiteRequestRejected", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                bool rejected = (bool)isCrossSiteMethod.Invoke(null, new object[] { request });
+                if (!rejected)
+                {
+                    return "expected IsCrossSiteRequestRejected to reject an Origin that does not match this server, independent of RequireIngestionToken";
+                }
+
+                string reportPath = Path.Combine(options.DataPath, "FORGED-PC.json");
+                if (File.Exists(reportPath))
+                {
+                    return "expected no report file to be written for a cross-site request, but one was";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
         }
 
         private static string TestHasJsonContentTypeAcceptsJsonWithOrWithoutCharsetSuffix()
