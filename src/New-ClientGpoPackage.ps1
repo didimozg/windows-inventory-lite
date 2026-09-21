@@ -45,6 +45,11 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+# Set-RestrictedFileAcl (used for Install-ClientGpo.cmd below) lives here so
+# this script and Install-Server.ps1 share one implementation instead of two
+# same-named functions with silently different behavior.
+. (Join-Path -Path $PSScriptRoot -ChildPath 'WilAclCommon.ps1')
+
 # ServerUrl/Token/PackageSharePath land on a `set` line in the generated
 # .cmd with no surrounding quotes (ServerUrl, PackageSharePath) or with
 # quotes an embedded " can break out of (Token). A value containing &, |,
@@ -64,34 +69,18 @@ Test-BatchSafeValue -Value $ServerUrl -FieldName 'ServerUrl'
 Test-BatchSafeValue -Value $Token -FieldName 'Token'
 Test-BatchSafeValue -Value $PackageSharePath -FieldName 'PackageSharePath'
 
-# Restricts a file to Administrators+SYSTEM plus the identity actually
+# Set-RestrictedFileAcl (dot-sourced from WilAclCommon.ps1 above) restricts
+# Install-ClientGpo.cmd to Administrators+SYSTEM plus the identity actually
 # running this script (whoever built the package, so they can still read/
-# copy their own output regardless of whether they are a local admin) -
-# same three-way grant Install-Server.ps1's own ApplyRestrictedConfigAcl
-# uses. -OutputPath is a local staging location (its default is a
+# copy their own output regardless of whether they are a local admin), via
+# -IncludeCurrentIdentity at the call site below - same three-way grant
+# Install-Server.ps1's own server-config.json protection uses, minus that
+# third grant. -OutputPath is a local staging location (its default is a
 # project-relative dist\gpo-client, not a real GPO share - -PackageSharePath
 # is the separate, explicit way to point the generated .cmd at wherever it
 # is actually deployed), so restricting the generated .cmd here does not
 # interfere with a later copy to SYSVOL or a custom share; that copy's own
 # destination ACL governs what target machines can read.
-function Set-RestrictedFileAcl {
-    param([string]$FilePath)
-    $adminSid  = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
-    $systemSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
-    $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-    # -Path, not -LiteralPath: this script requires only PS 2.0 (#requires
-    # above), and Get-Acl/Set-Acl only gained -LiteralPath in PS 3.0.
-    # $FilePath is always a script-built path, never wildcard-shaped, so
-    # -Path's wildcard expansion is a safe substitute here.
-    $acl = Get-Acl -Path $FilePath
-    $acl.SetAccessRuleProtection($true, $false)
-    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($adminSid, 'FullControl', 'Allow')))
-    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($systemSid, 'FullControl', 'Allow')))
-    if ($currentSid -and $currentSid -ne $adminSid -and $currentSid -ne $systemSid) {
-        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($currentSid, 'FullControl', 'Allow')))
-    }
-    Set-Acl -Path $FilePath -AclObject $acl
-}
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 if (-not $OutputPath) {
@@ -187,7 +176,7 @@ $lines += 'exit /b %ERRORLEVEL%'
 if (-not (Test-Path -LiteralPath $cmdPath)) {
     New-Item -Path $cmdPath -ItemType File -Force | Out-Null
 }
-Set-RestrictedFileAcl -FilePath $cmdPath
+Set-RestrictedFileAcl -FilePath $cmdPath -IncludeCurrentIdentity
 Set-Content -LiteralPath $cmdPath -Value $lines -Encoding ASCII
 
 Write-Host "GPO client package: $OutputPath"

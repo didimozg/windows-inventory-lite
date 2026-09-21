@@ -129,23 +129,26 @@ Describe 'Windows Inventory Lite Install-Server AdUseServiceIdentity resolution'
 
 # Same AST-extraction approach as above, applied to the functions that
 # guard config-file ACL ordering (3e) and install-path validation (3c-PS).
-# Write-ServerConfig depends on Set-RestrictedFileAcl and ConvertTo-JsonString,
-# so all three are extracted together; Test-BatchSafeValue is independent.
+# Write-ServerConfig depends on Set-RestrictedFileAcl and ConvertTo-JsonString.
+# Set-RestrictedFileAcl itself now lives in WilAclCommon.ps1 (shared with
+# New-ClientGpoPackage.ps1, see WilAclCommon.Tests.ps1 for its own coverage),
+# so it is dot-sourced directly here instead of AST-extracted like the rest.
 Describe 'Windows Inventory Lite Install-Server config and validation helpers' {
     BeforeAll {
         $script:ProjectRoot = Split-Path -Parent $PSScriptRoot
+        . (Join-Path -Path $script:ProjectRoot -ChildPath 'src\WilAclCommon.ps1')
         $scriptPath = Join-Path -Path $script:ProjectRoot -ChildPath 'src\Install-Server.ps1'
         $scriptContent = Get-Content -LiteralPath $scriptPath -Raw
         $tokens = $null
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseInput($scriptContent, [ref]$tokens, [ref]$errors)
-        $targetNames = @('Write-ServerConfig', 'Set-RestrictedFileAcl', 'Set-RestrictedDirectoryAcl', 'ConvertTo-JsonString', 'Test-BatchSafeValue')
+        $targetNames = @('Write-ServerConfig', 'Set-RestrictedDirectoryAcl', 'ConvertTo-JsonString', 'Test-BatchSafeValue')
         $functionAsts = $ast.FindAll({
             param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $targetNames -contains $node.Name
         }, $true)
-        if ($functionAsts.Count -ne 5) {
-            throw "Expected to find Write-ServerConfig, Set-RestrictedFileAcl, Set-RestrictedDirectoryAcl, ConvertTo-JsonString, and Test-BatchSafeValue in Install-Server.ps1, found $($functionAsts.Count)"
+        if ($functionAsts.Count -ne 4) {
+            throw "Expected to find Write-ServerConfig, Set-RestrictedDirectoryAcl, ConvertTo-JsonString, and Test-BatchSafeValue in Install-Server.ps1, found $($functionAsts.Count)"
         }
         foreach ($functionAst in $functionAsts) {
             . ([scriptblock]::Create($functionAst.Extent.Text))

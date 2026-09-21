@@ -175,6 +175,11 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+# Set-RestrictedFileAcl (used for server-config.json below) lives here so
+# Install-Server.ps1 and New-ClientGpoPackage.ps1 share one implementation
+# instead of two same-named functions with silently different behavior.
+. (Join-Path -Path $PSScriptRoot -ChildPath 'WilAclCommon.ps1')
+
 # This script creates/replaces a Windows service, restricts ACLs under
 # %ProgramData%, and opens firewall rules - all of which require local
 # admin rights. Checked before any of the six destructive-block parameters
@@ -931,7 +936,7 @@ elseif (-not (Test-Path -LiteralPath $ClientNet40ExecutablePath)) {
 # BUILTIN\Users create-file rights and CREATOR OWNER full control of anything
 # a non-admin user places there - a local-user-to-SYSTEM file/DLL-planting
 # path, since this server runs as LocalSystem by default. Unlike
-# Set-RestrictedFileAcl (below), these rules carry ContainerInherit +
+# Set-RestrictedFileAcl (dot-sourced from WilAclCommon.ps1 above), these rules carry ContainerInherit +
 # ObjectInherit so files and subfolders created inside the directory LATER
 # (catalog uploads, client reports, dashboard content) inherit the same
 # restriction instead of picking up whatever weaker default DACL Windows
@@ -1135,27 +1140,6 @@ if (Test-Path -LiteralPath $linuxClientVersionSidecarPath) {
 function ConvertTo-ServiceArgValue {
     param([string]$Value)
     return $Value -replace '"', '\"'
-}
-
-function Set-RestrictedFileAcl {
-    param([string]$FilePath)
-    # Use well-known SIDs, not literal account names: 'Administrators'/'SYSTEM'
-    # only resolve on English-locale Windows. The builtin groups have a
-    # localized display name on non-English installs, which throws
-    # IdentityNotMappedException from AddAccessRule with a literal string.
-    $adminSid  = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
-    $systemSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
-    # -Path, not -LiteralPath: this script requires only PS 2.0 (#requires
-    # above), and Get-Acl/Set-Acl only gained -LiteralPath in PS 3.0.
-    # $FilePath is always a script-built path, never wildcard-shaped, so
-    # -Path's wildcard expansion is a safe substitute here.
-    $acl = Get-Acl -Path $FilePath
-    $acl.SetAccessRuleProtection($true, $false)
-    $adminRule  = New-Object System.Security.AccessControl.FileSystemAccessRule($adminSid, 'FullControl', 'Allow')
-    $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule($systemSid, 'FullControl', 'Allow')
-    $acl.AddAccessRule($adminRule)
-    $acl.AddAccessRule($systemRule)
-    Set-Acl -Path $FilePath -AclObject $acl
 }
 
 # --prefix is deliberately NOT included here, unlike --data/--content/etc.
