@@ -13947,6 +13947,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository reports failure when SoftwareRepositoryPath is not configured", TestScanSoftwareRepositoryReportsMissingConfiguration);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository finds only files not already referenced by a catalog entry's relativePath", TestScanSoftwareRepositoryFindsUncatalogedFilesOnly);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository preserves the last successful scan's candidates when a subsequent scan fails", TestScanSoftwareRepositoryPreservesCandidatesOnSubsequentFailure);
+            allPassed &= SelfTestCheck(output, "Windows updates catalog: Create->Update->Delete through the real CreateWindowsUpdate/UpdateWindowsUpdate/DeleteWindowsUpdate HTTP handlers, then a 404 on both after delete", TestWindowsUpdatesCrudHttpLifecycleThroughRealHandlers);
+            allPassed &= SelfTestCheck(output, "Third-party software catalog: Create->Update->Delete through the real CreateThirdPartySoftware/UpdateThirdPartySoftware/DeleteThirdPartySoftware HTTP handlers, then a 404 on both after delete", TestThirdPartySoftwareCrudHttpLifecycleThroughRealHandlers);
+            allPassed &= SelfTestCheck(output, "SoftwareCatalogSpec wiring is not cross-contaminated: a Windows-Updates entry never appears in the Third-Party-Software list, and cross-catalog Update/Delete attempts 404 with the OTHER catalog's own not-found message", TestSoftwareCatalogHandlersDoNotCrossContaminateBetweenCatalogs);
             return allPassed;
         }
 
@@ -21963,6 +21966,443 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { File.Delete(tempPath); } catch { }
+            }
+        }
+
+        // Shared by the three HTTP-level SoftwareCatalogSpec tests below - the
+        // response Stream carries a full "HTTP/1.1 <code> <reason>\r\nHeader:
+        // value\r\n...\r\n\r\n<body>" text (see SendText), and each of these
+        // tests needs the JSON body in isolation several times over (to
+        // extract an id, or to assert on echoed field values).
+        private static string ExtractHttpResponseBodyText(string rawHttpResponse)
+        {
+            int headerEnd = rawHttpResponse.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+            return headerEnd < 0 ? "" : rawHttpResponse.Substring(headerEnd + 4);
+        }
+
+        // TestWindowsUpdatesCrudRoundTrip (above) only ever calls
+        // LoadWindowsUpdates/SaveWindowsUpdates directly - a bare disk round
+        // trip that never touches CreateWindowsUpdate/UpdateWindowsUpdate/
+        // DeleteWindowsUpdate, or the CreateSoftwareCatalogEntry/
+        // UpdateSoftwareCatalogEntry/DeleteSoftwareCatalogEntry methods those
+        // three adapters delegate to. A bug in the actual consolidated
+        // handlers (wrong lock, wrong not-found message, wrong subfolder,
+        // swapped id extraction, a broken IP-target check) would stay green
+        // there. This drives the full Create->Update->Delete sequence through
+        // the real adapters a client actually hits, asserting on the real
+        // HTTP response text, and proves the entry is genuinely gone after
+        // Delete by checking that a subsequent Update and a subsequent Delete
+        // against the same id both now 404.
+        private static string TestWindowsUpdatesCrudHttpLifecycleThroughRealHandlers()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-windows-updates-http-crud-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                Dictionary<string, object> createBody = new Dictionary<string, object>();
+                createBody["name"] = "Test KB HTTP";
+                createBody["relativePath"] = @"windows-updates\test-http.msu";
+                createBody["arguments"] = "/quiet /norestart";
+                createBody["requiresReboot"] = true;
+                createBody["enabled"] = true;
+                createBody["targets"] = "TEST-PC-HTTP";
+
+                RequestContext createRequest = new RequestContext();
+                createRequest.Method = "POST";
+                createRequest.Path = "/api/v1/windows-updates";
+                createRequest.Headers = new Dictionary<string, string>();
+                createRequest.Body = serializer.Serialize(createBody);
+
+                string createResponseText;
+                using (MemoryStream createStream = new MemoryStream())
+                {
+                    server.CreateWindowsUpdate(createStream, createRequest);
+                    createResponseText = Encoding.UTF8.GetString(createStream.ToArray());
+                }
+                if (createResponseText.IndexOf("HTTP/1.1 200 OK", StringComparison.Ordinal) < 0)
+                {
+                    return "expected CreateWindowsUpdate to return 200 OK, got: " + createResponseText;
+                }
+
+                Dictionary<string, object> createdRecord = serializer.Deserialize<Dictionary<string, object>>(ExtractHttpResponseBodyText(createResponseText));
+                string id = GetStringValue(createdRecord, "id");
+                if (String.IsNullOrEmpty(id))
+                {
+                    return "expected the Create response body to contain a non-empty id, got: " + createResponseText;
+                }
+                if (GetStringValue(createdRecord, "name") != "Test KB HTTP")
+                {
+                    return "expected the Create response body to echo the submitted name, got: " + createResponseText;
+                }
+
+                Dictionary<string, object> updateBody = new Dictionary<string, object>();
+                updateBody["name"] = "Test KB HTTP Renamed";
+                updateBody["relativePath"] = @"windows-updates\test-http-renamed.msu";
+                updateBody["arguments"] = "/quiet";
+                updateBody["requiresReboot"] = false;
+                updateBody["enabled"] = false;
+                updateBody["targets"] = "TEST-PC-HTTP";
+
+                RequestContext updateRequest = new RequestContext();
+                updateRequest.Method = "PUT";
+                updateRequest.Path = "/api/v1/windows-updates/" + id;
+                updateRequest.Headers = new Dictionary<string, string>();
+                updateRequest.Body = serializer.Serialize(updateBody);
+
+                string updateResponseText;
+                using (MemoryStream updateStream = new MemoryStream())
+                {
+                    server.UpdateWindowsUpdate(updateStream, updateRequest);
+                    updateResponseText = Encoding.UTF8.GetString(updateStream.ToArray());
+                }
+                if (updateResponseText.IndexOf("HTTP/1.1 200 OK", StringComparison.Ordinal) < 0)
+                {
+                    return "expected UpdateWindowsUpdate to return 200 OK for an existing id, got: " + updateResponseText;
+                }
+                Dictionary<string, object> updatedRecord = serializer.Deserialize<Dictionary<string, object>>(ExtractHttpResponseBodyText(updateResponseText));
+                if (GetStringValue(updatedRecord, "name") != "Test KB HTTP Renamed")
+                {
+                    return "expected the Update response body to reflect the renamed value, got: " + updateResponseText;
+                }
+                if (GetStringValue(updatedRecord, "id") != id)
+                {
+                    return "expected Update to preserve the original id, got: " + updateResponseText;
+                }
+
+                RequestContext deleteRequest = new RequestContext();
+                deleteRequest.Method = "DELETE";
+                deleteRequest.Path = "/api/v1/windows-updates/" + id;
+                deleteRequest.Headers = new Dictionary<string, string>();
+
+                string deleteResponseText;
+                using (MemoryStream deleteStream = new MemoryStream())
+                {
+                    server.DeleteWindowsUpdate(deleteStream, deleteRequest);
+                    deleteResponseText = Encoding.UTF8.GetString(deleteStream.ToArray());
+                }
+                if (deleteResponseText.IndexOf("HTTP/1.1 200 OK", StringComparison.Ordinal) < 0 || deleteResponseText.IndexOf("\"status\":\"deleted\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected DeleteWindowsUpdate to return 200 OK with a deleted status, got: " + deleteResponseText;
+                }
+
+                // The entry must genuinely be gone: a subsequent Update against the
+                // same id now 404s through the real handler.
+                RequestContext updateAfterDeleteRequest = new RequestContext();
+                updateAfterDeleteRequest.Method = "PUT";
+                updateAfterDeleteRequest.Path = "/api/v1/windows-updates/" + id;
+                updateAfterDeleteRequest.Headers = new Dictionary<string, string>();
+                updateAfterDeleteRequest.Body = serializer.Serialize(updateBody);
+
+                string updateAfterDeleteResponseText;
+                using (MemoryStream updateAfterDeleteStream = new MemoryStream())
+                {
+                    server.UpdateWindowsUpdate(updateAfterDeleteStream, updateAfterDeleteRequest);
+                    updateAfterDeleteResponseText = Encoding.UTF8.GetString(updateAfterDeleteStream.ToArray());
+                }
+                if (updateAfterDeleteResponseText.IndexOf("HTTP/1.1 404 Not Found", StringComparison.Ordinal) < 0 || updateAfterDeleteResponseText.IndexOf("windows update entry not found", StringComparison.Ordinal) < 0)
+                {
+                    return "expected UpdateWindowsUpdate against a deleted id to 404 with 'windows update entry not found', got: " + updateAfterDeleteResponseText;
+                }
+
+                // Same for a second Delete of the same, already-deleted id.
+                string deleteAfterDeleteResponseText;
+                using (MemoryStream deleteAfterDeleteStream = new MemoryStream())
+                {
+                    server.DeleteWindowsUpdate(deleteAfterDeleteStream, deleteRequest);
+                    deleteAfterDeleteResponseText = Encoding.UTF8.GetString(deleteAfterDeleteStream.ToArray());
+                }
+                if (deleteAfterDeleteResponseText.IndexOf("HTTP/1.1 404 Not Found", StringComparison.Ordinal) < 0 || deleteAfterDeleteResponseText.IndexOf("windows update entry not found", StringComparison.Ordinal) < 0)
+                {
+                    return "expected a second DeleteWindowsUpdate against an already-deleted id to 404 with 'windows update entry not found', got: " + deleteAfterDeleteResponseText;
+                }
+
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // Mirrors TestWindowsUpdatesCrudHttpLifecycleThroughRealHandlers for
+        // the Third-Party-Software catalog - same gap, same fix: the existing
+        // TestThirdPartySoftwareCrudRoundTrip only exercises
+        // LoadThirdPartySoftware/SaveThirdPartySoftware directly.
+        private static string TestThirdPartySoftwareCrudHttpLifecycleThroughRealHandlers()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-third-party-software-http-crud-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                Dictionary<string, object> createBody = new Dictionary<string, object>();
+                createBody["name"] = "Test App HTTP";
+                createBody["relativePath"] = @"third-party-software\test-http-setup.exe";
+                createBody["arguments"] = "/S";
+                createBody["requiresReboot"] = false;
+                createBody["enabled"] = true;
+                createBody["targets"] = "TEST-PC-HTTP";
+
+                RequestContext createRequest = new RequestContext();
+                createRequest.Method = "POST";
+                createRequest.Path = "/api/v1/third-party-software";
+                createRequest.Headers = new Dictionary<string, string>();
+                createRequest.Body = serializer.Serialize(createBody);
+
+                string createResponseText;
+                using (MemoryStream createStream = new MemoryStream())
+                {
+                    server.CreateThirdPartySoftware(createStream, createRequest);
+                    createResponseText = Encoding.UTF8.GetString(createStream.ToArray());
+                }
+                if (createResponseText.IndexOf("HTTP/1.1 200 OK", StringComparison.Ordinal) < 0)
+                {
+                    return "expected CreateThirdPartySoftware to return 200 OK, got: " + createResponseText;
+                }
+
+                Dictionary<string, object> createdRecord = serializer.Deserialize<Dictionary<string, object>>(ExtractHttpResponseBodyText(createResponseText));
+                string id = GetStringValue(createdRecord, "id");
+                if (String.IsNullOrEmpty(id))
+                {
+                    return "expected the Create response body to contain a non-empty id, got: " + createResponseText;
+                }
+                if (GetStringValue(createdRecord, "name") != "Test App HTTP")
+                {
+                    return "expected the Create response body to echo the submitted name, got: " + createResponseText;
+                }
+
+                Dictionary<string, object> updateBody = new Dictionary<string, object>();
+                updateBody["name"] = "Test App HTTP Renamed";
+                updateBody["relativePath"] = @"third-party-software\test-http-setup-renamed.exe";
+                updateBody["arguments"] = "/quiet";
+                updateBody["requiresReboot"] = true;
+                updateBody["enabled"] = false;
+                updateBody["targets"] = "TEST-PC-HTTP";
+
+                RequestContext updateRequest = new RequestContext();
+                updateRequest.Method = "PUT";
+                updateRequest.Path = "/api/v1/third-party-software/" + id;
+                updateRequest.Headers = new Dictionary<string, string>();
+                updateRequest.Body = serializer.Serialize(updateBody);
+
+                string updateResponseText;
+                using (MemoryStream updateStream = new MemoryStream())
+                {
+                    server.UpdateThirdPartySoftware(updateStream, updateRequest);
+                    updateResponseText = Encoding.UTF8.GetString(updateStream.ToArray());
+                }
+                if (updateResponseText.IndexOf("HTTP/1.1 200 OK", StringComparison.Ordinal) < 0)
+                {
+                    return "expected UpdateThirdPartySoftware to return 200 OK for an existing id, got: " + updateResponseText;
+                }
+                Dictionary<string, object> updatedRecord = serializer.Deserialize<Dictionary<string, object>>(ExtractHttpResponseBodyText(updateResponseText));
+                if (GetStringValue(updatedRecord, "name") != "Test App HTTP Renamed")
+                {
+                    return "expected the Update response body to reflect the renamed value, got: " + updateResponseText;
+                }
+                if (GetStringValue(updatedRecord, "id") != id)
+                {
+                    return "expected Update to preserve the original id, got: " + updateResponseText;
+                }
+
+                RequestContext deleteRequest = new RequestContext();
+                deleteRequest.Method = "DELETE";
+                deleteRequest.Path = "/api/v1/third-party-software/" + id;
+                deleteRequest.Headers = new Dictionary<string, string>();
+
+                string deleteResponseText;
+                using (MemoryStream deleteStream = new MemoryStream())
+                {
+                    server.DeleteThirdPartySoftware(deleteStream, deleteRequest);
+                    deleteResponseText = Encoding.UTF8.GetString(deleteStream.ToArray());
+                }
+                if (deleteResponseText.IndexOf("HTTP/1.1 200 OK", StringComparison.Ordinal) < 0 || deleteResponseText.IndexOf("\"status\":\"deleted\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected DeleteThirdPartySoftware to return 200 OK with a deleted status, got: " + deleteResponseText;
+                }
+
+                // The entry must genuinely be gone: a subsequent Update against the
+                // same id now 404s through the real handler.
+                RequestContext updateAfterDeleteRequest = new RequestContext();
+                updateAfterDeleteRequest.Method = "PUT";
+                updateAfterDeleteRequest.Path = "/api/v1/third-party-software/" + id;
+                updateAfterDeleteRequest.Headers = new Dictionary<string, string>();
+                updateAfterDeleteRequest.Body = serializer.Serialize(updateBody);
+
+                string updateAfterDeleteResponseText;
+                using (MemoryStream updateAfterDeleteStream = new MemoryStream())
+                {
+                    server.UpdateThirdPartySoftware(updateAfterDeleteStream, updateAfterDeleteRequest);
+                    updateAfterDeleteResponseText = Encoding.UTF8.GetString(updateAfterDeleteStream.ToArray());
+                }
+                if (updateAfterDeleteResponseText.IndexOf("HTTP/1.1 404 Not Found", StringComparison.Ordinal) < 0 || updateAfterDeleteResponseText.IndexOf("third-party software entry not found", StringComparison.Ordinal) < 0)
+                {
+                    return "expected UpdateThirdPartySoftware against a deleted id to 404 with 'third-party software entry not found', got: " + updateAfterDeleteResponseText;
+                }
+
+                // Same for a second Delete of the same, already-deleted id.
+                string deleteAfterDeleteResponseText;
+                using (MemoryStream deleteAfterDeleteStream = new MemoryStream())
+                {
+                    server.DeleteThirdPartySoftware(deleteAfterDeleteStream, deleteRequest);
+                    deleteAfterDeleteResponseText = Encoding.UTF8.GetString(deleteAfterDeleteStream.ToArray());
+                }
+                if (deleteAfterDeleteResponseText.IndexOf("HTTP/1.1 404 Not Found", StringComparison.Ordinal) < 0 || deleteAfterDeleteResponseText.IndexOf("third-party software entry not found", StringComparison.Ordinal) < 0)
+                {
+                    return "expected a second DeleteThirdPartySoftware against an already-deleted id to 404 with 'third-party software entry not found', got: " + deleteAfterDeleteResponseText;
+                }
+
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // The review that flagged the disk-round-trip gap above also live-
+        // tested (manually, over real HTTP) that the two SoftwareCatalogSpec
+        // instances (Windows-Updates vs. Third-Party-Software) don't share
+        // storage or fall through to each other - an entry created in one
+        // catalog stays invisible to the other's list, and a cross-catalog
+        // Update/Delete 404s with THAT catalog's own NotFoundMessage rather
+        // than silently succeeding or leaking the wrong message. This turns
+        // that one-off manual check into a permanent, automated test.
+        private static string TestSoftwareCatalogHandlersDoNotCrossContaminateBetweenCatalogs()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-catalog-cross-contamination-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                Dictionary<string, object> windowsUpdateBody = new Dictionary<string, object>();
+                windowsUpdateBody["name"] = "Cross-Contamination Windows Update";
+                windowsUpdateBody["relativePath"] = @"windows-updates\cross-check.msu";
+                windowsUpdateBody["arguments"] = "";
+                windowsUpdateBody["requiresReboot"] = false;
+                windowsUpdateBody["enabled"] = true;
+                windowsUpdateBody["targets"] = "";
+
+                RequestContext createWindowsUpdateRequest = new RequestContext();
+                createWindowsUpdateRequest.Method = "POST";
+                createWindowsUpdateRequest.Path = "/api/v1/windows-updates";
+                createWindowsUpdateRequest.Headers = new Dictionary<string, string>();
+                createWindowsUpdateRequest.Body = serializer.Serialize(windowsUpdateBody);
+
+                string windowsUpdateId;
+                using (MemoryStream createStream = new MemoryStream())
+                {
+                    server.CreateWindowsUpdate(createStream, createWindowsUpdateRequest);
+                    string responseText = Encoding.UTF8.GetString(createStream.ToArray());
+                    Dictionary<string, object> createdRecord = serializer.Deserialize<Dictionary<string, object>>(ExtractHttpResponseBodyText(responseText));
+                    windowsUpdateId = GetStringValue(createdRecord, "id");
+                }
+                if (String.IsNullOrEmpty(windowsUpdateId))
+                {
+                    return "expected CreateWindowsUpdate to return a non-empty id to set up the cross-contamination check";
+                }
+
+                // It must show up in the Windows-Updates list...
+                string windowsUpdatesListText;
+                using (MemoryStream listStream = new MemoryStream())
+                {
+                    server.SendWindowsUpdates(listStream);
+                    windowsUpdatesListText = Encoding.UTF8.GetString(listStream.ToArray());
+                }
+                if (windowsUpdatesListText.IndexOf(windowsUpdateId, StringComparison.Ordinal) < 0)
+                {
+                    return "expected the created entry's id to appear in GET /api/v1/windows-updates, got: " + windowsUpdatesListText;
+                }
+
+                // ...but never in the Third-Party-Software list.
+                string thirdPartyListText;
+                using (MemoryStream listStream = new MemoryStream())
+                {
+                    server.SendThirdPartySoftware(listStream);
+                    thirdPartyListText = Encoding.UTF8.GetString(listStream.ToArray());
+                }
+                if (thirdPartyListText.IndexOf(windowsUpdateId, StringComparison.Ordinal) >= 0)
+                {
+                    return "expected an entry created via CreateWindowsUpdate to never appear in GET /api/v1/third-party-software, got: " + thirdPartyListText;
+                }
+
+                // Attempting to Update/Delete a Windows-Updates id through the
+                // Third-Party-Software handlers must 404 with the THIRD-PARTY
+                // not-found message, proving the two SoftwareCatalogSpec
+                // instances are not accidentally sharing storage or falling
+                // through to each other.
+                Dictionary<string, object> updateAttemptBody = new Dictionary<string, object>();
+                updateAttemptBody["name"] = "Should not apply";
+                updateAttemptBody["relativePath"] = @"third-party-software\should-not-apply.exe";
+                updateAttemptBody["arguments"] = "";
+                updateAttemptBody["requiresReboot"] = false;
+                updateAttemptBody["enabled"] = true;
+                updateAttemptBody["targets"] = "";
+
+                RequestContext crossUpdateRequest = new RequestContext();
+                crossUpdateRequest.Method = "PUT";
+                crossUpdateRequest.Path = "/api/v1/third-party-software/" + windowsUpdateId;
+                crossUpdateRequest.Headers = new Dictionary<string, string>();
+                crossUpdateRequest.Body = serializer.Serialize(updateAttemptBody);
+
+                string crossUpdateResponseText;
+                using (MemoryStream crossUpdateStream = new MemoryStream())
+                {
+                    server.UpdateThirdPartySoftware(crossUpdateStream, crossUpdateRequest);
+                    crossUpdateResponseText = Encoding.UTF8.GetString(crossUpdateStream.ToArray());
+                }
+                if (crossUpdateResponseText.IndexOf("HTTP/1.1 404 Not Found", StringComparison.Ordinal) < 0 || crossUpdateResponseText.IndexOf("third-party software entry not found", StringComparison.Ordinal) < 0)
+                {
+                    return "expected UpdateThirdPartySoftware against a Windows-Updates id to 404 with the THIRD-PARTY not-found message (not silently succeed, or 404 with the wrong message), got: " + crossUpdateResponseText;
+                }
+
+                RequestContext crossDeleteRequest = new RequestContext();
+                crossDeleteRequest.Method = "DELETE";
+                crossDeleteRequest.Path = "/api/v1/third-party-software/" + windowsUpdateId;
+                crossDeleteRequest.Headers = new Dictionary<string, string>();
+
+                string crossDeleteResponseText;
+                using (MemoryStream crossDeleteStream = new MemoryStream())
+                {
+                    server.DeleteThirdPartySoftware(crossDeleteStream, crossDeleteRequest);
+                    crossDeleteResponseText = Encoding.UTF8.GetString(crossDeleteStream.ToArray());
+                }
+                if (crossDeleteResponseText.IndexOf("HTTP/1.1 404 Not Found", StringComparison.Ordinal) < 0 || crossDeleteResponseText.IndexOf("third-party software entry not found", StringComparison.Ordinal) < 0)
+                {
+                    return "expected DeleteThirdPartySoftware against a Windows-Updates id to 404 with the THIRD-PARTY not-found message, got: " + crossDeleteResponseText;
+                }
+
+                // The entry must still genuinely exist in Windows-Updates, unharmed
+                // by the cross-catalog Update/Delete attempts above.
+                string windowsUpdatesListAfterCrossAttemptsText;
+                using (MemoryStream listStream = new MemoryStream())
+                {
+                    server.SendWindowsUpdates(listStream);
+                    windowsUpdatesListAfterCrossAttemptsText = Encoding.UTF8.GetString(listStream.ToArray());
+                }
+                if (windowsUpdatesListAfterCrossAttemptsText.IndexOf(windowsUpdateId, StringComparison.Ordinal) < 0)
+                {
+                    return "expected the Windows-Updates entry to survive the cross-catalog Update/Delete attempts against the Third-Party-Software handlers, got: " + windowsUpdatesListAfterCrossAttemptsText;
+                }
+
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
             }
         }
 
