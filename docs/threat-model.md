@@ -41,6 +41,7 @@
 - POST body to `POST /api/v1/client-updates/credentials` (username, password) that saves the optional WinRM credential fallback used by Client Auto-Update pushes. No current-password check (unlike admin-password) - any authenticated dashboard user can already trigger a WinRM push via `Client actions` with arbitrary typed credentials, so this endpoint grants no capability the dashboard didn't already have.
 - The computer name embedded in a client's inventory report, when AD sync is enabled: used to build an LDAP search filter (see AdLookupService.LookupComputerDescription), escaped per RFC 4515 before use.
 - The Organizational Unit list (`AdComputerImportOUs`) configured via `POST /api/v1/server/settings`, used to build LDAP directory paths (`LDAP://<OU DN>`) for AD Computer Import (see AdLookupService.SearchComputers) - admin-configured only, not derived from any client-reported or otherwise attacker-influenceable data, so it is not run through `LdapFilterEscaper`. That escaping targets search-filter clauses, not directory paths, and is applied to the one input in this list that IS attacker-influenceable: the client-reported computer name in the entry above.
+- A report's self-asserted computer name/hostname is not otherwise bound to its source IP - `identityIssue` (added `[this version]`) flags a source-IP change on a previously-known computer for admin review, but does not reject or block the report.
 
 ## Required Invariants
 
@@ -65,6 +66,8 @@
 - Port changes for either listener must bind and start the new listener before touching the old one, so a failed rebind (port in use, no permission) leaves the previously working listener running unaffected.
 - The LDAP filter built from a client-reported computer name must have its special characters escaped before use, to prevent LDAP injection from a maliciously-named reporting host.
 - An unreachable or slow AD must not block or fail inventory report ingestion.
+- Scheduled pushes never enable host-key auto-trust (`TrustNewHostKeys` is never set on a scheduled job) - an SSH push to a target with no pinned fingerprint aborts at the host-key stage before authenticating, so a forged report steering a scheduled push at an attacker-chosen host never transmits the stored SSH password to it.
+- WinRM's own TrustedHosts policy blocks NTLM authentication to a host not already in TrustedHosts, and `addToTrustedHosts` is never set to true on a scheduled job - the same forged-report-steers-a-push scenario cannot result in NTLM credential capture, though a rogue AD computer object (default `ms-DS-MachineAccountQuota` lets any domain user create one) could still obtain Kerberos authentication to a chosen target; this residual risk is accepted, not yet mitigated.
 
 ## Main Risks
 

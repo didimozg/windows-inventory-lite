@@ -2573,7 +2573,21 @@ namespace WindowsInventoryLite
                 ApplyAdSyncFields(inventory, adFields);
                 inventory["hasUsbStorage"] = stickyUsbStorage;
                 EncryptInventoryLicenseKeys(inventory, options);
+                // previous (loaded above, before the lock) still holds the
+                // OLD report's own lastIngestSourceIp at this point -
+                // inventory has not been written yet, so this is the last
+                // chance to compare against it before it is overwritten
+                // below. previous is already null-tolerant (a missing or
+                // corrupt existing report falls back to null above), so a
+                // corrupt on-disk report never blocks this new, valid one
+                // from being accepted and written.
+                string previousSourceIp = GetStringValue(previous, "lastIngestSourceIp");
                 inventory["lastIngestSourceIp"] = request.RemoteAddress != null ? request.RemoteAddress.ToString() : null;
+                string identityIssue = ComputeClientIdentityIssue(previousSourceIp, GetStringValue(inventory, "lastIngestSourceIp"));
+                if (identityIssue != null)
+                {
+                    inventory["identityIssue"] = identityIssue;
+                }
 
                 string json = serializer.Serialize(inventory);
                 File.WriteAllText(path, json, new UTF8Encoding(false));
@@ -3549,7 +3563,17 @@ namespace WindowsInventoryLite
             lock (reportFileLock)
             {
                 ApplyAdSyncFields(inventory, adFields);
+                // Same previous-report comparison as ReceiveInventory - see
+                // its own comment for why previous (loaded above, before
+                // the lock) is safe to read here even when the existing
+                // on-disk report was missing or corrupt.
+                string previousSourceIp = GetStringValue(previous, "lastIngestSourceIp");
                 inventory["lastIngestSourceIp"] = request.RemoteAddress != null ? request.RemoteAddress.ToString() : null;
+                string identityIssue = ComputeClientIdentityIssue(previousSourceIp, GetStringValue(inventory, "lastIngestSourceIp"));
+                if (identityIssue != null)
+                {
+                    inventory["identityIssue"] = identityIssue;
+                }
 
                 string json = serializer.Serialize(inventory);
                 File.WriteAllText(path, json, new UTF8Encoding(false));
@@ -7548,6 +7572,30 @@ namespace WindowsInventoryLite
                 return null;
             }
             return newestMatch.Reason;
+        }
+
+        // Pure - no I/O. Flags when a specific, previously-known client's
+        // reports suddenly arrive from a different source IP than its own
+        // last-recorded one - could mean a reimage, a DHCP lease change, or
+        // (the reason this exists) a forged report claiming an existing
+        // computer's identity from an ingestion-token holder that is not
+        // actually that machine. Deliberately does NOT reject or block
+        // anything - matches this project's existing tokenIssue pattern of
+        // flagging anomalies for admin review rather than refusing a
+        // report outright, since a real reimage/DHCP change is far more
+        // common than an actual attack and should never itself cause data
+        // loss for a legitimate machine.
+        internal static string ComputeClientIdentityIssue(string previousSourceIp, string currentSourceIp)
+        {
+            if (String.IsNullOrEmpty(previousSourceIp) || String.IsNullOrEmpty(currentSourceIp))
+            {
+                return null;
+            }
+            if (String.Equals(previousSourceIp, currentSourceIp, StringComparison.Ordinal))
+            {
+                return null;
+            }
+            return "source IP changed from " + previousSourceIp + " to " + currentSourceIp;
         }
 
         // Secure only over HTTPS (stream is SslStream - the same test
@@ -14025,6 +14073,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue ignores a matching-IP rejection older than the client's last report", TestComputeClientTokenIssueStaleRejectionIgnored);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue flags a matching-IP rejection newer than the client's last report", TestComputeClientTokenIssueRecentRejectionFlagged);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue picks the newest matching-IP entry's reason when several match", TestComputeClientTokenIssueNewestWins);
+            allPassed &= SelfTestCheck(output, "ComputeClientIdentityIssue flags a source IP change from a known previous one", TestComputeClientIdentityIssueFlagsIpChange);
+            allPassed &= SelfTestCheck(output, "ComputeClientIdentityIssue is silent on a first-ever report (no previous IP)", TestComputeClientIdentityIssueSilentOnFirstReport);
+            allPassed &= SelfTestCheck(output, "ComputeClientIdentityIssue is silent when the IP is unchanged", TestComputeClientIdentityIssueSilentWhenUnchanged);
+            allPassed &= SelfTestCheck(output, "ReceiveInventory sets identityIssue when a client's source IP changes from a previous report", TestReceiveInventorySetsIdentityIssueOnIpChange);
             allPassed &= SelfTestCheck(output, "LoadClientReports sets tokenIssue on a client whose IP has a newer rejected attempt", TestLoadClientReportsSetsTokenIssueFromRejectionLog);
             allPassed &= SelfTestCheck(output, "LoadClientReports strips license keys (not just masks them) from the bulk client listing", TestLoadClientReportsRedactsLicenseKeysFromBulkListing);
             allPassed &= SelfTestCheck(output, "ResolveEffectiveToken falls back to the live server token when the request supplies none", TestResolveEffectiveTokenFallsBackToLiveTokenWhenBlank);
@@ -16570,6 +16622,41 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return null;
         }
 
+        private static string TestComputeClientIdentityIssueFlagsIpChange()
+        {
+            string issue = InventoryServer.ComputeClientIdentityIssue("192.168.1.10", "192.168.1.99");
+            if (issue == null || issue.IndexOf("192.168.1.10", StringComparison.Ordinal) < 0 || issue.IndexOf("192.168.1.99", StringComparison.Ordinal) < 0)
+            {
+                return "expected an identity issue naming both the old and new IP, got: " + issue;
+            }
+            return null;
+        }
+
+        private static string TestComputeClientIdentityIssueSilentOnFirstReport()
+        {
+            string issue = InventoryServer.ComputeClientIdentityIssue(null, "192.168.1.99");
+            if (issue != null)
+            {
+                return "expected no identity issue when there is no previous IP on record, got: " + issue;
+            }
+            issue = InventoryServer.ComputeClientIdentityIssue("", "192.168.1.99");
+            if (issue != null)
+            {
+                return "expected no identity issue when the previous IP was recorded as empty, got: " + issue;
+            }
+            return null;
+        }
+
+        private static string TestComputeClientIdentityIssueSilentWhenUnchanged()
+        {
+            string issue = InventoryServer.ComputeClientIdentityIssue("192.168.1.10", "192.168.1.10");
+            if (issue != null)
+            {
+                return "expected no identity issue when the source IP has not changed, got: " + issue;
+            }
+            return null;
+        }
+
         private static string TestLoadClientReportsSetsTokenIssueFromRejectionLog()
         {
             ServerOptions options = new ServerOptions();
@@ -18389,6 +18476,59 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (responseText.IndexOf("\"ingestionToken\":\"new-token\"", StringComparison.Ordinal) < 0)
                 {
                     return "expected the ack's config object to include the new token when the request authenticated with the previous one, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveInventorySetsIdentityIssueOnIpChange()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-identityissue-" + Guid.NewGuid().ToString("N"));
+            options.RequireIngestionToken = false;
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                // First report, from 192.168.1.10 - establishes the baseline.
+                Dictionary<string, object> firstBody = new Dictionary<string, object>();
+                firstBody["computerName"] = "TEST-PC";
+                RequestContext firstRequest = new RequestContext();
+                firstRequest.Method = "POST";
+                firstRequest.Path = "/api/v1/inventory";
+                firstRequest.Headers = new Dictionary<string, string>();
+                firstRequest.Body = serializer.Serialize(firstBody);
+                firstRequest.RemoteAddress = IPAddress.Parse("192.168.1.10");
+                using (MemoryStream firstStream = new MemoryStream())
+                {
+                    server.ReceiveInventory(firstStream, firstRequest);
+                }
+
+                // Second report, same computer name, DIFFERENT source IP.
+                Dictionary<string, object> secondBody = new Dictionary<string, object>();
+                secondBody["computerName"] = "TEST-PC";
+                RequestContext secondRequest = new RequestContext();
+                secondRequest.Method = "POST";
+                secondRequest.Path = "/api/v1/inventory";
+                secondRequest.Headers = new Dictionary<string, string>();
+                secondRequest.Body = serializer.Serialize(secondBody);
+                secondRequest.RemoteAddress = IPAddress.Parse("192.168.1.99");
+                using (MemoryStream secondStream = new MemoryStream())
+                {
+                    server.ReceiveInventory(secondStream, secondRequest);
+                }
+
+                string reportPath = Path.Combine(options.DataPath, "TEST-PC.json");
+                Dictionary<string, object> storedReport = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(reportPath, Encoding.UTF8));
+                if (!storedReport.ContainsKey("identityIssue") || Convert.ToString(storedReport["identityIssue"]).IndexOf("192.168.1.10", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the stored report to carry an identityIssue naming the previous IP after a source IP change, got: " + (storedReport.ContainsKey("identityIssue") ? storedReport["identityIssue"] : "(missing)");
                 }
                 return null;
             }
