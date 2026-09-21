@@ -1010,6 +1010,9 @@ Copy-Item -LiteralPath $linuxSshInstallerSource -Destination $linuxSshInstallerP
 $linuxSshUninstallerSource = Join-Path -Path $PSScriptRoot -ChildPath 'Uninstall-ClientDebianSSH.ps1'
 $linuxSshUninstallerPath = Join-Path -Path $InstallPath -ChildPath 'Uninstall-ClientDebianSSH.ps1'
 Copy-Item -LiteralPath $linuxSshUninstallerSource -Destination $linuxSshUninstallerPath -Force
+$linuxSshCommonSource = Join-Path -Path $PSScriptRoot -ChildPath 'WilLinuxSshCommon.ps1'
+$linuxSshCommonPath = Join-Path -Path $InstallPath -ChildPath 'WilLinuxSshCommon.ps1'
+Copy-Item -LiteralPath $linuxSshCommonSource -Destination $linuxSshCommonPath -Force
 
 # Install-ClientDebianSSH.ps1 resolves $projectRoot as the parent of its own
 # directory and looks for plink.exe/pscp.exe at $projectRoot\deploy\linux-client.
