@@ -8035,7 +8035,7 @@ namespace WindowsInventoryLite
             }
 
             byte[] data = File.ReadAllBytes(path);
-            string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Length: " + data.Length + "\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + BuildHstsHeaderOrEmpty(stream) + "\r\nConnection: close\r\n\r\n";
+            string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Length: " + data.Length + "\r\nCache-Control: no-cache" + BuildSecurityHeaders(stream) + "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
             stream.Write(data, 0, data.Length);
@@ -8338,6 +8338,23 @@ namespace WindowsInventoryLite
             return "\r\nStrict-Transport-Security: max-age=" + (options.HstsMaxAgeHours * 3600);
         }
 
+        // Every response this server writes carries the same baseline
+        // security headers - one source so a header cannot be added to
+        // some responses and silently missed on others. A comment
+        // elsewhere in this file already documents one real regression
+        // this exact duplication caused (a response path that bypassed
+        // SendText entirely and carried none of these headers, not just a
+        // newly-added one).
+        private string BuildSecurityHeaders(Stream stream)
+        {
+            return "\r\nX-Content-Type-Options: nosniff"
+                 + "\r\nX-Frame-Options: DENY"
+                 + "\r\nContent-Security-Policy: " + ContentSecurityPolicy
+                 + "\r\nReferrer-Policy: " + ReferrerPolicy
+                 + "\r\nPermissions-Policy: " + PermissionsPolicy
+                 + BuildHstsHeaderOrEmpty(stream);
+        }
+
         private static JavaScriptSerializer CreateJsonSerializer()
         {
             JavaScriptSerializer serializer = new JavaScriptSerializer();
@@ -8440,7 +8457,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             // headers below - not just the two new ones, the pre-existing
             // CSP/X-Frame-Options/nosniff too. A 401 is a response like
             // any other and deserves the same baseline.
-            string header = "HTTP/1.1 401 Unauthorized\r\nContent-Type: " + contentType + "\r\nContent-Length: " + body.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + BuildHstsHeaderOrEmpty(stream) + "\r\nConnection: close\r\n\r\n";
+            string header = "HTTP/1.1 401 Unauthorized\r\nContent-Type: " + contentType + "\r\nContent-Length: " + body.Length + BuildSecurityHeaders(stream) + "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
             stream.Write(body, 0, body.Length);
@@ -8455,7 +8472,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         private void SendTooManyRequests(Stream stream, int retryAfterSeconds)
         {
             byte[] body = Encoding.UTF8.GetBytes("{\"error\":\"Too many failed login attempts. Try again later.\"}");
-            string header = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: " + retryAfterSeconds + "\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: " + body.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + BuildHstsHeaderOrEmpty(stream) + "\r\nConnection: close\r\n\r\n";
+            string header = "HTTP/1.1 429 Too Many Requests\r\nRetry-After: " + retryAfterSeconds + "\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: " + body.Length + BuildSecurityHeaders(stream) + "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
             stream.Write(body, 0, body.Length);
@@ -8523,12 +8540,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             string header = "HTTP/1.1 " + statusCode + " " + status +
                 "\r\nContent-Type: " + contentType +
                 "\r\nContent-Length: " + body.Length +
-                "\r\nX-Content-Type-Options: nosniff" +
-                "\r\nX-Frame-Options: DENY" +
-                "\r\nContent-Security-Policy: " + ContentSecurityPolicy +
-                "\r\nReferrer-Policy: " + ReferrerPolicy +
-                "\r\nPermissions-Policy: " + PermissionsPolicy +
-                BuildHstsHeaderOrEmpty(stream) +
+                BuildSecurityHeaders(stream) +
                 (String.IsNullOrEmpty(cacheControl) ? "" : "\r\nCache-Control: " + cacheControl) +
                 (String.IsNullOrEmpty(extraHeaders) ? "" : "\r\n" + extraHeaders) +
                 "\r\nConnection: close\r\n\r\n";
@@ -13826,7 +13838,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private void SendBytes(Stream stream, byte[] data, string contentType, string filename)
         {
-            string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Disposition: attachment; filename=\"" + filename + "\"\r\nContent-Length: " + data.Length + "\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nContent-Security-Policy: " + ContentSecurityPolicy + "\r\nReferrer-Policy: " + ReferrerPolicy + "\r\nPermissions-Policy: " + PermissionsPolicy + BuildHstsHeaderOrEmpty(stream) + "\r\nConnection: close\r\n\r\n";
+            string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Disposition: attachment; filename=\"" + filename + "\"\r\nContent-Length: " + data.Length + BuildSecurityHeaders(stream) + "\r\nConnection: close\r\n\r\n";
             byte[] headerBytes = Encoding.ASCII.GetBytes(header);
             stream.Write(headerBytes, 0, headerBytes.Length);
             stream.Write(data, 0, data.Length);
@@ -13918,6 +13930,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "SendUnauthorized keeps the plain-text 401 body for API routes", TestSendUnauthorizedServesPlainTextForApiRequests);
             allPassed &= SelfTestCheck(output, "SendDashboardImage returns 404 with no body when the file is missing", TestSendDashboardImageReturns404WhenFileMissing);
             allPassed &= SelfTestCheck(output, "SendDashboardImage's 200 response carries the same security headers as every other response", TestSendDashboardImageIncludesSecurityHeaders);
+            allPassed &= SelfTestCheck(output, "SendBytes, SendUnauthorized, and SendTooManyRequests all emit the same security header block as SendText", TestSendBytesUnauthorizedTooManyRequestsEmitSameSecurityHeaders);
             allPassed &= SelfTestCheck(output, "TryParsePortFromPrefix extracts the port from a ListenPrefix URL", TestTryParsePortFromPrefix);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper escapes RFC 4515 special characters", TestLdapFilterEscapeSpecialChars);
             allPassed &= SelfTestCheck(output, "LdapFilterEscaper leaves a normal computer name untouched", TestLdapFilterEscapeNormalName);
@@ -15716,6 +15729,70 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
 
             return null;
+        }
+
+        private static string TestSendBytesUnauthorizedTooManyRequestsEmitSameSecurityHeaders()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-secheaders-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo buildMethod = typeof(InventoryServer).GetMethod("BuildSecurityHeaders", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    string headers = (string)buildMethod.Invoke(server, new object[] { stream });
+                    if (headers.IndexOf("X-Content-Type-Options: nosniff", StringComparison.Ordinal) < 0
+                        || headers.IndexOf("X-Frame-Options: DENY", StringComparison.Ordinal) < 0
+                        || headers.IndexOf("Content-Security-Policy:", StringComparison.Ordinal) < 0
+                        || headers.IndexOf("Referrer-Policy:", StringComparison.Ordinal) < 0
+                        || headers.IndexOf("Permissions-Policy:", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected BuildSecurityHeaders to include all 5 baseline headers, got: " + headers;
+                    }
+                }
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendBytes(stream, Encoding.ASCII.GetBytes("data"), "application/octet-stream", "test.bin");
+                    string response = Encoding.ASCII.GetString(stream.ToArray());
+                    if (response.IndexOf("X-Content-Type-Options: nosniff", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected SendBytes to include X-Content-Type-Options";
+                    }
+                }
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    RequestContext request = new RequestContext();
+                    request.Method = "GET";
+                    request.Path = "/api/v1/clients";
+                    server.SendUnauthorized(stream, request);
+                    string response = Encoding.ASCII.GetString(stream.ToArray());
+                    if (response.IndexOf("X-Content-Type-Options: nosniff", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected SendUnauthorized to include X-Content-Type-Options";
+                    }
+                }
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendTooManyRequests(stream, 30);
+                    string response = Encoding.ASCII.GetString(stream.ToArray());
+                    if (response.IndexOf("X-Content-Type-Options: nosniff", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected SendTooManyRequests to include X-Content-Type-Options";
+                    }
+                }
+
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
         }
 
         private static string TestEvaluateLockoutStateNotLockedOutCases()
