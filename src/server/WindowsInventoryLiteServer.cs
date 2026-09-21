@@ -1322,6 +1322,7 @@ namespace WindowsInventoryLite
 
             ReconfigureAdSyncTimer();
             ResetMissedOnceSchedule();
+            ResetMissedOnceLinuxSchedule();
             ReconfigureClientUpdateScheduleTimer();
             ReconfigureLinuxUpdateScheduleTimer();
             ReconfigureSoftwareRepositoryScanTimer();
@@ -1751,6 +1752,34 @@ namespace WindowsInventoryLite
             Dictionary<string, string> updates = new Dictionary<string, string>();
             updates["ClientUpdateScheduleMode"] = "off";
             updates["ClientUpdateScheduleOnceAtUtc"] = "";
+            SaveServerConfigValues(updates);
+        }
+
+        // Linux equivalent of ResetMissedOnceSchedule above - see its own
+        // comment for the full reasoning (a missed one-time push target is
+        // gone and silently cleared rather than fired late, since an
+        // unannounced push right as the service starts is worse than
+        // simply not running it). The Linux schedule previously had no
+        // equivalent at all: a one-time Linux push scheduled in the past
+        // fired immediately and unannounced the next time the service
+        // started.
+        private void ResetMissedOnceLinuxSchedule()
+        {
+            if (options.LinuxUpdateScheduleMode != "once")
+            {
+                return;
+            }
+            DateTime? onceAtUtc = ParseUtcOrNull(options.LinuxUpdateScheduleOnceAtUtc);
+            if (!onceAtUtc.HasValue || DateTime.UtcNow < onceAtUtc.Value)
+            {
+                return;
+            }
+
+            options.LinuxUpdateScheduleMode = "off";
+            options.LinuxUpdateScheduleOnceAtUtc = "";
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["LinuxUpdateScheduleMode"] = "off";
+            updates["LinuxUpdateScheduleOnceAtUtc"] = "";
             SaveServerConfigValues(updates);
         }
 
@@ -13710,6 +13739,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'once' is never due with no target time set", TestShouldRunClientUpdateScheduleOnceMissingTarget);
             allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'interval' is due immediately with no previous run", TestShouldRunClientUpdateScheduleIntervalNoPreviousRun);
             allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'interval' respects the interval window", TestShouldRunClientUpdateScheduleIntervalDueAndNotDue);
+            allPassed &= SelfTestCheck(output, "ResetMissedOnceLinuxSchedule clears a Linux 'once' schedule whose target time has already passed", TestResetMissedOnceLinuxScheduleClearsPastTarget);
+            allPassed &= SelfTestCheck(output, "ResetMissedOnceLinuxSchedule leaves a future Linux 'once' target untouched", TestResetMissedOnceLinuxScheduleLeavesFutureTargetUntouched);
             allPassed &= SelfTestCheck(output, "TryParseTimeOfDay accepts 'HH:mm', rejects bad formats and empty", TestTryParseTimeOfDayAcceptsValidRejectsInvalid);
             allPassed &= SelfTestCheck(output, "IsWithinSoftwareInstallWindow handles a normal (non-wrapping) range", TestIsWithinSoftwareInstallWindowNormalRange);
             allPassed &= SelfTestCheck(output, "IsWithinSoftwareInstallWindow handles a midnight-spanning range", TestIsWithinSoftwareInstallWindowMidnightWrap);
@@ -16791,6 +16822,61 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return "expected mode 'interval' to not be due when lastRunUtc is within intervalHours";
             }
             return null;
+        }
+
+        private static string TestResetMissedOnceLinuxScheduleClearsPastTarget()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxmissedonce-" + Guid.NewGuid().ToString("N"));
+            options.ConfigPath = Path.Combine(options.DataPath, "config.json");
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                options.LinuxUpdateScheduleMode = "once";
+                options.LinuxUpdateScheduleOnceAtUtc = DateTime.UtcNow.AddHours(-2).ToString("yyyy-MM-ddTHH:mm:ssZ");
+                InventoryServer server = new InventoryServer(options);
+
+                System.Reflection.MethodInfo resetMethod = typeof(InventoryServer).GetMethod("ResetMissedOnceLinuxSchedule", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                resetMethod.Invoke(server, null);
+
+                if (options.LinuxUpdateScheduleMode != "off" || !String.IsNullOrEmpty(options.LinuxUpdateScheduleOnceAtUtc))
+                {
+                    return "expected a past-due Linux 'once' schedule to be cleared to 'off' with no target time, got mode=" + options.LinuxUpdateScheduleMode + " onceAtUtc=" + options.LinuxUpdateScheduleOnceAtUtc;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestResetMissedOnceLinuxScheduleLeavesFutureTargetUntouched()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxfutureonce-" + Guid.NewGuid().ToString("N"));
+            options.ConfigPath = Path.Combine(options.DataPath, "config.json");
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                options.LinuxUpdateScheduleMode = "once";
+                string futureTarget = DateTime.UtcNow.AddHours(2).ToString("yyyy-MM-ddTHH:mm:ssZ");
+                options.LinuxUpdateScheduleOnceAtUtc = futureTarget;
+                InventoryServer server = new InventoryServer(options);
+
+                System.Reflection.MethodInfo resetMethod = typeof(InventoryServer).GetMethod("ResetMissedOnceLinuxSchedule", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                resetMethod.Invoke(server, null);
+
+                if (options.LinuxUpdateScheduleMode != "once" || options.LinuxUpdateScheduleOnceAtUtc != futureTarget)
+                {
+                    return "expected a future Linux 'once' target to be left untouched, got mode=" + options.LinuxUpdateScheduleMode + " onceAtUtc=" + options.LinuxUpdateScheduleOnceAtUtc;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
         }
 
         private static string TestTryParseTimeOfDayAcceptsValidRejectsInvalid()
