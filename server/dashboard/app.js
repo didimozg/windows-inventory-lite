@@ -47,6 +47,7 @@
     licenses: [], editingLicenseId: null, licenseFormComputers: [],
     licenseKeySources: [], editingLicenseKeySourceId: null,
     windowsUpdates: [], editingWindowsUpdateId: null,
+    wsusMissingSummary: [],
     thirdPartySoftware: [], editingThirdPartySoftwareId: null,
     revealedLicenseKeys: {},
     sort: {
@@ -3758,11 +3759,40 @@
       });
   }
 
-  // Placeholder for the Missing updates sub-tab - Task 13 replaces this with
-  // a real fetch against the WSUS missing-summary endpoint and populates
-  // #windowsUpdatesMissingBody with actual rows.
   function loadWsusMissingSummary() {
-    byId('windowsUpdatesMissingBody').innerHTML = '<tr><td colspan="5" class="empty">Missing updates reporting is not implemented yet.</td></tr>';
+    fetch('/api/v1/windows-updates/missing-summary', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.wsusMissingSummary = data.missingUpdates || [];
+        renderWsusMissingSummary();
+      })
+      .catch(error => {
+        byId('windowsUpdatesMissingBody').innerHTML = `<tr><td colspan="5" class="empty">Missing-update summary unavailable: ${escapeHtml(error.message)}</td></tr>`;
+      });
+  }
+
+  function renderWsusMissingSummary() {
+    const tbody = byId('windowsUpdatesMissingBody');
+    const rows = state.wsusMissingSummary || [];
+    tbody.innerHTML = rows.map(entry => `
+      <tr>
+        <td class="mono">${escapeHtml(entry.kbId)}</td>
+        <td>${escapeHtml(entry.title || '')}</td>
+        <td>${escapeHtml(entry.severity || '')}</td>
+        <td>${entry.machineCount}</td>
+        <td><button data-add-catalog-for-kb="${escapeHtml(entry.kbId)}" class="export-button" type="button">+ Add catalog entry</button></td>
+      </tr>
+    `).join('') || '<tr><td colspan="5" class="empty">No missing updates reported by any client yet.</td></tr>';
+
+    tbody.querySelectorAll('[data-add-catalog-for-kb]').forEach(button => {
+      button.addEventListener('click', () => {
+        openWindowsUpdateForm(null, { targetMode: 'missingKb', kbId: button.dataset.addCatalogForKb });
+        setView('windowsUpdates', 'catalog');
+      });
+    });
   }
 
   function loadWindowsUpdates() {
