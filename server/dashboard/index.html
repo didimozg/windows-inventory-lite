@@ -762,11 +762,24 @@
                 Arguments
                 <input id="windowsUpdateArguments" type="text">
               </label>
+              <label class="license-name-field">
+                Target mode
+                <select id="windowsUpdateTargetMode">
+                  <option value="static">Static hosts</option>
+                  <option value="missingKb">Missing KB</option>
+                </select>
+              </label>
             </div>
-            <div class="license-computers-field">
+            <div id="windowsUpdateTargetsField" class="license-computers-field">
               <label>
                 Targets (computer names, one per line, or comma/semicolon-separated)
                 <textarea id="windowsUpdateTargets" rows="4"></textarea>
+              </label>
+            </div>
+            <div id="windowsUpdateKbIdField" class="license-computers-field hidden">
+              <label>
+                KB ID (e.g. KB5099539) - targets every machine whose most recent scan reports this KB as missing
+                <input id="windowsUpdateKbId" type="text">
               </label>
             </div>
             <label><input id="windowsUpdateRequiresReboot" type="checkbox"> Requires reboot</label>
@@ -780,7 +793,7 @@
           <div class="table-wrap">
             <table>
               <thead>
-                <tr><th>Name</th><th>File path</th><th>Targets</th><th>Enabled</th><th>Edit</th><th>Delete</th></tr>
+                <tr><th>Name</th><th>File path</th><th>Targeting</th><th>Enabled</th><th>Edit</th><th>Delete</th></tr>
               </thead>
               <tbody id="windowsUpdatesBody"></tbody>
             </table>

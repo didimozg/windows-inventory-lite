@@ -3816,7 +3816,7 @@
       <tr>
         <td>${escapeHtml(entry.name)}</td>
         <td class="mono">${escapeHtml(entry.relativePath)}</td>
-        <td class="mono">${escapeHtml(entry.targets)}</td>
+        <td class="mono">${entry.targetMode === 'missingKb' ? 'Auto: ' + escapeHtml(entry.kbId) : escapeHtml(entry.targets)}</td>
         <td>${entry.enabled ? 'Yes' : 'No'}</td>
         <td><button data-edit-windows-update="${escapeHtml(entry.id)}" class="export-button" type="button">Edit</button></td>
         <td><button data-delete-windows-update="${escapeHtml(entry.id)}" class="export-button" type="button">Delete</button></td>
@@ -3831,13 +3831,18 @@
     });
   }
 
-  function openWindowsUpdateForm(entryId) {
+  function openWindowsUpdateForm(entryId, prefill) {
     state.editingWindowsUpdateId = entryId || null;
     const entry = entryId ? state.windowsUpdates.find(e => e.id === entryId) : null;
+    const targetMode = entry ? (entry.targetMode || 'static') : (prefill ? prefill.targetMode : 'static') || 'static';
     byId('windowsUpdateName').value = entry ? entry.name : '';
     byId('windowsUpdateRelativePath').value = entry ? entry.relativePath : '';
     byId('windowsUpdateArguments').value = entry ? entry.arguments : '';
     byId('windowsUpdateTargets').value = entry ? entry.targets : '';
+    byId('windowsUpdateTargetMode').value = targetMode;
+    byId('windowsUpdateKbId').value = entry ? (entry.kbId || '') : (prefill ? prefill.kbId : '') || '';
+    byId('windowsUpdateTargetsField').classList.toggle('hidden', targetMode !== 'static');
+    byId('windowsUpdateKbIdField').classList.toggle('hidden', targetMode !== 'missingKb');
     byId('windowsUpdateRequiresReboot').checked = entry ? !!entry.requiresReboot : false;
     byId('windowsUpdateEnabled').checked = entry ? !!entry.enabled : true;
     byId('windowsUpdateMessage').className = 'pkg-message hidden';
@@ -3854,6 +3859,8 @@
     const relativePath = byId('windowsUpdateRelativePath').value.trim();
     const argumentsValue = byId('windowsUpdateArguments').value.trim();
     const targets = byId('windowsUpdateTargets').value.trim();
+    const targetMode = byId('windowsUpdateTargetMode').value;
+    const kbId = byId('windowsUpdateKbId').value.trim();
     const requiresReboot = byId('windowsUpdateRequiresReboot').checked;
     const enabled = byId('windowsUpdateEnabled').checked;
     const editingId = state.editingWindowsUpdateId;
@@ -3864,7 +3871,7 @@
       method,
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, relativePath, arguments: argumentsValue, targets, requiresReboot, enabled })
+      body: JSON.stringify({ name, relativePath, arguments: argumentsValue, targets, targetMode, kbId, requiresReboot, enabled })
     })
       .then(r => r.json().then(data => ({ ok: r.ok, data })))
       .then(({ ok, data }) => {
@@ -5823,6 +5830,11 @@
   byId('windowsUpdateSaveButton').addEventListener('click', saveWindowsUpdate);
   byId('windowsUpdateCancelButton').addEventListener('click', closeWindowsUpdateForm);
   byId('windowsUpdateScanButton').addEventListener('click', refreshWindowsUpdateScan);
+  byId('windowsUpdateTargetMode').addEventListener('change', () => {
+    const mode = byId('windowsUpdateTargetMode').value;
+    byId('windowsUpdateTargetsField').classList.toggle('hidden', mode !== 'static');
+    byId('windowsUpdateKbIdField').classList.toggle('hidden', mode !== 'missingKb');
+  });
   byId('thirdPartySoftwareTab').addEventListener('click', () => setView('thirdPartySoftware'));
   byId('thirdPartySoftwareAddButton').addEventListener('click', () => openThirdPartySoftwareForm(null));
   byId('thirdPartySoftwareSaveButton').addEventListener('click', saveThirdPartySoftware);
