@@ -710,6 +710,7 @@
       case 'office': return versionSortKey(client.office && client.office.version) + '\u001f' + ((client.office && client.office.name) || '').toLowerCase();
       case 'windowsActivated': return (client.activation && client.activation.windows && client.activation.windows.activated) ? 1 : 0;
       case 'officeActivated': return (client.activation && client.activation.office && client.activation.office.activated) ? 1 : 0;
+      case 'wuServiceUnavailable': return client.wuServiceUnavailable ? 0 : 1;
       case 'softwareCount': return (client.software || []).length;
       case 'collectedAt': return new Date(client.collectedAt || client.sourceUpdatedAt || 0).getTime();
       default: return '';
@@ -749,6 +750,11 @@
       // this needs) - reachable only via the Dashboard's "Office activated"
       // tile setting state.sort.clients directly.
       case 'officeActivation': return isWindows ? clientSortValue(client, 'officeActivated') : null;
+      // Not exposed as its own clickable column header either - reachable
+      // only via the Dashboard's "WU disabled" tile setting state.sort.clients
+      // directly, same as 'officeActivation' above. Linux has no Windows
+      // Update service concept, so Linux rows sort to the end (null).
+      case 'wuServiceUnavailable': return isWindows ? clientSortValue(client, 'wuServiceUnavailable') : null;
       case 'items': return isWindows ? clientSortValue(client, 'softwareCount') : linuxClientSortValue(client, 'softwareCount');
       case 'collectedAt': return new Date(client.collectedAt || client.sourceUpdatedAt || 0).getTime();
       default: return '';
@@ -4487,6 +4493,13 @@
     byId('dashStaleCount').textContent = dashStaleCount;
     byId('dashStaleLabel').textContent = `Stale >${state.staleHours}h`;
     byId('dashStaleTile').classList.toggle('tile-alert', dashStaleCount > 0);
+    // wuServiceUnavailable is a Windows-only field (same one the Clients
+    // table's "WU SERVICE UNAVAILABLE" badge reads), but fleet-wide over
+    // allClients matches the Stale tile's own convention - Linux clients
+    // never carry the field so they can't inflate the count.
+    const dashWuDisabledCount = allClients.filter(client => client.wuServiceUnavailable).length;
+    byId('dashWuDisabledCount').textContent = dashWuDisabledCount;
+    byId('dashWuDisabledTile').classList.toggle('tile-alert', dashWuDisabledCount > 0);
     byId('dashLicenseCount').textContent = state.licenses.length;
     byId('dashUsbTile').classList.toggle('hidden', !state.showUsbStorageIndicator);
     byId('dashUsbCount').textContent = allClients.filter(client => client.hasUsbStorage).length;
@@ -5419,7 +5432,8 @@
   const dashboardTileHandlers = [
     ['dashWindowsActivatedTile', () => navigateToClientsSortedBy('activation', 'windows')],
     ['dashOfficeActivatedTile', () => navigateToClientsSortedBy('officeActivation', 'windows')],
-    ['dashStaleTile', () => navigateToClientsSortedBy('collectedAt', 'all')]
+    ['dashStaleTile', () => navigateToClientsSortedBy('collectedAt', 'all')],
+    ['dashWuDisabledTile', () => navigateToClientsSortedBy('wuServiceUnavailable', 'windows')]
   ];
   dashboardTileHandlers.forEach(([id, handler]) => {
     byId(id).addEventListener('click', handler);
