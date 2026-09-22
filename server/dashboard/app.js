@@ -4683,7 +4683,7 @@
 
       return `<tr class="${staleClass}">
         <td><button class="link-button" type="button" ${expandAttr}>${escapeHtml(clientDisplayName(client))}</button> <small class="platform-tag">${escapeHtml(clientPlatformLabel(client))}</small>${usbBadge}${staleBadge}${domainHtml}${ipAddressesHtml ? `<small class="mono">${ipAddressesHtml}</small>` : ''}</td>
-        <td>${escapeHtml(client.clientVersion)}${client.tokenIssue ? ` <span class="usb-badge" title="A recent request from this client's last known address ${client.tokenIssue === 'missing' ? 'had no ingestion token' : 'had a wrong ingestion token'}">${client.tokenIssue === 'missing' ? 'TOKEN MISSING' : 'TOKEN MISMATCH'}</span>` : ''}</td>
+        <td>${escapeHtml(client.clientVersion)}${client.tokenIssue ? ` <span class="usb-badge" title="A recent request from this client's last known address ${client.tokenIssue === 'missing' ? 'had no ingestion token' : 'had a wrong ingestion token'}">${client.tokenIssue === 'missing' ? 'TOKEN MISSING' : 'TOKEN MISMATCH'}</span>` : ''}${client.wuServiceUnavailable ? ' <span class="usb-badge" title="The Windows Update service (wuauserv) was not running the last time this client tried to scan for missing updates">WU SERVICE UNAVAILABLE</span>' : ''}</td>
         <td>${osCell}</td>
         <td>${officeCell}</td>
         <td>${activationCell}</td>
