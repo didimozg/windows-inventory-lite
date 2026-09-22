@@ -14081,8 +14081,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/wsus-cab-download requires a valid ingestion token unconditionally, rejects with 401 when missing/wrong", TestDownloadWsusCabRejectsWithoutValidToken);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/wsus-cab-download streams the real cab bytes on success, 404s when the file does not exist", TestDownloadWsusCabStreamsRealBytesOrReturns404);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results requires a valid ingestion token unconditionally", TestReceiveWsusScanResultsRejectsWithoutValidToken);
-            allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results writes wsusMissingUpdates/wsusScannedCabHash/wsusScanAt onto the real stored report, is a no-op for an unknown computer", TestReceiveWsusScanResultsWritesFieldsOntoExistingReport);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results writes wsusMissingUpdates/wsusScannedCabHash/wsusScanAt onto the real stored report and preserves other pre-existing fields", TestReceiveWsusScanResultsWritesFieldsOntoExistingReportAndPreservesOtherFields);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results with wuServiceAvailable=false still writes wuServiceUnavailable=true and an empty missing-updates list", TestReceiveWsusScanResultsRecordsServiceUnavailableFlag);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results is a no-op for an unknown computer with no stored report", TestReceiveWsusScanResultsIsNoOpForUnknownComputer);
             return allPassed;
         }
 
@@ -23026,7 +23027,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
-        private static string TestReceiveWsusScanResultsWritesFieldsOntoExistingReport()
+        private static string TestReceiveWsusScanResultsWritesFieldsOntoExistingReportAndPreservesOtherFields()
         {
             ServerOptions options = new ServerOptions();
             options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-scanresultswrite-" + Guid.NewGuid().ToString("N"));
@@ -23075,9 +23076,55 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 {
                     return "expected the recorded missing update to have kbId KB5099539";
                 }
-                if (savedReport.ContainsKey("clientVersion") && Convert.ToString(savedReport["clientVersion"]) != "0.7.0")
+                if (!savedReport.ContainsKey("clientVersion") || Convert.ToString(savedReport["clientVersion"]) != "0.7.0")
                 {
                     return "expected the pre-existing clientVersion field to survive untouched";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        // Regression coverage for the accept-and-drop behavior documented at
+        // the top of ReceiveWsusScanResults: a scan-results report for a
+        // computer with no existing stored report must never create a
+        // partial record from a ping, same convention as MergeServiceStatus.
+        private static string TestReceiveWsusScanResultsIsNoOpForUnknownComputer()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-scanresultsunknown-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/client/wsus-scan-results";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "real-token";
+                request.Body = "{\"computerName\":\"UNKNOWN-PC\",\"cabHash\":\"abc123\",\"wuServiceAvailable\":true,\"missingUpdates\":[{\"kbId\":\"KB5099539\",\"title\":\"Test update\",\"msrcSeverity\":\"Critical\"}]}";
+                request.RemoteAddress = IPAddress.Loopback;
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("ReceiveWsusScanResults", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("\"status\":\"ok\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the unknown-computer report to still be accepted with status ok, got: " + responseText;
+                }
+                string reportPath = Path.Combine(options.DataPath, "UNKNOWN-PC.json");
+                if (File.Exists(reportPath))
+                {
+                    return "expected no report file to be created for an unknown computer, but found: " + reportPath;
                 }
                 return null;
             }
