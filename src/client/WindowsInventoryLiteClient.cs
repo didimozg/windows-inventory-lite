@@ -2348,6 +2348,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ApplyInventoryAckResponse does not lose a previously-learned field when a later ack only carries a different one", TestApplyInventoryAckResponsePreservesUnrelatedLearnedFields);
             allPassed &= SelfTestCheck(output, "ApplyConfigFromServer ignores an out-of-range interval and applies an in-range one", TestApplyConfigFromServerValidatesIntervalRange);
             allPassed &= SelfTestCheck(output, "LoadLicenseKeySourcesCache parses a source written via ApplyInventoryAckResponse", TestLoadLicenseKeySourcesCacheParsesEntryWrittenThroughAckResponse);
+            allPassed &= SelfTestCheck(output, "WsusScanner.ShouldRescan returns true when hashes differ or the client has never scanned, false when they match", TestWsusScannerShouldRescanCompares);
             return allPassed;
         }
 
@@ -3286,6 +3287,27 @@ namespace WindowsInventoryLite
             {
                 try { Directory.Delete(tempDir, true); } catch { }
             }
+        }
+
+        private static string TestWsusScannerShouldRescanCompares()
+        {
+            if (!WsusScanner.ShouldRescan("abc123", ""))
+            {
+                return "expected ShouldRescan to return true when the client has never scanned (empty last-scanned hash)";
+            }
+            if (!WsusScanner.ShouldRescan("abc123", "def456"))
+            {
+                return "expected ShouldRescan to return true when the hashes differ";
+            }
+            if (WsusScanner.ShouldRescan("abc123", "abc123"))
+            {
+                return "expected ShouldRescan to return false when the hashes already match";
+            }
+            if (WsusScanner.ShouldRescan("", "abc123"))
+            {
+                return "expected ShouldRescan to return false when the server has no cab configured (empty server hash), regardless of the client's own last-scanned hash";
+            }
+            return null;
         }
 
         // Returns true only if the process both exited within the timeout
