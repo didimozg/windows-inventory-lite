@@ -2044,6 +2044,10 @@ namespace WindowsInventoryLite
                     {
                         DownloadLinuxClientPackageUpdate(stream, request);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/client/wsus-cab-download")
+                    {
+                        DownloadWsusCab(stream, request);
+                    }
                     else if (IsBasicAuthLockedOut(request, out loginLockoutRetryAfterSeconds))
                     {
                         SendTooManyRequests(stream, loginLockoutRetryAfterSeconds);
@@ -9024,6 +9028,32 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendBytes(stream, binaryBytes, "application/octet-stream", "wil-linux-client");
         }
 
+        // Called by the running Windows client itself to fetch the
+        // admin-placed wsusscn2.cab for an offline WUA scan - same
+        // ingestion-token-always-required posture as the self-update
+        // download endpoints above, since a tampered response here could
+        // feed a forged/malicious cab into the client's own WUA scan.
+        private void DownloadWsusCab(Stream stream, RequestContext request)
+        {
+            string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
+            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            {
+                RecordIngestionRejection(request, "wsus-cab-download", ResolveIngestionRejectionReason(token));
+                SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
+                return;
+            }
+
+            string cabPath = GetWsusCabPath();
+            if (!File.Exists(cabPath))
+            {
+                SendText(stream, "WSUS cab file not configured on this server.", "text/plain; charset=utf-8", 404);
+                return;
+            }
+
+            byte[] cabBytes = File.ReadAllBytes(cabPath);
+            SendBytes(stream, cabBytes, "application/octet-stream", "wsusscn2.cab");
+        }
+
         private void SendLinuxClientPackageStatus(Stream stream)
         {
             JavaScriptSerializer serializer = CreateJsonSerializer();
@@ -13958,6 +13988,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "GetWsusCabStatus reports Present=false with no other fields populated when the cab file does not exist", TestGetWsusCabStatusReportsAbsentWhenFileMissing);
             allPassed &= SelfTestCheck(output, "GetWsusCabStatus computes the real SHA-256 hash, size, and modified time of an existing cab file", TestGetWsusCabStatusComputesRealHashSizeAndModifiedTime);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates/cab-status returns present=false with no cab file, then present=true with real hash/size/modifiedUtc once one exists", TestSendWsusCabStatusReflectsRealFileState);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/wsus-cab-download requires a valid ingestion token unconditionally, rejects with 401 when missing/wrong", TestDownloadWsusCabRejectsWithoutValidToken);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/wsus-cab-download streams the real cab bytes on success, 404s when the file does not exist", TestDownloadWsusCabStreamsRealBytesOrReturns404);
             return allPassed;
         }
 
@@ -22765,6 +22797,98 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                         || responseText.IndexOf("\"modifiedUtc\":\"", StringComparison.OrdinalIgnoreCase) < 0)
                     {
                         return "expected present:true with real hash/sizeBytes/modifiedUtc fields, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestDownloadWsusCabRejectsWithoutValidToken()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-cabdownloadauth-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client/wsus-cab-download";
+                request.Headers = new Dictionary<string, string>();
+                request.RemoteAddress = IPAddress.Loopback;
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("DownloadWsusCab", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401 Unauthorized", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 401 Unauthorized response with no token, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestDownloadWsusCabStreamsRealBytesOrReturns404()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-cabdownload-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client/wsus-cab-download";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "real-token";
+                request.RemoteAddress = IPAddress.Loopback;
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("DownloadWsusCab", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("404", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected 404 when no cab file exists yet, got: " + responseText;
+                    }
+                }
+
+                System.Reflection.MethodInfo dirMethod = typeof(InventoryServer).GetMethod("GetWsusDirectory", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                string wsusDir = (string)dirMethod.Invoke(server, null);
+                Directory.CreateDirectory(wsusDir);
+                System.Reflection.MethodInfo pathMethod = typeof(InventoryServer).GetMethod("GetWsusCabPath", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                string cabPath = (string)pathMethod.Invoke(server, null);
+                byte[] fakeContent = Encoding.UTF8.GetBytes("fake cab bytes for download test");
+                File.WriteAllBytes(cabPath, fakeContent);
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("DownloadWsusCab", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                    byte[] responseBytes = stream.ToArray();
+                    string headerText = Encoding.ASCII.GetString(responseBytes, 0, Math.Min(200, responseBytes.Length));
+                    if (headerText.IndexOf("200 OK", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected 200 OK once the cab file exists, got header: " + headerText;
+                    }
+                    string fullText = Encoding.UTF8.GetString(responseBytes);
+                    if (fullText.IndexOf("fake cab bytes for download test", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected the real file bytes in the response body";
                     }
                 }
                 return null;
