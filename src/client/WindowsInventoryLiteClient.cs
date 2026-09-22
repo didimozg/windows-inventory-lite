@@ -2378,6 +2378,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "WsusScanner.ShouldRescan returns true when hashes differ or the client has never scanned, false when they match", TestWsusScannerShouldRescanCompares);
             allPassed &= SelfTestCheck(output, "DownloadAndVerifyWsusCab writes the file and returns true when the downloaded bytes' hash matches", TestDownloadAndVerifyWsusCabSucceedsOnHashMatch);
             allPassed &= SelfTestCheck(output, "DownloadAndVerifyWsusCab returns false and does not write the file when the downloaded bytes' hash does not match", TestDownloadAndVerifyWsusCabFailsOnHashMismatch);
+            allPassed &= SelfTestCheck(output, "PostWsusScanResults returns true and posts the expected JSON fields when the injected postJson succeeds", TestPostWsusScanResultsReturnsTrueAndPostsExpectedFieldsOnSuccess);
+            allPassed &= SelfTestCheck(output, "PostWsusScanResults returns false when the injected postJson throws", TestPostWsusScanResultsReturnsFalseWhenPostJsonThrows);
             return allPassed;
         }
 
@@ -3392,6 +3394,66 @@ namespace WindowsInventoryLite
             }
         }
 
+        private static string TestPostWsusScanResultsReturnsTrueAndPostsExpectedFieldsOnSuccess()
+        {
+            string capturedJson = null;
+            Func<string, string, string, string> fakePostJson = (url, json, token) =>
+            {
+                capturedJson = json;
+                return "{}";
+            };
+
+            List<Dictionary<string, object>> missingUpdates = new List<Dictionary<string, object>>();
+            Dictionary<string, object> oneUpdate = new Dictionary<string, object>();
+            oneUpdate["kb"] = "KB1234567";
+            missingUpdates.Add(oneUpdate);
+
+            bool result = PostWsusScanResults("https://server/api/v1/inventory", "token", "TEST-PC", "abc123", true, missingUpdates, fakePostJson);
+            if (!result)
+            {
+                return "expected PostWsusScanResults to return true when the injected postJson succeeds";
+            }
+            if (capturedJson == null)
+            {
+                return "expected postJson to be called with a JSON body";
+            }
+
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            Dictionary<string, object> parsed = serializer.Deserialize<Dictionary<string, object>>(capturedJson);
+            if (!parsed.ContainsKey("computerName") || (string)parsed["computerName"] != "TEST-PC")
+            {
+                return "expected the posted JSON to contain computerName='TEST-PC', got: " + capturedJson;
+            }
+            if (!parsed.ContainsKey("cabHash") || (string)parsed["cabHash"] != "abc123")
+            {
+                return "expected the posted JSON to contain cabHash='abc123', got: " + capturedJson;
+            }
+            if (!parsed.ContainsKey("wuServiceAvailable") || !(bool)parsed["wuServiceAvailable"])
+            {
+                return "expected the posted JSON to contain wuServiceAvailable=true, got: " + capturedJson;
+            }
+            if (!parsed.ContainsKey("missingUpdates") || !(parsed["missingUpdates"] is ArrayList) || ((ArrayList)parsed["missingUpdates"]).Count != 1)
+            {
+                return "expected the posted JSON to contain a one-element missingUpdates array, got: " + capturedJson;
+            }
+            return null;
+        }
+
+        private static string TestPostWsusScanResultsReturnsFalseWhenPostJsonThrows()
+        {
+            Func<string, string, string, string> throwingPostJson = (url, json, token) =>
+            {
+                throw new InvalidOperationException("simulated HTTP failure");
+            };
+
+            bool result = PostWsusScanResults("https://server/api/v1/inventory", "token", "TEST-PC", "abc123", true, new List<Dictionary<string, object>>(), throwingPostJson);
+            if (result)
+            {
+                return "expected PostWsusScanResults to return false when the injected postJson throws";
+            }
+            return null;
+        }
+
         // Returns true only if the process both exited within the timeout
         // AND returned a zero exit code - the caller previously ignored
         // both signals and always assumed success.
@@ -3588,46 +3650,14 @@ namespace WindowsInventoryLite
             }
         }
 
-        // Mirrors HttpGetBytes's exact structure (TLS 1.2 opt-in,
-        // 60-second timeout, X-Inventory-Token header) for a POST with a
-        // JSON body instead. Distinct from the existing PostJson: that
-        // helper returns the response body and throws on a non-2xx status,
-        // while PostWsusScanResults below needs the raw status code so it
-        // can report success/failure as a bool without relying on
-        // exception control flow for the (self-testable) delegate.
-        internal static int HttpPostJson(string url, string token, string jsonBody)
-        {
-            if (url.StartsWith("https:", StringComparison.OrdinalIgnoreCase))
-            {
-                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
-            }
-
-            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
-            request.Method = "POST";
-            request.ContentType = "application/json";
-            request.Timeout = 60000;
-            if (!String.IsNullOrEmpty(token))
-            {
-                request.Headers["X-Inventory-Token"] = token;
-            }
-
-            byte[] bodyBytes = Encoding.UTF8.GetBytes(jsonBody);
-            request.ContentLength = bodyBytes.Length;
-            using (Stream requestStream = request.GetRequestStream())
-            {
-                requestStream.Write(bodyBytes, 0, bodyBytes.Length);
-            }
-
-            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
-            {
-                return (int)response.StatusCode;
-            }
-        }
-
-        // httpPost is injected (production: HttpPostJson above) so the
-        // JSON body construction is testable without a real HTTP call.
-        // Returns true only on a 2xx response.
-        internal static bool PostWsusScanResults(string serverUrl, string token, string computerName, string cabHash, bool wuServiceAvailable, List<Dictionary<string, object>> missingUpdates, Func<string, string, string, int> httpPost)
+        // postJson is injected (production: the existing PostJson) so this
+        // is testable without a real HTTP call. Mirrors
+        // ApplySelfUpdateFromServerCore's own convention: the injected
+        // delegate throws on failure (PostJson throws InvalidOperationException
+        // on a non-2xx response), the caller catches and maps to a clean
+        // bool instead of letting a real HTTP failure propagate out of the
+        // poll cycle.
+        internal static bool PostWsusScanResults(string serverUrl, string token, string computerName, string cabHash, bool wuServiceAvailable, List<Dictionary<string, object>> missingUpdates, Func<string, string, string, string> postJson)
         {
             JavaScriptSerializer serializer = new JavaScriptSerializer();
             Dictionary<string, object> body = new Dictionary<string, object>();
@@ -3638,8 +3668,15 @@ namespace WindowsInventoryLite
             string json = serializer.Serialize(body);
 
             string url = ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/wsus-scan-results");
-            int statusCode = httpPost(url, token, json);
-            return statusCode >= 200 && statusCode < 300;
+            try
+            {
+                postJson(url, json, token);
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
 
         // options.ServerUrl is the full URL of the inventory ingestion
