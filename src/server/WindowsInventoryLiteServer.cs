@@ -2780,19 +2780,20 @@ namespace WindowsInventoryLite
                 return;
             }
 
+            HashSet<string> missingKbIds = LoadWsusMissingKbIds(computerName);
             ArrayList jobs = new ArrayList();
             lock (windowsUpdatesLock)
             {
                 foreach (Dictionary<string, object> entry in LoadWindowsUpdates())
                 {
-                    AppendJobIfTargeted(jobs, entry, "windowsUpdate", computerName);
+                    AppendJobIfTargeted(jobs, entry, "windowsUpdate", computerName, missingKbIds);
                 }
             }
             lock (thirdPartySoftwareLock)
             {
                 foreach (Dictionary<string, object> entry in LoadThirdPartySoftware())
                 {
-                    AppendJobIfTargeted(jobs, entry, "thirdPartySoftware", computerName);
+                    AppendJobIfTargeted(jobs, entry, "thirdPartySoftware", computerName, missingKbIds);
                 }
             }
 
@@ -2809,7 +2810,56 @@ namespace WindowsInventoryLite
             SendJson(stream, serializer.Serialize(response));
         }
 
-        private static void AppendJobIfTargeted(ArrayList jobs, Dictionary<string, object> entry, string catalogType, string computerName)
+        // Loads just the one computer's own set of currently-missing KB
+        // IDs, for the missingKb targeting-mode resolution below. A
+        // dedicated single-file read (not LoadClientReports(), which
+        // scans every stored report) since this runs once per
+        // software-jobs poll from every single client - reading the
+        // whole fleet's reports on every poll would not scale. Tolerates
+        // a missing/corrupt report the same way other per-computer
+        // lookups in this file do - returns an empty set rather than
+        // failing the whole software-jobs response.
+        private HashSet<string> LoadWsusMissingKbIds(string computerName)
+        {
+            HashSet<string> result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
+            if (!File.Exists(path))
+            {
+                return result;
+            }
+            try
+            {
+                JavaScriptSerializer serializer = CreateJsonSerializer();
+                Dictionary<string, object> report = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                if (report != null && report.ContainsKey("wsusMissingUpdates"))
+                {
+                    ArrayList missing = report["wsusMissingUpdates"] as ArrayList;
+                    if (missing != null)
+                    {
+                        foreach (object item in missing)
+                        {
+                            Dictionary<string, object> entry = item as Dictionary<string, object>;
+                            if (entry != null && entry.ContainsKey("kbId"))
+                            {
+                                string kbId = Convert.ToString(entry["kbId"]);
+                                if (!String.IsNullOrEmpty(kbId))
+                                {
+                                    result.Add(kbId);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Tolerate a torn/corrupt report the same way
+                // LoadClientReports does elsewhere.
+            }
+            return result;
+        }
+
+        private static void AppendJobIfTargeted(ArrayList jobs, Dictionary<string, object> entry, string catalogType, string computerName, HashSet<string> missingKbIds)
         {
             bool enabled = entry.ContainsKey("enabled") && Convert.ToBoolean(entry["enabled"]);
             if (!enabled)
@@ -2817,15 +2867,25 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            string targetsText = GetStringValue(entry, "targets");
-            ArrayList targets = ExpandInstallTargets(targetsText);
-            bool isTargeted = false;
-            foreach (string target in targets)
+            string targetMode = GetStringValue(entry, "targetMode");
+            bool isTargeted;
+            if (targetMode == "missingKb")
             {
-                if (String.Equals(Convert.ToString(target), computerName, StringComparison.OrdinalIgnoreCase))
+                string kbId = GetStringValue(entry, "kbId");
+                isTargeted = !String.IsNullOrEmpty(kbId) && missingKbIds != null && missingKbIds.Contains(kbId);
+            }
+            else
+            {
+                string targetsText = GetStringValue(entry, "targets");
+                ArrayList targets = ExpandInstallTargets(targetsText);
+                isTargeted = false;
+                foreach (string target in targets)
                 {
-                    isTargeted = true;
-                    break;
+                    if (String.Equals(Convert.ToString(target), computerName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        isTargeted = true;
+                        break;
+                    }
                 }
             }
 
@@ -13870,6 +13930,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ShouldAdmitSoftwareInstallWindowRequest inside the window compares the sample against the ramp probability", TestShouldAdmitSoftwareInstallWindowRequestInsideWindowComparesSample);
             allPassed &= SelfTestCheck(output, "ShouldAdmitSoftwareInstallWindowRequest fails open when the configured window is unparsable", TestShouldAdmitSoftwareInstallWindowRequestFailsOpenOnBadConfig);
             allPassed &= SelfTestCheck(output, "SendClientSoftwareJobs withholds a targeted job outside the configured install window, and delivers it once the window is disabled", TestSendClientSoftwareJobsWithheldOutsideInstallWindow);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs targets a missingKb-mode entry to a computer whose last scan reported that exact KB as missing", TestSendClientSoftwareJobsTargetsMissingKbEntryDynamically);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs does not target a missingKb-mode entry to a computer that never reported that KB as missing", TestSendClientSoftwareJobsDoesNotTargetMissingKbEntryWhenNotMissing);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs still targets a static-mode entry by hostname unchanged, zero regression from the missingKb addition", TestSendClientSoftwareJobsStaticTargetingUnaffected);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall updates a target's stored clientVersion", TestPatchClientReportVersionAfterInstallUpdatesVersion);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall's lastInstalledAtUtc is cleared once a real report overwrites the file", TestPatchClientReportVersionAfterInstallFieldClearedByRealReport);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall is a no-op when the target has no stored report yet", TestPatchClientReportVersionAfterInstallMissingReport);
@@ -14221,14 +14284,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             entry["arguments"] = "/quiet";
             entry["requiresReboot"] = true;
 
-            AppendJobIfTargeted(jobs, entry, "windowsUpdate", "PC-002");
+            AppendJobIfTargeted(jobs, entry, "windowsUpdate", "PC-002", null);
             if (jobs.Count != 1)
             {
                 return "expected PC-002 (a listed target) to receive this job";
             }
 
             jobs.Clear();
-            AppendJobIfTargeted(jobs, entry, "windowsUpdate", "PC-999");
+            AppendJobIfTargeted(jobs, entry, "windowsUpdate", "PC-999", null);
             if (jobs.Count != 0)
             {
                 return "expected PC-999 (not a listed target) to NOT receive this job";
@@ -14243,7 +14306,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             entry["id"] = "job-1";
             entry["enabled"] = false;
             entry["targets"] = "PC-001";
-            AppendJobIfTargeted(jobs, entry, "windowsUpdate", "PC-001");
+            AppendJobIfTargeted(jobs, entry, "windowsUpdate", "PC-001", null);
             if (jobs.Count != 0)
             {
                 return "expected a disabled entry to never be assigned, even to a listed target";
@@ -17253,6 +17316,161 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     return "expected the targeted catalog entry to appear once the install window feature is disabled, got: " + responseText;
                 }
 
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendClientSoftwareJobsTargetsMissingKbEntryDynamically()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-dynamictarget-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                report["computerName"] = "PC-MISSING";
+                ArrayList missing = new ArrayList();
+                Dictionary<string, object> missingEntry = new Dictionary<string, object>();
+                missingEntry["kbId"] = "KB5099539";
+                missingEntry["title"] = "Test KB";
+                missingEntry["msrcSeverity"] = "Critical";
+                missing.Add(missingEntry);
+                report["wsusMissingUpdates"] = missing;
+                File.WriteAllText(Path.Combine(options.DataPath, "PC-MISSING.json"), serializer.Serialize(report), new UTF8Encoding(false));
+
+                RequestContext createRequest = new RequestContext();
+                createRequest.Method = "POST";
+                createRequest.Path = "/api/v1/windows-updates";
+                createRequest.Headers = new Dictionary<string, string>();
+                createRequest.Body = "{\"name\":\"KB5099539 rollout\",\"relativePath\":\"windows-updates\\\\kb5099539.msu\",\"targetMode\":\"missingKb\",\"kbId\":\"KB5099539\"}";
+                createRequest.RemoteAddress = IPAddress.Loopback;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("CreateWindowsUpdate", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, createRequest });
+                }
+
+                RequestContext jobsRequest = new RequestContext();
+                jobsRequest.Method = "GET";
+                jobsRequest.Path = "/api/v1/client/software-jobs?computerName=PC-MISSING";
+                jobsRequest.Headers = new Dictionary<string, string>();
+                jobsRequest.Headers["x-inventory-token"] = "real-token";
+                jobsRequest.RemoteAddress = IPAddress.Loopback;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendClientSoftwareJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, jobsRequest });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("\"relativePath\":\"windows-updates\\\\kb5099539.msu\"", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected the missingKb-mode entry to be dynamically targeted at PC-MISSING (which reported KB5099539 as missing), got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendClientSoftwareJobsDoesNotTargetMissingKbEntryWhenNotMissing()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-notmissing-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                report["computerName"] = "PC-CLEAN";
+                report["wsusMissingUpdates"] = new ArrayList();
+                File.WriteAllText(Path.Combine(options.DataPath, "PC-CLEAN.json"), serializer.Serialize(report), new UTF8Encoding(false));
+
+                RequestContext createRequest = new RequestContext();
+                createRequest.Method = "POST";
+                createRequest.Path = "/api/v1/windows-updates";
+                createRequest.Headers = new Dictionary<string, string>();
+                createRequest.Body = "{\"name\":\"KB5099539 rollout\",\"relativePath\":\"windows-updates\\\\kb5099539.msu\",\"targetMode\":\"missingKb\",\"kbId\":\"KB5099539\"}";
+                createRequest.RemoteAddress = IPAddress.Loopback;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("CreateWindowsUpdate", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, createRequest });
+                }
+
+                RequestContext jobsRequest = new RequestContext();
+                jobsRequest.Method = "GET";
+                jobsRequest.Path = "/api/v1/client/software-jobs?computerName=PC-CLEAN";
+                jobsRequest.Headers = new Dictionary<string, string>();
+                jobsRequest.Headers["x-inventory-token"] = "real-token";
+                jobsRequest.RemoteAddress = IPAddress.Loopback;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendClientSoftwareJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, jobsRequest });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("kb5099539.msu", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        return "expected PC-CLEAN (which reported no missing updates) NOT to be targeted, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendClientSoftwareJobsStaticTargetingUnaffected()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-staticunaffected-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext createRequest = new RequestContext();
+                createRequest.Method = "POST";
+                createRequest.Path = "/api/v1/windows-updates";
+                createRequest.Headers = new Dictionary<string, string>();
+                createRequest.Body = "{\"name\":\"Static entry\",\"relativePath\":\"windows-updates\\\\static.msu\",\"targets\":\"PC-STATIC\"}";
+                createRequest.RemoteAddress = IPAddress.Loopback;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("CreateWindowsUpdate", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, createRequest });
+                }
+
+                RequestContext jobsRequest = new RequestContext();
+                jobsRequest.Method = "GET";
+                jobsRequest.Path = "/api/v1/client/software-jobs?computerName=PC-STATIC";
+                jobsRequest.Headers = new Dictionary<string, string>();
+                jobsRequest.Headers["x-inventory-token"] = "real-token";
+                jobsRequest.RemoteAddress = IPAddress.Loopback;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendClientSoftwareJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, jobsRequest });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("static.msu", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected the static-mode entry to still be targeted at PC-STATIC by hostname, got: " + responseText;
+                    }
+                }
                 return null;
             }
             finally
