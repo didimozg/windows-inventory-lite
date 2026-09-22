@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.69.0] - WSUS offline compliance scanning
+
+### Added
+
+- **Managed Windows clients can now be checked for missing Windows Updates against an admin-provided offline scan file (`wsusscn2.cab`), using the real Windows Update Agent (WUA) applicability/supersedence engine rather than hand-rolled KB comparison.** An admin manually places the cab file in the server's `_wsus` data folder; each client learns the file's hash on its existing software-jobs poll and re-scans only when it changes. Missing updates are reported per client and aggregated fleet-wide on a new Missing-updates sub-tab (Software > Windows updates), each with a "+ Add catalog entry" action.
+- **The Windows Updates catalog gained a second targeting mode.** A catalog entry can now target "every machine whose most recent scan reports this exact KB as missing" instead of a static hostname list - an admin sources one installer and adds one catalog entry, and every affected machine (present and future) picks it up automatically through the existing install-job pipeline, with no per-machine targeting step.
+- A new Dashboard tile and a Fleet > Clients badge surface machines whose Windows Update service (`wuauserv`) was unavailable the last time a scan was attempted.
+
+### Notes
+
+- v1 is manual-cab-placement only - no automated fetching from Microsoft, no proxy support. See `docs/superpowers/specs/2026-09-22-wsus-offline-compliance-design.md` for the full design and what's explicitly deferred.
+- The Windows client also moves to this version (`0.7.0` -> new capability, the WUA scan). The Linux client is untouched - this feature is Windows-only.
+
 ## [0.68.0] - Server hardening & duplication cleanup (full-project review, Workstream 2 of 3)
 
 ### Fixed
