@@ -2305,6 +2305,10 @@ namespace WindowsInventoryLite
                     {
                         DeleteWindowsUpdate(stream, request);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/windows-updates/cab-status")
+                    {
+                        SendWsusCabStatus(stream);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/third-party-software")
                     {
                         SendThirdPartySoftware(stream);
@@ -12607,6 +12611,21 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             DeleteSoftwareCatalogEntry(stream, spec, ExtractWindowsUpdateId(request.Path));
         }
 
+        private void SendWsusCabStatus(Stream stream)
+        {
+            WsusCabStatus status = GetWsusCabStatus();
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["present"] = status.Present;
+            if (status.Present)
+            {
+                result["hash"] = status.Sha256Hash;
+                result["sizeBytes"] = status.SizeBytes;
+                result["modifiedUtc"] = status.ModifiedUtc;
+            }
+            SendJson(stream, serializer.Serialize(result));
+        }
+
         private string GetThirdPartySoftwareDirectory()
         {
             return Path.Combine(options.DataPath, "_third-party-software");
@@ -13938,6 +13957,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "UpdateLinuxClientDescription succeeds while AD Description Sync is off, rejects with 400 while it's on, and DeleteLinuxClient removes the report file - through the real HTTP handlers", TestUpdateLinuxClientDescriptionAndDeleteLinuxClientHttpRoundTrip);
             allPassed &= SelfTestCheck(output, "GetWsusCabStatus reports Present=false with no other fields populated when the cab file does not exist", TestGetWsusCabStatusReportsAbsentWhenFileMissing);
             allPassed &= SelfTestCheck(output, "GetWsusCabStatus computes the real SHA-256 hash, size, and modified time of an existing cab file", TestGetWsusCabStatusComputesRealHashSizeAndModifiedTime);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates/cab-status returns present=false with no cab file, then present=true with real hash/size/modifiedUtc once one exists", TestSendWsusCabStatusReflectsRealFileState);
             return allPassed;
         }
 
@@ -22690,6 +22710,62 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (actualSize != fakeContent.Length)
                 {
                     return "expected size " + fakeContent.Length + " but got " + actualSize;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendWsusCabStatusReflectsRealFileState()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-cabstatusroute-" + Guid.NewGuid().ToString("N"));
+            options.WebUsername = "admin";
+            options.WebPassword = "password123";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/windows-updates/cab-status";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["authorization"] = "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("admin:password123"));
+                request.RemoteAddress = IPAddress.Loopback;
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendWsusCabStatus", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("\"present\":false", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected present:false with no cab file, got: " + responseText;
+                    }
+                }
+
+                System.Reflection.MethodInfo dirMethod = typeof(InventoryServer).GetMethod("GetWsusDirectory", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                string wsusDir = (string)dirMethod.Invoke(server, null);
+                Directory.CreateDirectory(wsusDir);
+                System.Reflection.MethodInfo pathMethod = typeof(InventoryServer).GetMethod("GetWsusCabPath", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                string cabPath = (string)pathMethod.Invoke(server, null);
+                File.WriteAllBytes(cabPath, Encoding.UTF8.GetBytes("fake cab"));
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendWsusCabStatus", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("\"present\":true", StringComparison.OrdinalIgnoreCase) < 0
+                        || responseText.IndexOf("\"sizeBytes\":8", StringComparison.OrdinalIgnoreCase) < 0
+                        || responseText.IndexOf("\"hash\":\"", StringComparison.OrdinalIgnoreCase) < 0
+                        || responseText.IndexOf("\"modifiedUtc\":\"", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected present:true with real hash/sizeBytes/modifiedUtc fields, got: " + responseText;
+                    }
                 }
                 return null;
             }
