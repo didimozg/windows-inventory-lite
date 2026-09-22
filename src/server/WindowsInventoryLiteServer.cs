@@ -2317,6 +2317,10 @@ namespace WindowsInventoryLite
                     {
                         SendWsusCabStatus(stream);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/windows-updates/missing-summary")
+                    {
+                        SendWsusMissingSummary(stream);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/third-party-software")
                     {
                         SendThirdPartySoftware(stream);
@@ -8927,6 +8931,73 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendJson(stream, serializer.Serialize(result));
         }
 
+        // Modeled on SendClientUpdates' own "loop LoadClientReports(),
+        // pull one field per client, aggregate" shape - the closest
+        // existing precedent for this class of live-computed dashboard
+        // aggregation. No separate persisted rollup file, by design -
+        // matches this project's own established preference for
+        // computing from the source of truth on read rather than
+        // maintaining a second copy that could drift.
+        private void SendWsusMissingSummary(Stream stream)
+        {
+            Dictionary<string, Dictionary<string, object>> byKbId = new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, List<string>> computersByKbId = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (Dictionary<string, object> client in LoadClientReports())
+            {
+                if (!client.ContainsKey("wsusMissingUpdates"))
+                {
+                    continue;
+                }
+                ArrayList missing = client["wsusMissingUpdates"] as ArrayList;
+                if (missing == null)
+                {
+                    continue;
+                }
+                string computerName = GetStringValue(client, "computerName");
+
+                foreach (object item in missing)
+                {
+                    Dictionary<string, object> entry = item as Dictionary<string, object>;
+                    if (entry == null || !entry.ContainsKey("kbId"))
+                    {
+                        continue;
+                    }
+                    string kbId = Convert.ToString(entry["kbId"]);
+                    if (String.IsNullOrEmpty(kbId))
+                    {
+                        continue;
+                    }
+
+                    if (!byKbId.ContainsKey(kbId))
+                    {
+                        Dictionary<string, object> summaryEntry = new Dictionary<string, object>();
+                        summaryEntry["kbId"] = kbId;
+                        summaryEntry["title"] = GetStringValue(entry, "title");
+                        summaryEntry["severity"] = GetStringValue(entry, "msrcSeverity");
+                        byKbId[kbId] = summaryEntry;
+                        computersByKbId[kbId] = new List<string>();
+                    }
+                    computersByKbId[kbId].Add(computerName);
+                }
+            }
+
+            ArrayList summary = new ArrayList();
+            foreach (string kbId in byKbId.Keys)
+            {
+                Dictionary<string, object> summaryEntry = byKbId[kbId];
+                List<string> computers = computersByKbId[kbId];
+                summaryEntry["machineCount"] = computers.Count;
+                summaryEntry["computerNames"] = new ArrayList(computers);
+                summary.Add(summaryEntry);
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["missingUpdates"] = summary;
+            SendJson(stream, serializer.Serialize(result));
+        }
+
         private void SendClientPackageStatus(Stream stream)
         {
             JavaScriptSerializer serializer = CreateJsonSerializer();
@@ -14180,6 +14251,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate rejects targetMode=missingKb with no kbId", TestCreateWindowsUpdateRejectsMissingKbTargetModeWithoutKbId);
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate defaults targetMode to static when omitted, matching pre-existing behavior", TestCreateWindowsUpdateDefaultsToStaticTargetMode);
             allPassed &= SelfTestCheck(output, "UpdateWindowsUpdate can change an existing static entry to targetMode=missingKb and back", TestUpdateWindowsUpdateCanChangeTargetMode);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates/missing-summary aggregates wsusMissingUpdates across every stored Windows client report by kbId, with machine counts and names", TestSendWsusMissingSummaryAggregatesAcrossReports);
             return allPassed;
         }
 
@@ -23054,6 +23126,77 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (Convert.ToString(entries[0]["targetMode"]) != "missingKb" || Convert.ToString(entries[0]["kbId"]) != "KB1234567")
                 {
                     return "expected the update to change targetMode to missingKb and set kbId to KB1234567";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendWsusMissingSummaryAggregatesAcrossReports()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-missingsummary-" + Guid.NewGuid().ToString("N"));
+            options.WebUsername = "admin";
+            options.WebPassword = "password123";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                Dictionary<string, object> report1 = new Dictionary<string, object>();
+                report1["computerName"] = "PC1";
+                ArrayList missing1 = new ArrayList();
+                Dictionary<string, object> kb1OnPc1 = new Dictionary<string, object>();
+                kb1OnPc1["kbId"] = "KB5099539";
+                kb1OnPc1["title"] = "Test Update A";
+                kb1OnPc1["msrcSeverity"] = "Critical";
+                missing1.Add(kb1OnPc1);
+                report1["wsusMissingUpdates"] = missing1;
+                File.WriteAllText(Path.Combine(options.DataPath, "PC1.json"), serializer.Serialize(report1), new UTF8Encoding(false));
+
+                Dictionary<string, object> report2 = new Dictionary<string, object>();
+                report2["computerName"] = "PC2";
+                ArrayList missing2 = new ArrayList();
+                Dictionary<string, object> kb1OnPc2 = new Dictionary<string, object>();
+                kb1OnPc2["kbId"] = "KB5099539";
+                kb1OnPc2["title"] = "Test Update A";
+                kb1OnPc2["msrcSeverity"] = "Critical";
+                missing2.Add(kb1OnPc2);
+                Dictionary<string, object> kb2OnPc2 = new Dictionary<string, object>();
+                kb2OnPc2["kbId"] = "KB5102203";
+                kb2OnPc2["title"] = "Test Update B";
+                kb2OnPc2["msrcSeverity"] = "Important";
+                missing2.Add(kb2OnPc2);
+                report2["wsusMissingUpdates"] = missing2;
+                File.WriteAllText(Path.Combine(options.DataPath, "PC2.json"), serializer.Serialize(report2), new UTF8Encoding(false));
+
+                Dictionary<string, object> report3 = new Dictionary<string, object>();
+                report3["computerName"] = "PC3";
+                report3["wsusMissingUpdates"] = new ArrayList();
+                File.WriteAllText(Path.Combine(options.DataPath, "PC3.json"), serializer.Serialize(report3), new UTF8Encoding(false));
+
+                InventoryServer server = new InventoryServer(options);
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendWsusMissingSummary", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+
+                    if (responseText.IndexOf("\"kbId\":\"KB5099539\"", StringComparison.OrdinalIgnoreCase) < 0 || responseText.IndexOf("\"machineCount\":2", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected KB5099539 aggregated with machineCount=2 (PC1+PC2), got: " + responseText;
+                    }
+                    if (responseText.IndexOf("\"kbId\":\"KB5102203\"", StringComparison.OrdinalIgnoreCase) < 0 || responseText.IndexOf("\"machineCount\":1", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected KB5102203 aggregated with machineCount=1 (PC2 only), got: " + responseText;
+                    }
+                    if (responseText.IndexOf("PC1", StringComparison.OrdinalIgnoreCase) < 0 || responseText.IndexOf("PC2", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected computerNames to include PC1 and PC2, got: " + responseText;
+                    }
                 }
                 return null;
             }
