@@ -330,6 +330,30 @@ namespace WindowsInventoryLite
 
                     JavaScriptSerializer serializer = new JavaScriptSerializer();
                     Dictionary<string, object> jobsResponse = serializer.Deserialize<Dictionary<string, object>>(jobsJson);
+
+                    // The server advertises its current WSUS cab hash on
+                    // this same poll response regardless of whether any
+                    // software job is queued, so this check runs
+                    // unconditionally here - before the jobs-empty early
+                    // return below - rather than being folded into the
+                    // job-processing path further down.
+                    string wsusCabHash = jobsResponse == null ? "" : (InventoryCollector.GetString(jobsResponse, "wsusCabHash") ?? "");
+                    InventoryCollector wsusStateCollector = new InventoryCollector(options);
+                    Dictionary<string, object> learnedWsusState = wsusStateCollector.LoadLearnedState();
+                    string lastScannedWsusHash = learnedWsusState.ContainsKey("wsusScannedCabHash") ? Convert.ToString(learnedWsusState["wsusScannedCabHash"]) : "";
+                    bool wsusScannedAndReported = InventoryCollector.MaybeRunWsusScanCore(
+                        wsusCabHash,
+                        lastScannedWsusHash,
+                        WsusScanner.IsWuauservRunning,
+                        WsusScanner.ScanForMissingUpdates,
+                        (hash, destPath) => InventoryCollector.DownloadAndVerifyWsusCab(options.ServerUrl, options.Token, hash, destPath, InventoryCollector.HttpGetBytes),
+                        (hash, available, missing) => InventoryCollector.PostWsusScanResults(options.ServerUrl, options.Token, Environment.MachineName, hash, available, missing, InventoryCollector.PostJson));
+                    if (wsusScannedAndReported)
+                    {
+                        learnedWsusState["wsusScannedCabHash"] = wsusCabHash;
+                        wsusStateCollector.SaveLearnedState(learnedWsusState);
+                    }
+
                     ArrayList jobs = jobsResponse != null && jobsResponse.ContainsKey("jobs") ? jobsResponse["jobs"] as ArrayList : null;
                     if (jobs == null || jobs.Count == 0)
                     {
@@ -1807,7 +1831,12 @@ namespace WindowsInventoryLite
             }
         }
 
-        private void SaveLearnedState(Dictionary<string, object> learned)
+        // internal rather than private: SoftwareJobRunner.CheckAndRun() (a
+        // separate top-level class's nested type, see GetString's own
+        // comment above) needs to persist the last-scanned WSUS cab hash
+        // through this same cache file, the same cross-class reason
+        // LoadLearnedState just above is internal instead of private.
+        internal void SaveLearnedState(Dictionary<string, object> learned)
         {
             try
             {
@@ -2341,6 +2370,55 @@ namespace WindowsInventoryLite
             return true;
         }
 
+        // Testable core of the WSUS scan trigger: every real I/O boundary
+        // (wuauserv service check, WUA scan, cab download+verify, results
+        // POST) is an injected delegate, so the decision sequencing - and
+        // specifically the two "definitely do nothing" paths - can be
+        // self-tested without any of them actually running. The real
+        // wiring, in SoftwareJobRunner.CheckAndRun, passes the production
+        // implementations.
+        //
+        // Returns true only when the scan ran and was reported
+        // successfully; the caller then persists wsusCabHash as the new
+        // last-scanned hash via LoadLearnedState/SaveLearnedState (kept
+        // out of this function since both are InventoryCollector instance
+        // methods, and this function stays static so its two no-op paths
+        // stay trivially testable). On every other outcome - no rescan
+        // needed, wuauserv down, download/verify failure, or a failed
+        // report - this returns false and the caller leaves the stored
+        // hash untouched: a wuauserv-down or report failure is retried
+        // automatically on the next poll, with no separate retry/calendar
+        // mechanism.
+        internal static bool MaybeRunWsusScanCore(string wsusCabHash, string lastScannedHash, Func<bool> isWuauservRunning, Func<string, List<Dictionary<string, object>>> scanForMissingUpdates, Func<string, string, bool> downloadAndVerifyCab, Func<string, bool, List<Dictionary<string, object>>, bool> postResults)
+        {
+            if (!WsusScanner.ShouldRescan(wsusCabHash, lastScannedHash))
+            {
+                return false;
+            }
+
+            if (!isWuauservRunning())
+            {
+                postResults(wsusCabHash, false, new List<Dictionary<string, object>>());
+                return false;
+            }
+
+            string cabPath = Path.Combine(Path.GetTempPath(), "wil-wsusscn2-" + Guid.NewGuid().ToString("N") + ".cab");
+            try
+            {
+                if (!downloadAndVerifyCab(wsusCabHash, cabPath))
+                {
+                    return false;
+                }
+
+                List<Dictionary<string, object>> missingUpdates = scanForMissingUpdates(cabPath);
+                return postResults(wsusCabHash, true, missingUpdates);
+            }
+            finally
+            {
+                try { File.Delete(cabPath); } catch { }
+            }
+        }
+
         internal static bool RunSelfTests(TextWriter output)
         {
             bool allPassed = true;
@@ -2380,6 +2458,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "DownloadAndVerifyWsusCab returns false and does not write the file when the downloaded bytes' hash does not match", TestDownloadAndVerifyWsusCabFailsOnHashMismatch);
             allPassed &= SelfTestCheck(output, "PostWsusScanResults returns true and posts the expected JSON fields when the injected postJson succeeds", TestPostWsusScanResultsReturnsTrueAndPostsExpectedFieldsOnSuccess);
             allPassed &= SelfTestCheck(output, "PostWsusScanResults returns false when the injected postJson throws", TestPostWsusScanResultsReturnsFalseWhenPostJsonThrows);
+            allPassed &= SelfTestCheck(output, "MaybeRunWsusScanCore does nothing when wsusCabHash is empty or unchanged from the last scan", TestMaybeRunWsusScanCoreNoOpsWhenHashEmptyOrUnchanged);
             return allPassed;
         }
 
@@ -3450,6 +3529,32 @@ namespace WindowsInventoryLite
             if (result)
             {
                 return "expected PostWsusScanResults to return false when the injected postJson throws";
+            }
+            return null;
+        }
+
+        // Only the two "definitely do nothing" no-op paths are testable
+        // here without real I/O - see MaybeRunWsusScanCore's own comment.
+        // Both fakes below assert they are never invoked; a call into
+        // either would mean the no-op short-circuit failed.
+        private static string TestMaybeRunWsusScanCoreNoOpsWhenHashEmptyOrUnchanged()
+        {
+            bool scanWasCalled = false;
+            Func<string, List<Dictionary<string, object>>> fakeScan = cabPath => { scanWasCalled = true; return new List<Dictionary<string, object>>(); };
+            Func<bool> fakeIsWuauservRunning = () => true;
+            Func<string, string, bool> fakeDownloadAndVerifyCab = (hash, destPath) => true;
+            Func<string, bool, List<Dictionary<string, object>>, bool> fakePostResults = (hash, available, missing) => true;
+
+            bool ranWithEmptyHash = MaybeRunWsusScanCore("", "previous-hash", fakeIsWuauservRunning, fakeScan, fakeDownloadAndVerifyCab, fakePostResults);
+            if (scanWasCalled || ranWithEmptyHash)
+            {
+                return "expected no scan when wsusCabHash is empty (no cab configured)";
+            }
+
+            bool ranWithUnchangedHash = MaybeRunWsusScanCore("same-hash", "same-hash", fakeIsWuauservRunning, fakeScan, fakeDownloadAndVerifyCab, fakePostResults);
+            if (scanWasCalled || ranWithUnchangedHash)
+            {
+                return "expected no scan when wsusCabHash matches the last-scanned hash already";
             }
             return null;
         }
