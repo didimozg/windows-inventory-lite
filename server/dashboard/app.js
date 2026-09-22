@@ -249,7 +249,7 @@
 
   function loadSettingsSubviewData(subview) {
     if (subview === 'server') { loadServerSettings(); loadIngestionTokenStatus(); }
-    if (subview === 'windows') { loadWindowsSettings(); loadClientUpdateCredentials(); loadSoftwareRepositoryCredentials(); }
+    if (subview === 'windows') { loadWindowsSettings(); loadClientUpdateCredentials(); loadSoftwareRepositoryCredentials(); loadWsusCabStatus(); }
     if (subview === 'linux') { loadLinuxSettings(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (subview === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (subview === 'adminPassword') { loadAdminPasswordStatus(); loadLoginLockoutSettings(); }
@@ -2650,6 +2650,35 @@
       risks.length ? `<span class="usb-badge">${risks.length} RISK${risks.length > 1 ? 'S' : ''}</span>` : ''
     ].filter(Boolean);
     byId('certStatus').innerHTML = parts.join(' &nbsp;&middot;&nbsp; ');
+  }
+
+  function loadWsusCabStatus() {
+    fetch('/api/v1/windows-updates/cab-status', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => renderWsusCabStatus(data))
+      .catch(error => {
+        byId('wsusCabStatus').textContent = `WSUS cab status unavailable: ${error.message}`;
+      });
+  }
+
+  function renderWsusCabStatus(data) {
+    if (!data.present) {
+      byId('wsusCabStatus').textContent = 'No wsusscn2.cab file placed yet.';
+      return;
+    }
+    const sizeBytes = data.sizeBytes || 0;
+    const sizeText = sizeBytes >= 1024 * 1024
+      ? `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
+      : `${(sizeBytes / 1024).toFixed(1)} KB`;
+    const parts = [
+      'Size: ' + sizeText,
+      'Modified: ' + escapeHtml(formatDateTime(data.modifiedUtc)),
+      'Hash: ' + escapeHtml((data.hash || '').substring(0, 12)) + '...'
+    ];
+    byId('wsusCabStatus').innerHTML = parts.join(' &nbsp;&middot;&nbsp; ');
   }
 
   function deleteCertificate() {
