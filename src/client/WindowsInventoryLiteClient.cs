@@ -2314,6 +2314,33 @@ namespace WindowsInventoryLite
             }
         }
 
+        internal static string ToWsusCabDownloadUrl(string serverUrl)
+        {
+            return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/wsus-cab-download");
+        }
+
+        // download is injected the same way ApplySelfUpdateFromServerCore
+        // injects it (production: HttpGetBytes) - lets the hash-mismatch
+        // and file-write logic be self-tested without a real HTTP call.
+        internal static bool DownloadAndVerifyWsusCab(string serverUrl, string token, string expectedHash, string destinationPath, Func<string, string, byte[]> download)
+        {
+            byte[] downloadedBytes = download(ToWsusCabDownloadUrl(serverUrl), token);
+
+            string actualHash;
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                actualHash = BitConverter.ToString(sha256.ComputeHash(downloadedBytes)).Replace("-", "").ToLowerInvariant();
+            }
+
+            if (!String.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            File.WriteAllBytes(destinationPath, downloadedBytes);
+            return true;
+        }
+
         internal static bool RunSelfTests(TextWriter output)
         {
             bool allPassed = true;
@@ -2349,6 +2376,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ApplyConfigFromServer ignores an out-of-range interval and applies an in-range one", TestApplyConfigFromServerValidatesIntervalRange);
             allPassed &= SelfTestCheck(output, "LoadLicenseKeySourcesCache parses a source written via ApplyInventoryAckResponse", TestLoadLicenseKeySourcesCacheParsesEntryWrittenThroughAckResponse);
             allPassed &= SelfTestCheck(output, "WsusScanner.ShouldRescan returns true when hashes differ or the client has never scanned, false when they match", TestWsusScannerShouldRescanCompares);
+            allPassed &= SelfTestCheck(output, "DownloadAndVerifyWsusCab writes the file and returns true when the downloaded bytes' hash matches", TestDownloadAndVerifyWsusCabSucceedsOnHashMatch);
+            allPassed &= SelfTestCheck(output, "DownloadAndVerifyWsusCab returns false and does not write the file when the downloaded bytes' hash does not match", TestDownloadAndVerifyWsusCabFailsOnHashMismatch);
             return allPassed;
         }
 
@@ -3310,6 +3339,59 @@ namespace WindowsInventoryLite
             return null;
         }
 
+        private static string TestDownloadAndVerifyWsusCabSucceedsOnHashMatch()
+        {
+            string tempPath = Path.Combine(Path.GetTempPath(), "wil-selftest-cabverify-" + Guid.NewGuid().ToString("N") + ".cab");
+            try
+            {
+                byte[] fakeContent = Encoding.UTF8.GetBytes("fake cab content");
+                string expectedHash;
+                using (SHA256 sha256 = SHA256.Create())
+                {
+                    expectedHash = BitConverter.ToString(sha256.ComputeHash(fakeContent)).Replace("-", "").ToLowerInvariant();
+                }
+                Func<string, string, byte[]> fakeDownload = (url, token) => fakeContent;
+
+                bool result = DownloadAndVerifyWsusCab("https://server", "token", expectedHash, tempPath, fakeDownload);
+                if (!result)
+                {
+                    return "expected DownloadAndVerifyWsusCab to return true when the hash matches";
+                }
+                if (!File.Exists(tempPath) || !Encoding.UTF8.GetString(File.ReadAllBytes(tempPath)).Equals("fake cab content"))
+                {
+                    return "expected the cab file to be written with the downloaded bytes";
+                }
+                return null;
+            }
+            finally
+            {
+                try { File.Delete(tempPath); } catch { }
+            }
+        }
+
+        private static string TestDownloadAndVerifyWsusCabFailsOnHashMismatch()
+        {
+            string tempPath = Path.Combine(Path.GetTempPath(), "wil-selftest-cabverifybad-" + Guid.NewGuid().ToString("N") + ".cab");
+            try
+            {
+                Func<string, string, byte[]> fakeDownload = (url, token) => Encoding.UTF8.GetBytes("wrong content");
+                bool result = DownloadAndVerifyWsusCab("https://server", "token", "0000000000000000000000000000000000000000000000000000000000000000", tempPath, fakeDownload);
+                if (result)
+                {
+                    return "expected DownloadAndVerifyWsusCab to return false when the hash does not match";
+                }
+                if (File.Exists(tempPath))
+                {
+                    return "expected the cab file NOT to be written when hash verification fails";
+                }
+                return null;
+            }
+            finally
+            {
+                try { File.Delete(tempPath); } catch { }
+            }
+        }
+
         // Returns true only if the process both exited within the timeout
         // AND returned a zero exit code - the caller previously ignored
         // both signals and always assumed success.
@@ -3504,6 +3586,60 @@ namespace WindowsInventoryLite
                     return buffer.ToArray();
                 }
             }
+        }
+
+        // Mirrors HttpGetBytes's exact structure (TLS 1.2 opt-in,
+        // 60-second timeout, X-Inventory-Token header) for a POST with a
+        // JSON body instead. Distinct from the existing PostJson: that
+        // helper returns the response body and throws on a non-2xx status,
+        // while PostWsusScanResults below needs the raw status code so it
+        // can report success/failure as a bool without relying on
+        // exception control flow for the (self-testable) delegate.
+        internal static int HttpPostJson(string url, string token, string jsonBody)
+        {
+            if (url.StartsWith("https:", StringComparison.OrdinalIgnoreCase))
+            {
+                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
+            }
+
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            request.Method = "POST";
+            request.ContentType = "application/json";
+            request.Timeout = 60000;
+            if (!String.IsNullOrEmpty(token))
+            {
+                request.Headers["X-Inventory-Token"] = token;
+            }
+
+            byte[] bodyBytes = Encoding.UTF8.GetBytes(jsonBody);
+            request.ContentLength = bodyBytes.Length;
+            using (Stream requestStream = request.GetRequestStream())
+            {
+                requestStream.Write(bodyBytes, 0, bodyBytes.Length);
+            }
+
+            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+            {
+                return (int)response.StatusCode;
+            }
+        }
+
+        // httpPost is injected (production: HttpPostJson above) so the
+        // JSON body construction is testable without a real HTTP call.
+        // Returns true only on a 2xx response.
+        internal static bool PostWsusScanResults(string serverUrl, string token, string computerName, string cabHash, bool wuServiceAvailable, List<Dictionary<string, object>> missingUpdates, Func<string, string, string, int> httpPost)
+        {
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            Dictionary<string, object> body = new Dictionary<string, object>();
+            body["computerName"] = computerName;
+            body["cabHash"] = cabHash;
+            body["wuServiceAvailable"] = wuServiceAvailable;
+            body["missingUpdates"] = missingUpdates;
+            string json = serializer.Serialize(body);
+
+            string url = ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/wsus-scan-results");
+            int statusCode = httpPost(url, token, json);
+            return statusCode >= 200 && statusCode < 300;
         }
 
         // options.ServerUrl is the full URL of the inventory ingestion
