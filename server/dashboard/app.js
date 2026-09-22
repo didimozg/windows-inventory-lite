@@ -176,7 +176,8 @@
     if (hash === 'licenses') return { view: 'licenses', subview: 'catalog' };
     if (hash === 'licensekeysources') return { view: 'licenses', subview: 'sources' };
     if (hash === 'licenses-keys') return { view: 'licenses', subview: 'keys' };
-    if (hash === 'windowsupdates') return { view: 'windowsUpdates', subview: null };
+    if (hash === 'windowsupdates') return { view: 'windowsUpdates', subview: 'missing' };
+    if (hash === 'windowsupdates-catalog') return { view: 'windowsUpdates', subview: 'catalog' };
     if (hash === 'thirdpartysoftware') return { view: 'thirdPartySoftware', subview: null };
     if (hash === 'softwarejobhistory') return { view: 'logging', subview: 'software' };
     if (hash === 'logging-installs') return { view: 'logging', subview: 'installs' };
@@ -215,6 +216,7 @@
       return 'settings-server';
     }
     if (view === 'licenses') return subview === 'sources' ? 'licensekeysources' : subview === 'keys' ? 'licenses-keys' : 'licenses';
+    if (view === 'windowsUpdates') return subview === 'catalog' ? 'windowsupdates-catalog' : 'windowsupdates';
     if (view === 'logging') return subview === 'installs' ? 'logging-installs' : subview === 'software' ? 'softwarejobhistory' : subview === 'debug' ? 'logging-debug' : 'logging';
     if (view === 'linuxServices') return 'linux-services';
     return view;
@@ -239,6 +241,11 @@
     if (subview === 'sources') loadLicenseKeySources();
   }
 
+  function loadWindowsUpdatesSubviewData(subview) {
+    if (subview === 'missing') loadWsusMissingSummary();
+    if (subview === 'catalog') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); }
+  }
+
   function loadSettingsSubviewData(subview) {
     if (subview === 'server') { loadServerSettings(); loadIngestionTokenStatus(); }
     if (subview === 'windows') { loadWindowsSettings(); loadClientUpdateCredentials(); loadSoftwareRepositoryCredentials(); }
@@ -259,7 +266,7 @@
     if (view === 'deploy') loadDeploySubviewData(state.subview);
     if (view === 'settings') loadSettingsSubviewData(state.subview);
     if (view === 'licenses') loadLicensesSubviewData(state.subview);
-    if (view === 'windowsUpdates') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); }
+    if (view === 'windowsUpdates') loadWindowsUpdatesSubviewData(state.subview);
     if (view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
     if (view === 'logging') loadLoggingSubviewData(subview);
     // 'clients' and 'hardware' are in this list because both merged views
@@ -302,6 +309,11 @@
     byId('licensesSubtabSources').setAttribute('aria-selected', String(state.view === 'licenses' && state.subview === 'sources'));
     byId('licensesSubtabKeys').classList.toggle('active', state.view === 'licenses' && state.subview === 'keys');
     byId('licensesSubtabKeys').setAttribute('aria-selected', String(state.view === 'licenses' && state.subview === 'keys'));
+    byId('windowsUpdatesSubtabs').classList.toggle('hidden', state.view !== 'windowsUpdates');
+    byId('windowsUpdatesSubtabMissing').classList.toggle('active', state.view === 'windowsUpdates' && state.subview === 'missing');
+    byId('windowsUpdatesSubtabMissing').setAttribute('aria-selected', String(state.view === 'windowsUpdates' && state.subview === 'missing'));
+    byId('windowsUpdatesSubtabCatalog').classList.toggle('active', state.view === 'windowsUpdates' && state.subview === 'catalog');
+    byId('windowsUpdatesSubtabCatalog').setAttribute('aria-selected', String(state.view === 'windowsUpdates' && state.subview === 'catalog'));
     byId('loggingSubtabs').classList.toggle('hidden', state.view !== 'logging');
     byId('loggingSubtabIngestion').classList.toggle('active', state.view === 'logging' && state.subview === 'ingestion');
     byId('loggingSubtabIngestion').setAttribute('aria-selected', String(state.view === 'logging' && state.subview === 'ingestion'));
@@ -3746,6 +3758,13 @@
       });
   }
 
+  // Placeholder for the Missing updates sub-tab - Task 13 replaces this with
+  // a real fetch against the WSUS missing-summary endpoint and populates
+  // #windowsUpdatesMissingBody with actual rows.
+  function loadWsusMissingSummary() {
+    byId('windowsUpdatesMissingBody').innerHTML = '<tr><td colspan="5" class="empty">Missing updates reporting is not implemented yet.</td></tr>';
+  }
+
   function loadWindowsUpdates() {
     fetch('/api/v1/windows-updates', { cache: 'no-store' })
       .then(response => {
@@ -5052,7 +5071,8 @@
     byId('licensesView').classList.toggle('hidden', !(state.view === 'licenses' && state.subview === 'catalog'));
     byId('licenseKeySourcesView').classList.toggle('hidden', !(state.view === 'licenses' && state.subview === 'sources'));
     byId('licensesKeysView').classList.toggle('hidden', !(state.view === 'licenses' && state.subview === 'keys'));
-    byId('windowsUpdatesView').classList.toggle('hidden', state.view !== 'windowsUpdates');
+    byId('windowsUpdatesMissingView').classList.toggle('hidden', !(state.view === 'windowsUpdates' && state.subview === 'missing'));
+    byId('windowsUpdatesView').classList.toggle('hidden', !(state.view === 'windowsUpdates' && state.subview === 'catalog'));
     byId('thirdPartySoftwareView').classList.toggle('hidden', state.view !== 'thirdPartySoftware');
     byId('loggingView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'ingestion'));
     byId('installHistoryView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'installs'));
@@ -5391,7 +5411,7 @@
     if (state.view === 'deploy') loadDeploySubviewData(state.subview);
     if (state.view === 'settings') loadSettingsSubviewData(state.subview);
     if (state.view === 'licenses') loadLicensesSubviewData(state.subview);
-    if (state.view === 'windowsUpdates') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); }
+    if (state.view === 'windowsUpdates') loadWindowsUpdatesSubviewData(state.subview);
     if (state.view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
     if (state.view === 'logging') loadLoggingSubviewData(state.subview);
     if (state.view === 'clients' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
@@ -5766,7 +5786,9 @@
   byId('licenseKeySourceAddButton').addEventListener('click', () => openLicenseKeySourceForm(null));
   byId('licenseKeySourceSaveButton').addEventListener('click', saveLicenseKeySource);
   byId('licenseKeySourceCancelButton').addEventListener('click', closeLicenseKeySourceForm);
-  byId('windowsUpdatesTab').addEventListener('click', () => setView('windowsUpdates'));
+  byId('windowsUpdatesTab').addEventListener('click', () => setView('windowsUpdates', 'missing'));
+  byId('windowsUpdatesSubtabMissing').addEventListener('click', () => setView('windowsUpdates', 'missing'));
+  byId('windowsUpdatesSubtabCatalog').addEventListener('click', () => setView('windowsUpdates', 'catalog'));
   byId('windowsUpdateAddButton').addEventListener('click', () => openWindowsUpdateForm(null));
   byId('windowsUpdateSaveButton').addEventListener('click', saveWindowsUpdate);
   byId('windowsUpdateCancelButton').addEventListener('click', closeWindowsUpdateForm);
@@ -5810,7 +5832,7 @@
   if (state.view === 'deploy') loadDeploySubviewData(state.subview);
   if (state.view === 'settings') loadSettingsSubviewData(state.subview);
   if (state.view === 'licenses') loadLicensesSubviewData(state.subview);
-  if (state.view === 'windowsUpdates') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); }
+  if (state.view === 'windowsUpdates') loadWindowsUpdatesSubviewData(state.subview);
   if (state.view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
   if (state.view === 'logging') loadLoggingSubviewData(state.subview);
   updateInstallFieldVisibility();

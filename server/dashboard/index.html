@@ -722,7 +722,21 @@
           <div id="licensesKeysPager" class="pager"></div>
         </section>
 
-        <section id="windowsUpdatesView" class="hidden" aria-label="Windows updates">
+        <div id="windowsUpdatesSubtabs" class="subtab-strip hidden" role="tablist" aria-label="Windows updates sections">
+          <button id="windowsUpdatesSubtabMissing" class="subtab-item" role="tab" type="button">Missing updates</button>
+          <button id="windowsUpdatesSubtabCatalog" class="subtab-item" role="tab" type="button">Catalog</button>
+        </div>
+
+        <section id="windowsUpdatesMissingView" class="hidden" aria-label="Missing Windows updates">
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>KB ID</th><th>Title</th><th>Severity</th><th>Machines</th><th>Action</th></tr></thead>
+              <tbody id="windowsUpdatesMissingBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="windowsUpdatesView" class="hidden" aria-label="Windows updates catalog">
           <div class="view-toolbar">
             <button id="windowsUpdateAddButton" class="primary-button" type="button">Add entry</button>
             <button id="windowsUpdateScanButton" class="export-button" type="button">Refresh discovered files</button>
