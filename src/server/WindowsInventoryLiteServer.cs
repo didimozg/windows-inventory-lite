@@ -2807,6 +2807,8 @@ namespace WindowsInventoryLite
             JavaScriptSerializer serializer = CreateJsonSerializer();
             Dictionary<string, object> response = new Dictionary<string, object>();
             response["jobs"] = jobs;
+            WsusCabStatus wsusCabStatus = GetWsusCabStatus();
+            response["wsusCabHash"] = wsusCabStatus.Present ? wsusCabStatus.Sha256Hash : "";
             SendJson(stream, serializer.Serialize(response));
         }
 
@@ -13933,6 +13935,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs targets a missingKb-mode entry to a computer whose last scan reported that exact KB as missing", TestSendClientSoftwareJobsTargetsMissingKbEntryDynamically);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs does not target a missingKb-mode entry to a computer that never reported that KB as missing", TestSendClientSoftwareJobsDoesNotTargetMissingKbEntryWhenNotMissing);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs still targets a static-mode entry by hostname unchanged, zero regression from the missingKb addition", TestSendClientSoftwareJobsStaticTargetingUnaffected);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs includes wsusCabHash, empty when no cab is configured and the real hash once one is", TestSendClientSoftwareJobsIncludesWsusCabHash);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall updates a target's stored clientVersion", TestPatchClientReportVersionAfterInstallUpdatesVersion);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall's lastInstalledAtUtc is cleared once a real report overwrites the file", TestPatchClientReportVersionAfterInstallFieldClearedByRealReport);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall is a no-op when the target has no stored report yet", TestPatchClientReportVersionAfterInstallMissingReport);
@@ -17469,6 +17472,58 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     if (responseText.IndexOf("static.msu", StringComparison.OrdinalIgnoreCase) < 0)
                     {
                         return "expected the static-mode entry to still be targeted at PC-STATIC by hostname, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendClientSoftwareJobsIncludesWsusCabHash()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-jobscabhash-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client/software-jobs?computerName=TEST-PC";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "real-token";
+                request.RemoteAddress = IPAddress.Loopback;
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendClientSoftwareJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("\"wsusCabHash\":\"\"", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected an empty wsusCabHash field with no cab configured, got: " + responseText;
+                    }
+                }
+
+                System.Reflection.MethodInfo dirMethod = typeof(InventoryServer).GetMethod("GetWsusDirectory", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                string wsusDir = (string)dirMethod.Invoke(server, null);
+                Directory.CreateDirectory(wsusDir);
+                System.Reflection.MethodInfo pathMethod = typeof(InventoryServer).GetMethod("GetWsusCabPath", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                string cabPath = (string)pathMethod.Invoke(server, null);
+                File.WriteAllBytes(cabPath, Encoding.UTF8.GetBytes("fake cab"));
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendClientSoftwareJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("\"wsusCabHash\":\"\"", StringComparison.OrdinalIgnoreCase) >= 0 || responseText.IndexOf("\"wsusCabHash\":", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a non-empty wsusCabHash field once a cab exists, got: " + responseText;
                     }
                 }
                 return null;
