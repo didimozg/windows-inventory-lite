@@ -12527,6 +12527,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             string targets = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "").Trim();
             bool requiresReboot = payload.ContainsKey("requiresReboot") && Convert.ToBoolean(payload["requiresReboot"]);
             bool enabled = !payload.ContainsKey("enabled") || Convert.ToBoolean(payload["enabled"]);
+            string targetMode = payload.ContainsKey("targetMode") ? Convert.ToString(payload["targetMode"]).Trim() : "static";
+            if (targetMode != "static" && targetMode != "missingKb")
+            {
+                targetMode = "static";
+            }
+            string kbId = Convert.ToString(payload.ContainsKey("kbId") ? payload["kbId"] : "").Trim();
 
             if (String.IsNullOrEmpty(name))
             {
@@ -12562,6 +12568,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     }
                 }
             }
+            if (targetMode == "missingKb" && String.IsNullOrEmpty(kbId))
+            {
+                SendText(stream, "{\"error\":\"kbId is required when targetMode is missingKb\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
 
             string nowUtc = DateTime.UtcNow.ToString("o");
             Dictionary<string, object> record = new Dictionary<string, object>();
@@ -12572,6 +12583,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             record["requiresReboot"] = requiresReboot;
             record["enabled"] = enabled;
             record["targets"] = targets;
+            record["targetMode"] = targetMode;
+            record["kbId"] = kbId;
             record["createdAt"] = nowUtc;
             record["updatedAt"] = nowUtc;
 
@@ -12609,6 +12622,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             string targets = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "").Trim();
             bool requiresReboot = payload.ContainsKey("requiresReboot") && Convert.ToBoolean(payload["requiresReboot"]);
             bool enabled = !payload.ContainsKey("enabled") || Convert.ToBoolean(payload["enabled"]);
+            string targetMode = payload.ContainsKey("targetMode") ? Convert.ToString(payload["targetMode"]).Trim() : "static";
+            if (targetMode != "static" && targetMode != "missingKb")
+            {
+                targetMode = "static";
+            }
+            string kbId = Convert.ToString(payload.ContainsKey("kbId") ? payload["kbId"] : "").Trim();
 
             if (String.IsNullOrEmpty(name))
             {
@@ -12637,6 +12656,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     }
                 }
             }
+            if (targetMode == "missingKb" && String.IsNullOrEmpty(kbId))
+            {
+                SendText(stream, "{\"error\":\"kbId is required when targetMode is missingKb\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
 
             lock (spec.Lock)
             {
@@ -12663,6 +12687,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 record["requiresReboot"] = requiresReboot;
                 record["enabled"] = enabled;
                 record["targets"] = targets;
+                record["targetMode"] = targetMode;
+                record["kbId"] = kbId;
                 record["updatedAt"] = DateTime.UtcNow.ToString("o");
 
                 spec.Save(entries);
@@ -14084,6 +14110,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results writes wsusMissingUpdates/wsusScannedCabHash/wsusScanAt onto the real stored report and preserves other pre-existing fields", TestReceiveWsusScanResultsWritesFieldsOntoExistingReportAndPreservesOtherFields);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results with wuServiceAvailable=false still writes wuServiceUnavailable=true and an empty missing-updates list", TestReceiveWsusScanResultsRecordsServiceUnavailableFlag);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results is a no-op for an unknown computer with no stored report", TestReceiveWsusScanResultsIsNoOpForUnknownComputer);
+            allPassed &= SelfTestCheck(output, "CreateWindowsUpdate accepts targetMode=missingKb with a kbId and persists both fields", TestCreateWindowsUpdateAcceptsMissingKbTargetMode);
+            allPassed &= SelfTestCheck(output, "CreateWindowsUpdate rejects targetMode=missingKb with no kbId", TestCreateWindowsUpdateRejectsMissingKbTargetModeWithoutKbId);
+            allPassed &= SelfTestCheck(output, "CreateWindowsUpdate defaults targetMode to static when omitted, matching pre-existing behavior", TestCreateWindowsUpdateDefaultsToStaticTargetMode);
+            allPassed &= SelfTestCheck(output, "UpdateWindowsUpdate can change an existing static entry to targetMode=missingKb and back", TestUpdateWindowsUpdateCanChangeTargetMode);
             return allPassed;
         }
 
@@ -22592,6 +22622,171 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestCreateWindowsUpdateAcceptsMissingKbTargetMode()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-wutargetmode-" + Guid.NewGuid().ToString("N"));
+            options.WebUsername = "admin";
+            options.WebPassword = "password123";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/windows-updates";
+                request.Headers = new Dictionary<string, string>();
+                request.Body = "{\"name\":\"KB5099539 rollout\",\"relativePath\":\"windows-updates\\\\kb5099539.msu\",\"targetMode\":\"missingKb\",\"kbId\":\"KB5099539\"}";
+                request.RemoteAddress = IPAddress.Loopback;
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("CreateWindowsUpdate", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("200 OK", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected 200 OK, got: " + responseText;
+                    }
+                }
+
+                System.Reflection.MethodInfo loadMethod = typeof(InventoryServer).GetMethod("LoadWindowsUpdates", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                List<Dictionary<string, object>> entries = (List<Dictionary<string, object>>)loadMethod.Invoke(server, null);
+                if (entries.Count != 1 || Convert.ToString(entries[0]["targetMode"]) != "missingKb" || Convert.ToString(entries[0]["kbId"]) != "KB5099539")
+                {
+                    return "expected one persisted entry with targetMode=missingKb and kbId=KB5099539";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestCreateWindowsUpdateRejectsMissingKbTargetModeWithoutKbId()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-wutargetmodenokb-" + Guid.NewGuid().ToString("N"));
+            options.WebUsername = "admin";
+            options.WebPassword = "password123";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/windows-updates";
+                request.Headers = new Dictionary<string, string>();
+                request.Body = "{\"name\":\"Bad entry\",\"relativePath\":\"windows-updates\\\\bad.msu\",\"targetMode\":\"missingKb\"}";
+                request.RemoteAddress = IPAddress.Loopback;
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("CreateWindowsUpdate", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("400 Bad Request", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 400 rejection when targetMode=missingKb has no kbId, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestCreateWindowsUpdateDefaultsToStaticTargetMode()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-wudefaulttarget-" + Guid.NewGuid().ToString("N"));
+            options.WebUsername = "admin";
+            options.WebPassword = "password123";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/windows-updates";
+                request.Headers = new Dictionary<string, string>();
+                request.Body = "{\"name\":\"Office 2016 SP1\",\"relativePath\":\"windows-updates\\\\office.msu\",\"targets\":\"PC1\"}";
+                request.RemoteAddress = IPAddress.Loopback;
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("CreateWindowsUpdate", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                }
+
+                System.Reflection.MethodInfo loadMethod = typeof(InventoryServer).GetMethod("LoadWindowsUpdates", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                List<Dictionary<string, object>> entries = (List<Dictionary<string, object>>)loadMethod.Invoke(server, null);
+                if (entries.Count != 1 || Convert.ToString(entries[0]["targetMode"]) != "static")
+                {
+                    return "expected targetMode to default to 'static' when omitted from the request body";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestUpdateWindowsUpdateCanChangeTargetMode()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-wuupdatetargetmode-" + Guid.NewGuid().ToString("N"));
+            options.WebUsername = "admin";
+            options.WebPassword = "password123";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext createRequest = new RequestContext();
+                createRequest.Method = "POST";
+                createRequest.Path = "/api/v1/windows-updates";
+                createRequest.Headers = new Dictionary<string, string>();
+                createRequest.Body = "{\"name\":\"Entry\",\"relativePath\":\"windows-updates\\\\entry.msu\",\"targets\":\"PC1\"}";
+                createRequest.RemoteAddress = IPAddress.Loopback;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("CreateWindowsUpdate", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, createRequest });
+                }
+
+                System.Reflection.MethodInfo loadMethod = typeof(InventoryServer).GetMethod("LoadWindowsUpdates", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                List<Dictionary<string, object>> entries = (List<Dictionary<string, object>>)loadMethod.Invoke(server, null);
+                string id = Convert.ToString(entries[0]["id"]);
+
+                RequestContext updateRequest = new RequestContext();
+                updateRequest.Method = "PUT";
+                updateRequest.Path = "/api/v1/windows-updates/" + id;
+                updateRequest.Headers = new Dictionary<string, string>();
+                updateRequest.Body = "{\"name\":\"Entry\",\"relativePath\":\"windows-updates\\\\entry.msu\",\"targetMode\":\"missingKb\",\"kbId\":\"KB1234567\"}";
+                updateRequest.RemoteAddress = IPAddress.Loopback;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("UpdateWindowsUpdate", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, updateRequest });
+                }
+
+                entries = (List<Dictionary<string, object>>)loadMethod.Invoke(server, null);
+                if (Convert.ToString(entries[0]["targetMode"]) != "missingKb" || Convert.ToString(entries[0]["kbId"]) != "KB1234567")
+                {
+                    return "expected the update to change targetMode to missingKb and set kbId to KB1234567";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
             }
         }
 
