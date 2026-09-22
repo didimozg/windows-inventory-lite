@@ -2032,6 +2032,10 @@ namespace WindowsInventoryLite
                     {
                         ReceiveSoftwareJobResults(stream, request);
                     }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/client/wsus-scan-results")
+                    {
+                        ReceiveWsusScanResults(stream, request);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/client/software-repository-connection")
                     {
                         SendSoftwareRepositoryConnectionInfo(stream, request);
@@ -2940,6 +2944,92 @@ namespace WindowsInventoryLite
                         DebugLogger.Log(options, "Client", "Skipped one malformed software job result entry: " + ex.Message);
                     }
                 }
+            }
+
+            SendJson(stream, "{\"status\":\"ok\"}");
+        }
+
+        // Client-facing, ingestion-token gated (always required, same
+        // posture as the software-distribution client routes - this
+        // writes into a specific computer's own stored report). A
+        // report for a computer name with no existing stored report is
+        // accepted and silently dropped, matching MergeServiceStatus's
+        // own established "never create a partial record from a ping"
+        // convention - a genuine first inventory report will create the
+        // file shortly, and this endpoint should never race that.
+        private void ReceiveWsusScanResults(Stream stream, RequestContext request)
+        {
+            string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
+            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            {
+                RecordIngestionRejection(request, "wsus-scan-results", ResolveIngestionRejectionReason(token));
+                SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string computerName = GetStringValue(payload, "computerName");
+            if (String.IsNullOrEmpty(computerName))
+            {
+                SendText(stream, "{\"error\":\"computerName is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string cabHash = GetStringValue(payload, "cabHash");
+            bool wuServiceAvailable = payload.ContainsKey("wuServiceAvailable") && Convert.ToBoolean(payload["wuServiceAvailable"]);
+            ArrayList missingUpdates = payload.ContainsKey("missingUpdates") ? payload["missingUpdates"] as ArrayList : null;
+            if (missingUpdates == null)
+            {
+                missingUpdates = new ArrayList();
+            }
+
+            string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
+            lock (reportFileLock)
+            {
+                if (!File.Exists(path))
+                {
+                    // No stored report yet for this computer - accept and
+                    // drop, same convention as MergeServiceStatus.
+                    SendJson(stream, "{\"status\":\"ok\"}");
+                    return;
+                }
+
+                Dictionary<string, object> report;
+                try
+                {
+                    report = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                }
+                catch
+                {
+                    SendText(stream, "{\"error\":\"client report could not be read\"}", "application/json; charset=utf-8", 500);
+                    return;
+                }
+                if (report == null)
+                {
+                    SendText(stream, "{\"error\":\"client report could not be read\"}", "application/json; charset=utf-8", 500);
+                    return;
+                }
+
+                report["wsusMissingUpdates"] = missingUpdates;
+                report["wsusScannedCabHash"] = cabHash;
+                report["wsusScanAt"] = DateTime.UtcNow.ToString("o");
+                report["wuServiceUnavailable"] = !wuServiceAvailable;
+                File.WriteAllText(path, serializer.Serialize(report), new UTF8Encoding(false));
             }
 
             SendJson(stream, "{\"status\":\"ok\"}");
@@ -13990,6 +14080,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates/cab-status returns present=false with no cab file, then present=true with real hash/size/modifiedUtc once one exists", TestSendWsusCabStatusReflectsRealFileState);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/wsus-cab-download requires a valid ingestion token unconditionally, rejects with 401 when missing/wrong", TestDownloadWsusCabRejectsWithoutValidToken);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/wsus-cab-download streams the real cab bytes on success, 404s when the file does not exist", TestDownloadWsusCabStreamsRealBytesOrReturns404);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results requires a valid ingestion token unconditionally", TestReceiveWsusScanResultsRejectsWithoutValidToken);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results writes wsusMissingUpdates/wsusScannedCabHash/wsusScanAt onto the real stored report, is a no-op for an unknown computer", TestReceiveWsusScanResultsWritesFieldsOntoExistingReport);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results with wuServiceAvailable=false still writes wuServiceUnavailable=true and an empty missing-updates list", TestReceiveWsusScanResultsRecordsServiceUnavailableFlag);
             return allPassed;
         }
 
@@ -22890,6 +22983,143 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     {
                         return "expected the real file bytes in the response body";
                     }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveWsusScanResultsRejectsWithoutValidToken()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-scanresultsauth-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/client/wsus-scan-results";
+                request.Headers = new Dictionary<string, string>();
+                request.Body = "{}";
+                request.RemoteAddress = IPAddress.Loopback;
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("ReceiveWsusScanResults", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401 Unauthorized", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected 401 with no token, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveWsusScanResultsWritesFieldsOntoExistingReport()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-scanresultswrite-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                Dictionary<string, object> existingReport = new Dictionary<string, object>();
+                existingReport["computerName"] = "TEST-PC";
+                existingReport["clientVersion"] = "0.7.0";
+                string reportPath = Path.Combine(options.DataPath, "TEST-PC.json");
+                File.WriteAllText(reportPath, serializer.Serialize(existingReport), new UTF8Encoding(false));
+
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/client/wsus-scan-results";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "real-token";
+                request.Body = "{\"computerName\":\"TEST-PC\",\"cabHash\":\"abc123\",\"wuServiceAvailable\":true,\"missingUpdates\":[{\"kbId\":\"KB5099539\",\"title\":\"Test update\",\"msrcSeverity\":\"Critical\"}]}";
+                request.RemoteAddress = IPAddress.Loopback;
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("ReceiveWsusScanResults", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                }
+
+                Dictionary<string, object> savedReport = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(reportPath, Encoding.UTF8));
+                if (!savedReport.ContainsKey("wsusMissingUpdates") || !savedReport.ContainsKey("wsusScannedCabHash") || !savedReport.ContainsKey("wsusScanAt"))
+                {
+                    return "expected wsusMissingUpdates/wsusScannedCabHash/wsusScanAt to be written onto the stored report";
+                }
+                if (Convert.ToString(savedReport["wsusScannedCabHash"]) != "abc123")
+                {
+                    return "expected wsusScannedCabHash to be 'abc123', got " + savedReport["wsusScannedCabHash"];
+                }
+                ArrayList missing = savedReport["wsusMissingUpdates"] as ArrayList;
+                if (missing == null || missing.Count != 1)
+                {
+                    return "expected exactly one missing update recorded";
+                }
+                Dictionary<string, object> firstMissing = missing[0] as Dictionary<string, object>;
+                if (firstMissing == null || Convert.ToString(firstMissing["kbId"]) != "KB5099539")
+                {
+                    return "expected the recorded missing update to have kbId KB5099539";
+                }
+                if (savedReport.ContainsKey("clientVersion") && Convert.ToString(savedReport["clientVersion"]) != "0.7.0")
+                {
+                    return "expected the pre-existing clientVersion field to survive untouched";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveWsusScanResultsRecordsServiceUnavailableFlag()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-scanresultsunavail-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                Dictionary<string, object> existingReport = new Dictionary<string, object>();
+                existingReport["computerName"] = "TEST-PC2";
+                string reportPath = Path.Combine(options.DataPath, "TEST-PC2.json");
+                File.WriteAllText(reportPath, serializer.Serialize(existingReport), new UTF8Encoding(false));
+
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/client/wsus-scan-results";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "real-token";
+                request.Body = "{\"computerName\":\"TEST-PC2\",\"cabHash\":\"\",\"wuServiceAvailable\":false,\"missingUpdates\":[]}";
+                request.RemoteAddress = IPAddress.Loopback;
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("ReceiveWsusScanResults", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                }
+
+                Dictionary<string, object> savedReport = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(reportPath, Encoding.UTF8));
+                if (!savedReport.ContainsKey("wuServiceUnavailable") || !Convert.ToBoolean(savedReport["wuServiceUnavailable"]))
+                {
+                    return "expected wuServiceUnavailable=true when wuServiceAvailable:false was reported";
                 }
                 return null;
             }
