@@ -1302,6 +1302,10 @@ namespace WindowsInventoryLite
             {
                 Directory.CreateDirectory(GetInstallJobDirectory());
             }
+            if (!Directory.Exists(GetWsusDirectory()))
+            {
+                Directory.CreateDirectory(GetWsusDirectory());
+            }
             CleanupInstallJobLogs();
             MigrateLegacyLinuxSshKey();
             PurgeOrphanedLinuxInstallJobDirectory();
@@ -9573,6 +9577,54 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendJson(stream, serializer.Serialize(BuildCertificateStatusPayload()));
         }
 
+        // Fixed location, not an admin-configurable setting - matches the
+        // _certificates/_licenses convention: a subfolder under DataPath so
+        // BuildClientIndex's top-level *.json glob (which treats every
+        // top-level file as a client report) never picks it up. Unlike
+        // those two, this directory is eagerly created at Start() (see
+        // below) rather than lazily on first write, since a human - not
+        // the server - needs to find it to manually place a file there.
+        private string GetWsusDirectory()
+        {
+            return Path.Combine(options.DataPath, "_wsus");
+        }
+
+        private string GetWsusCabPath()
+        {
+            return Path.Combine(GetWsusDirectory(), "wsusscn2.cab");
+        }
+
+        private sealed class WsusCabStatus
+        {
+            internal bool Present;
+            internal string Sha256Hash;
+            internal long SizeBytes;
+            internal string ModifiedUtc;
+        }
+
+        private WsusCabStatus GetWsusCabStatus()
+        {
+            WsusCabStatus status = new WsusCabStatus();
+            string path = GetWsusCabPath();
+            if (!File.Exists(path))
+            {
+                status.Present = false;
+                return status;
+            }
+
+            status.Present = true;
+            FileInfo info = new FileInfo(path);
+            status.SizeBytes = info.Length;
+            status.ModifiedUtc = info.LastWriteTimeUtc.ToString("o");
+            using (SHA256 sha256 = SHA256.Create())
+            using (FileStream fileStream = File.OpenRead(path))
+            {
+                byte[] hashBytes = sha256.ComputeHash(fileStream);
+                status.Sha256Hash = BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
+            }
+            return status;
+        }
+
         private string GetCertificateHistoryDirectory()
         {
             return Path.Combine(options.DataPath, "_certificates");
@@ -13884,6 +13936,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "SoftwareCatalogSpec wiring is not cross-contaminated: a Windows-Updates entry never appears in the Third-Party-Software list, and cross-catalog Update/Delete attempts 404 with the OTHER catalog's own not-found message", TestSoftwareCatalogHandlersDoNotCrossContaminateBetweenCatalogs);
             allPassed &= SelfTestCheck(output, "UpdateClientDescription succeeds while AD Description Sync is off, rejects with 400 while it's on, and DeleteClient removes the report file - through the real HTTP handlers", TestUpdateClientDescriptionAndDeleteClientHttpRoundTrip);
             allPassed &= SelfTestCheck(output, "UpdateLinuxClientDescription succeeds while AD Description Sync is off, rejects with 400 while it's on, and DeleteLinuxClient removes the report file - through the real HTTP handlers", TestUpdateLinuxClientDescriptionAndDeleteLinuxClientHttpRoundTrip);
+            allPassed &= SelfTestCheck(output, "GetWsusCabStatus reports Present=false with no other fields populated when the cab file does not exist", TestGetWsusCabStatusReportsAbsentWhenFileMissing);
+            allPassed &= SelfTestCheck(output, "GetWsusCabStatus computes the real SHA-256 hash, size, and modified time of an existing cab file", TestGetWsusCabStatusComputesRealHashSizeAndModifiedTime);
             return allPassed;
         }
 
@@ -22570,6 +22624,78 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(linuxDataPath, true); } catch { }
+            }
+        }
+
+        private static string TestGetWsusCabStatusReportsAbsentWhenFileMissing()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-wsusabsent-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("GetWsusCabStatus", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                object status = method.Invoke(server, null);
+                bool present = (bool)status.GetType().GetField("Present", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public).GetValue(status);
+                if (present)
+                {
+                    return "expected Present=false when no cab file exists, got true";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestGetWsusCabStatusComputesRealHashSizeAndModifiedTime()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-wsuspresent-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo dirMethod = typeof(InventoryServer).GetMethod("GetWsusDirectory", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                string wsusDir = (string)dirMethod.Invoke(server, null);
+                Directory.CreateDirectory(wsusDir);
+                System.Reflection.MethodInfo pathMethod = typeof(InventoryServer).GetMethod("GetWsusCabPath", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                string cabPath = (string)pathMethod.Invoke(server, null);
+                byte[] fakeContent = Encoding.UTF8.GetBytes("fake cab content for hashing test");
+                File.WriteAllBytes(cabPath, fakeContent);
+
+                string expectedHash;
+                using (SHA256 sha256 = SHA256.Create())
+                {
+                    expectedHash = BitConverter.ToString(sha256.ComputeHash(fakeContent)).Replace("-", "").ToLowerInvariant();
+                }
+
+                System.Reflection.MethodInfo statusMethod = typeof(InventoryServer).GetMethod("GetWsusCabStatus", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                object status = statusMethod.Invoke(server, null);
+                Type statusType = status.GetType();
+                bool present = (bool)statusType.GetField("Present", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(status);
+                string actualHash = (string)statusType.GetField("Sha256Hash", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(status);
+                long actualSize = (long)statusType.GetField("SizeBytes", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(status);
+
+                if (!present)
+                {
+                    return "expected Present=true once the cab file exists, got false";
+                }
+                if (!String.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    return "expected hash " + expectedHash + " but GetWsusCabStatus computed " + actualHash;
+                }
+                if (actualSize != fakeContent.Length)
+                {
+                    return "expected size " + fakeContent.Length + " but got " + actualSize;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
             }
         }
 
