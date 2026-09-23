@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [Windows client 0.7.1] - Fixed the WUA offline scan crashing on every real update found
+
+### Fixed
+
+- **`WsusScanner.ScanForMissingUpdates` threw `COMException (DISP_E_MEMBERNOTFOUND)` on every real Windows host with at least one missing update** - the first genuine end-to-end verification of this code against a real WUA session and a real `wsusscn2.cab`, since it shipped in 0.69.0/0.7.0. `IUpdateCollection.Item` and `IStringCollection.Item` are read/write **properties** (`get_Item`/`put_Item` per Microsoft's own WUA reference), not methods - the late-bound `Type.InvokeMember` calls used `BindingFlags.InvokeMethod` instead of `BindingFlags.GetProperty`, which a real COM dispatch interface rejects outright. Everything before this point in the scan (searcher creation, offline-cab service registration, the actual search, `Count`) was already confirmed correct by the same live run - only the two `Item` accessors were wrong. Not unit-testable (real COM interop) - verified live is the only way this class of bug surfaces, exactly as this file's own comments already warned.
+
 ## [0.70.3] - Fixed WSUS scan results being silently erased every hour
 
 ### Fixed

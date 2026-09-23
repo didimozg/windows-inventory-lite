@@ -80,7 +80,14 @@ namespace WindowsInventoryLite
 
             for (int i = 0; i < count; i++)
             {
-                object update = updates.GetType().InvokeMember("Item", BindingFlags.InvokeMethod, null, updates, new object[] { i });
+                // IUpdateCollection.Item is a read/write PROPERTY (get_Item/
+                // put_Item per Microsoft's own reference), not a method -
+                // InvokeMethod here throws DISP_E_MEMBERNOTFOUND against a
+                // real WUA COM object, confirmed live against a real Windows
+                // 10 host (the exception fired here, right after Count was
+                // read successfully, proving everything before this point
+                // is correct).
+                object update = updates.GetType().InvokeMember("Item", BindingFlags.GetProperty, null, updates, new object[] { i });
                 string title = Convert.ToString(update.GetType().InvokeMember("Title", BindingFlags.GetProperty, null, update, null));
                 string msrcSeverity = Convert.ToString(update.GetType().InvokeMember("MsrcSeverity", BindingFlags.GetProperty, null, update, null) ?? "");
 
@@ -94,7 +101,9 @@ namespace WindowsInventoryLite
                     // project's catalog targets by ID is expected to have
                     // exactly one; verify this assumption holds during
                     // live verification rather than silently.
-                    object firstKb = kbArticleIds.GetType().InvokeMember("Item", BindingFlags.InvokeMethod, null, kbArticleIds, new object[] { 0 });
+                    // Same fix as IUpdateCollection.Item above - IStringCollection.Item
+                    // is also a get_Item/put_Item property, not a method.
+                    object firstKb = kbArticleIds.GetType().InvokeMember("Item", BindingFlags.GetProperty, null, kbArticleIds, new object[] { 0 });
                     kbId = "KB" + Convert.ToString(firstKb);
                 }
 
