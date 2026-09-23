@@ -2521,10 +2521,6 @@ namespace WindowsInventoryLite
                     {
                         UpdateWindowsUpdate(stream, request);
                     }
-                    else if (request.Method == "DELETE" && request.Path.StartsWith("/api/v1/windows-updates/", StringComparison.OrdinalIgnoreCase))
-                    {
-                        DeleteWindowsUpdate(stream, request);
-                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/windows-updates/cab-status")
                     {
                         SendWsusCabStatus(stream);
@@ -2552,6 +2548,15 @@ namespace WindowsInventoryLite
                     else if (request.Method == "POST" && request.Path == "/api/v1/windows-updates/cab-download-now")
                     {
                         TriggerWsusCabDownloadNow(stream, request);
+                    }
+                    else if (request.Method == "DELETE" && request.Path.StartsWith("/api/v1/windows-updates/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Must stay after every exact-match /api/v1/windows-updates/* route
+                        // above (cab-status, download-schedule, download-log, cab-download-now) -
+                        // this generic catalog-item-by-id handler's StartsWith check would
+                        // otherwise intercept those literal sub-paths first in this
+                        // top-to-bottom else-if chain and make them unreachable.
+                        DeleteWindowsUpdate(stream, request);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/third-party-software")
                     {
