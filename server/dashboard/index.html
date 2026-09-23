@@ -441,7 +441,42 @@
           <div class="settings-block">
             <h2 class="settings-block-title">WSUS offline scan file</h2>
             <p id="wsusCabStatus" class="pkg-status">Loading WSUS cab status...</p>
-            <p class="cert-hint">Place wsusscn2.cab manually in the server's _wsus data folder to enable missing-update scanning. See docs/parameters-reference.md.</p>
+            <p class="cert-hint">Place wsusscn2.cab manually in the server's _wsus data folder, or configure automated download below. See docs/parameters-reference.md.</p>
+            <div class="pkg-grid client-update-schedule-panel">
+              <label class="pkg-token-field">
+                Download schedule
+                <select id="wsusScheduleMode">
+                  <option value="off">Off (manual only)</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </label>
+              <label id="wsusScheduleDayOfWeekField" class="pkg-token-field hidden">
+                Day of week
+                <select id="wsusScheduleDayOfWeek">
+                  <option value="0">Sunday</option>
+                  <option value="1">Monday</option>
+                  <option value="2">Tuesday</option>
+                  <option value="3">Wednesday</option>
+                  <option value="4">Thursday</option>
+                  <option value="5">Friday</option>
+                  <option value="6">Saturday</option>
+                </select>
+              </label>
+              <label id="wsusScheduleDayOfMonthField" class="pkg-token-field hidden">
+                Day of month
+                <input id="wsusScheduleDayOfMonth" type="number" min="1" max="31" value="1">
+              </label>
+              <label class="pkg-token-field">
+                Time (UTC)
+                <input id="wsusScheduleTimeUtc" type="text" placeholder="03:00">
+              </label>
+              <div class="pkg-buttons">
+                <button id="wsusScheduleSaveButton" class="primary-button" type="button">Save schedule</button>
+                <button id="wsusDownloadNowButton" class="export-button" type="button">Download now</button>
+              </div>
+            </div>
+            <div id="wsusScheduleMessage" class="pkg-message hidden"></div>
           </div>
         </section>
 

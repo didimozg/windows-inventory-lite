@@ -249,7 +249,7 @@
 
   function loadSettingsSubviewData(subview) {
     if (subview === 'server') { loadServerSettings(); loadIngestionTokenStatus(); loadOutboundProxySettings(); }
-    if (subview === 'windows') { loadWindowsSettings(); loadClientUpdateCredentials(); loadSoftwareRepositoryCredentials(); loadWsusCabStatus(); }
+    if (subview === 'windows') { loadWindowsSettings(); loadClientUpdateCredentials(); loadSoftwareRepositoryCredentials(); loadWsusCabStatus(); loadWsusDownloadSchedule(); }
     if (subview === 'linux') { loadLinuxSettings(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (subview === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
     if (subview === 'adminPassword') { loadAdminPasswordStatus(); loadLoginLockoutSettings(); }
@@ -2733,18 +2733,110 @@
   function renderWsusCabStatus(data) {
     if (!data.present) {
       byId('wsusCabStatus').textContent = 'No wsusscn2.cab file placed yet.';
-      return;
+    } else {
+      const sizeBytes = data.sizeBytes || 0;
+      const sizeText = sizeBytes >= 1024 * 1024
+        ? `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
+        : `${(sizeBytes / 1024).toFixed(1)} KB`;
+      const parts = [
+        'Size: ' + sizeText,
+        'Modified: ' + escapeHtml(formatDateTime(data.modifiedUtc)),
+        'Hash: ' + escapeHtml((data.hash || '').substring(0, 12)) + '...'
+      ];
+      byId('wsusCabStatus').innerHTML = parts.join(' &nbsp;&middot;&nbsp; ');
     }
-    const sizeBytes = data.sizeBytes || 0;
-    const sizeText = sizeBytes >= 1024 * 1024
-      ? `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
-      : `${(sizeBytes / 1024).toFixed(1)} KB`;
-    const parts = [
-      'Size: ' + sizeText,
-      'Modified: ' + escapeHtml(formatDateTime(data.modifiedUtc)),
-      'Hash: ' + escapeHtml((data.hash || '').substring(0, 12)) + '...'
-    ];
-    byId('wsusCabStatus').innerHTML = parts.join(' &nbsp;&middot;&nbsp; ');
+
+    // renderWsusCabStatus can run again on a later poll of this settings
+    // subview - remove any previously-inserted attempt line first so
+    // repeated polls update it in place instead of stacking duplicates.
+    const existingAttemptLine = document.getElementById('wsusLastAttempt');
+    if (existingAttemptLine) existingAttemptLine.remove();
+
+    if (data.lastAttemptUtc) {
+      const resultText = data.lastAttemptResult === 'success'
+        ? 'succeeded'
+        : `failed (${escapeHtml(data.lastAttemptErrorCategory || 'unknown')}: ${escapeHtml(data.lastAttemptErrorMessage || '')})`;
+      const attemptLine = document.createElement('p');
+      attemptLine.id = 'wsusLastAttempt';
+      attemptLine.className = 'cert-hint';
+      attemptLine.textContent = `Last download attempt (${data.lastAttemptSource}): ${formatDateTime(data.lastAttemptUtc)} - ${resultText}`;
+      byId('wsusCabStatus').insertAdjacentElement('afterend', attemptLine);
+    }
+  }
+
+  function loadWsusDownloadSchedule() {
+    fetch('/api/v1/windows-updates/download-schedule', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('wsusScheduleMode').value = data.mode || 'off';
+        byId('wsusScheduleDayOfWeek').value = String(data.dayOfWeek != null ? data.dayOfWeek : 2);
+        byId('wsusScheduleDayOfMonth').value = data.dayOfMonth || 1;
+        byId('wsusScheduleTimeUtc').value = data.timeUtc || '03:00';
+        updateWsusScheduleFieldVisibility();
+      })
+      .catch(() => {});
+  }
+
+  function updateWsusScheduleFieldVisibility() {
+    const mode = byId('wsusScheduleMode').value;
+    byId('wsusScheduleDayOfWeekField').classList.toggle('hidden', mode !== 'weekly');
+    byId('wsusScheduleDayOfMonthField').classList.toggle('hidden', mode !== 'monthly');
+  }
+
+  function saveWsusDownloadSchedule() {
+    const mode = byId('wsusScheduleMode').value;
+    const dayOfWeek = Number(byId('wsusScheduleDayOfWeek').value);
+    const dayOfMonth = Number(byId('wsusScheduleDayOfMonth').value);
+    const timeUtc = byId('wsusScheduleTimeUtc').value.trim();
+    const messageElement = byId('wsusScheduleMessage');
+
+    byId('wsusScheduleSaveButton').disabled = true;
+    fetch('/api/v1/windows-updates/download-schedule', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode, dayOfWeek, dayOfMonth, timeUtc })
+    })
+      .then(r => r.json().then(data => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Failed to save.');
+        messageElement.className = 'pkg-message';
+        messageElement.textContent = 'Schedule saved.';
+        messageElement.classList.remove('hidden');
+        loadWsusDownloadSchedule();
+      })
+      .catch(error => {
+        messageElement.className = 'pkg-message error';
+        messageElement.textContent = error.message;
+        messageElement.classList.remove('hidden');
+      })
+      .finally(() => {
+        byId('wsusScheduleSaveButton').disabled = false;
+      });
+  }
+
+  function triggerWsusCabDownloadNow() {
+    const messageElement = byId('wsusScheduleMessage');
+    byId('wsusDownloadNowButton').disabled = true;
+    fetch('/api/v1/windows-updates/cab-download-now', { method: 'POST', cache: 'no-store' })
+      .then(r => r.json().then(data => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Failed to start download.');
+        messageElement.className = 'pkg-message';
+        messageElement.textContent = 'Download started - refresh in a moment to see the result.';
+        messageElement.classList.remove('hidden');
+      })
+      .catch(error => {
+        messageElement.className = 'pkg-message error';
+        messageElement.textContent = error.message;
+        messageElement.classList.remove('hidden');
+      })
+      .finally(() => {
+        byId('wsusDownloadNowButton').disabled = false;
+      });
   }
 
   function deleteCertificate() {
@@ -5881,6 +5973,9 @@
   byId('softwareRepoClearButton').addEventListener('click', clearSoftwareRepositoryCredentials);
   byId('outboundProxySaveButton').addEventListener('click', saveOutboundProxySettings);
   byId('outboundProxyClearButton').addEventListener('click', clearOutboundProxySettings);
+  byId('wsusScheduleMode').addEventListener('change', updateWsusScheduleFieldVisibility);
+  byId('wsusScheduleSaveButton').addEventListener('click', saveWsusDownloadSchedule);
+  byId('wsusDownloadNowButton').addEventListener('click', triggerWsusCabDownloadNow);
   byId('updatesPushButton').addEventListener('click', startMergedUpdatesPush);
   byId('updatesSelectAll').addEventListener('change', () => {
     // Only ever toggles the CURRENT page's rows - "select every matching
