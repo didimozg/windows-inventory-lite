@@ -20,6 +20,12 @@
     // trustHostKeyAndRetry).
     installHistorySelectedJobId: null,
     updateJobId: null, updatePollTimer: null,
+    // Last cab-status payload rendered by renderWsusCabStatus, kept so
+    // triggerWsusCabDownloadNow can tell "the attempt that just finished"
+    // apart from whatever attempt was already recorded before this click -
+    // comparing server-issued lastAttemptUtc values, never the browser's
+    // own clock, which could be skewed relative to the server's.
+    wsusCabStatus: null, wsusDownloadPollTimer: null,
     // Keyed "platform|target" (matches a row checkbox's own dataset), not
     // DOM checkbox state - renderMergedUpdatesTable rebuilds updatesBody's
     // innerHTML from scratch on every page change/sort/poll refresh, which
@@ -2735,6 +2741,7 @@
   }
 
   function renderWsusCabStatus(data) {
+    state.wsusCabStatus = data;
     if (!data.present) {
       byId('wsusCabStatus').textContent = 'No wsusscn2.cab file placed yet.';
     } else {
@@ -2822,25 +2829,82 @@
       });
   }
 
+  // A trigger click only starts the download - the real work runs on a
+  // background thread and the POST response ("started") arrives almost
+  // instantly, well before a 600+ MB transfer finishes. Previously the
+  // button re-enabled and the message froze on "started" immediately
+  // after that POST, with nothing telling the admin whether it was still
+  // running, had already failed, or had already succeeded - reported
+  // live: an admin who saw no change assumed the first click had done
+  // nothing and clicked again, producing two real, correctly-logged but
+  // confusingly-experienced attempts. This now keeps the button disabled
+  // and actively polls cab-status until a genuinely new attempt (by
+  // server-issued timestamp, not a guessed duration) shows up.
+  const wsusDownloadPollIntervalMs = 3000;
+  const wsusDownloadPollMaxMs = 10 * 60 * 1000;
+
   function triggerWsusCabDownloadNow() {
     const messageElement = byId('wsusScheduleMessage');
-    byId('wsusDownloadNowButton').disabled = true;
+    const button = byId('wsusDownloadNowButton');
+    const previousAttemptUtc = state.wsusCabStatus ? (state.wsusCabStatus.lastAttemptUtc || '') : '';
+
+    button.disabled = true;
+    messageElement.className = 'pkg-message';
+    messageElement.textContent = 'Starting download...';
+    messageElement.classList.remove('hidden');
+
     fetch('/api/v1/windows-updates/cab-download-now', { method: 'POST', cache: 'no-store' })
       .then(r => r.json().then(data => ({ ok: r.ok, data })))
       .then(({ ok, data }) => {
         if (!ok) throw new Error(data.error || 'Failed to start download.');
-        messageElement.className = 'pkg-message';
-        messageElement.textContent = 'Download started - refresh in a moment to see the result.';
-        messageElement.classList.remove('hidden');
+        messageElement.textContent = 'Download in progress - this can take a few minutes for a large file...';
+        pollWsusCabDownloadCompletion(previousAttemptUtc, Date.now());
       })
       .catch(error => {
         messageElement.className = 'pkg-message error';
         messageElement.textContent = error.message;
         messageElement.classList.remove('hidden');
-      })
-      .finally(() => {
-        byId('wsusDownloadNowButton').disabled = false;
+        button.disabled = false;
       });
+  }
+
+  function pollWsusCabDownloadCompletion(previousAttemptUtc, startedAtMs) {
+    const messageElement = byId('wsusScheduleMessage');
+    const button = byId('wsusDownloadNowButton');
+
+    if (state.wsusDownloadPollTimer) {
+      window.clearInterval(state.wsusDownloadPollTimer);
+    }
+
+    state.wsusDownloadPollTimer = window.setInterval(() => {
+      fetch('/api/v1/windows-updates/cab-status', { cache: 'no-store' })
+        .then(response => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.json();
+        })
+        .then(data => {
+          const attemptCompleted = data.lastAttemptUtc && data.lastAttemptUtc !== previousAttemptUtc;
+          const timedOut = Date.now() - startedAtMs > wsusDownloadPollMaxMs;
+          if (!attemptCompleted && !timedOut) {
+            return;
+          }
+          window.clearInterval(state.wsusDownloadPollTimer);
+          state.wsusDownloadPollTimer = null;
+          button.disabled = false;
+          renderWsusCabStatus(data);
+          if (attemptCompleted) {
+            messageElement.classList.add('hidden');
+          } else {
+            messageElement.className = 'pkg-message';
+            messageElement.textContent = 'Still running after 10 minutes - check the status above once it finishes.';
+          }
+        })
+        .catch(() => {
+          // Transient poll failure - keep trying on the next tick rather
+          // than giving up on one dropped request; wsusDownloadPollMaxMs
+          // above still bounds how long this can go on for.
+        });
+    }, wsusDownloadPollIntervalMs);
   }
 
   function deleteCertificate() {
