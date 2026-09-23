@@ -255,7 +255,7 @@
 
   function loadWindowsUpdatesSubviewData(subview) {
     if (subview === 'missing') loadWsusMissingSummary();
-    if (subview === 'catalog') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); }
+    if (subview === 'catalog') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); loadWindowsUpdateAutoCreateSetting(); }
   }
 
   function loadSettingsSubviewData(subview) {
@@ -4223,6 +4223,40 @@
       });
   }
 
+  function loadWindowsUpdateAutoCreateSetting() {
+    fetch('/api/v1/server/settings', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('windowsUpdateAutoCreateEnabled').checked = !!data.autoCreateWindowsUpdateCatalogEntries;
+      })
+      .catch(() => {});
+  }
+
+  function saveWindowsUpdateAutoCreateSetting() {
+    const messageElement = byId('windowsUpdateAutoCreateMessage');
+    const enabled = byId('windowsUpdateAutoCreateEnabled').checked;
+    byId('windowsUpdateAutoCreateSaveButton').disabled = true;
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ autoCreateWindowsUpdateCatalogEntries: enabled })
+    })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        showSavedMessage(messageElement, 'Saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(messageElement, `Failed to save: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('windowsUpdateAutoCreateSaveButton').disabled = false;
+      });
+  }
+
   function loadWindowsUpdateDiscovered() {
     fetch('/api/v1/software-repository/scan-status', { cache: 'no-store' })
       .then(response => {
@@ -6226,6 +6260,7 @@
   byId('windowsUpdateSaveButton').addEventListener('click', saveWindowsUpdate);
   byId('windowsUpdateCancelButton').addEventListener('click', closeWindowsUpdateForm);
   byId('windowsUpdateScanButton').addEventListener('click', refreshWindowsUpdateScan);
+  byId('windowsUpdateAutoCreateSaveButton').addEventListener('click', saveWindowsUpdateAutoCreateSetting);
   byId('windowsUpdateTargetMode').addEventListener('change', () => {
     const mode = byId('windowsUpdateTargetMode').value;
     byId('windowsUpdateTargetsField').classList.toggle('hidden', mode !== 'static');
