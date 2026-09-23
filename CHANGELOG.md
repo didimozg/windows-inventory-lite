@@ -6,6 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.70.0] - WSUS cab automated download + outbound proxy
+
+### Added
+
+- **The server can now fetch `wsusscn2.cab` directly from Microsoft, instead of requiring an admin to download and copy it in by hand.** A new weekly/monthly + time-of-day schedule (Settings > Windows) triggers it automatically, or an admin can click "Download now" at any time; manual placement still works exactly as before and simply gets overwritten by the next successful automated download.
+- **A new outbound proxy setting (Settings > Server)** - host/port/optional username/password - used by the cab downloader when the network requires one; empty host connects directly. Named and built generically so a future server-initiated download feature can reuse the same setting.
+- **A new "WSUS Downloads" Logging sub-tab** records every automated and manual download attempt, with a categorized failure reason (network/proxy unreachable, a bad response from Microsoft, or a local disk-write failure) instead of a generic or silent error. The Settings > Windows status card also shows the most recent attempt's outcome.
+
+### Fixed
+
+- The new "WSUS Downloads" log's "Clear log" button always failed with a 404: a route-dispatch ordering bug let the generic catalog-item `DELETE` handler intercept the exact-match `download-log` route before it could run. Caught during this feature's own dashboard verification, before release.
+
+### Notes
+
+- Server + dashboard only - neither the Windows nor Linux client is touched by this feature.
+- See `docs/superpowers/specs/2026-09-23-wsus-automated-download-design.md` for the full design, including what's deliberately out of scope (a separate cab-signature check beyond what WUA already verifies, multiple/failover proxies, automatic retry-on-failure).
+
 ## [0.69.1] - GPO/WinRM deploy no longer trusts a stale installed-version marker
 
 ### Fixed
