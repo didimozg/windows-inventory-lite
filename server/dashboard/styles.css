@@ -1933,6 +1933,39 @@ th.sort-desc::after {
   grid-template-columns: minmax(200px, 420px) minmax(200px, 420px) minmax(160px, 220px) auto;
 }
 
+/* Outbound proxy (Host/Port/Username/Password) and Software repository
+   (Path/Username/Password/Scan interval) each have 4 real fields - one
+   more than the base .client-update-grid's 3-column (2 fields + a
+   trailing button track) template accounts for. With 5 grid items (4
+   fields + the .pkg-buttons div) auto-placed into only 3 explicit
+   columns, the 4th field spilled into row 1's button track and the 5th
+   (button row) ended up sharing row 2 with the field that wrapped there
+   instead of getting its own row - reported live for Outbound proxy
+   (Username fell in next to Host/Port, Password landed next to Save/
+   Clear instead of grouped with Username). Dropping to 2 equal columns
+   makes the 4 fields wrap 2-per-row as intended (Host+Port, then
+   Username+Password / Path+Username, then Password+Interval); forcing
+   .pkg-buttons to span both tracks puts Save/Clear on their own row
+   below, matching every other .client-update-grid block that ends with
+   an unshared button row. input[type="number"]'s own 120px max-width
+   cap (see above) keeps Port/Scan-interval from stretching to fill the
+   wider 420px track. Two separate classes with an identical body,
+   matching this file's own convention of one modifier per named
+   settings block (see .windows-defaults-grid/.linux-defaults-grid) -
+   keeps each block free to diverge later without an unrelated rename. */
+.outbound-proxy-grid {
+  grid-template-columns: minmax(200px, 420px) minmax(200px, 420px);
+}
+.outbound-proxy-grid > .pkg-buttons {
+  grid-column: 1 / -1;
+}
+.software-repo-grid {
+  grid-template-columns: minmax(200px, 420px) minmax(200px, 420px);
+}
+.software-repo-grid > .pkg-buttons {
+  grid-column: 1 / -1;
+}
+
 /* Four short numeric fields (threshold/window/duration/session lifetime) -
    narrower tracks than .client-update-grid's credential-shaped fields,
    matching this block's actual content instead of stretching digits-only

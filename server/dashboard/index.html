@@ -177,7 +177,7 @@
           <div class="settings-block">
             <h2 class="settings-block-title">Outbound proxy</h2>
             <p class="cert-hint">Used by server-initiated outbound downloads (currently: the WSUS cab downloader under Software &gt; Windows updates). Leave the host blank to connect directly with no proxy.</p>
-            <div class="pkg-grid client-update-grid">
+            <div class="pkg-grid client-update-grid outbound-proxy-grid">
               <label class="pkg-token-field">
                 Host
                 <input id="outboundProxyHost" type="text" placeholder="proxy.example.local">
@@ -414,7 +414,7 @@
           <div class="settings-block">
             <h2 class="settings-block-title">Software repository</h2>
             <p class="cert-hint">The network share Windows clients pull software installers and OS patches from. Leave password blank to keep the currently saved value.</p>
-            <div class="pkg-grid client-update-grid">
+            <div class="pkg-grid client-update-grid software-repo-grid">
               <label class="pkg-token-field">
                 Share path (UNC)
                 <input id="softwareRepoPath" type="text" placeholder="\\fileserver\software-repo">
