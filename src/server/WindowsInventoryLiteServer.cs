@@ -24154,7 +24154,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             // Cyrillic "КБ" (U+041A, U+0411) is a different byte sequence than
             // Latin "KB" (U+004B, U+0042) and must not match - a real, non-
             // hypothetical gap documented in the design doc, not an oversight.
-            if (ExtractKbFromFilename("windows-updates\\office2016wordкб1234567.msu") != null)
+            if (ExtractKbFromFilename("windows-updates\\office2016word\u043a\u04311234567.msu") != null)
             {
                 return "expected null for a Cyrillic-labelled filename - only Latin KB is matched";
             }
