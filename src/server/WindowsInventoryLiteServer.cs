@@ -154,6 +154,14 @@ namespace WindowsInventoryLite
         public string SoftwareRepositoryUsername;
         public string SoftwareRepositoryPassword;
         public int SoftwareShareScanIntervalMinutes;
+        // Used by the WSUS cab downloader (a later task) when the network
+        // requires an outbound proxy - see BuildOutboundProxy. Empty host
+        // means "connect directly", same convention as the other optional
+        // credential fields in this class.
+        public string OutboundProxyHost;
+        public int OutboundProxyPort;
+        public string OutboundProxyUsername;
+        public string OutboundProxyPassword;
         public string LinuxClientPackagePath;
         // CIDR block (e.g. "192.168.1.0/24") an admin can set in Settings >
         // Linux when a Linux host reports several NICs and the "wrong"
@@ -914,6 +922,27 @@ namespace WindowsInventoryLite
                 if (String.IsNullOrEmpty(options.SoftwareRepositoryPassword))
                 {
                     options.SoftwareRepositoryPassword = SecretProtector.Unprotect(GetConfigString(config, "SoftwareRepositoryPassword"));
+                }
+                if (String.IsNullOrEmpty(options.OutboundProxyHost))
+                {
+                    options.OutboundProxyHost = GetConfigString(config, "OutboundProxyHost") ?? "";
+                }
+                if (options.OutboundProxyPort == 0)
+                {
+                    string outboundProxyPortText = GetConfigString(config, "OutboundProxyPort");
+                    int outboundProxyPortFromConfig;
+                    if (!String.IsNullOrEmpty(outboundProxyPortText) && Int32.TryParse(outboundProxyPortText, out outboundProxyPortFromConfig))
+                    {
+                        options.OutboundProxyPort = outboundProxyPortFromConfig;
+                    }
+                }
+                if (String.IsNullOrEmpty(options.OutboundProxyUsername))
+                {
+                    options.OutboundProxyUsername = GetConfigString(config, "OutboundProxyUsername") ?? "";
+                }
+                if (String.IsNullOrEmpty(options.OutboundProxyPassword))
+                {
+                    options.OutboundProxyPassword = SecretProtector.Unprotect(GetConfigString(config, "OutboundProxyPassword"));
                 }
                 string configuredScanInterval = GetConfigString(config, "SoftwareShareScanIntervalMinutes");
                 int parsedScanInterval;
@@ -2224,6 +2253,14 @@ namespace WindowsInventoryLite
                     else if (request.Method == "POST" && request.Path == "/api/v1/server/settings")
                     {
                         ConfigureServerSettings(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/outbound-proxy")
+                    {
+                        SendOutboundProxyStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/outbound-proxy")
+                    {
+                        ConfigureOutboundProxy(stream, request);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/ad/computers")
                     {
@@ -4218,6 +4255,101 @@ namespace WindowsInventoryLite
             ReconfigureSoftwareRepositoryScanTimer();
 
             SendSoftwareRepositoryCredentialsStatus(stream);
+        }
+
+        private void SendOutboundProxyStatus(Stream stream)
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["host"] = options.OutboundProxyHost ?? "";
+            result["port"] = options.OutboundProxyPort;
+            result["username"] = String.IsNullOrEmpty(options.OutboundProxyUsername) ? null : options.OutboundProxyUsername;
+            result["hasPassword"] = !String.IsNullOrEmpty(options.OutboundProxyPassword);
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void ConfigureOutboundProxy(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            bool clear = payload.ContainsKey("clear") && Convert.ToBoolean(payload["clear"]);
+            string host;
+            int port;
+            string username;
+            string password;
+            if (clear)
+            {
+                host = "";
+                port = 0;
+                username = "";
+                password = "";
+            }
+            else
+            {
+                host = payload.ContainsKey("host") ? Convert.ToString(payload["host"]).Trim() : options.OutboundProxyHost;
+                port = options.OutboundProxyPort;
+                if (payload.ContainsKey("port"))
+                {
+                    if (!Int32.TryParse(Convert.ToString(payload["port"]), out port) || port < 0 || port > 65535)
+                    {
+                        SendText(stream, "{\"error\":\"port must be between 0 and 65535\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+                username = payload.ContainsKey("username") ? Convert.ToString(payload["username"]).Trim() : options.OutboundProxyUsername;
+                password = payload.ContainsKey("password") && !String.IsNullOrEmpty(Convert.ToString(payload["password"]))
+                    ? Convert.ToString(payload["password"])
+                    : options.OutboundProxyPassword;
+            }
+
+            options.OutboundProxyHost = host;
+            options.OutboundProxyPort = port;
+            options.OutboundProxyUsername = username;
+            options.OutboundProxyPassword = password;
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["OutboundProxyHost"] = host ?? "";
+            updates["OutboundProxyPort"] = port.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            updates["OutboundProxyUsername"] = username ?? "";
+            updates["OutboundProxyPassword"] = password ?? "";
+            SaveServerConfigValues(updates);
+
+            SendOutboundProxyStatus(stream);
+        }
+
+        // Used only by the WSUS cab downloader (Task 4) today - named
+        // generically, not Wsus-prefixed, so a future outbound-call
+        // feature can reuse this same setting/helper rather than growing
+        // its own separate proxy configuration. Returns null (meaning
+        // "connect directly") when no host is configured, matching the
+        // "empty host = no proxy" convention this setting was designed
+        // around - there is no separate enabled/disabled checkbox.
+        private IWebProxy BuildOutboundProxy()
+        {
+            if (String.IsNullOrEmpty(options.OutboundProxyHost))
+            {
+                return null;
+            }
+            WebProxy proxy = new WebProxy(options.OutboundProxyHost, options.OutboundProxyPort);
+            if (!String.IsNullOrEmpty(options.OutboundProxyUsername))
+            {
+                proxy.Credentials = new NetworkCredential(options.OutboundProxyUsername, options.OutboundProxyPassword ?? "");
+            }
+            return proxy;
         }
 
         private void SendShareScanStatus(Stream stream)
@@ -11181,7 +11313,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // ConfigureCertificate here and Install-Server.ps1's own import
         // step), so there is nothing to encrypt for it.
         private static readonly HashSet<string> EncryptedConfigKeys = new HashSet<string>(
-            new[] { "AdPassword", "WebPassword", "Token", "ClientUpdatePassword", "LinuxUpdatePassword", "SoftwareRepositoryPassword", "PreviousToken" },
+            new[] { "AdPassword", "WebPassword", "Token", "ClientUpdatePassword", "LinuxUpdatePassword", "SoftwareRepositoryPassword", "PreviousToken", "OutboundProxyPassword" },
             StringComparer.Ordinal);
 
         private void SaveServerConfigValues(Dictionary<string, string> updates)
@@ -14252,6 +14384,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate defaults targetMode to static when omitted, matching pre-existing behavior", TestCreateWindowsUpdateDefaultsToStaticTargetMode);
             allPassed &= SelfTestCheck(output, "UpdateWindowsUpdate can change an existing static entry to targetMode=missingKb and back", TestUpdateWindowsUpdateCanChangeTargetMode);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates/missing-summary aggregates wsusMissingUpdates across every stored Windows client report by kbId, with machine counts and names", TestSendWsusMissingSummaryAggregatesAcrossReports);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/outbound-proxy reports hasPassword without ever returning the raw password", TestSendOutboundProxyStatusMasksPassword);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/outbound-proxy saves host/port/username/password and an empty password in the request keeps the existing one", TestConfigureOutboundProxyKeepsExistingPasswordWhenBlank);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/outbound-proxy with clear=true wipes host/port/username/password", TestConfigureOutboundProxyClearWipesAllFields);
+            allPassed &= SelfTestCheck(output, "OutboundProxyPassword is DPAPI-encrypted at rest", TestOutboundProxyPasswordIsInEncryptedConfigKeys);
+            allPassed &= SelfTestCheck(output, "BuildOutboundProxy returns null when no host is configured, a real WebProxy with credentials when one is", TestBuildOutboundProxyReturnsNullOrConfiguredProxy);
             return allPassed;
         }
 
@@ -22312,6 +22449,177 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return "expected PreviousToken to be in EncryptedConfigKeys so it is never stored in plaintext";
             }
             return null;
+        }
+
+        private static string TestSendOutboundProxyStatusMasksPassword()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-proxystatus-" + Guid.NewGuid().ToString("N"));
+            options.WebUsername = "admin";
+            options.WebPassword = "password123";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                options.OutboundProxyHost = "proxy.example.local";
+                options.OutboundProxyPort = 8080;
+                options.OutboundProxyUsername = "proxyuser";
+                options.OutboundProxyPassword = "super-secret";
+
+                InventoryServer server = new InventoryServer(options);
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendOutboundProxyStatus", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("\"host\":\"proxy.example.local\"", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected host to be echoed back, got: " + responseText;
+                    }
+                    if (responseText.IndexOf("\"hasPassword\":true", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected hasPassword:true, got: " + responseText;
+                    }
+                    if (responseText.IndexOf("super-secret", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        return "expected the raw password to never appear in the response, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestConfigureOutboundProxyKeepsExistingPasswordWhenBlank()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-proxykeep-" + Guid.NewGuid().ToString("N"));
+            options.WebUsername = "admin";
+            options.WebPassword = "password123";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                options.OutboundProxyPassword = "original-secret";
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/outbound-proxy";
+                request.Body = "{\"host\":\"newproxy.example.local\",\"port\":3128,\"username\":\"newuser\",\"password\":\"\"}";
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("ConfigureOutboundProxy", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                }
+
+                if (options.OutboundProxyHost != "newproxy.example.local" || options.OutboundProxyPort != 3128 || options.OutboundProxyUsername != "newuser")
+                {
+                    return "expected host/port/username to update, got host=" + options.OutboundProxyHost + " port=" + options.OutboundProxyPort + " username=" + options.OutboundProxyUsername;
+                }
+                if (options.OutboundProxyPassword != "original-secret")
+                {
+                    return "expected the existing password to survive a blank password in the request, got: " + options.OutboundProxyPassword;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestConfigureOutboundProxyClearWipesAllFields()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-proxyclear-" + Guid.NewGuid().ToString("N"));
+            options.WebUsername = "admin";
+            options.WebPassword = "password123";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                options.OutboundProxyHost = "proxy.example.local";
+                options.OutboundProxyPort = 8080;
+                options.OutboundProxyUsername = "proxyuser";
+                options.OutboundProxyPassword = "super-secret";
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/outbound-proxy";
+                request.Body = "{\"clear\":true}";
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("ConfigureOutboundProxy", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                }
+
+                if (!String.IsNullOrEmpty(options.OutboundProxyHost) || options.OutboundProxyPort != 0 || !String.IsNullOrEmpty(options.OutboundProxyUsername) || !String.IsNullOrEmpty(options.OutboundProxyPassword))
+                {
+                    return "expected clear=true to wipe every field, got host=" + options.OutboundProxyHost + " port=" + options.OutboundProxyPort + " username=" + options.OutboundProxyUsername + " password=" + options.OutboundProxyPassword;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestOutboundProxyPasswordIsInEncryptedConfigKeys()
+        {
+            if (!EncryptedConfigKeys.Contains("OutboundProxyPassword"))
+            {
+                return "expected OutboundProxyPassword to be in EncryptedConfigKeys so it is never stored in plaintext";
+            }
+            return null;
+        }
+
+        private static string TestBuildOutboundProxyReturnsNullOrConfiguredProxy()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-proxybuild-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("BuildOutboundProxy", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+                object noProxy = method.Invoke(server, null);
+                if (noProxy != null)
+                {
+                    return "expected null when no host is configured";
+                }
+
+                options.OutboundProxyHost = "proxy.example.local";
+                options.OutboundProxyPort = 8080;
+                options.OutboundProxyUsername = "proxyuser";
+                options.OutboundProxyPassword = "proxypass";
+                IWebProxy proxy = (IWebProxy)method.Invoke(server, null);
+                if (proxy == null)
+                {
+                    return "expected a real IWebProxy once a host is configured";
+                }
+                Uri probe = new Uri("https://go.microsoft.com/fwlink/?LinkID=74689");
+                Uri proxyUri = proxy.GetProxy(probe);
+                if (proxyUri == null || proxyUri.Host != "proxy.example.local" || proxyUri.Port != 8080)
+                {
+                    return "expected the proxy to route to proxy.example.local:8080, got: " + proxyUri;
+                }
+                NetworkCredential credential = proxy.Credentials.GetCredential(probe, "Basic");
+                if (credential == null || credential.UserName != "proxyuser" || credential.Password != "proxypass")
+                {
+                    return "expected the proxy credentials to carry proxyuser/proxypass";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
         }
 
         private static string TestSplitDomainUsernameHandlesBothForms()
