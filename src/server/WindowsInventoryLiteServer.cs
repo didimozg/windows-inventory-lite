@@ -14179,7 +14179,88 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 }
                 lastShareScanResult = result;
             }
+
+            if (options.AutoCreateWindowsUpdateCatalogEntries && result.Success)
+            {
+                AutoCreateCatalogEntriesForDetectedKbs(result.WindowsUpdateCandidates);
+            }
+
             return result;
+        }
+
+        // Called once per scan when AutoCreateWindowsUpdateCatalogEntries is
+        // on. For every non-conflicting candidate with a successfully
+        // detected KB and no existing catalog entry (enabled or disabled)
+        // already targeting that exact KB via missingKb, creates a new entry
+        // through the exact same internal path CreateWindowsUpdate already
+        // uses for a manual "Add to catalog" click - a synthetic in-process
+        // RequestContext with a JSON body, matching this file's own
+        // established self-test convention for calling HTTP handlers
+        // directly. An entry this method creates is an ordinary catalog
+        // entry afterward - fully editable/deletable via the existing
+        // dashboard actions, indistinguishable from one a human created by
+        // hand.
+        internal void AutoCreateCatalogEntriesForDetectedKbs(List<WindowsUpdateCandidate> candidates)
+        {
+            HashSet<string> alreadyCatalogedKbIds;
+            lock (windowsUpdatesLock)
+            {
+                alreadyCatalogedKbIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (Dictionary<string, object> entry in LoadWindowsUpdates())
+                {
+                    if (GetStringValue(entry, "targetMode") == "missingKb")
+                    {
+                        string existingKbId = GetStringValue(entry, "kbId");
+                        if (!String.IsNullOrEmpty(existingKbId))
+                        {
+                            alreadyCatalogedKbIds.Add(existingKbId);
+                        }
+                    }
+                }
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            foreach (WindowsUpdateCandidate candidate in candidates)
+            {
+                if (candidate.HasConflict || String.IsNullOrEmpty(candidate.DetectedKbId))
+                {
+                    continue;
+                }
+                if (alreadyCatalogedKbIds.Contains(candidate.DetectedKbId))
+                {
+                    continue;
+                }
+
+                string extension = candidate.RelativePath.Contains(".") ? candidate.RelativePath.Substring(candidate.RelativePath.LastIndexOf('.') + 1).ToLowerInvariant() : "";
+                string defaultArguments = extension == "msu" ? "/quiet /norestart" : "";
+
+                Dictionary<string, object> createBody = new Dictionary<string, object>();
+                createBody["name"] = "Auto: KB" + candidate.DetectedKbId;
+                createBody["relativePath"] = candidate.RelativePath;
+                createBody["arguments"] = defaultArguments;
+                createBody["targetMode"] = "missingKb";
+                createBody["kbId"] = candidate.DetectedKbId;
+                createBody["requiresReboot"] = false;
+                createBody["enabled"] = true;
+
+                RequestContext createRequest = new RequestContext();
+                createRequest.Method = "POST";
+                createRequest.Path = "/api/v1/windows-updates";
+                createRequest.Headers = new Dictionary<string, string>();
+                createRequest.Body = serializer.Serialize(createBody);
+
+                using (MemoryStream createStream = new MemoryStream())
+                {
+                    CreateWindowsUpdate(createStream, createRequest);
+                }
+
+                // Prevents creating two entries for the same KB within this
+                // same scan pass if it somehow appeared on more than one
+                // non-conflicting candidate (should not happen given
+                // FindDuplicateKbIds already flags true duplicates, but this
+                // keeps the invariant correct regardless).
+                alreadyCatalogedKbIds.Add(candidate.DetectedKbId);
+            }
         }
 
         // Recursively lists files under <repositoryRoot>\<subfolderName>,
@@ -15290,6 +15371,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository finds only files not already referenced by a catalog entry's relativePath", TestScanSoftwareRepositoryFindsUncatalogedFilesOnly);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository preserves the last successful scan's candidates when a subsequent scan fails", TestScanSoftwareRepositoryPreservesCandidatesOnSubsequentFailure);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository flags every candidate sharing a duplicate detected KB with HasConflict=true, leaves a unique KB unflagged", TestScanSoftwareRepositoryFlagsConflictingKbCandidates);
+            allPassed &= SelfTestCheck(output, "ScanSoftwareRepository auto-creates a missingKb catalog entry when AutoCreateWindowsUpdateCatalogEntries is on, does not duplicate it on a second scan", TestScanSoftwareRepositoryAutoCreatesCatalogEntryWhenEnabled);
+            allPassed &= SelfTestCheck(output, "ScanSoftwareRepository never auto-creates when the setting is off, a KB conflicts, or that KB already has any catalog entry (even disabled)", TestScanSoftwareRepositorySkipsAutoCreateWhenDisabledConflictedOrAlreadyCatalogued);
             allPassed &= SelfTestCheck(output, "Windows updates catalog: Create->Update->Delete through the real CreateWindowsUpdate/UpdateWindowsUpdate/DeleteWindowsUpdate HTTP handlers, then a 404 on both after delete", TestWindowsUpdatesCrudHttpLifecycleThroughRealHandlers);
             allPassed &= SelfTestCheck(output, "Third-party software catalog: Create->Update->Delete through the real CreateThirdPartySoftware/UpdateThirdPartySoftware/DeleteThirdPartySoftware HTTP handlers, then a 404 on both after delete", TestThirdPartySoftwareCrudHttpLifecycleThroughRealHandlers);
             allPassed &= SelfTestCheck(output, "SoftwareCatalogSpec wiring is not cross-contaminated: a Windows-Updates entry never appears in the Third-Party-Software list, and cross-catalog Update/Delete attempts 404 with the OTHER catalog's own not-found message", TestSoftwareCatalogHandlersDoNotCrossContaminateBetweenCatalogs);
@@ -24651,6 +24734,119 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     {
                         return "expected the lone kb5099539 file to NOT be flagged as a conflict: " + candidate.RelativePath;
                     }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestScanSoftwareRepositoryAutoCreatesCatalogEntryWhenEnabled()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-share-scan-autocreate-test-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-share-scan-autocreate-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "windows-updates"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "third-party-software"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                File.WriteAllText(Path.Combine(shareRoot, "windows-updates", "kb5031354-fix.msu"), "test");
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                options.AutoCreateWindowsUpdateCatalogEntries = true;
+                InventoryServer server = new InventoryServer(options);
+
+                server.ScanSoftwareRepository();
+
+                List<Dictionary<string, object>> stored = server.LoadWindowsUpdates();
+                if (stored.Count != 1)
+                {
+                    return "expected exactly one catalog entry to be auto-created, got " + stored.Count;
+                }
+                if (GetStringValue(stored[0], "targetMode") != "missingKb" || GetStringValue(stored[0], "kbId") != "5031354")
+                {
+                    return "expected the auto-created entry to target missingKb 5031354, got targetMode=" + GetStringValue(stored[0], "targetMode") + " kbId=" + GetStringValue(stored[0], "kbId");
+                }
+                if (!Convert.ToBoolean(stored[0]["enabled"]))
+                {
+                    return "expected the auto-created entry to be enabled";
+                }
+
+                // A second scan must not create a duplicate - the KB is now
+                // already catalogued.
+                server.ScanSoftwareRepository();
+                List<Dictionary<string, object>> afterSecondScan = server.LoadWindowsUpdates();
+                if (afterSecondScan.Count != 1)
+                {
+                    return "expected a second scan to find the KB already catalogued and NOT create a duplicate, got " + afterSecondScan.Count + " entries";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestScanSoftwareRepositorySkipsAutoCreateWhenDisabledConflictedOrAlreadyCatalogued()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-share-scan-autocreate-skip-test-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-share-scan-autocreate-skip-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "windows-updates"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "third-party-software"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                // Two files for the same KB -> a conflict, must never auto-create.
+                File.WriteAllText(Path.Combine(shareRoot, "windows-updates", "kb5031354-x86.msu"), "test");
+                File.WriteAllText(Path.Combine(shareRoot, "windows-updates", "kb5031354-x64.msu"), "test");
+                // A KB that's already catalogued, even disabled - must not be duplicated or re-enabled.
+                File.WriteAllText(Path.Combine(shareRoot, "windows-updates", "kb5099539-fix.msu"), "test");
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                options.AutoCreateWindowsUpdateCatalogEntries = false;
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> preExisting = new List<Dictionary<string, object>>();
+                Dictionary<string, object> alreadyDisabledEntry = new Dictionary<string, object>();
+                alreadyDisabledEntry["id"] = "pre-existing-5099539";
+                alreadyDisabledEntry["name"] = "Pre-existing, deliberately disabled";
+                alreadyDisabledEntry["relativePath"] = @"windows-updates\some-other-file.msu";
+                alreadyDisabledEntry["targetMode"] = "missingKb";
+                alreadyDisabledEntry["kbId"] = "5099539";
+                alreadyDisabledEntry["enabled"] = false;
+                preExisting.Add(alreadyDisabledEntry);
+                server.SaveWindowsUpdates(preExisting);
+
+                // First: setting disabled entirely - nothing new should appear.
+                server.ScanSoftwareRepository();
+                List<Dictionary<string, object>> afterDisabledScan = server.LoadWindowsUpdates();
+                if (afterDisabledScan.Count != 1)
+                {
+                    return "expected no auto-creation at all while the setting is off, got " + afterDisabledScan.Count + " entries";
+                }
+
+                // Now enable it and re-scan: the conflicted KB must still not be
+                // created, and the already-catalogued (disabled) KB must not be
+                // duplicated or touched.
+                options.AutoCreateWindowsUpdateCatalogEntries = true;
+                server.ScanSoftwareRepository();
+                List<Dictionary<string, object>> afterEnabledScan = server.LoadWindowsUpdates();
+                if (afterEnabledScan.Count != 1)
+                {
+                    return "expected still exactly one entry - conflict must not auto-create, already-catalogued KB must not duplicate - got " + afterEnabledScan.Count;
+                }
+                if (Convert.ToBoolean(afterEnabledScan[0]["enabled"]))
+                {
+                    return "expected the pre-existing disabled entry to remain untouched (still disabled), auto-creation must never modify an entry it did not create";
                 }
                 return null;
             }
