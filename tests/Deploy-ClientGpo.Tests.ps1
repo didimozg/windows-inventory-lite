@@ -104,6 +104,47 @@ Describe 'Windows Inventory Lite Deploy-ClientGpo client-data layout' {
         Get-ExeVersion -Path $fixturePath | Should -Be '1.2.3-test'
     }
 
+    # Root cause of a real production bug (2026-09-23): "installed version"
+    # used to be tracked via a private client-version.txt marker file,
+    # written only by this script's own Save-InstalledVersion, right after
+    # THIS script performed an install/reinstall. The client's own
+    # self-update mechanism (ApplySelfUpdateFromServerCore, C#) swaps the
+    # exe and restarts the service through a completely separate .cmd/
+    # schtasks path and never touches that marker - so a machine that
+    # self-updated one or more times since its last GPO/WinRM deploy had a
+    # marker frozen on a stale, older version than what was actually
+    # running, making $needsInstall's comparison wrong (a misleading log
+    # line at best, an unnecessary forced service stop/reinstall at worst).
+    # Fixed by reading the ACTUAL currently-installed exe's real version via
+    # Get-ExeVersion (the same mechanism already used for $packageVersion)
+    # instead of a bookkeeping file only one of two update paths ever wrote.
+    It 'no longer tracks the installed version via a private marker file (Get-InstalledVersion/Save-InstalledVersion are gone)' {
+        Get-Command -Name Get-InstalledVersion -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+        Get-Command -Name Save-InstalledVersion -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+    }
+
+    It 'Get-ExeVersion independently reports the real version of two different files with no shared/leaked state between calls' {
+        $installedFixture = Join-Path -Path $TestDrive -ChildPath 'fake-installed-client.cmd'
+        Set-Content -LiteralPath $installedFixture -Value @(
+            '@echo off'
+            'echo 0.6.0'
+            'exit /b 0'
+        )
+        $packageFixture = Join-Path -Path $TestDrive -ChildPath 'fake-package-client.cmd'
+        Set-Content -LiteralPath $packageFixture -Value @(
+            '@echo off'
+            'echo 0.7.0'
+            'exit /b 0'
+        )
+
+        # Simulates the real deploy flow: the currently-installed exe's real
+        # version is read via the same function, at the same call site
+        # shape, as the new package's version - no separate bookkeeping file
+        # for either side, so the two can never drift apart from each other.
+        Get-ExeVersion -Path $installedFixture | Should -Be '0.6.0'
+        Get-ExeVersion -Path $packageFixture | Should -Be '0.7.0'
+    }
+
     It 'Get-ServiceEnvironmentToken returns an empty string when no Environment value is set' {
         $registryRoot = 'TestRegistry:\Services'
         $serviceName = 'FakeServiceNoToken'

@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.69.1] - GPO/WinRM deploy no longer trusts a stale installed-version marker
+
+### Fixed
+
+- **`Deploy-ClientGpo.ps1` (shared by both the GPO startup-script path and the WinRM bulk-push path) tracked "installed version" via a private `client-version.txt` marker file, written only by this same script right after it performed an install/reinstall.** The client's own self-update mechanism (`ApplySelfUpdateFromServerCore`) swaps the exe and restarts the service through a completely separate path and never touched that marker - so a machine that self-updated one or more times since its last GPO/WinRM deploy had the marker frozen on a stale, older version than what was actually running. This produced a misleading "Installed version" log line during every subsequent deploy, and could force an unnecessary service stop/reinstall on a machine that was already exactly current. Fixed by reading the real currently-installed exe's own reported version via the same `Get-ExeVersion` mechanism already used for the new package - both sides of the comparison now go through one function, so they can no longer drift apart. `client-version.txt`/`Get-InstalledVersion`/`Save-InstalledVersion` are removed entirely; only a legacy-cleanup step (migrating an old bare-root install to the current layout) still removes a stray leftover copy of that file if one exists.
+
 ## [0.69.0] - WSUS offline compliance scanning
 
 ### Added

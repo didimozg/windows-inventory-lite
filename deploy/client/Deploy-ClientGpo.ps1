@@ -220,32 +220,6 @@ function Get-ExeVersion {
     }
 }
 
-function Get-InstalledVersion {
-    param([string]$InstallDirectory)
-
-    $versionPath = Join-Path -Path $InstallDirectory -ChildPath 'client-version.txt'
-    if (Test-Path -LiteralPath $versionPath) {
-        try {
-            return ([System.IO.File]::ReadAllText($versionPath, [System.Text.Encoding]::UTF8)).Trim()
-        }
-        catch {
-            return $null
-        }
-    }
-
-    return $null
-}
-
-function Save-InstalledVersion {
-    param(
-        [string]$InstallDirectory,
-        [string]$Version
-    )
-
-    $versionPath = Join-Path -Path $InstallDirectory -ChildPath 'client-version.txt'
-    [System.IO.File]::WriteAllText($versionPath, $Version, (New-Object System.Text.UTF8Encoding($false)))
-}
-
 function Test-ServiceExists {
     $null = & sc.exe query $ServiceName 2>&1
     return ($LASTEXITCODE -eq 0)
@@ -431,10 +405,12 @@ function Remove-LegacyClientFiles {
 
     # Same path-equality guard as the exe above - without it, an operator
     # who explicitly passes -InstallPath back to the legacy bare root (still
-    # technically permitted) would have this delete the client-version.txt
-    # Save-InstalledVersion just wrote to that same path seconds earlier,
-    # making Get-InstalledVersion read nothing on the next run and forcing
-    # a needless reinstall on every subsequent deploy.
+    # technically permitted) would have this delete a client-version.txt
+    # that is also the new install's own file. This project no longer
+    # writes client-version.txt at all (installed-version detection reads
+    # the real exe via Get-ExeVersion instead - see the top-level script
+    # body) - this cleanup only removes a stray leftover from before that
+    # change, on machines whose legacy bare-root install still has one.
     $legacyVersionPath = Join-Path -Path $LegacyRoot -ChildPath 'client-version.txt'
     $newVersionPath = Join-Path -Path $newDirectory -ChildPath 'client-version.txt'
     if ((Test-Path -LiteralPath $legacyVersionPath) -and ($legacyVersionPath -ne $newVersionPath)) {
@@ -549,7 +525,18 @@ if ($MyInvocation.InvocationName -ne '.') {
     $servicePath = Join-Path -Path $InstallPath -ChildPath 'WindowsInventoryLiteClient.exe'
     $debugLogPath = Join-Path -Path $InstallPath -ChildPath '_logs\debug-client.log'
     $packageVersion = Get-ExeVersion -Path $PackageClientPath
-    $installedVersion = Get-InstalledVersion -InstallDirectory $InstallPath
+    # Reads the REAL currently-installed exe's own reported version, the
+    # same way $packageVersion is read for the new package - not a
+    # separate bookkeeping file. A private client-version.txt marker used
+    # to track this, written only by this script's own install/reinstall
+    # step below; the client's self-update mechanism (ApplySelfUpdateFromServerCore,
+    # C#) swaps the exe through a completely separate path and never
+    # touched that marker, so a machine that self-updated since its last
+    # GPO/WinRM deploy had a marker frozen on a stale, older version than
+    # what was actually running - a misleading "Installed version" log line
+    # at best, an unnecessary forced service stop/reinstall at worst.
+    # $null (same as before) when no exe exists yet - the fresh-install case.
+    $installedVersion = Get-ExeVersion -Path $servicePath
     $desiredCommand = Get-DesiredServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SoftwareHours $SoftwareCheckIntervalHours -OutputDirectory $InstallPath -DebugLogPath $debugLogPath -RequireHttpsSelfUpdate:$RequireHttpsSelfUpdate -RequireSignedSelfUpdate:$RequireSignedSelfUpdate
     $currentCommand = Get-ServiceBinaryPath
     $serviceExists = Test-ServiceExists
@@ -604,7 +591,6 @@ if ($MyInvocation.InvocationName -ne '.') {
 
     Copy-Item -LiteralPath $PackageClientPath -Destination $servicePath -Force
     $installedVersion = $packageVersion
-    Save-InstalledVersion -InstallDirectory $InstallPath -Version $installedVersion
 
     Invoke-ServiceCreate -ServiceName $ServiceName -BinPath $desiredCommand -DisplayName 'Windows Inventory Lite' -FailureMessage 'Failed to create service.' | Out-Null
     Set-ServiceEnvironmentToken -ServiceName $ServiceName -SharedToken $Token
