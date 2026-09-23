@@ -244,6 +244,7 @@ namespace WindowsInventoryLite
         // atomic file swap with no live process interruption) - an admin
         // may reasonably want one without the other.
         public bool EnableWindowsClientSelfUpdate;
+        public bool AutoCreateWindowsUpdateCatalogEntries;
         public bool EnableLinuxClientSelfUpdate;
         public bool ConsoleMode;
         public bool ShowVersion;
@@ -632,6 +633,11 @@ namespace WindowsInventoryLite
                 {
                     string enableWindowsClientSelfUpdateText = GetConfigString(config, "EnableWindowsClientSelfUpdate");
                     options.EnableWindowsClientSelfUpdate = String.Equals(enableWindowsClientSelfUpdateText, "true", StringComparison.OrdinalIgnoreCase);
+                }
+                if (!options.AutoCreateWindowsUpdateCatalogEntries)
+                {
+                    string autoCreateWindowsUpdateCatalogEntriesText = GetConfigString(config, "AutoCreateWindowsUpdateCatalogEntries");
+                    options.AutoCreateWindowsUpdateCatalogEntries = String.Equals(autoCreateWindowsUpdateCatalogEntriesText, "true", StringComparison.OrdinalIgnoreCase);
                 }
                 if (!options.EnableLinuxClientSelfUpdate)
                 {
@@ -9931,6 +9937,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             result["useHttps"] = options.UseHttps;
             result["hstsEnabled"] = options.HstsEnabled;
             result["enableWindowsClientSelfUpdate"] = options.EnableWindowsClientSelfUpdate;
+            result["autoCreateWindowsUpdateCatalogEntries"] = options.AutoCreateWindowsUpdateCatalogEntries;
             result["enableLinuxClientSelfUpdate"] = options.EnableLinuxClientSelfUpdate;
             result["hstsMaxAgeHours"] = options.HstsMaxAgeHours;
             result["thumbprint"] = options.CertificateThumbprint;
@@ -11054,6 +11061,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 options.EnableWindowsClientSelfUpdate = Convert.ToBoolean(payload["enableWindowsClientSelfUpdate"]);
                 updates["EnableWindowsClientSelfUpdate"] = options.EnableWindowsClientSelfUpdate ? "true" : "false";
+            }
+            if (payload.ContainsKey("autoCreateWindowsUpdateCatalogEntries"))
+            {
+                options.AutoCreateWindowsUpdateCatalogEntries = Convert.ToBoolean(payload["autoCreateWindowsUpdateCatalogEntries"]);
+                updates["AutoCreateWindowsUpdateCatalogEntries"] = options.AutoCreateWindowsUpdateCatalogEntries ? "true" : "false";
             }
             if (payload.ContainsKey("enableLinuxClientSelfUpdate"))
             {
@@ -15002,6 +15014,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips the software install window and validates its fields", TestConfigureServerSettingsRoundTripsSoftwareInstallWindow);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips showUsbStorageIndicator", TestConfigureServerSettingsRoundTripsShowUsbStorageIndicator);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips enableWindowsClientSelfUpdate/enableLinuxClientSelfUpdate", TestConfigureServerSettingsRoundTripsSelfUpdateToggles);
+            allPassed &= SelfTestCheck(output, "autoCreateWindowsUpdateCatalogEntries defaults to false and round-trips through the real settings GET/POST handlers", TestAutoCreateWindowsUpdateCatalogEntriesSettingRoundTrips);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips debugLogRetentionDays/debugLogMaxSizeMb", TestConfigureServerSettingsRoundTripsDebugLogCaps);
             allPassed &= SelfTestCheck(output, "SendDebugLog returns empty content when the log file does not exist", TestSendDebugLogReturnsEmptyContentWhenFileMissing);
             allPassed &= SelfTestCheck(output, "SendDebugLog round-trips real file content", TestSendDebugLogRoundTripsRealFileContent);
@@ -16617,6 +16630,60 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     return "expected GET /api/v1/server/settings to echo back both toggles as true, got: " + responseText;
                 }
 
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestAutoCreateWindowsUpdateCatalogEntriesSettingRoundTrips()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.EnableHttp = true;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-autocreate-setting-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                if (options.AutoCreateWindowsUpdateCatalogEntries)
+                {
+                    return "expected AutoCreateWindowsUpdateCatalogEntries to default to false";
+                }
+
+                RequestContext postRequest = new RequestContext();
+                postRequest.Method = "POST";
+                postRequest.Path = "/api/v1/server/settings";
+                postRequest.Headers = new Dictionary<string, string>();
+                postRequest.Body = "{\"autoCreateWindowsUpdateCatalogEntries\":true}";
+
+                using (MemoryStream postStream = new MemoryStream())
+                {
+                    server.ConfigureServerSettings(postStream, postRequest);
+                }
+                if (!options.AutoCreateWindowsUpdateCatalogEntries)
+                {
+                    return "expected the live options object to be updated to true after POST";
+                }
+
+                RequestContext getRequest = new RequestContext();
+                getRequest.Method = "GET";
+                getRequest.Path = "/api/v1/server/settings";
+                getRequest.Headers = new Dictionary<string, string>();
+
+                string getResponseText;
+                using (MemoryStream getStream = new MemoryStream())
+                {
+                    server.SendServerSettings(getStream);
+                    getResponseText = Encoding.UTF8.GetString(getStream.ToArray());
+                }
+                if (getResponseText.IndexOf("\"autoCreateWindowsUpdateCatalogEntries\":true", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the settings GET response to reflect the new value, got: " + getResponseText;
+                }
                 return null;
             }
             finally
