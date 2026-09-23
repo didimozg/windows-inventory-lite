@@ -1551,6 +1551,25 @@ th.sort-desc::after {
   margin-bottom: 8px;
 }
 
+/* Missing updates' own filter row - left-aligned and wrapping, unlike
+   .view-toolbar's right-aligned button row above. The shared select rule
+   (textarea/input[type=text]/.../select { width: 100% }) would otherwise
+   make each dropdown fight for the full row width as a flex item with no
+   explicit basis - same class of problem input[type="number"] already has
+   its own override for above. */
+.missing-updates-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: 8px;
+}
+
+.missing-updates-filters select {
+  width: auto;
+  min-width: 160px;
+}
+
 .export-button {
   min-height: 40px;
   min-width: 72px;

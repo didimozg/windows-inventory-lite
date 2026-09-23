@@ -81,7 +81,10 @@
       // Sorts the merged Deploy > Updates table (Windows + Linux outdated
       // clients combined) - same per-view-key convention as every other
       // table above.
-      updates: { key: 'computerName', dir: 1 }
+      updates: { key: 'computerName', dir: 1 },
+      // Most-affected-first by default - the most actionable read of "which
+      // missing update should I prioritize" without the admin sorting first.
+      windowsUpdatesMissing: { key: 'machineCount', dir: -1 }
     },
     page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxServices: 1, updates: 1, ingestionRejections: 1, licensesKeys: 1 },
     // clients/software start at a reasonable fallback and are corrected to
@@ -4013,6 +4016,7 @@
       })
       .then(data => {
         state.wsusMissingSummary = data.missingUpdates || [];
+        populateWsusMissingMachineFilterOptions();
         renderWsusMissingSummary();
       })
       .catch(error => {
@@ -4020,9 +4024,74 @@
       });
   }
 
+  // Options come from the live data (computerNames, already sent by the
+  // server alongside machineCount but unused until now) rather than a
+  // fixed list - there is no separate "list of all Windows clients" this
+  // view would otherwise draw from without a second request. Keeps the
+  // admin's current selection across a reload as long as that machine is
+  // still present in the new data.
+  function populateWsusMissingMachineFilterOptions() {
+    const select = byId('windowsUpdatesMissingMachineFilter');
+    const previousValue = select.value;
+    const machines = new Set();
+    (state.wsusMissingSummary || []).forEach(entry => {
+      (entry.computerNames || []).forEach(name => machines.add(name));
+    });
+    const sortedMachines = Array.from(machines).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+    select.innerHTML = '<option value="">All machines</option>' +
+      sortedMachines.map(name => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+    if (sortedMachines.indexOf(previousValue) !== -1) {
+      select.value = previousValue;
+    }
+  }
+
+  function wsusMissingSortValue(entry, key) {
+    switch (key) {
+      case 'kbId': return (entry.kbId || '').toLowerCase();
+      case 'title': return (entry.title || '').toLowerCase();
+      case 'severity': return (entry.severity || '').toLowerCase();
+      case 'machineCount': return entry.machineCount || 0;
+      default: return '';
+    }
+  }
+
+  // severityFilter '__none__' means "no MsrcSeverity reported" (WUA leaves
+  // this blank for some updates) - kept distinct from '' ("no filter
+  // applied"), since both would otherwise collapse to the same empty-string
+  // comparison and make "Unspecified" impossible to select on its own.
+  function wsusMissingMatchesFilters(entry, query, severityFilter, machineFilter) {
+    if (query) {
+      const haystack = `${entry.kbId || ''} ${entry.title || ''}`.toLowerCase();
+      if (haystack.indexOf(query) === -1) return false;
+    }
+    if (severityFilter) {
+      if (severityFilter === '__none__') {
+        if (entry.severity) return false;
+      } else if ((entry.severity || '') !== severityFilter) {
+        return false;
+      }
+    }
+    if (machineFilter && (entry.computerNames || []).indexOf(machineFilter) === -1) {
+      return false;
+    }
+    return true;
+  }
+
   function renderWsusMissingSummary() {
+    renderSortHeaders();
     const tbody = byId('windowsUpdatesMissingBody');
-    const rows = state.wsusMissingSummary || [];
+    const allRows = state.wsusMissingSummary || [];
+    const query = byId('windowsUpdatesMissingSearch').value.trim().toLowerCase();
+    const severityFilter = byId('windowsUpdatesMissingSeverityFilter').value;
+    const machineFilter = byId('windowsUpdatesMissingMachineFilter').value;
+    const { key: sortKey, dir: sortDir } = state.sort.windowsUpdatesMissing;
+
+    const filtered = allRows.filter(entry => wsusMissingMatchesFilters(entry, query, severityFilter, machineFilter));
+    const rows = applySort(filtered, entry => wsusMissingSortValue(entry, sortKey), sortDir);
+    const emptyMessage = allRows.length === 0
+      ? 'No missing updates reported by any client yet.'
+      : 'No missing updates match the current filters.';
+
     tbody.innerHTML = rows.map(entry => `
       <tr>
         <td class="mono">${escapeHtml(entry.kbId)}</td>
@@ -4031,7 +4100,7 @@
         <td>${entry.machineCount}</td>
         <td><button data-add-catalog-for-kb="${escapeHtml(entry.kbId)}" class="export-button" type="button">+ Add catalog entry</button></td>
       </tr>
-    `).join('') || '<tr><td colspan="5" class="empty">No missing updates reported by any client yet.</td></tr>';
+    `).join('') || `<tr><td colspan="5" class="empty">${emptyMessage}</td></tr>`;
 
     tbody.querySelectorAll('[data-add-catalog-for-kb]').forEach(button => {
       button.addEventListener('click', () => {
@@ -5824,6 +5893,8 @@
         renderMergedUpdatesTable();
       } else if (table === 'licenseKeySources') {
         renderLicenseKeySources();
+      } else if (table === 'windowsUpdatesMissing') {
+        renderWsusMissingSummary();
       } else {
         render();
       }
@@ -5996,6 +6067,9 @@
   byId('ingestionRejectionsClearButton').addEventListener('click', clearIngestionRejectionLog);
   byId('debugLogClearButton').addEventListener('click', clearDebugLog);
   byId('wsusDownloadLogClearButton').addEventListener('click', clearWsusDownloadLog);
+  byId('windowsUpdatesMissingSearch').addEventListener('input', renderWsusMissingSummary);
+  byId('windowsUpdatesMissingSeverityFilter').addEventListener('change', renderWsusMissingSummary);
+  byId('windowsUpdatesMissingMachineFilter').addEventListener('change', renderWsusMissingSummary);
   byId('installHistoryClearButton').addEventListener('click', clearInstallHistory);
   byId('softwareJobHistoryClearButton').addEventListener('click', clearSoftwareJobHistory);
   byId('deployTab').addEventListener('click', () => setView('deploy', 'actions'));

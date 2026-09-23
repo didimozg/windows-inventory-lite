@@ -796,9 +796,29 @@
         </div>
 
         <section id="windowsUpdatesMissingView" class="hidden" aria-label="Missing Windows updates">
+          <div class="missing-updates-filters">
+            <input id="windowsUpdatesMissingSearch" type="search" placeholder="Filter by KB ID or title">
+            <select id="windowsUpdatesMissingSeverityFilter">
+              <option value="">All severities</option>
+              <option value="Critical">Critical</option>
+              <option value="Important">Important</option>
+              <option value="Moderate">Moderate</option>
+              <option value="Low">Low</option>
+              <option value="__none__">Unspecified</option>
+            </select>
+            <select id="windowsUpdatesMissingMachineFilter">
+              <option value="">All machines</option>
+            </select>
+          </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>KB ID</th><th>Title</th><th>Severity</th><th>Machines</th><th>Action</th></tr></thead>
+              <thead><tr>
+                <th data-sort-table="windowsUpdatesMissing" data-sort-key="kbId" class="sortable">KB ID</th>
+                <th data-sort-table="windowsUpdatesMissing" data-sort-key="title" class="sortable">Title</th>
+                <th data-sort-table="windowsUpdatesMissing" data-sort-key="severity" class="sortable">Severity</th>
+                <th data-sort-table="windowsUpdatesMissing" data-sort-key="machineCount" class="sortable">Machines</th>
+                <th>Action</th>
+              </tr></thead>
               <tbody id="windowsUpdatesMissingBody"></tbody>
             </table>
           </div>
