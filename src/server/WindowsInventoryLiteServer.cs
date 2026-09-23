@@ -23845,6 +23845,20 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 options.WsusDownloadScheduleMode = "weekly";
                 options.WsusDownloadScheduleDayOfWeek = (int)nowUtc.DayOfWeek;
                 options.WsusDownloadScheduleTimeUtc = "00:00";
+                // A due tick calls the REAL PerformWsusCabDownload, which
+                // (with no proxy configured) reaches the real Microsoft URL
+                // directly - a real several-hundred-MB file over a real
+                // connection can take well over a minute to complete,
+                // bloating every self-test run for no reason this test
+                // actually needs (it only cares that LastRunUtc updates
+                // after a real attempt, not that the attempt succeeds).
+                // Pointing at an address nothing listens on (port 1 is
+                // reserved/unassigned - the OS returns an immediate
+                // "connection refused", not a hung timeout) makes the real
+                // download fail almost instantly instead, while still
+                // genuinely exercising the real, non-mocked network call.
+                options.OutboundProxyHost = "127.0.0.1";
+                options.OutboundProxyPort = 1;
                 tickMethod.Invoke(server, new object[] { null });
                 if (String.IsNullOrEmpty(options.WsusDownloadScheduleLastRunUtc))
                 {
