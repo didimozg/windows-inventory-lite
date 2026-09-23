@@ -23,7 +23,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.70.2";
+        internal const string ProductVersion = "0.70.3";
 
         private static int Main(string[] args)
         {
@@ -2790,6 +2790,8 @@ namespace WindowsInventoryLite
             }
         }
 
+        private static readonly string[] WsusScanFieldsToCarryForward = { "wsusMissingUpdates", "wsusScannedCabHash", "wsusScanAt", "wuServiceUnavailable" };
+
         private void ReceiveInventory(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
@@ -2858,6 +2860,21 @@ namespace WindowsInventoryLite
             {
                 ApplyAdSyncFields(inventory, adFields);
                 inventory["hasUsbStorage"] = stickyUsbStorage;
+                // wsusMissingUpdates/wsusScannedCabHash/wsusScanAt/wuServiceUnavailable
+                // are written by the separate, far less frequent WSUS-scan endpoint
+                // (ReceiveWsusScanResults, every ~6h) - never part of the client's own
+                // inventory payload, so without this they were silently erased by
+                // every routine inventory report (hourly) long before the next real
+                // scan could refresh them. Reported live: an admin saw wuauserv
+                // correctly flagged as unavailable, then saw the flag vanish entirely
+                // on the very next poll with no way to tell a real fix from data loss.
+                foreach (string wsusField in WsusScanFieldsToCarryForward)
+                {
+                    if (previous != null && previous.ContainsKey(wsusField))
+                    {
+                        inventory[wsusField] = previous[wsusField];
+                    }
+                }
                 EncryptInventoryLicenseKeys(inventory, options);
                 // previous (loaded above, before the lock) still holds the
                 // OLD report's own lastIngestSourceIp at this point -
@@ -15080,6 +15097,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results writes wsusMissingUpdates/wsusScannedCabHash/wsusScanAt onto the real stored report and preserves other pre-existing fields", TestReceiveWsusScanResultsWritesFieldsOntoExistingReportAndPreservesOtherFields);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results with wuServiceAvailable=false still writes wuServiceUnavailable=true and an empty missing-updates list", TestReceiveWsusScanResultsRecordsServiceUnavailableFlag);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results is a no-op for an unknown computer with no stored report", TestReceiveWsusScanResultsIsNoOpForUnknownComputer);
+            allPassed &= SelfTestCheck(output, "A routine POST /api/v1/windows-inventory report does not erase wsusMissingUpdates/wsusScannedCabHash/wsusScanAt/wuServiceUnavailable written by an earlier wsus-scan-results report", TestReceiveInventoryPreservesWsusFieldsFromPreviousReport);
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate accepts targetMode=missingKb with a kbId and persists both fields", TestCreateWindowsUpdateAcceptsMissingKbTargetMode);
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate rejects targetMode=missingKb with no kbId", TestCreateWindowsUpdateRejectsMissingKbTargetModeWithoutKbId);
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate defaults targetMode to static when omitted, matching pre-existing behavior", TestCreateWindowsUpdateDefaultsToStaticTargetMode);
@@ -25450,6 +25468,83 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (!savedReport.ContainsKey("clientVersion") || Convert.ToString(savedReport["clientVersion"]) != "0.7.0")
                 {
                     return "expected the pre-existing clientVersion field to survive untouched";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        // Regression coverage for a real bug reported live: ReceiveWsusScanResults
+        // writes wsusMissingUpdates/wsusScannedCabHash/wsusScanAt/wuServiceUnavailable
+        // via a read-modify-write onto the stored report, but the far more
+        // frequent (hourly, vs. the WSUS scan's own 6-hourly cadence) main
+        // inventory report was overwriting the whole file from just the
+        // client's own payload - which never includes these WSUS fields -
+        // silently erasing them every time. ReceiveInventory must carry them
+        // forward from the previous report, the same way it already does for
+        // AD sync fields and hasUsbStorage stickiness.
+        private static string TestReceiveInventoryPreservesWsusFieldsFromPreviousReport()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-inventorypreserveswsus-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                Dictionary<string, object> existingReport = new Dictionary<string, object>();
+                existingReport["computerName"] = "TEST-PC-WSUS";
+                existingReport["clientVersion"] = "0.7.0";
+                ArrayList missingUpdates = new ArrayList();
+                Dictionary<string, object> missingEntry = new Dictionary<string, object>();
+                missingEntry["kbId"] = "KB5099539";
+                missingUpdates.Add(missingEntry);
+                existingReport["wsusMissingUpdates"] = missingUpdates;
+                existingReport["wsusScannedCabHash"] = "abc123";
+                existingReport["wsusScanAt"] = "2026-09-23T12:00:00Z";
+                existingReport["wuServiceUnavailable"] = true;
+                string reportPath = Path.Combine(options.DataPath, "TEST-PC-WSUS.json");
+                File.WriteAllText(reportPath, serializer.Serialize(existingReport), new UTF8Encoding(false));
+
+                // A real client's own inventory payload never includes any
+                // wsus* field - they only ever arrive via the separate
+                // wsus-scan-results endpoint above.
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/windows-inventory";
+                request.Headers = new Dictionary<string, string>();
+                request.Body = "{\"computerName\":\"TEST-PC-WSUS\",\"clientVersion\":\"0.7.0\",\"os\":{\"caption\":\"Windows 10\"}}";
+                request.RemoteAddress = IPAddress.Loopback;
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveInventory(stream, request);
+                }
+
+                Dictionary<string, object> savedReport = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(reportPath, Encoding.UTF8));
+                if (!savedReport.ContainsKey("wsusScannedCabHash") || Convert.ToString(savedReport["wsusScannedCabHash"]) != "abc123")
+                {
+                    return "expected wsusScannedCabHash to survive a routine inventory report untouched, got: " + (savedReport.ContainsKey("wsusScannedCabHash") ? Convert.ToString(savedReport["wsusScannedCabHash"]) : "(absent)");
+                }
+                if (!savedReport.ContainsKey("wsusScanAt") || Convert.ToString(savedReport["wsusScanAt"]) != "2026-09-23T12:00:00Z")
+                {
+                    return "expected wsusScanAt to survive a routine inventory report untouched";
+                }
+                if (!savedReport.ContainsKey("wuServiceUnavailable") || !Convert.ToBoolean(savedReport["wuServiceUnavailable"]))
+                {
+                    return "expected wuServiceUnavailable to survive a routine inventory report untouched";
+                }
+                if (!savedReport.ContainsKey("wsusMissingUpdates"))
+                {
+                    return "expected wsusMissingUpdates to survive a routine inventory report untouched";
+                }
+                ArrayList savedMissing = savedReport["wsusMissingUpdates"] as ArrayList;
+                if (savedMissing == null || savedMissing.Count != 1)
+                {
+                    return "expected the one previously-recorded missing update to still be present";
                 }
                 return null;
             }
