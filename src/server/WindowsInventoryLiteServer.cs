@@ -10366,6 +10366,146 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendJson(stream, "{\"status\":\"ok\"}");
         }
 
+        internal sealed class WsusCabDownloadResult
+        {
+            internal bool Success;
+            internal string ErrorCategory;
+            internal string ErrorMessage;
+            internal string Sha256Hash;
+            internal long SizeBytes;
+        }
+
+        // A real wsusscn2.cab has been several hundred MB for years - this
+        // threshold only exists to reject an obviously-wrong response (a
+        // captive portal's HTML page, a proxy's own error page returned
+        // with a 200 status, a truncated read) with zero risk of ever
+        // rejecting a genuine file.
+        private const long MinimumPlausibleWsusCabBytes = 1024 * 1024;
+
+        // Pure orchestration - every I/O boundary (the network download,
+        // the disk write) is an injected delegate, so the sequencing and
+        // error-phase disambiguation can be fully self-tested without any
+        // of them actually running. Categorization is driven by WHICH
+        // PHASE throws, not by exception type alone - a download-phase
+        // IOException (a real possibility - a dropped connection mid-read)
+        // and a write-phase IOException (a real possibility - disk full)
+        // must land in different categories despite sharing a exception
+        // type, which only try/catch-per-phase can distinguish correctly.
+        internal static WsusCabDownloadResult PerformWsusCabDownloadCore(Func<byte[]> downloadBytes, Action<byte[]> writeBytes)
+        {
+            byte[] bytes;
+            try
+            {
+                bytes = downloadBytes();
+            }
+            catch (WebException webEx)
+            {
+                return new WsusCabDownloadResult
+                {
+                    Success = false,
+                    ErrorCategory = webEx.Status == WebExceptionStatus.ProtocolError ? "badResponse" : "network",
+                    ErrorMessage = webEx.Message
+                };
+            }
+            catch (Exception ex)
+            {
+                return new WsusCabDownloadResult { Success = false, ErrorCategory = "network", ErrorMessage = ex.Message };
+            }
+
+            if (bytes == null || bytes.LongLength < MinimumPlausibleWsusCabBytes)
+            {
+                long actualLength = bytes == null ? 0 : bytes.LongLength;
+                return new WsusCabDownloadResult
+                {
+                    Success = false,
+                    ErrorCategory = "badResponse",
+                    ErrorMessage = "Downloaded content is too small to be a real wsusscn2.cab (" + actualLength + " bytes)"
+                };
+            }
+
+            try
+            {
+                writeBytes(bytes);
+            }
+            catch (Exception ex)
+            {
+                return new WsusCabDownloadResult { Success = false, ErrorCategory = "diskWrite", ErrorMessage = ex.Message };
+            }
+
+            string hash;
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                hash = BitConverter.ToString(sha256.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
+            }
+            return new WsusCabDownloadResult { Success = true, Sha256Hash = hash, SizeBytes = bytes.LongLength };
+        }
+
+        // Real network call - NOT unit-testable, matching the WsusScanner
+        // WUA-COM precedent from the prior WSUS feature. Verify live
+        // against a real network (and a real proxy, if one is available)
+        // before this feature is considered fully done. 5-minute timeout:
+        // a real wsusscn2.cab is large and this runs on a background
+        // ThreadPool thread, never the HTTP request thread, so a slow
+        // download does not block the dashboard or any client poll.
+        private byte[] DownloadWsusCabBytesFromMicrosoft()
+        {
+            const string url = "https://go.microsoft.com/fwlink/?LinkID=74689";
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            if (url.StartsWith("https:", StringComparison.OrdinalIgnoreCase))
+            {
+                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
+            }
+            request.Timeout = 300000;
+            request.ReadWriteTimeout = 300000;
+            IWebProxy proxy = BuildOutboundProxy();
+            if (proxy != null)
+            {
+                request.Proxy = proxy;
+            }
+            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+            using (Stream responseStream = response.GetResponseStream())
+            using (MemoryStream memoryStream = new MemoryStream())
+            {
+                responseStream.CopyTo(memoryStream);
+                return memoryStream.ToArray();
+            }
+        }
+
+        private void WriteWsusCabBytes(byte[] bytes)
+        {
+            string directory = GetWsusDirectory();
+            if (!Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+            File.WriteAllBytes(GetWsusCabPath(), bytes);
+        }
+
+        // The single real entry point both the manual trigger (Task 6) and
+        // the schedule tick (Task 5) call. Records the attempt to the
+        // download log (Task 3) regardless of outcome, so both successes
+        // and failures are visible in the Logging sub-tab and the
+        // cab-status card's last-attempt summary.
+        private void PerformWsusCabDownload(string source)
+        {
+            WsusCabDownloadResult result = PerformWsusCabDownloadCore(DownloadWsusCabBytesFromMicrosoft, WriteWsusCabBytes);
+
+            WsusDownloadLogEntry entry = new WsusDownloadLogEntry();
+            entry.TimestampUtc = DateTime.UtcNow;
+            entry.Source = source;
+            entry.Success = result.Success;
+            entry.ErrorCategory = result.ErrorCategory ?? "";
+            entry.ErrorMessage = result.ErrorMessage ?? "";
+            entry.Sha256Hash = result.Sha256Hash ?? "";
+            entry.SizeBytes = result.SizeBytes;
+            RecordWsusDownloadAttempt(entry);
+
+            if (!result.Success)
+            {
+                DebugLogger.Log(options, "Error", "WSUS cab download (" + source + ") failed: [" + result.ErrorCategory + "] " + result.ErrorMessage);
+            }
+        }
+
         private string GetCertificateHistoryDirectory()
         {
             return Path.Combine(options.DataPath, "_certificates");
@@ -14832,6 +14972,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "RecordWsusDownloadAttempt prunes down to WsusDownloadLogMaxEntries once the limit is exceeded", TestRecordWsusDownloadAttemptPrunesOverMaxEntries);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates/download-log returns entries newest-first", TestSendWsusDownloadLogReturnsNewestFirst);
             allPassed &= SelfTestCheck(output, "DELETE /api/v1/windows-updates/download-log clears every entry and the file on disk", TestClearWsusDownloadLogRemovesEverything);
+            allPassed &= SelfTestCheck(output, "PerformWsusCabDownloadCore succeeds and returns the real hash/size when download and write both succeed", TestPerformWsusCabDownloadCoreSucceeds);
+            allPassed &= SelfTestCheck(output, "PerformWsusCabDownloadCore categorizes a WebException with a non-ProtocolError status as 'network'", TestPerformWsusCabDownloadCoreCategorizesNetworkFailure);
+            allPassed &= SelfTestCheck(output, "PerformWsusCabDownloadCore categorizes a WebException with ProtocolError status as 'badResponse'", TestPerformWsusCabDownloadCoreCategorizesProtocolErrorAsBadResponse);
+            allPassed &= SelfTestCheck(output, "PerformWsusCabDownloadCore categorizes a suspiciously small download as 'badResponse' without ever attempting to write it", TestPerformWsusCabDownloadCoreCategorizesTinyDownloadAsBadResponse);
+            allPassed &= SelfTestCheck(output, "PerformWsusCabDownloadCore categorizes a write-phase exception as 'diskWrite', distinct from a same-typed download-phase exception", TestPerformWsusCabDownloadCoreCategorizesWriteFailureAsDiskWrite);
+            allPassed &= SelfTestCheck(output, "BuildOutboundProxy is null and PerformWsusCabDownloadCore still succeeds with no proxy configured", TestPerformWsusCabDownloadCoreWorksWithNoProxyConfigured);
             return allPassed;
         }
 
@@ -23421,6 +23567,129 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     {
                         return "expected the log to be empty after clearing, got: " + responseText;
                     }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestPerformWsusCabDownloadCoreSucceeds()
+        {
+            byte[] fakeContent = new byte[2 * 1024 * 1024];
+            new Random(42).NextBytes(fakeContent);
+            byte[] written = null;
+            InventoryServer.WsusCabDownloadResult result = InventoryServer.PerformWsusCabDownloadCore(
+                () => fakeContent,
+                bytes => { written = bytes; });
+
+            if (!result.Success)
+            {
+                return "expected success, got category=" + result.ErrorCategory + " message=" + result.ErrorMessage;
+            }
+            if (written == null || written.Length != fakeContent.Length)
+            {
+                return "expected the downloaded bytes to be passed through to the write delegate unchanged";
+            }
+            string expectedHash;
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                expectedHash = BitConverter.ToString(sha256.ComputeHash(fakeContent)).Replace("-", "").ToLowerInvariant();
+            }
+            if (result.Sha256Hash != expectedHash)
+            {
+                return "expected the result's hash to match the real SHA-256 of the downloaded bytes";
+            }
+            if (result.SizeBytes != fakeContent.Length)
+            {
+                return "expected SizeBytes to match the downloaded content length";
+            }
+            return null;
+        }
+
+        private static string TestPerformWsusCabDownloadCoreCategorizesNetworkFailure()
+        {
+            InventoryServer.WsusCabDownloadResult result = InventoryServer.PerformWsusCabDownloadCore(
+                () => { throw new WebException("simulated DNS failure", WebExceptionStatus.NameResolutionFailure); },
+                bytes => { });
+
+            if (result.Success || result.ErrorCategory != "network")
+            {
+                return "expected a non-ProtocolError WebException to categorize as 'network', got success=" + result.Success + " category=" + result.ErrorCategory;
+            }
+            return null;
+        }
+
+        private static string TestPerformWsusCabDownloadCoreCategorizesProtocolErrorAsBadResponse()
+        {
+            InventoryServer.WsusCabDownloadResult result = InventoryServer.PerformWsusCabDownloadCore(
+                () => { throw new WebException("simulated HTTP 404", null, WebExceptionStatus.ProtocolError, null); },
+                bytes => { });
+
+            if (result.Success || result.ErrorCategory != "badResponse")
+            {
+                return "expected a ProtocolError WebException to categorize as 'badResponse', got success=" + result.Success + " category=" + result.ErrorCategory;
+            }
+            return null;
+        }
+
+        private static string TestPerformWsusCabDownloadCoreCategorizesTinyDownloadAsBadResponse()
+        {
+            bool writeWasCalled = false;
+            InventoryServer.WsusCabDownloadResult result = InventoryServer.PerformWsusCabDownloadCore(
+                () => Encoding.UTF8.GetBytes("<html>captive portal</html>"),
+                bytes => { writeWasCalled = true; });
+
+            if (result.Success || result.ErrorCategory != "badResponse")
+            {
+                return "expected an implausibly small download to categorize as 'badResponse', got success=" + result.Success + " category=" + result.ErrorCategory;
+            }
+            if (writeWasCalled)
+            {
+                return "expected the write delegate to never be called for a rejected tiny download";
+            }
+            return null;
+        }
+
+        private static string TestPerformWsusCabDownloadCoreCategorizesWriteFailureAsDiskWrite()
+        {
+            byte[] fakeContent = new byte[2 * 1024 * 1024];
+            // Deliberately the SAME exception TYPE (IOException) a download-
+            // phase failure could also throw - proves categorization is
+            // driven by WHICH PHASE threw, not by exception type alone.
+            InventoryServer.WsusCabDownloadResult result = InventoryServer.PerformWsusCabDownloadCore(
+                () => fakeContent,
+                bytes => { throw new IOException("simulated disk full"); });
+
+            if (result.Success || result.ErrorCategory != "diskWrite")
+            {
+                return "expected a write-phase IOException to categorize as 'diskWrite', got success=" + result.Success + " category=" + result.ErrorCategory;
+            }
+            return null;
+        }
+
+        private static string TestPerformWsusCabDownloadCoreWorksWithNoProxyConfigured()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-noproxy-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("BuildOutboundProxy", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                object proxy = method.Invoke(server, null);
+                if (proxy != null)
+                {
+                    return "expected BuildOutboundProxy to return null with no host configured (sanity check for this test's own premise)";
+                }
+
+                byte[] fakeContent = new byte[2 * 1024 * 1024];
+                InventoryServer.WsusCabDownloadResult result = InventoryServer.PerformWsusCabDownloadCore(() => fakeContent, bytes => { });
+                if (!result.Success)
+                {
+                    return "expected PerformWsusCabDownloadCore to succeed regardless of proxy configuration - it only orchestrates the injected delegates";
                 }
                 return null;
             }
