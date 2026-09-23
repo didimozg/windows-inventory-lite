@@ -13686,6 +13686,19 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 result["sizeBytes"] = status.SizeBytes;
                 result["modifiedUtc"] = status.ModifiedUtc;
             }
+
+            WsusDownloadLogEntry lastAttempt = GetLastWsusDownloadAttempt();
+            if (lastAttempt != null)
+            {
+                result["lastAttemptUtc"] = lastAttempt.TimestampUtc.ToString("o");
+                result["lastAttemptResult"] = lastAttempt.Success ? "success" : "failed";
+                result["lastAttemptSource"] = lastAttempt.Source;
+                if (!lastAttempt.Success)
+                {
+                    result["lastAttemptErrorCategory"] = lastAttempt.ErrorCategory;
+                    result["lastAttemptErrorMessage"] = lastAttempt.ErrorMessage;
+                }
+            }
             SendJson(stream, serializer.Serialize(result));
         }
 
@@ -15032,6 +15045,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "GetWsusCabStatus reports Present=false with no other fields populated when the cab file does not exist", TestGetWsusCabStatusReportsAbsentWhenFileMissing);
             allPassed &= SelfTestCheck(output, "GetWsusCabStatus computes the real SHA-256 hash, size, and modified time of an existing cab file", TestGetWsusCabStatusComputesRealHashSizeAndModifiedTime);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates/cab-status returns present=false with no cab file, then present=true with real hash/size/modifiedUtc once one exists", TestSendWsusCabStatusReflectsRealFileState);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates/cab-status includes lastAttempt fields once a download has been recorded, omits them when none exists yet", TestSendWsusCabStatusIncludesLastAttempt);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/wsus-cab-download requires a valid ingestion token unconditionally, rejects with 401 when missing/wrong", TestDownloadWsusCabRejectsWithoutValidToken);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/wsus-cab-download streams the real cab bytes on success, 404s when the file does not exist", TestDownloadWsusCabStreamsRealBytesOrReturns404);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results requires a valid ingestion token unconditionally", TestReceiveWsusScanResultsRejectsWithoutValidToken);
@@ -25156,6 +25170,70 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                         || responseText.IndexOf("\"modifiedUtc\":\"", StringComparison.OrdinalIgnoreCase) < 0)
                     {
                         return "expected present:true with real hash/sizeBytes/modifiedUtc fields, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendWsusCabStatusIncludesLastAttempt()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-cabstatuslastattempt-" + Guid.NewGuid().ToString("N"));
+            options.WebUsername = "admin";
+            options.WebPassword = "password123";
+            // Both default to 0 on a fresh ServerOptions - RecordWsusDownloadAttempt's
+            // own prune-to-MaxEntries loop would otherwise immediately remove
+            // the entry this test is about to record, before it can ever be
+            // observed via GetLastWsusDownloadAttempt/SendWsusCabStatus.
+            options.WsusDownloadLogRetentionDays = 90;
+            options.WsusDownloadLogMaxEntries = 200;
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo sendMethod = typeof(InventoryServer).GetMethod("SendWsusCabStatus", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    sendMethod.Invoke(server, new object[] { stream });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("lastAttempt", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        return "expected no lastAttempt fields before any download attempt has ever been recorded, got: " + responseText;
+                    }
+                }
+
+                System.Reflection.MethodInfo recordMethod = typeof(InventoryServer).GetMethod("RecordWsusDownloadAttempt", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Type entryType = typeof(InventoryServer).GetNestedType("WsusDownloadLogEntry", System.Reflection.BindingFlags.NonPublic);
+                object entry = Activator.CreateInstance(entryType);
+                entryType.GetField("TimestampUtc", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(entry, DateTime.UtcNow);
+                entryType.GetField("Source", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(entry, "manual");
+                entryType.GetField("Success", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(entry, false);
+                entryType.GetField("ErrorCategory", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(entry, "network");
+                entryType.GetField("ErrorMessage", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(entry, "simulated DNS failure");
+                recordMethod.Invoke(server, new object[] { entry });
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo sendMethod = typeof(InventoryServer).GetMethod("SendWsusCabStatus", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    sendMethod.Invoke(server, new object[] { stream });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("\"lastAttemptResult\":\"failed\"", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected lastAttemptResult:failed once a failed attempt is recorded, got: " + responseText;
+                    }
+                    if (responseText.IndexOf("\"lastAttemptErrorCategory\":\"network\"", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected lastAttemptErrorCategory:network, got: " + responseText;
+                    }
+                    if (responseText.IndexOf("\"lastAttemptSource\":\"manual\"", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected lastAttemptSource:manual, got: " + responseText;
                     }
                 }
                 return null;
