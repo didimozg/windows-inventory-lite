@@ -2302,15 +2302,11 @@
       })
       .then(() => {
         byId('softwareRepoPassword').value = '';
-        messageElement.className = 'pkg-message';
-        messageElement.textContent = 'Saved.';
-        messageElement.classList.remove('hidden');
+        showSavedMessage(messageElement, 'Saved.', false);
         loadSoftwareRepositoryCredentials();
       })
       .catch(error => {
-        messageElement.className = 'pkg-message error';
-        messageElement.textContent = `Failed to save: ${error.message}`;
-        messageElement.classList.remove('hidden');
+        showSavedMessage(messageElement, `Failed to save: ${error.message}`, true);
       })
       .finally(() => {
         byId('softwareRepoSaveButton').disabled = false;
@@ -2368,15 +2364,11 @@
       })
       .then(() => {
         byId('outboundProxyPassword').value = '';
-        messageElement.className = 'pkg-message';
-        messageElement.textContent = 'Saved.';
-        messageElement.classList.remove('hidden');
+        showSavedMessage(messageElement, 'Saved.', false);
         loadOutboundProxySettings();
       })
       .catch(error => {
-        messageElement.className = 'pkg-message error';
-        messageElement.textContent = `Failed to save: ${error.message}`;
-        messageElement.classList.remove('hidden');
+        showSavedMessage(messageElement, `Failed to save: ${error.message}`, true);
       })
       .finally(() => {
         byId('outboundProxySaveButton').disabled = false;
@@ -2814,15 +2806,11 @@
       .then(r => r.json().then(data => ({ ok: r.ok, data })))
       .then(({ ok, data }) => {
         if (!ok) throw new Error(data.error || 'Failed to save.');
-        messageElement.className = 'pkg-message';
-        messageElement.textContent = 'Schedule saved.';
-        messageElement.classList.remove('hidden');
+        showSavedMessage(messageElement, 'Schedule saved.', false);
         loadWsusDownloadSchedule();
       })
       .catch(error => {
-        messageElement.className = 'pkg-message error';
-        messageElement.textContent = error.message;
-        messageElement.classList.remove('hidden');
+        showSavedMessage(messageElement, error.message, true);
       })
       .finally(() => {
         byId('wsusScheduleSaveButton').disabled = false;
@@ -2861,9 +2849,7 @@
         pollWsusCabDownloadCompletion(previousAttemptUtc, Date.now());
       })
       .catch(error => {
-        messageElement.className = 'pkg-message error';
-        messageElement.textContent = error.message;
-        messageElement.classList.remove('hidden');
+        showSavedMessage(messageElement, error.message, true);
         button.disabled = false;
       });
   }
@@ -2895,8 +2881,7 @@
           if (attemptCompleted) {
             messageElement.classList.add('hidden');
           } else {
-            messageElement.className = 'pkg-message';
-            messageElement.textContent = 'Still running after 10 minutes - check the status above once it finishes.';
+            showSavedMessage(messageElement, 'Still running after 10 minutes - check the status above once it finishes.', false);
           }
         })
         .catch(() => {
