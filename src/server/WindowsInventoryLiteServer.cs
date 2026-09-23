@@ -13897,6 +13897,46 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // the last successful scan's candidate lists and
         // LastSuccessfulScanUtc, so only the Success/ErrorMessage/
         // ScannedAtUtc fields reflect this latest (failed) attempt.
+
+        // Matches Microsoft's own real Update Catalog naming convention
+        // (windows10.0-kb5031354-x64_<hash>.msu) when a file is left
+        // unrenamed. Latin "KB" only, deliberately - see the design doc for
+        // why a Cyrillic-labelled filename is a real, accepted limitation of
+        // this fallback path specifically (content-based detection in
+        // ExtractKbFromMsuFile is authoritative whenever it succeeds and
+        // never depends on the filename at all).
+        internal static string ExtractKbFromFilename(string relativePath)
+        {
+            Match match = Regex.Match(relativePath, "kb(\\d{6,7})", RegexOptions.IgnoreCase);
+            return match.Success ? match.Groups[1].Value : null;
+        }
+
+        // Two files resolving to the same KB is always a conflict requiring
+        // a human decision - see the design doc's own reasoning (an x86/x64
+        // pair, or two genuinely different builds, must never be silently
+        // resolved by picking one).
+        internal static HashSet<string> FindDuplicateKbIds(IEnumerable<string> detectedKbIds)
+        {
+            Dictionary<string, int> counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (string kbId in detectedKbIds)
+            {
+                if (String.IsNullOrEmpty(kbId))
+                {
+                    continue;
+                }
+                counts[kbId] = counts.ContainsKey(kbId) ? counts[kbId] + 1 : 1;
+            }
+            HashSet<string> duplicates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (KeyValuePair<string, int> pair in counts)
+            {
+                if (pair.Value > 1)
+                {
+                    duplicates.Add(pair.Key);
+                }
+            }
+            return duplicates;
+        }
+
         private ShareScanResult ScanSoftwareRepository()
         {
             ShareScanResult result = new ShareScanResult();
@@ -15080,6 +15120,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "SplitDomainUsername handles both DOMAIN\\user and bare-username forms", TestSplitDomainUsernameHandlesBothForms);
             allPassed &= SelfTestCheck(output, "WithSoftwareRepositoryIdentity runs the action directly when no credentials are configured", TestWithSoftwareRepositoryIdentityRunsDirectlyWhenNoCredentialsConfigured);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository reports failure when SoftwareRepositoryPath is not configured", TestScanSoftwareRepositoryReportsMissingConfiguration);
+            allPassed &= SelfTestCheck(output, "ExtractKbFromFilename matches real Microsoft Update Catalog naming, rejects Cyrillic-labelled names and names with no KB pattern", TestExtractKbFromFilenameMatchesRealMicrosoftNamingPattern);
+            allPassed &= SelfTestCheck(output, "FindDuplicateKbIds returns only KBs appearing 2+ times, ignoring null/empty", TestFindDuplicateKbIdsIgnoresNullsAndSingleOccurrences);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository finds only files not already referenced by a catalog entry's relativePath", TestScanSoftwareRepositoryFindsUncatalogedFilesOnly);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository preserves the last successful scan's candidates when a subsequent scan fails", TestScanSoftwareRepositoryPreservesCandidatesOnSubsequentFailure);
             allPassed &= SelfTestCheck(output, "Windows updates catalog: Create->Update->Delete through the real CreateWindowsUpdate/UpdateWindowsUpdate/DeleteWindowsUpdate HTTP handlers, then a 404 on both after delete", TestWindowsUpdatesCrudHttpLifecycleThroughRealHandlers);
@@ -24091,6 +24133,45 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (String.IsNullOrEmpty(result.ErrorMessage))
             {
                 return "expected a non-empty error message explaining the missing configuration";
+            }
+            return null;
+        }
+
+        private static string TestExtractKbFromFilenameMatchesRealMicrosoftNamingPattern()
+        {
+            if (ExtractKbFromFilename(@"windows-updates\windows10.0-kb5031354-x64_abc123.msu") != "5031354")
+            {
+                return "expected to extract 5031354 from a real-shaped Microsoft Update Catalog filename";
+            }
+            if (ExtractKbFromFilename(@"windows-updates\KB5099539.msu") != "5099539")
+            {
+                return "expected to extract 5099539 from a bare KB-prefixed filename";
+            }
+            if (ExtractKbFromFilename(@"windows-updates\office2016-word-update.msu") != null)
+            {
+                return "expected null when the filename has no KB pattern at all";
+            }
+            // Cyrillic "КБ" (U+041A, U+0411) is a different byte sequence than
+            // Latin "KB" (U+004B, U+0042) and must not match - a real, non-
+            // hypothetical gap documented in the design doc, not an oversight.
+            if (ExtractKbFromFilename("windows-updates\\office2016wordкб1234567.msu") != null)
+            {
+                return "expected null for a Cyrillic-labelled filename - only Latin KB is matched";
+            }
+            return null;
+        }
+
+        private static string TestFindDuplicateKbIdsIgnoresNullsAndSingleOccurrences()
+        {
+            HashSet<string> result = FindDuplicateKbIds(new[] { "5031354", null, "5099539", "", "5031354" });
+            if (result.Count != 1 || !result.Contains("5031354"))
+            {
+                return "expected exactly one duplicate (5031354), nulls/empties/single-occurrence KBs excluded, got: " + String.Join(",", result);
+            }
+            HashSet<string> noDuplicates = FindDuplicateKbIds(new[] { "5031354", "5099539" });
+            if (noDuplicates.Count != 0)
+            {
+                return "expected no duplicates when every KB appears exactly once";
             }
             return null;
         }
