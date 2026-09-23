@@ -4225,15 +4225,21 @@
       .then(data => {
         const tbody = byId('windowsUpdateDiscoveredBody');
         const candidates = data.windowsUpdateCandidates || [];
-        tbody.innerHTML = candidates.map(path => `
+        tbody.innerHTML = candidates.map(candidate => {
+          const kbText = candidate.hasConflict
+            ? `<span class="usb-badge" title="Another discovered file also resolves to this same KB - resolve manually, neither will auto-create">CONFLICT: KB${escapeHtml(candidate.detectedKbId)}</span>`
+            : (candidate.detectedKbId ? `KB${escapeHtml(candidate.detectedKbId)}` : '&mdash;');
+          return `
           <tr>
-            <td class="mono">${escapeHtml(path)}</td>
-            <td><button data-promote-windows-update="${escapeHtml(path)}" class="export-button" type="button">Add to catalog</button></td>
+            <td class="mono">${escapeHtml(candidate.relativePath)}</td>
+            <td>${kbText}</td>
+            <td><button data-promote-windows-update="${escapeHtml(candidate.relativePath)}" data-promote-kb-id="${escapeHtml(candidate.detectedKbId || '')}" class="export-button" type="button">Add to catalog</button></td>
           </tr>
-        `).join('') || '<tr><td colspan="2" class="empty">No new files discovered.</td></tr>';
+        `;
+        }).join('') || '<tr><td colspan="3" class="empty">No new files discovered.</td></tr>';
 
         tbody.querySelectorAll('[data-promote-windows-update]').forEach(button => {
-          button.addEventListener('click', () => promoteWindowsUpdateCandidate(button.dataset.promoteWindowsUpdate));
+          button.addEventListener('click', () => promoteWindowsUpdateCandidate(button.dataset.promoteWindowsUpdate, button.dataset.promoteKbId));
         });
 
         const messageElement = byId('windowsUpdateDiscoveredMessage');
@@ -4253,8 +4259,8 @@
       .catch(() => {});
   }
 
-  function promoteWindowsUpdateCandidate(relativePath) {
-    openWindowsUpdateForm(null);
+  function promoteWindowsUpdateCandidate(relativePath, detectedKbId) {
+    openWindowsUpdateForm(null, detectedKbId ? { targetMode: 'missingKb', kbId: detectedKbId } : null);
     byId('windowsUpdateRelativePath').value = relativePath;
     const extension = relativePath.split('.').pop().toLowerCase();
     const defaultArguments = extension === 'msi' ? '/qn /norestart' : extension === 'msu' ? '/quiet /norestart' : extension === 'exe' ? '/S' : '';
