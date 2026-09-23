@@ -2549,6 +2549,10 @@ namespace WindowsInventoryLite
                     {
                         ClearWsusDownloadLog(stream);
                     }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/windows-updates/cab-download-now")
+                    {
+                        TriggerWsusCabDownloadNow(stream, request);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/third-party-software")
                     {
                         SendThirdPartySoftware(stream);
@@ -10549,6 +10553,39 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
+        // Deliberately NOT the heavier InstallJob/ThreadPool.QueueUserWorkItem(RunClientActionJob, ...)
+        // pattern used for multi-target SSH/WinRM pushes - that machinery
+        // (per-target results, a job list, output logs) exists for a
+        // fundamentally different need (many targets, many outcomes) that
+        // does not apply to "download one file from one URL." A plain
+        // ThreadPool hand-off plus the shared in-progress guard is the
+        // right-sized amount of the same "return immediately, do the real
+        // work off the request thread" convention for this simpler case.
+        private void TriggerWsusCabDownloadNow(Stream stream, RequestContext request)
+        {
+            if (!TryClaimWsusDownloadInProgress())
+            {
+                SendText(stream, "{\"error\":\"A WSUS cab download is already in progress.\"}", "application/json; charset=utf-8", 409);
+                return;
+            }
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    PerformWsusCabDownload("manual");
+                }
+                finally
+                {
+                    ReleaseWsusDownloadInProgress();
+                }
+            });
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["status"] = "started";
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
         private string GetCertificateHistoryDirectory()
         {
             return Path.Combine(options.DataPath, "_certificates");
@@ -15023,6 +15060,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "BuildOutboundProxy is null and PerformWsusCabDownloadCore still succeeds with no proxy configured", TestPerformWsusCabDownloadCoreWorksWithNoProxyConfigured);
             allPassed &= SelfTestCheck(output, "TryClaimWsusDownloadInProgress succeeds once, fails while held, succeeds again after release", TestWsusDownloadInProgressGuardClaimAndRelease);
             allPassed &= SelfTestCheck(output, "RunWsusDownloadScheduleTick updates WsusDownloadScheduleLastRunUtc only when the schedule was actually due", TestRunWsusDownloadScheduleTickUpdatesLastRunOnlyWhenDue);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/windows-updates/cab-download-now returns started and releases the guard once the background download finishes", TestTriggerWsusCabDownloadNowStartsAndReleasesGuard);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/windows-updates/cab-download-now returns 409 when a download is already in progress", TestTriggerWsusCabDownloadNowRejectsWhileInProgress);
             return allPassed;
         }
 
@@ -23810,6 +23849,106 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (String.IsNullOrEmpty(options.WsusDownloadScheduleLastRunUtc))
                 {
                     return "expected a due weekly schedule to update LastRunUtc after the tick runs";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestTriggerWsusCabDownloadNowStartsAndReleasesGuard()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-triggernow-" + Guid.NewGuid().ToString("N"));
+            options.WebUsername = "admin";
+            options.WebPassword = "password123";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/windows-updates/cab-download-now";
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("TriggerWsusCabDownloadNow", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("\"status\":\"started\"", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected an immediate {\"status\":\"started\"} response, got: " + responseText;
+                    }
+                }
+
+                // The real download runs on a background ThreadPool thread
+                // against the real Microsoft URL, which this self-test
+                // cannot reach/wait for deterministically - instead, poll
+                // briefly for the guard to release, proving the background
+                // work actually ran to completion (success or failure both
+                // release it) rather than leaking the "in progress" state
+                // forever after one trigger.
+                System.Reflection.MethodInfo claimMethod = typeof(InventoryServer).GetMethod("TryClaimWsusDownloadInProgress", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                DateTime deadline = DateTime.UtcNow.AddSeconds(20);
+                bool releasedEventually = false;
+                while (DateTime.UtcNow < deadline)
+                {
+                    if ((bool)claimMethod.Invoke(server, null))
+                    {
+                        releasedEventually = true;
+                        System.Reflection.MethodInfo releaseMethod = typeof(InventoryServer).GetMethod("ReleaseWsusDownloadInProgress", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                        releaseMethod.Invoke(server, null);
+                        break;
+                    }
+                    System.Threading.Thread.Sleep(200);
+                }
+                if (!releasedEventually)
+                {
+                    return "expected the in-progress guard to release once the background download attempt finishes (success or failure), within 20 seconds";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestTriggerWsusCabDownloadNowRejectsWhileInProgress()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-triggerbusy-" + Guid.NewGuid().ToString("N"));
+            options.WebUsername = "admin";
+            options.WebPassword = "password123";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo claimMethod = typeof(InventoryServer).GetMethod("TryClaimWsusDownloadInProgress", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                System.Reflection.MethodInfo releaseMethod = typeof(InventoryServer).GetMethod("ReleaseWsusDownloadInProgress", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                claimMethod.Invoke(server, null);
+                try
+                {
+                    RequestContext request = new RequestContext();
+                    request.Method = "POST";
+                    request.Path = "/api/v1/windows-updates/cab-download-now";
+
+                    using (MemoryStream stream = new MemoryStream())
+                    {
+                        System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("TriggerWsusCabDownloadNow", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                        method.Invoke(server, new object[] { stream, request });
+                        string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                        if (responseText.IndexOf("error", StringComparison.OrdinalIgnoreCase) < 0)
+                        {
+                            return "expected a rejection while a download is already in progress, got: " + responseText;
+                        }
+                    }
+                }
+                finally
+                {
+                    releaseMethod.Invoke(server, null);
                 }
                 return null;
             }
