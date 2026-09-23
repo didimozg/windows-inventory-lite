@@ -13882,13 +13882,29 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         private readonly object shareScanLock = new object();
         private ShareScanResult lastShareScanResult;
 
+        internal sealed class WindowsUpdateCandidate
+        {
+            internal string RelativePath;
+            internal string DetectedKbId;
+            internal bool HasConflict;
+
+            internal Dictionary<string, object> ToDictionary()
+            {
+                Dictionary<string, object> result = new Dictionary<string, object>();
+                result["relativePath"] = RelativePath;
+                result["detectedKbId"] = DetectedKbId;
+                result["hasConflict"] = HasConflict;
+                return result;
+            }
+        }
+
         private sealed class ShareScanResult
         {
             public bool Success;
             public string ErrorMessage;
             public DateTime ScannedAtUtc;
             public DateTime LastSuccessfulScanUtc;
-            public List<string> WindowsUpdateCandidates;
+            public List<WindowsUpdateCandidate> WindowsUpdateCandidates;
             public List<string> ThirdPartySoftwareCandidates;
 
             public Dictionary<string, object> ToDictionary()
@@ -13898,7 +13914,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 result["errorMessage"] = ErrorMessage;
                 result["scannedAt"] = ScannedAtUtc == DateTime.MinValue ? null : ScannedAtUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
                 result["lastSuccessfulScanAt"] = LastSuccessfulScanUtc == DateTime.MinValue ? null : LastSuccessfulScanUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                result["windowsUpdateCandidates"] = WindowsUpdateCandidates ?? new List<string>();
+                List<Dictionary<string, object>> windowsUpdateCandidateDicts = new List<Dictionary<string, object>>();
+                foreach (WindowsUpdateCandidate candidate in WindowsUpdateCandidates ?? new List<WindowsUpdateCandidate>())
+                {
+                    windowsUpdateCandidateDicts.Add(candidate.ToDictionary());
+                }
+                result["windowsUpdateCandidates"] = windowsUpdateCandidateDicts;
                 result["thirdPartySoftwareCandidates"] = ThirdPartySoftwareCandidates ?? new List<string>();
                 return result;
             }
@@ -14082,13 +14103,31 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                         }
                     }
 
-                    result.WindowsUpdateCandidates = new List<string>();
+                    List<string> newWindowsUpdateFiles = new List<string>();
                     foreach (string file in windowsUpdateFiles)
                     {
                         if (!knownWindowsUpdatePaths.Contains(file))
                         {
-                            result.WindowsUpdateCandidates.Add(file);
+                            newWindowsUpdateFiles.Add(file);
                         }
+                    }
+
+                    Dictionary<string, string> detectedKbByPath = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (string file in newWindowsUpdateFiles)
+                    {
+                        string fullPath = Path.Combine(options.SoftwareRepositoryPath, file);
+                        detectedKbByPath[file] = DetectKbForCandidate(fullPath, file);
+                    }
+                    HashSet<string> duplicateKbIds = FindDuplicateKbIds(detectedKbByPath.Values);
+
+                    result.WindowsUpdateCandidates = new List<WindowsUpdateCandidate>();
+                    foreach (string file in newWindowsUpdateFiles)
+                    {
+                        WindowsUpdateCandidate candidate = new WindowsUpdateCandidate();
+                        candidate.RelativePath = file;
+                        candidate.DetectedKbId = detectedKbByPath[file];
+                        candidate.HasConflict = !String.IsNullOrEmpty(candidate.DetectedKbId) && duplicateKbIds.Contains(candidate.DetectedKbId);
+                        result.WindowsUpdateCandidates.Add(candidate);
                     }
 
                     result.ThirdPartySoftwareCandidates = new List<string>();
@@ -15237,6 +15276,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "FindDuplicateKbIds returns only KBs appearing 2+ times, ignoring null/empty", TestFindDuplicateKbIdsIgnoresNullsAndSingleOccurrences);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository finds only files not already referenced by a catalog entry's relativePath", TestScanSoftwareRepositoryFindsUncatalogedFilesOnly);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository preserves the last successful scan's candidates when a subsequent scan fails", TestScanSoftwareRepositoryPreservesCandidatesOnSubsequentFailure);
+            allPassed &= SelfTestCheck(output, "ScanSoftwareRepository flags every candidate sharing a duplicate detected KB with HasConflict=true, leaves a unique KB unflagged", TestScanSoftwareRepositoryFlagsConflictingKbCandidates);
             allPassed &= SelfTestCheck(output, "Windows updates catalog: Create->Update->Delete through the real CreateWindowsUpdate/UpdateWindowsUpdate/DeleteWindowsUpdate HTTP handlers, then a 404 on both after delete", TestWindowsUpdatesCrudHttpLifecycleThroughRealHandlers);
             allPassed &= SelfTestCheck(output, "Third-party software catalog: Create->Update->Delete through the real CreateThirdPartySoftware/UpdateThirdPartySoftware/DeleteThirdPartySoftware HTTP handlers, then a 404 on both after delete", TestThirdPartySoftwareCrudHttpLifecycleThroughRealHandlers);
             allPassed &= SelfTestCheck(output, "SoftwareCatalogSpec wiring is not cross-contaminated: a Windows-Updates entry never appears in the Third-Party-Software list, and cross-catalog Update/Delete attempts 404 with the OTHER catalog's own not-found message", TestSoftwareCatalogHandlersDoNotCrossContaminateBetweenCatalogs);
@@ -24420,7 +24460,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 {
                     return "expected the scan to succeed, got error: " + result.ErrorMessage;
                 }
-                if (result.WindowsUpdateCandidates.Count != 1 || result.WindowsUpdateCandidates[0].IndexOf("new-patch.msu", StringComparison.OrdinalIgnoreCase) < 0)
+                if (result.WindowsUpdateCandidates.Count != 1 || result.WindowsUpdateCandidates[0].RelativePath.IndexOf("new-patch.msu", StringComparison.OrdinalIgnoreCase) < 0)
                 {
                     return "expected exactly one Windows-update candidate (new-patch.msu) - already-cataloged file must be excluded";
                 }
@@ -24490,6 +24530,60 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (secondScan.LastSuccessfulScanUtc != firstScan.ScannedAtUtc)
                 {
                     return "expected LastSuccessfulScanUtc to carry forward from the last successful scan, not reset";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestScanSoftwareRepositoryFlagsConflictingKbCandidates()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-share-scan-conflict-test-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-share-scan-conflict-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "windows-updates"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "third-party-software"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                // Neither file is a real .msu (plain text content) - content-
+                // based detection (Task 2) will legitimately fail for both,
+                // exercising the filename fallback (Task 1) instead, which is
+                // enough to prove the conflict-flagging wiring itself without
+                // needing a real .msu fixture here.
+                File.WriteAllText(Path.Combine(shareRoot, "windows-updates", "kb5031354-x86.msu"), "test");
+                File.WriteAllText(Path.Combine(shareRoot, "windows-updates", "kb5031354-x64.msu"), "test");
+                File.WriteAllText(Path.Combine(shareRoot, "windows-updates", "kb5099539.msu"), "test");
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                InventoryServer server = new InventoryServer(options);
+
+                var result = server.ScanSoftwareRepository();
+                if (!result.Success || result.WindowsUpdateCandidates.Count != 3)
+                {
+                    return "expected the scan to succeed and find all 3 candidates, got success=" + result.Success + " count=" + (result.WindowsUpdateCandidates == null ? -1 : result.WindowsUpdateCandidates.Count);
+                }
+
+                foreach (WindowsUpdateCandidate candidate in result.WindowsUpdateCandidates)
+                {
+                    bool isConflictingFile = candidate.RelativePath.IndexOf("kb5031354", StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (candidate.DetectedKbId != "5031354" && candidate.DetectedKbId != "5099539")
+                    {
+                        return "expected every candidate to have its KB detected via the filename fallback, got: " + candidate.RelativePath + " -> " + candidate.DetectedKbId;
+                    }
+                    if (isConflictingFile && !candidate.HasConflict)
+                    {
+                        return "expected both kb5031354 files to be flagged HasConflict=true: " + candidate.RelativePath;
+                    }
+                    if (!isConflictingFile && candidate.HasConflict)
+                    {
+                        return "expected the lone kb5099539 file to NOT be flagged as a conflict: " + candidate.RelativePath;
+                    }
                 }
                 return null;
             }
