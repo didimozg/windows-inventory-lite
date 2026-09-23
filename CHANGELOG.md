@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.70.3] - Fixed WSUS scan results being silently erased every hour
+
+### Fixed
+
+- **A client's WSUS scan result (missing-updates list, last-scan time, and the "Windows Update service unavailable" flag) was being silently wiped out by that same client's own next routine inventory report.** The WSUS-scan endpoint correctly merges its fields onto the stored report, but the much more frequent (hourly, vs. the WSUS scan's own ~6-hourly cadence) main inventory report was rewriting the whole file from just the client's own payload, which never includes those fields. In practice this meant WSUS scan data was visible for a small fraction of each cycle and looked broken or missing the rest of the time, even when scanning was working correctly. The inventory report now carries these fields forward from the previous report, the same way it already does for AD-sync fields and USB-storage stickiness.
+
 ## [0.70.2] - Settings save confirmations that never disappeared
 
 ### Fixed
