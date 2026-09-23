@@ -208,6 +208,8 @@ namespace WindowsInventoryLite
         // RecordSoftwareJobAttempt), previously two hardcoded constants.
         public int SoftwareJobAttemptLogRetentionDays;
         public int SoftwareJobAttemptLogMaxEntries;
+        public int WsusDownloadLogRetentionDays;
+        public int WsusDownloadLogMaxEntries;
         public string ConfigPath;
         // The certificate is resolved from the LocalMachine\My store by thumbprint
         // (see InventoryServer.FindCertificateByThumbprint). Install-Server.ps1 can
@@ -411,6 +413,8 @@ namespace WindowsInventoryLite
             options.IngestionRejectionLogMaxEntries = 5000;
             options.SoftwareJobAttemptLogRetentionDays = 90;
             options.SoftwareJobAttemptLogMaxEntries = 5000;
+            options.WsusDownloadLogRetentionDays = 90;
+            options.WsusDownloadLogMaxEntries = 200;
             options.SoftwareShareScanIntervalMinutes = 60;
             options.DebugLogRetentionDays = 7;
             options.DebugLogMaxSizeMb = 10;
@@ -902,6 +906,24 @@ namespace WindowsInventoryLite
                         options.SoftwareJobAttemptLogMaxEntries = softwareJobAttemptMaxEntriesFromConfig;
                     }
                 }
+                if (options.WsusDownloadLogRetentionDays == 90)
+                {
+                    string wsusDownloadLogRetentionText = GetConfigString(config, "WsusDownloadLogRetentionDays");
+                    int wsusDownloadLogRetentionFromConfig;
+                    if (!String.IsNullOrEmpty(wsusDownloadLogRetentionText) && Int32.TryParse(wsusDownloadLogRetentionText, out wsusDownloadLogRetentionFromConfig) && wsusDownloadLogRetentionFromConfig > 0)
+                    {
+                        options.WsusDownloadLogRetentionDays = wsusDownloadLogRetentionFromConfig;
+                    }
+                }
+                if (options.WsusDownloadLogMaxEntries == 200)
+                {
+                    string wsusDownloadLogMaxEntriesText = GetConfigString(config, "WsusDownloadLogMaxEntries");
+                    int wsusDownloadLogMaxEntriesFromConfig;
+                    if (!String.IsNullOrEmpty(wsusDownloadLogMaxEntriesText) && Int32.TryParse(wsusDownloadLogMaxEntriesText, out wsusDownloadLogMaxEntriesFromConfig) && wsusDownloadLogMaxEntriesFromConfig > 0)
+                    {
+                        options.WsusDownloadLogMaxEntries = wsusDownloadLogMaxEntriesFromConfig;
+                    }
+                }
                 if (String.IsNullOrEmpty(options.ClientUpdateUsername))
                 {
                     options.ClientUpdateUsername = GetConfigString(config, "ClientUpdateUsername");
@@ -1184,6 +1206,10 @@ namespace WindowsInventoryLite
     internal sealed class InventoryServer
     {
         private readonly ServerOptions options;
+
+        private readonly object wsusDownloadLogLock = new object();
+        private readonly List<WsusDownloadLogEntry> wsusDownloadLog = new List<WsusDownloadLogEntry>();
+
         private readonly object installJobsLock = new object();
         private readonly Dictionary<string, InstallJob> installJobs = new Dictionary<string, InstallJob>();
         // Per-source-IP Basic Auth failure tracking (see IsBasicAuthLockedOut/
@@ -1395,6 +1421,7 @@ namespace WindowsInventoryLite
             PurgeOrphanedLinuxInstallJobDirectory();
             LoadIngestionRejectionLogFromDisk();
             LoadSoftwareJobAttemptLogFromDisk();
+            LoadWsusDownloadLogFromDisk();
 
             if (options.EnableHttp)
             {
@@ -2470,6 +2497,14 @@ namespace WindowsInventoryLite
                     else if (request.Method == "POST" && request.Path == "/api/v1/windows-updates/download-schedule")
                     {
                         ConfigureWsusDownloadSchedule(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/windows-updates/download-log")
+                    {
+                        SendWsusDownloadLog(stream);
+                    }
+                    else if (request.Method == "DELETE" && request.Path == "/api/v1/windows-updates/download-log")
+                    {
+                        ClearWsusDownloadLog(stream);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/third-party-software")
                     {
@@ -10182,6 +10217,155 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return status;
         }
 
+        internal sealed class WsusDownloadLogEntry
+        {
+            internal DateTime TimestampUtc;
+            internal string Source;
+            internal bool Success;
+            internal string ErrorCategory;
+            internal string ErrorMessage;
+            internal string Sha256Hash;
+            internal long SizeBytes;
+        }
+
+        private string GetWsusDownloadLogPath()
+        {
+            return Path.Combine(GetWsusDirectory(), "download-log.json");
+        }
+
+        private Dictionary<string, object> WsusDownloadLogEntryToDictionary(WsusDownloadLogEntry entry)
+        {
+            Dictionary<string, object> line = new Dictionary<string, object>();
+            line["timestampUtc"] = entry.TimestampUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+            line["source"] = entry.Source;
+            line["success"] = entry.Success;
+            line["errorCategory"] = entry.ErrorCategory ?? "";
+            line["errorMessage"] = entry.ErrorMessage ?? "";
+            line["sha256Hash"] = entry.Sha256Hash ?? "";
+            line["sizeBytes"] = entry.SizeBytes;
+            return line;
+        }
+
+        // Loads the on-disk log at startup - call once from Start(), same
+        // convention as LoadIngestionRejectionLogFromDisk. A missing or
+        // corrupt file is treated as an empty log rather than a startup
+        // failure, matching this project's own established tolerance for a
+        // diagnostic log's own storage being imperfect.
+        private void LoadWsusDownloadLogFromDisk()
+        {
+            string path = GetWsusDownloadLogPath();
+            if (!File.Exists(path))
+            {
+                return;
+            }
+            try
+            {
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                ArrayList lines = serializer.Deserialize<ArrayList>(File.ReadAllText(path, Encoding.UTF8));
+                lock (wsusDownloadLogLock)
+                {
+                    wsusDownloadLog.Clear();
+                    foreach (object lineObject in lines)
+                    {
+                        Dictionary<string, object> line = lineObject as Dictionary<string, object>;
+                        if (line == null)
+                        {
+                            continue;
+                        }
+                        WsusDownloadLogEntry entry = new WsusDownloadLogEntry();
+                        DateTime parsedTimestamp;
+                        if (DateTime.TryParse(Convert.ToString(line.ContainsKey("timestampUtc") ? line["timestampUtc"] : null), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out parsedTimestamp))
+                        {
+                            entry.TimestampUtc = parsedTimestamp;
+                        }
+                        entry.Source = line.ContainsKey("source") ? Convert.ToString(line["source"]) : "";
+                        entry.Success = line.ContainsKey("success") && Convert.ToBoolean(line["success"]);
+                        entry.ErrorCategory = line.ContainsKey("errorCategory") ? Convert.ToString(line["errorCategory"]) : "";
+                        entry.ErrorMessage = line.ContainsKey("errorMessage") ? Convert.ToString(line["errorMessage"]) : "";
+                        entry.Sha256Hash = line.ContainsKey("sha256Hash") ? Convert.ToString(line["sha256Hash"]) : "";
+                        entry.SizeBytes = line.ContainsKey("sizeBytes") ? Convert.ToInt64(line["sizeBytes"]) : 0;
+                        wsusDownloadLog.Add(entry);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Error", "LoadWsusDownloadLogFromDisk failed to parse the stored download log: " + ex.Message);
+            }
+        }
+
+        private void RewriteWsusDownloadLogFileLocked()
+        {
+            ArrayList lines = new ArrayList();
+            foreach (WsusDownloadLogEntry entry in wsusDownloadLog)
+            {
+                lines.Add(WsusDownloadLogEntryToDictionary(entry));
+            }
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            string directory = GetWsusDirectory();
+            if (!Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+            File.WriteAllText(GetWsusDownloadLogPath(), serializer.Serialize(lines), new UTF8Encoding(false));
+        }
+
+        // Appends one attempt and, unlike the (much higher-volume)
+        // Ingestion Rejection log, prunes+rewrites immediately whenever the
+        // limit is exceeded rather than batching with a slack margin - see
+        // this task's own design note for why that optimization does not
+        // apply here. wsusDownloadLog is kept oldest-first internally
+        // (append order); callers that need newest-first (the dashboard
+        // list) reverse it at render time.
+        internal void RecordWsusDownloadAttempt(WsusDownloadLogEntry entry)
+        {
+            lock (wsusDownloadLogLock)
+            {
+                wsusDownloadLog.Add(entry);
+                DateTime cutoffUtc = DateTime.UtcNow.AddDays(-options.WsusDownloadLogRetentionDays);
+                wsusDownloadLog.RemoveAll(e => e.TimestampUtc < cutoffUtc);
+                while (wsusDownloadLog.Count > options.WsusDownloadLogMaxEntries)
+                {
+                    wsusDownloadLog.RemoveAt(0);
+                }
+                RewriteWsusDownloadLogFileLocked();
+            }
+        }
+
+        internal WsusDownloadLogEntry GetLastWsusDownloadAttempt()
+        {
+            lock (wsusDownloadLogLock)
+            {
+                return wsusDownloadLog.Count > 0 ? wsusDownloadLog[wsusDownloadLog.Count - 1] : null;
+            }
+        }
+
+        private void SendWsusDownloadLog(Stream stream)
+        {
+            ArrayList entries = new ArrayList();
+            lock (wsusDownloadLogLock)
+            {
+                for (int i = wsusDownloadLog.Count - 1; i >= 0; i--)
+                {
+                    entries.Add(WsusDownloadLogEntryToDictionary(wsusDownloadLog[i]));
+                }
+            }
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["entries"] = entries;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void ClearWsusDownloadLog(Stream stream)
+        {
+            lock (wsusDownloadLogLock)
+            {
+                wsusDownloadLog.Clear();
+                RewriteWsusDownloadLogFileLocked();
+            }
+            SendJson(stream, "{\"status\":\"ok\"}");
+        }
+
         private string GetCertificateHistoryDirectory()
         {
             return Path.Combine(options.DataPath, "_certificates");
@@ -14644,6 +14828,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "POST /api/v1/outbound-proxy with clear=true wipes host/port/username/password", TestConfigureOutboundProxyClearWipesAllFields);
             allPassed &= SelfTestCheck(output, "OutboundProxyPassword is DPAPI-encrypted at rest", TestOutboundProxyPasswordIsInEncryptedConfigKeys);
             allPassed &= SelfTestCheck(output, "BuildOutboundProxy returns null when no host is configured, a real WebProxy with credentials when one is", TestBuildOutboundProxyReturnsNullOrConfiguredProxy);
+            allPassed &= SelfTestCheck(output, "RecordWsusDownloadAttempt appends an entry and GetLastWsusDownloadAttempt returns the most recent one", TestRecordWsusDownloadAttemptAndGetLast);
+            allPassed &= SelfTestCheck(output, "RecordWsusDownloadAttempt prunes down to WsusDownloadLogMaxEntries once the limit is exceeded", TestRecordWsusDownloadAttemptPrunesOverMaxEntries);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates/download-log returns entries newest-first", TestSendWsusDownloadLogReturnsNewestFirst);
+            allPassed &= SelfTestCheck(output, "DELETE /api/v1/windows-updates/download-log clears every entry and the file on disk", TestClearWsusDownloadLogRemovesEverything);
             return allPassed;
         }
 
@@ -23046,6 +23234,193 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (credential == null || credential.UserName != "proxyuser" || credential.Password != "proxypass")
                 {
                     return "expected the proxy credentials to carry proxyuser/proxypass";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestRecordWsusDownloadAttemptAndGetLast()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-downloadlog-" + Guid.NewGuid().ToString("N"));
+            // Without these, a bare `new ServerOptions()` defaults
+            // WsusDownloadLogMaxEntries to 0, which makes RecordWsusDownloadAttempt's
+            // own prune loop remove every entry immediately after it is added -
+            // matches the established convention for this shape of log (see
+            // TestClearSoftwareJobAttemptLogEmptiesListAndFile).
+            options.WsusDownloadLogRetentionDays = 90;
+            options.WsusDownloadLogMaxEntries = 200;
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo recordMethod = typeof(InventoryServer).GetMethod("RecordWsusDownloadAttempt", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Type entryType = typeof(InventoryServer).GetNestedType("WsusDownloadLogEntry", System.Reflection.BindingFlags.NonPublic);
+
+                object firstEntry = Activator.CreateInstance(entryType);
+                entryType.GetField("TimestampUtc", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(firstEntry, DateTime.UtcNow.AddMinutes(-5));
+                entryType.GetField("Source", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(firstEntry, "scheduled");
+                entryType.GetField("Success", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(firstEntry, true);
+                entryType.GetField("Sha256Hash", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(firstEntry, "aaa111");
+                entryType.GetField("SizeBytes", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(firstEntry, 123456L);
+                recordMethod.Invoke(server, new object[] { firstEntry });
+
+                object secondEntry = Activator.CreateInstance(entryType);
+                entryType.GetField("TimestampUtc", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(secondEntry, DateTime.UtcNow);
+                entryType.GetField("Source", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(secondEntry, "manual");
+                entryType.GetField("Success", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(secondEntry, false);
+                entryType.GetField("ErrorCategory", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(secondEntry, "network");
+                entryType.GetField("ErrorMessage", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(secondEntry, "simulated failure");
+                recordMethod.Invoke(server, new object[] { secondEntry });
+
+                System.Reflection.MethodInfo lastMethod = typeof(InventoryServer).GetMethod("GetLastWsusDownloadAttempt", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                object last = lastMethod.Invoke(server, null);
+                if (last == null)
+                {
+                    return "expected GetLastWsusDownloadAttempt to return the most recently recorded entry";
+                }
+                string lastSource = (string)entryType.GetField("Source", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(last);
+                if (lastSource != "manual")
+                {
+                    return "expected the last entry to be the manual one, got source=" + lastSource;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestRecordWsusDownloadAttemptPrunesOverMaxEntries()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-downloadlogprune-" + Guid.NewGuid().ToString("N"));
+            options.WsusDownloadLogRetentionDays = 90;
+            options.WsusDownloadLogMaxEntries = 3;
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo recordMethod = typeof(InventoryServer).GetMethod("RecordWsusDownloadAttempt", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Type entryType = typeof(InventoryServer).GetNestedType("WsusDownloadLogEntry", System.Reflection.BindingFlags.NonPublic);
+
+                for (int i = 0; i < 5; i++)
+                {
+                    object entry = Activator.CreateInstance(entryType);
+                    entryType.GetField("TimestampUtc", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(entry, DateTime.UtcNow.AddMinutes(i));
+                    entryType.GetField("Source", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(entry, "manual");
+                    entryType.GetField("Success", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(entry, true);
+                    recordMethod.Invoke(server, new object[] { entry });
+                }
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo sendMethod = typeof(InventoryServer).GetMethod("SendWsusDownloadLog", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    sendMethod.Invoke(server, new object[] { stream });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    JavaScriptSerializer serializer = new JavaScriptSerializer();
+                    Dictionary<string, object> parsed = serializer.Deserialize<Dictionary<string, object>>(ExtractHttpResponseBodyText(responseText));
+                    ArrayList entries = (ArrayList)parsed["entries"];
+                    if (entries.Count != 3)
+                    {
+                        return "expected pruning to keep exactly WsusDownloadLogMaxEntries (3) entries, got " + entries.Count;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendWsusDownloadLogReturnsNewestFirst()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-downloadlogorder-" + Guid.NewGuid().ToString("N"));
+            options.WebUsername = "admin";
+            options.WebPassword = "password123";
+            options.WsusDownloadLogRetentionDays = 90;
+            options.WsusDownloadLogMaxEntries = 200;
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo recordMethod = typeof(InventoryServer).GetMethod("RecordWsusDownloadAttempt", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Type entryType = typeof(InventoryServer).GetNestedType("WsusDownloadLogEntry", System.Reflection.BindingFlags.NonPublic);
+
+                object older = Activator.CreateInstance(entryType);
+                entryType.GetField("TimestampUtc", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(older, DateTime.UtcNow.AddHours(-1));
+                entryType.GetField("Source", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(older, "scheduled");
+                entryType.GetField("Success", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(older, true);
+                recordMethod.Invoke(server, new object[] { older });
+
+                object newer = Activator.CreateInstance(entryType);
+                entryType.GetField("TimestampUtc", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(newer, DateTime.UtcNow);
+                entryType.GetField("Source", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(newer, "manual");
+                entryType.GetField("Success", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(newer, true);
+                recordMethod.Invoke(server, new object[] { newer });
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo sendMethod = typeof(InventoryServer).GetMethod("SendWsusDownloadLog", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    sendMethod.Invoke(server, new object[] { stream });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    int manualIndex = responseText.IndexOf("\"manual\"", StringComparison.Ordinal);
+                    int scheduledIndex = responseText.IndexOf("\"scheduled\"", StringComparison.Ordinal);
+                    if (manualIndex < 0 || scheduledIndex < 0 || manualIndex > scheduledIndex)
+                    {
+                        return "expected the newer 'manual' entry to appear before the older 'scheduled' entry, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestClearWsusDownloadLogRemovesEverything()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-downloadlogclear-" + Guid.NewGuid().ToString("N"));
+            options.WebUsername = "admin";
+            options.WebPassword = "password123";
+            options.WsusDownloadLogRetentionDays = 90;
+            options.WsusDownloadLogMaxEntries = 200;
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo recordMethod = typeof(InventoryServer).GetMethod("RecordWsusDownloadAttempt", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Type entryType = typeof(InventoryServer).GetNestedType("WsusDownloadLogEntry", System.Reflection.BindingFlags.NonPublic);
+                object entry = Activator.CreateInstance(entryType);
+                entryType.GetField("TimestampUtc", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(entry, DateTime.UtcNow);
+                entryType.GetField("Source", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(entry, "manual");
+                entryType.GetField("Success", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).SetValue(entry, true);
+                recordMethod.Invoke(server, new object[] { entry });
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo clearMethod = typeof(InventoryServer).GetMethod("ClearWsusDownloadLog", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    clearMethod.Invoke(server, new object[] { stream });
+                }
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo sendMethod = typeof(InventoryServer).GetMethod("SendWsusDownloadLog", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    sendMethod.Invoke(server, new object[] { stream });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("\"manual\"", StringComparison.Ordinal) >= 0)
+                    {
+                        return "expected the log to be empty after clearing, got: " + responseText;
+                    }
                 }
                 return null;
             }
