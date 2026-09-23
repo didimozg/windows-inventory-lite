@@ -924,6 +924,7 @@
           <button id="loggingSubtabInstalls" class="subtab-item" role="tab" type="button">Installs</button>
           <button id="loggingSubtabSoftware" class="subtab-item" role="tab" type="button">Software</button>
           <button id="loggingSubtabDebug" class="subtab-item" role="tab" type="button">Debug</button>
+          <button id="loggingSubtabWsusDownloads" class="subtab-item" role="tab" type="button">WSUS Downloads</button>
         </div>
 
         <section id="loggingView" class="hidden" aria-label="Ingestion rejection log">
@@ -957,6 +958,26 @@
             <span id="debugLogMeta" class="cert-hint"></span>
           </div>
           <pre id="debugLogContent" class="debug-log-content"></pre>
+        </section>
+
+        <section id="wsusDownloadLogView" class="hidden" aria-label="WSUS download attempts">
+          <p class="cert-hint">Every automated (scheduled) or manual WSUS cab download attempt, newest first. See Settings &gt; Windows for the current file status and to configure the schedule.</p>
+          <div class="view-toolbar">
+            <button id="wsusDownloadLogClearButton" class="danger-button-ghost" type="button">Clear log</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Source</th>
+                  <th>Result</th>
+                  <th>Details</th>
+                </tr>
+              </thead>
+              <tbody id="wsusDownloadLogBody"></tbody>
+            </table>
+          </div>
         </section>
 
         <section id="installHistoryView" class="install-panel card-glow hidden" aria-label="Saved client action logs">

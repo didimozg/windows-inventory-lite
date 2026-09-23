@@ -183,6 +183,7 @@
     if (hash === 'softwarejobhistory') return { view: 'logging', subview: 'software' };
     if (hash === 'logging-installs') return { view: 'logging', subview: 'installs' };
     if (hash === 'logging-debug') return { view: 'logging', subview: 'debug' };
+    if (hash === 'logging-wsusdownloads') return { view: 'logging', subview: 'wsusdownloads' };
     if (hash === 'logging') return { view: 'logging', subview: 'ingestion' };
     // #linux-clients / #linux are kept as aliases of the merged Clients
     // page (same backward-compat pattern as #linux-hardware above and
@@ -218,7 +219,7 @@
     }
     if (view === 'licenses') return subview === 'sources' ? 'licensekeysources' : subview === 'keys' ? 'licenses-keys' : 'licenses';
     if (view === 'windowsUpdates') return subview === 'catalog' ? 'windowsupdates-catalog' : 'windowsupdates';
-    if (view === 'logging') return subview === 'installs' ? 'logging-installs' : subview === 'software' ? 'softwarejobhistory' : subview === 'debug' ? 'logging-debug' : 'logging';
+    if (view === 'logging') return subview === 'installs' ? 'logging-installs' : subview === 'software' ? 'softwarejobhistory' : subview === 'debug' ? 'logging-debug' : subview === 'wsusdownloads' ? 'logging-wsusdownloads' : 'logging';
     if (view === 'linuxServices') return 'linux-services';
     return view;
   }
@@ -235,6 +236,7 @@
     if (subview === 'installs') loadInstallHistory();
     if (subview === 'software') loadSoftwareJobHistory();
     if (subview === 'debug') loadDebugLog();
+    if (subview === 'wsusdownloads') loadWsusDownloadLog();
   }
 
   function loadLicensesSubviewData(subview) {
@@ -324,6 +326,8 @@
     byId('loggingSubtabSoftware').setAttribute('aria-selected', String(state.view === 'logging' && state.subview === 'software'));
     byId('loggingSubtabDebug').classList.toggle('active', state.view === 'logging' && state.subview === 'debug');
     byId('loggingSubtabDebug').setAttribute('aria-selected', String(state.view === 'logging' && state.subview === 'debug'));
+    byId('loggingSubtabWsusDownloads').classList.toggle('active', state.view === 'logging' && state.subview === 'wsusdownloads');
+    byId('loggingSubtabWsusDownloads').setAttribute('aria-selected', String(state.view === 'logging' && state.subview === 'wsusdownloads'));
   }
 
   function text(value) {
@@ -5102,6 +5106,53 @@
       });
   }
 
+  function loadWsusDownloadLog() {
+    fetch('/api/v1/windows-updates/download-log', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => renderWsusDownloadLog(data.entries || []))
+      .catch(error => {
+        byId('wsusDownloadLogBody').innerHTML = `<tr><td colspan="4" class="empty">Log unavailable: ${escapeHtml(error.message)}</td></tr>`;
+      });
+  }
+
+  function renderWsusDownloadLog(entries) {
+    const tbody = byId('wsusDownloadLogBody');
+    tbody.innerHTML = entries.map(entry => {
+      const resultText = entry.success
+        ? 'Success'
+        : `Failed (${escapeHtml(entry.errorCategory || 'unknown')})`;
+      const detailsText = entry.success
+        ? `${escapeHtml((entry.sha256Hash || '').substring(0, 12))}... - ${entry.sizeBytes || 0} bytes`
+        : escapeHtml(entry.errorMessage || '');
+      return `
+        <tr>
+          <td>${escapeHtml(formatDateTime(entry.timestampUtc))}</td>
+          <td>${escapeHtml(entry.source)}</td>
+          <td>${resultText}</td>
+          <td>${detailsText}</td>
+        </tr>
+      `;
+    }).join('') || '<tr><td colspan="4" class="empty">No WSUS download attempts recorded yet.</td></tr>';
+  }
+
+  function clearWsusDownloadLog() {
+    if (!window.confirm('Clear the entire WSUS download attempt log? This cannot be undone.')) return;
+    byId('wsusDownloadLogClearButton').disabled = true;
+    fetch('/api/v1/windows-updates/download-log', { method: 'DELETE', cache: 'no-store' })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Clear failed');
+        loadWsusDownloadLog();
+      })
+      .catch(error => window.alert(`Failed to clear: ${error.message}`))
+      .finally(() => {
+        byId('wsusDownloadLogClearButton').disabled = false;
+      });
+  }
+
   // Fleet-wide row list for the Licenses > Keys subtab. `index` is this
   // license's position inside THIS client's own `licenses` array - the
   // reveal button needs it to pick the right entry out of
@@ -5315,6 +5366,7 @@
     byId('installHistoryView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'installs'));
     byId('softwareJobHistoryView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'software'));
     byId('debugLogView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'debug'));
+    byId('wsusDownloadLogView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'wsusdownloads'));
     byId('linuxServicesView').classList.toggle('hidden', state.view !== 'linuxServices');
     // Deploy: Actions shows both platforms' sections together (stacked, own
     // headings), Updates and Package are each already cross-platform on one
@@ -5890,9 +5942,11 @@
   byId('loggingSubtabInstalls').addEventListener('click', () => setView('logging', 'installs'));
   byId('loggingSubtabSoftware').addEventListener('click', () => setView('logging', 'software'));
   byId('loggingSubtabDebug').addEventListener('click', () => setView('logging', 'debug'));
+  byId('loggingSubtabWsusDownloads').addEventListener('click', () => setView('logging', 'wsusdownloads'));
   byId('debugLogRefreshButton').addEventListener('click', loadDebugLog);
   byId('ingestionRejectionsClearButton').addEventListener('click', clearIngestionRejectionLog);
   byId('debugLogClearButton').addEventListener('click', clearDebugLog);
+  byId('wsusDownloadLogClearButton').addEventListener('click', clearWsusDownloadLog);
   byId('installHistoryClearButton').addEventListener('click', clearInstallHistory);
   byId('softwareJobHistoryClearButton').addEventListener('click', clearSoftwareJobHistory);
   byId('deployTab').addEventListener('click', () => setView('deploy', 'actions'));
