@@ -175,6 +175,33 @@
             <p class="cert-hint">HSTS tells browsers to only ever use HTTPS for this server, for the max-age duration - only sent on responses actually served over HTTPS. Off by default: a browser that has cached this can lock itself out of the dashboard for the full max-age if HTTPS is later disabled (e.g. during a certificate emergency). Start with a short max-age and only enable once HTTPS is stable.</p>
           </div>
           <div class="settings-block">
+            <h2 class="settings-block-title">Outbound proxy</h2>
+            <p class="cert-hint">Used by server-initiated outbound downloads (currently: the WSUS cab downloader under Software &gt; Windows updates). Leave the host blank to connect directly with no proxy.</p>
+            <div class="pkg-grid client-update-grid">
+              <label class="pkg-token-field">
+                Host
+                <input id="outboundProxyHost" type="text" placeholder="proxy.example.local">
+              </label>
+              <label class="pkg-token-field">
+                Port
+                <input id="outboundProxyPort" type="number" min="0" max="65535" placeholder="8080">
+              </label>
+              <label class="pkg-token-field">
+                Username (optional)
+                <input id="outboundProxyUsername" type="text" autocomplete="off">
+              </label>
+              <label class="pkg-token-field">
+                Password (optional)
+                <input id="outboundProxyPassword" type="password" autocomplete="new-password" placeholder="leave blank to keep the current one">
+              </label>
+              <div class="pkg-buttons">
+                <button id="outboundProxySaveButton" class="primary-button" type="button">Save</button>
+                <button id="outboundProxyClearButton" class="danger-button-ghost" type="button">Clear proxy settings</button>
+              </div>
+            </div>
+            <div id="outboundProxyMessage" class="pkg-message hidden"></div>
+          </div>
+          <div class="settings-block">
             <h2 class="settings-block-title">Ingestion Token</h2>
             <p id="ingestionTokenStatusText" class="pkg-status">Loading status...</p>
             <label class="token-value-field">

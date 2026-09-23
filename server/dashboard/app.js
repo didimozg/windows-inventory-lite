@@ -248,7 +248,7 @@
   }
 
   function loadSettingsSubviewData(subview) {
-    if (subview === 'server') { loadServerSettings(); loadIngestionTokenStatus(); }
+    if (subview === 'server') { loadServerSettings(); loadIngestionTokenStatus(); loadOutboundProxySettings(); }
     if (subview === 'windows') { loadWindowsSettings(); loadClientUpdateCredentials(); loadSoftwareRepositoryCredentials(); loadWsusCabStatus(); }
     if (subview === 'linux') { loadLinuxSettings(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (subview === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
@@ -2320,6 +2320,72 @@
         return response.json();
       })
       .then(() => loadSoftwareRepositoryCredentials())
+      .catch(error => window.alert(`Failed to clear: ${error.message}`));
+  }
+
+  function loadOutboundProxySettings() {
+    fetch('/api/v1/outbound-proxy', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('outboundProxyHost').value = data.host || '';
+        byId('outboundProxyPort').value = data.port || '';
+        byId('outboundProxyUsername').value = data.username || '';
+        applyPasswordPlaceholder('outboundProxyPassword', !!data.hasPassword, 'leave blank to keep the current one');
+      })
+      .catch(() => {});
+  }
+
+  function saveOutboundProxySettings() {
+    const host = byId('outboundProxyHost').value.trim();
+    const port = Number(byId('outboundProxyPort').value) || 0;
+    const username = byId('outboundProxyUsername').value.trim();
+    const password = byId('outboundProxyPassword').value;
+    const messageElement = byId('outboundProxyMessage');
+
+    byId('outboundProxySaveButton').disabled = true;
+    fetch('/api/v1/outbound-proxy', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, port, username, password })
+    })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(() => {
+        byId('outboundProxyPassword').value = '';
+        messageElement.className = 'pkg-message';
+        messageElement.textContent = 'Saved.';
+        messageElement.classList.remove('hidden');
+        loadOutboundProxySettings();
+      })
+      .catch(error => {
+        messageElement.className = 'pkg-message error';
+        messageElement.textContent = `Failed to save: ${error.message}`;
+        messageElement.classList.remove('hidden');
+      })
+      .finally(() => {
+        byId('outboundProxySaveButton').disabled = false;
+      });
+  }
+
+  function clearOutboundProxySettings() {
+    if (!window.confirm('Clear the saved outbound proxy settings?')) return;
+    fetch('/api/v1/outbound-proxy', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clear: true })
+    })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(() => loadOutboundProxySettings())
       .catch(error => window.alert(`Failed to clear: ${error.message}`));
   }
 
@@ -5813,6 +5879,8 @@
   byId('windowsCredsClearButton').addEventListener('click', clearClientUpdateCredentials);
   byId('softwareRepoSaveButton').addEventListener('click', saveSoftwareRepositoryCredentials);
   byId('softwareRepoClearButton').addEventListener('click', clearSoftwareRepositoryCredentials);
+  byId('outboundProxySaveButton').addEventListener('click', saveOutboundProxySettings);
+  byId('outboundProxyClearButton').addEventListener('click', clearOutboundProxySettings);
   byId('updatesPushButton').addEventListener('click', startMergedUpdatesPush);
   byId('updatesSelectAll').addEventListener('change', () => {
     // Only ever toggles the CURRENT page's rows - "select every matching
