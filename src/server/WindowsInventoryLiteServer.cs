@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
@@ -13935,6 +13936,100 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 }
             }
             return duplicates;
+        }
+
+        // Real, live-verified-only logic - see Global Constraints. A .msu is
+        // a CAB container; expand.exe's -F:pattern mode extracts only files
+        // matching the pattern without unpacking the whole archive, so the
+        // (potentially hundreds-of-MB) real update payload is never touched
+        // on disk.
+        //
+        // Live verification against two real, unrenamed .msu files from
+        // Microsoft's Update Catalog (KB5071812 and KB5031539) found that
+        // every real .msu's own servicing manifest (*.mum, with a kb="..."
+        // attribute) is NOT present at the top level of the outer .msu - it
+        // is nested one level deeper inside a per-component inner .cab
+        // (e.g. "Windows6.0-KB5071812-x86.cab") that is itself close to the
+        // full size of the update, so extracting it would defeat the whole
+        // point of never touching the real payload. Both real files instead
+        // carry a small (under 1 KB), top-level "*-pkgProperties.txt" file
+        // with a plain-text `KB Article Number="XXXXXXX"` line - this is
+        // what is actually extracted and parsed here. If extraction finds
+        // zero such files, a file with no KB Article Number line, or
+        // multiple files naming DIFFERENT KBs (a real but rare shape for
+        // combined/multi-component packages), this returns null rather than
+        // guessing - the caller falls back to filename-based detection.
+        internal string ExtractKbFromMsuFile(string fullFilePath)
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-msu-kb-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(tempDir);
+
+                ProcessStartInfo psi = new ProcessStartInfo();
+                psi.FileName = "expand.exe";
+                psi.Arguments = "-F:*-pkgProperties.txt \"" + fullFilePath + "\" \"" + tempDir + "\"";
+                psi.UseShellExecute = false;
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError = true;
+                psi.CreateNoWindow = true;
+
+                using (Process process = Process.Start(psi))
+                {
+                    if (!process.WaitForExit(30000))
+                    {
+                        try { process.Kill(); } catch { }
+                        return null;
+                    }
+                }
+
+                string[] propertyFiles = Directory.GetFiles(tempDir, "*.txt");
+                if (propertyFiles.Length == 0)
+                {
+                    return null;
+                }
+
+                HashSet<string> foundKbIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string propertyFile in propertyFiles)
+                {
+                    string content = File.ReadAllText(propertyFile);
+                    Match match = Regex.Match(content, "KB Article Number=\"(\\d+)\"", RegexOptions.IgnoreCase);
+                    if (match.Success)
+                    {
+                        foundKbIds.Add(match.Groups[1].Value);
+                    }
+                }
+
+                return foundKbIds.Count == 1 ? foundKbIds.First() : null;
+            }
+            catch
+            {
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
+        // Single entry point Task 4's scan wiring calls. Content-based
+        // detection is authoritative whenever it succeeds - see the design
+        // doc for why this means an admin can name a real .msu file
+        // anything at all (including a free-form Cyrillic description) with
+        // no loss of function; the filename fallback only matters when
+        // content extraction fails for some other reason.
+        internal string DetectKbForCandidate(string fullFilePath, string relativePath)
+        {
+            if (!relativePath.EndsWith(".msu", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+            string fromContent = ExtractKbFromMsuFile(fullFilePath);
+            if (!String.IsNullOrEmpty(fromContent))
+            {
+                return fromContent;
+            }
+            return ExtractKbFromFilename(relativePath);
         }
 
         private ShareScanResult ScanSoftwareRepository()
