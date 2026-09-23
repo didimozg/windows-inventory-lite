@@ -344,6 +344,16 @@ namespace WindowsInventoryLite
         public string ClientUpdateScheduleOnceAtUtc;
         public int ClientUpdateScheduleIntervalHours;
         public string ClientUpdateScheduleLastRunUtc;
+        // Mode is "off", "weekly", or "monthly" - a genuinely different
+        // shape from ClientUpdateScheduleMode above (day-of-week or
+        // day-of-month + time-of-day, UTC, recurring indefinitely) rather
+        // than that field's once/interval-hours model, which cannot express
+        // "every Tuesday" or "the 1st of the month" without calendar drift.
+        public string WsusDownloadScheduleMode;
+        public int WsusDownloadScheduleDayOfWeek;
+        public int WsusDownloadScheduleDayOfMonth;
+        public string WsusDownloadScheduleTimeUtc;
+        public string WsusDownloadScheduleLastRunUtc;
 
         public static ServerOptions Parse(string[] args)
         {
@@ -371,6 +381,11 @@ namespace WindowsInventoryLite
             options.ClientUpdateScheduleOnceAtUtc = "";
             options.ClientUpdateScheduleIntervalHours = 24;
             options.ClientUpdateScheduleLastRunUtc = "";
+            options.WsusDownloadScheduleMode = "off";
+            options.WsusDownloadScheduleDayOfWeek = 2;
+            options.WsusDownloadScheduleDayOfMonth = 1;
+            options.WsusDownloadScheduleTimeUtc = "03:00";
+            options.WsusDownloadScheduleLastRunUtc = "";
             options.LinuxUpdateScheduleMode = "off";
             options.LinuxUpdateScheduleOnceAtUtc = "";
             options.LinuxUpdateScheduleIntervalHours = 24;
@@ -1030,6 +1045,44 @@ namespace WindowsInventoryLite
                 {
                     options.ClientUpdateScheduleLastRunUtc = GetConfigString(config, "ClientUpdateScheduleLastRunUtc") ?? "";
                 }
+                if (options.WsusDownloadScheduleMode == "off")
+                {
+                    string wsusScheduleModeText = GetConfigString(config, "WsusDownloadScheduleMode");
+                    if (wsusScheduleModeText == "off" || wsusScheduleModeText == "weekly" || wsusScheduleModeText == "monthly")
+                    {
+                        options.WsusDownloadScheduleMode = wsusScheduleModeText;
+                    }
+                }
+                if (options.WsusDownloadScheduleDayOfWeek == 2)
+                {
+                    string wsusScheduleDayOfWeekText = GetConfigString(config, "WsusDownloadScheduleDayOfWeek");
+                    int wsusScheduleDayOfWeekFromConfig;
+                    if (!String.IsNullOrEmpty(wsusScheduleDayOfWeekText) && Int32.TryParse(wsusScheduleDayOfWeekText, out wsusScheduleDayOfWeekFromConfig) && wsusScheduleDayOfWeekFromConfig >= 0 && wsusScheduleDayOfWeekFromConfig <= 6)
+                    {
+                        options.WsusDownloadScheduleDayOfWeek = wsusScheduleDayOfWeekFromConfig;
+                    }
+                }
+                if (options.WsusDownloadScheduleDayOfMonth == 1)
+                {
+                    string wsusScheduleDayOfMonthText = GetConfigString(config, "WsusDownloadScheduleDayOfMonth");
+                    int wsusScheduleDayOfMonthFromConfig;
+                    if (!String.IsNullOrEmpty(wsusScheduleDayOfMonthText) && Int32.TryParse(wsusScheduleDayOfMonthText, out wsusScheduleDayOfMonthFromConfig) && wsusScheduleDayOfMonthFromConfig >= 1 && wsusScheduleDayOfMonthFromConfig <= 31)
+                    {
+                        options.WsusDownloadScheduleDayOfMonth = wsusScheduleDayOfMonthFromConfig;
+                    }
+                }
+                if (options.WsusDownloadScheduleTimeUtc == "03:00")
+                {
+                    string wsusScheduleTimeText = GetConfigString(config, "WsusDownloadScheduleTimeUtc");
+                    if (!String.IsNullOrEmpty(wsusScheduleTimeText))
+                    {
+                        options.WsusDownloadScheduleTimeUtc = wsusScheduleTimeText;
+                    }
+                }
+                if (String.IsNullOrEmpty(options.WsusDownloadScheduleLastRunUtc))
+                {
+                    options.WsusDownloadScheduleLastRunUtc = GetConfigString(config, "WsusDownloadScheduleLastRunUtc") ?? "";
+                }
                 if (!options.DebugLogEnabled)
                 {
                     string debugLogEnabledText = GetConfigString(config, "DebugLogEnabled");
@@ -1222,6 +1275,8 @@ namespace WindowsInventoryLite
         private Timer adSyncTimer;
         private readonly object clientUpdateScheduleTimerLock = new object();
         private Timer clientUpdateScheduleTimer;
+        private readonly object wsusDownloadScheduleTimerLock = new object();
+        private Timer wsusDownloadScheduleTimer;
         private readonly object reportFileLock = new object();
         // server-config.json holds the DPAPI-encrypted secrets (AdPassword/
         // WebPassword/Token/ClientUpdatePassword) and is now written by more
@@ -1358,6 +1413,7 @@ namespace WindowsInventoryLite
             ResetMissedOnceLinuxSchedule();
             ReconfigureClientUpdateScheduleTimer();
             ReconfigureLinuxUpdateScheduleTimer();
+            ReconfigureWsusDownloadScheduleTimer();
             ReconfigureSoftwareRepositoryScanTimer();
 
             if (!httpSlot.Running && !httpsSlot.Running)
@@ -1617,6 +1673,55 @@ namespace WindowsInventoryLite
             catch (Exception ex)
             {
                 DebugLogger.Log(options, "Error", "Client update schedule tick failed: " + ex);
+            }
+        }
+
+        private void ReconfigureWsusDownloadScheduleTimer()
+        {
+            lock (wsusDownloadScheduleTimerLock)
+            {
+                if (wsusDownloadScheduleTimer != null)
+                {
+                    wsusDownloadScheduleTimer.Dispose();
+                    wsusDownloadScheduleTimer = null;
+                }
+                if (options.WsusDownloadScheduleMode != "off")
+                {
+                    TimeSpan pollInterval = TimeSpan.FromSeconds(60);
+                    wsusDownloadScheduleTimer = new Timer(RunWsusDownloadScheduleTick, null, TimeSpan.Zero, pollInterval);
+                }
+            }
+        }
+
+        // NOTE for the next task (Task 5): this tick currently only checks
+        // whether the schedule is due and logs that fact - it does not yet
+        // trigger a real download, since the download routine does not
+        // exist until Task 4. Task 5 replaces the DebugLogger.Log call
+        // below with a real call to the download routine plus the
+        // concurrency guard, matching RunClientUpdateScheduleTick's own
+        // shape exactly. Do not skip Task 5 - a schedule that only logs
+        // and never downloads is not a complete feature.
+        private void RunWsusDownloadScheduleTick(object state)
+        {
+            try
+            {
+                string mode = options.WsusDownloadScheduleMode;
+                if (mode == "off")
+                {
+                    return;
+                }
+
+                DateTime? lastRunUtc = ParseUtcOrNull(options.WsusDownloadScheduleLastRunUtc);
+                if (!ShouldRunWsusDownloadSchedule(DateTime.UtcNow, mode, options.WsusDownloadScheduleDayOfWeek, options.WsusDownloadScheduleDayOfMonth, options.WsusDownloadScheduleTimeUtc, lastRunUtc))
+                {
+                    return;
+                }
+
+                DebugLogger.Log(options, "Info", "WSUS download schedule is due - Task 5 will wire the real download call here.");
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Error", "WSUS download schedule tick failed: " + ex);
             }
         }
 
@@ -2357,6 +2462,14 @@ namespace WindowsInventoryLite
                     else if (request.Method == "GET" && request.Path == "/api/v1/windows-updates/missing-summary")
                     {
                         SendWsusMissingSummary(stream);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/windows-updates/download-schedule")
+                    {
+                        SendWsusDownloadScheduleStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/windows-updates/download-schedule")
+                    {
+                        ConfigureWsusDownloadSchedule(stream, request);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/third-party-software")
                     {
@@ -3307,6 +3420,61 @@ namespace WindowsInventoryLite
             }
             timeOfDay = parsed.TimeOfDay;
             return true;
+        }
+
+        // Pure decision function for the WSUS cab download schedule timer
+        // (RunWsusDownloadScheduleTick calls this on every 60-second poll) -
+        // no I/O, so it's directly self-testable. Computes the most recent
+        // scheduled occurrence at or before nowUtc (this week's/month's
+        // day+time, or last week's/month's if this occurrence hasn't
+        // happened yet) and fires only if that occurrence is newer than the
+        // last recorded run - a poll ticking more than once within the same
+        // target minute never fires twice, and if the server was briefly
+        // down at the exact target moment, the very next poll still catches
+        // up (matching ShouldRunClientUpdateSchedule's own "once" mode
+        // philosophy of firing as soon as the check next runs, however late).
+        // dayOfMonth values beyond the real month length clamp to that
+        // month's actual last day (e.g. 31 in February resolves to 28/29).
+        internal static bool ShouldRunWsusDownloadSchedule(DateTime nowUtc, string mode, int dayOfWeek, int dayOfMonth, string timeUtc, DateTime? lastRunUtc)
+        {
+            TimeSpan timeOfDay;
+            if (!TryParseTimeOfDay(timeUtc, out timeOfDay))
+            {
+                return false;
+            }
+
+            DateTime mostRecentOccurrence;
+            if (mode == "weekly")
+            {
+                if (dayOfWeek < 0 || dayOfWeek > 6)
+                {
+                    return false;
+                }
+                DateTime candidate = nowUtc.Date.AddDays(-(int)nowUtc.DayOfWeek + dayOfWeek).Add(timeOfDay);
+                if (candidate > nowUtc)
+                {
+                    candidate = candidate.AddDays(-7);
+                }
+                mostRecentOccurrence = candidate;
+            }
+            else if (mode == "monthly")
+            {
+                int clampedDay = Math.Min(Math.Max(dayOfMonth, 1), DateTime.DaysInMonth(nowUtc.Year, nowUtc.Month));
+                DateTime candidate = new DateTime(nowUtc.Year, nowUtc.Month, clampedDay, 0, 0, 0, DateTimeKind.Utc).Add(timeOfDay);
+                if (candidate > nowUtc)
+                {
+                    DateTime previousMonth = nowUtc.Date.AddMonths(-1);
+                    int previousClampedDay = Math.Min(Math.Max(dayOfMonth, 1), DateTime.DaysInMonth(previousMonth.Year, previousMonth.Month));
+                    candidate = new DateTime(previousMonth.Year, previousMonth.Month, previousClampedDay, 0, 0, 0, DateTimeKind.Utc).Add(timeOfDay);
+                }
+                mostRecentOccurrence = candidate;
+            }
+            else
+            {
+                return false;
+            }
+
+            return !lastRunUtc.HasValue || lastRunUtc.Value < mostRecentOccurrence;
         }
 
         // Handles a window that spans midnight (windowStart > windowEnd,
@@ -11171,6 +11339,86 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendClientUpdateScheduleStatus(stream);
         }
 
+        private void SendWsusDownloadScheduleStatus(Stream stream)
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["mode"] = options.WsusDownloadScheduleMode;
+            result["dayOfWeek"] = options.WsusDownloadScheduleDayOfWeek;
+            result["dayOfMonth"] = options.WsusDownloadScheduleDayOfMonth;
+            result["timeUtc"] = options.WsusDownloadScheduleTimeUtc;
+            result["lastRunUtc"] = options.WsusDownloadScheduleLastRunUtc;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void ConfigureWsusDownloadSchedule(Stream stream, RequestContext request)
+        {
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string mode = payload.ContainsKey("mode") ? Convert.ToString(payload["mode"]) : "off";
+            if (mode != "off" && mode != "weekly" && mode != "monthly")
+            {
+                SendText(stream, "{\"error\":\"mode must be 'off', 'weekly', or 'monthly'\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            int dayOfWeek = options.WsusDownloadScheduleDayOfWeek;
+            if (payload.ContainsKey("dayOfWeek") && (!Int32.TryParse(Convert.ToString(payload["dayOfWeek"]), out dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6))
+            {
+                SendText(stream, "{\"error\":\"dayOfWeek must be between 0 (Sunday) and 6 (Saturday)\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            int dayOfMonth = options.WsusDownloadScheduleDayOfMonth;
+            if (payload.ContainsKey("dayOfMonth") && (!Int32.TryParse(Convert.ToString(payload["dayOfMonth"]), out dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 31))
+            {
+                SendText(stream, "{\"error\":\"dayOfMonth must be between 1 and 31\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string timeUtc = payload.ContainsKey("timeUtc") ? Convert.ToString(payload["timeUtc"]) : options.WsusDownloadScheduleTimeUtc;
+            // Format validation only when the schedule is actually being
+            // enabled - an admin turning it off must never be blocked by a
+            // stale/blank time field left over from before (same philosophy
+            // as the existing Software Install Window setting).
+            TimeSpan parsedTimeOfDay;
+            if (mode != "off" && !TryParseTimeOfDay(timeUtc, out parsedTimeOfDay))
+            {
+                SendText(stream, "{\"error\":\"timeUtc must be in 'HH:mm' format\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            options.WsusDownloadScheduleMode = mode;
+            options.WsusDownloadScheduleDayOfWeek = dayOfWeek;
+            options.WsusDownloadScheduleDayOfMonth = dayOfMonth;
+            options.WsusDownloadScheduleTimeUtc = timeUtc;
+
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["WsusDownloadScheduleMode"] = mode;
+            updates["WsusDownloadScheduleDayOfWeek"] = dayOfWeek.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            updates["WsusDownloadScheduleDayOfMonth"] = dayOfMonth.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            updates["WsusDownloadScheduleTimeUtc"] = timeUtc ?? "";
+            SaveServerConfigValues(updates);
+
+            ReconfigureWsusDownloadScheduleTimer();
+
+            SendWsusDownloadScheduleStatus(stream);
+        }
+
         // Doubles as first-time setup and password rotation. Bootstrapping without
         // a current-password check is reachable by anyone on the network while
         // Basic Auth is unconfigured, but at that point the whole dashboard is
@@ -14122,6 +14370,13 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'once' is never due with no target time set", TestShouldRunClientUpdateScheduleOnceMissingTarget);
             allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'interval' is due immediately with no previous run", TestShouldRunClientUpdateScheduleIntervalNoPreviousRun);
             allPassed &= SelfTestCheck(output, "ShouldRunClientUpdateSchedule 'interval' respects the interval window", TestShouldRunClientUpdateScheduleIntervalDueAndNotDue);
+            allPassed &= SelfTestCheck(output, "ShouldRunWsusDownloadSchedule is never due in 'off' mode", TestShouldRunWsusDownloadScheduleOffMode);
+            allPassed &= SelfTestCheck(output, "ShouldRunWsusDownloadSchedule weekly mode is due once this week's target time has passed and not run yet", TestShouldRunWsusDownloadScheduleWeeklyDue);
+            allPassed &= SelfTestCheck(output, "ShouldRunWsusDownloadSchedule weekly mode is not due again after already running for this week's occurrence", TestShouldRunWsusDownloadScheduleWeeklyAlreadyRan);
+            allPassed &= SelfTestCheck(output, "ShouldRunWsusDownloadSchedule monthly mode clamps an out-of-range day to the real last day of the month", TestShouldRunWsusDownloadScheduleMonthlyClampsDayOfMonth);
+            allPassed &= SelfTestCheck(output, "ShouldRunWsusDownloadSchedule returns false for an unparseable time-of-day", TestShouldRunWsusDownloadScheduleInvalidTimeFormat);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates/download-schedule then POST round-trips mode/dayOfWeek/dayOfMonth/timeUtc", TestConfigureWsusDownloadScheduleRoundTrips);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/windows-updates/download-schedule rejects an invalid mode, dayOfWeek, dayOfMonth, or time format", TestConfigureWsusDownloadScheduleRejectsInvalidInput);
             allPassed &= SelfTestCheck(output, "ResetMissedOnceLinuxSchedule clears a Linux 'once' schedule whose target time has already passed", TestResetMissedOnceLinuxScheduleClearsPastTarget);
             allPassed &= SelfTestCheck(output, "ResetMissedOnceLinuxSchedule leaves a future Linux 'once' target untouched", TestResetMissedOnceLinuxScheduleLeavesFutureTargetUntouched);
             allPassed &= SelfTestCheck(output, "TryParseTimeOfDay accepts 'HH:mm', rejects bad formats and empty", TestTryParseTimeOfDayAcceptsValidRejectsInvalid);
@@ -17230,6 +17485,184 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return "expected mode 'interval' to not be due when lastRunUtc is within intervalHours";
             }
             return null;
+        }
+
+        private static string TestShouldRunWsusDownloadScheduleOffMode()
+        {
+            if (InventoryServer.ShouldRunWsusDownloadSchedule(DateTime.UtcNow, "off", 2, 1, "03:00", null))
+            {
+                return "expected 'off' mode to never be due";
+            }
+            return null;
+        }
+
+        private static string TestShouldRunWsusDownloadScheduleWeeklyDue()
+        {
+            // A fixed, known Wednesday (2026-09-23 is a Wednesday) at 10:00 UTC,
+            // schedule target is Wednesday (day 3) at 03:00 UTC - already passed
+            // today, never run before.
+            DateTime now = new DateTime(2026, 9, 23, 10, 0, 0, DateTimeKind.Utc);
+            if (!InventoryServer.ShouldRunWsusDownloadSchedule(now, "weekly", 3, 1, "03:00", null))
+            {
+                return "expected weekly mode to be due once this week's target time has passed with no previous run";
+            }
+            return null;
+        }
+
+        private static string TestShouldRunWsusDownloadScheduleWeeklyAlreadyRan()
+        {
+            DateTime now = new DateTime(2026, 9, 23, 10, 0, 0, DateTimeKind.Utc);
+            DateTime ranEarlierToday = new DateTime(2026, 9, 23, 3, 5, 0, DateTimeKind.Utc);
+            if (InventoryServer.ShouldRunWsusDownloadSchedule(now, "weekly", 3, 1, "03:00", ranEarlierToday))
+            {
+                return "expected weekly mode to NOT be due again after already running for this week's occurrence";
+            }
+            // A week later, the NEXT occurrence should be due again.
+            DateTime nextWeek = now.AddDays(7);
+            if (!InventoryServer.ShouldRunWsusDownloadSchedule(nextWeek, "weekly", 3, 1, "03:00", ranEarlierToday))
+            {
+                return "expected weekly mode to be due again once next week's occurrence has passed";
+            }
+            return null;
+        }
+
+        private static string TestShouldRunWsusDownloadScheduleMonthlyClampsDayOfMonth()
+        {
+            // February 2027 has 28 days (not a leap year) - dayOfMonth 31 must
+            // clamp to the 28th, not silently never fire or throw.
+            DateTime now = new DateTime(2027, 2, 28, 10, 0, 0, DateTimeKind.Utc);
+            if (!InventoryServer.ShouldRunWsusDownloadSchedule(now, "monthly", 1, 31, "03:00", null))
+            {
+                return "expected monthly mode with dayOfMonth=31 to clamp to Feb 28 and be due";
+            }
+            return null;
+        }
+
+        private static string TestShouldRunWsusDownloadScheduleInvalidTimeFormat()
+        {
+            if (InventoryServer.ShouldRunWsusDownloadSchedule(DateTime.UtcNow, "weekly", 2, 1, "not-a-time", null))
+            {
+                return "expected an unparseable time-of-day to never be due";
+            }
+            return null;
+        }
+
+        private static string TestConfigureWsusDownloadScheduleRoundTrips()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-wsusschedule-" + Guid.NewGuid().ToString("N"));
+            options.WebUsername = "admin";
+            options.WebPassword = "password123";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/windows-updates/download-schedule";
+                request.Body = "{\"mode\":\"weekly\",\"dayOfWeek\":2,\"timeUtc\":\"04:30\"}";
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("ConfigureWsusDownloadSchedule", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                }
+
+                if (options.WsusDownloadScheduleMode != "weekly" || options.WsusDownloadScheduleDayOfWeek != 2 || options.WsusDownloadScheduleTimeUtc != "04:30")
+                {
+                    return "expected mode/dayOfWeek/timeUtc to be saved, got mode=" + options.WsusDownloadScheduleMode + " dayOfWeek=" + options.WsusDownloadScheduleDayOfWeek + " timeUtc=" + options.WsusDownloadScheduleTimeUtc;
+                }
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendWsusDownloadScheduleStatus", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("\"mode\":\"weekly\"", StringComparison.OrdinalIgnoreCase) < 0 || responseText.IndexOf("\"dayOfWeek\":2", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected the GET response to reflect the saved schedule, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestConfigureWsusDownloadScheduleRejectsInvalidInput()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-wsusschedulebad-" + Guid.NewGuid().ToString("N"));
+            options.WebUsername = "admin";
+            options.WebPassword = "password123";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("ConfigureWsusDownloadSchedule", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+                RequestContext badMode = new RequestContext();
+                badMode.Method = "POST";
+                badMode.Path = "/api/v1/windows-updates/download-schedule";
+                badMode.Body = "{\"mode\":\"daily\"}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    method.Invoke(server, new object[] { stream, badMode });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("400", StringComparison.Ordinal) < 0 && responseText.IndexOf("error", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected an invalid mode to be rejected, got: " + responseText;
+                    }
+                }
+
+                RequestContext badTime = new RequestContext();
+                badTime.Method = "POST";
+                badTime.Path = "/api/v1/windows-updates/download-schedule";
+                badTime.Body = "{\"mode\":\"weekly\",\"dayOfWeek\":2,\"timeUtc\":\"not-a-time\"}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    method.Invoke(server, new object[] { stream, badTime });
+                }
+                if (options.WsusDownloadScheduleMode == "weekly" && options.WsusDownloadScheduleTimeUtc == "not-a-time")
+                {
+                    return "expected an invalid time format to be rejected and leave options unchanged";
+                }
+
+                RequestContext badDayOfWeek = new RequestContext();
+                badDayOfWeek.Method = "POST";
+                badDayOfWeek.Path = "/api/v1/windows-updates/download-schedule";
+                badDayOfWeek.Body = "{\"mode\":\"weekly\",\"dayOfWeek\":9,\"timeUtc\":\"03:00\"}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    method.Invoke(server, new object[] { stream, badDayOfWeek });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("error", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected dayOfWeek=9 to be rejected, got: " + responseText;
+                    }
+                }
+
+                RequestContext badDayOfMonth = new RequestContext();
+                badDayOfMonth.Method = "POST";
+                badDayOfMonth.Path = "/api/v1/windows-updates/download-schedule";
+                badDayOfMonth.Body = "{\"mode\":\"monthly\",\"dayOfMonth\":32,\"timeUtc\":\"03:00\"}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    method.Invoke(server, new object[] { stream, badDayOfMonth });
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("error", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected dayOfMonth=32 to be rejected, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
         }
 
         private static string TestResetMissedOnceLinuxScheduleClearsPastTarget()
