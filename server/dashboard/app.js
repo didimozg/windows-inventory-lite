@@ -2755,7 +2755,7 @@
     if (data.lastAttemptUtc) {
       const resultText = data.lastAttemptResult === 'success'
         ? 'succeeded'
-        : `failed (${escapeHtml(data.lastAttemptErrorCategory || 'unknown')}: ${escapeHtml(data.lastAttemptErrorMessage || '')})`;
+        : `failed (${data.lastAttemptErrorCategory || 'unknown'}: ${data.lastAttemptErrorMessage || ''})`;
       const attemptLine = document.createElement('p');
       attemptLine.id = 'wsusLastAttempt';
       attemptLine.className = 'cert-hint';
