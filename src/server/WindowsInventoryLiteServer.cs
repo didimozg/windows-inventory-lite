@@ -10443,6 +10443,29 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // and a write-phase IOException (a real possibility - disk full)
         // must land in different categories despite sharing a exception
         // type, which only try/catch-per-phase can distinguish correctly.
+        // A bare WebException.Message (e.g. "Could not create SSL/TLS secure
+        // channel") hides the actual cause, which normally sits one or two
+        // levels down the InnerException chain (AuthenticationException,
+        // then a Win32Exception carrying the real SSPI/SChannel error code) -
+        // without this, the download log gives no way to tell a real cipher/
+        // protocol mismatch apart from a plain transient network blip.
+        private static string DescribeExceptionChain(Exception ex)
+        {
+            string result = ex.GetType().Name + ": " + ex.Message;
+            Exception inner = ex.InnerException;
+            while (inner != null)
+            {
+                result += " -> " + inner.GetType().Name + ": " + inner.Message;
+                System.ComponentModel.Win32Exception win32 = inner as System.ComponentModel.Win32Exception;
+                if (win32 != null)
+                {
+                    result += " (native error 0x" + win32.NativeErrorCode.ToString("X8") + ")";
+                }
+                inner = inner.InnerException;
+            }
+            return result;
+        }
+
         internal static WsusCabDownloadResult PerformWsusCabDownloadCore(Func<byte[]> downloadBytes, Action<byte[]> writeBytes)
         {
             byte[] bytes;
@@ -10456,12 +10479,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 {
                     Success = false,
                     ErrorCategory = webEx.Status == WebExceptionStatus.ProtocolError ? "badResponse" : "network",
-                    ErrorMessage = webEx.Message
+                    ErrorMessage = DescribeExceptionChain(webEx)
                 };
             }
             catch (Exception ex)
             {
-                return new WsusCabDownloadResult { Success = false, ErrorCategory = "network", ErrorMessage = ex.Message };
+                return new WsusCabDownloadResult { Success = false, ErrorCategory = "network", ErrorMessage = DescribeExceptionChain(ex) };
             }
 
             if (bytes == null || bytes.LongLength < MinimumPlausibleWsusCabBytes)
