@@ -3134,6 +3134,18 @@ namespace WindowsInventoryLite
             {
                 string kbId = GetStringValue(entry, "kbId");
                 isTargeted = !String.IsNullOrEmpty(kbId) && missingKbIds != null && missingKbIds.Contains(kbId);
+                if (isTargeted)
+                {
+                    string excludedComputersText = GetStringValue(entry, "excludedComputers");
+                    foreach (string excluded in ExpandInstallTargets(excludedComputersText))
+                    {
+                        if (String.Equals(Convert.ToString(excluded), computerName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            isTargeted = false;
+                            break;
+                        }
+                    }
+                }
             }
             else
             {
@@ -13488,6 +13500,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             string relativePath = Convert.ToString(payload.ContainsKey("relativePath") ? payload["relativePath"] : "").Trim();
             string arguments = Convert.ToString(payload.ContainsKey("arguments") ? payload["arguments"] : "").Trim();
             string targets = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "").Trim();
+            string excludedComputers = Convert.ToString(payload.ContainsKey("excludedComputers") ? payload["excludedComputers"] : "").Trim();
             bool requiresReboot = payload.ContainsKey("requiresReboot") && Convert.ToBoolean(payload["requiresReboot"]);
             bool enabled = !payload.ContainsKey("enabled") || Convert.ToBoolean(payload["enabled"]);
             string targetMode = payload.ContainsKey("targetMode") ? Convert.ToString(payload["targetMode"]).Trim() : "static";
@@ -13546,6 +13559,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             record["requiresReboot"] = requiresReboot;
             record["enabled"] = enabled;
             record["targets"] = targets;
+            record["excludedComputers"] = excludedComputers;
             record["targetMode"] = targetMode;
             record["kbId"] = kbId;
             record["createdAt"] = nowUtc;
@@ -13583,6 +13597,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             string relativePath = Convert.ToString(payload.ContainsKey("relativePath") ? payload["relativePath"] : "").Trim();
             string arguments = Convert.ToString(payload.ContainsKey("arguments") ? payload["arguments"] : "").Trim();
             string targets = Convert.ToString(payload.ContainsKey("targets") ? payload["targets"] : "").Trim();
+            string excludedComputers = Convert.ToString(payload.ContainsKey("excludedComputers") ? payload["excludedComputers"] : "").Trim();
             bool requiresReboot = payload.ContainsKey("requiresReboot") && Convert.ToBoolean(payload["requiresReboot"]);
             bool enabled = !payload.ContainsKey("enabled") || Convert.ToBoolean(payload["enabled"]);
             string targetMode = payload.ContainsKey("targetMode") ? Convert.ToString(payload["targetMode"]).Trim() : "static";
@@ -13650,6 +13665,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 record["requiresReboot"] = requiresReboot;
                 record["enabled"] = enabled;
                 record["targets"] = targets;
+                record["excludedComputers"] = excludedComputers;
                 record["targetMode"] = targetMode;
                 record["kbId"] = kbId;
                 record["updatedAt"] = DateTime.UtcNow.ToString("o");
@@ -14904,6 +14920,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ExpandInstallTargets de-duplicates and splits on separators", TestExpandInstallTargetsDedup);
             allPassed &= SelfTestCheck(output, "AppendJobIfTargeted includes matching computer only", TestAppendJobIfTargetedIncludesMatchingComputerOnly);
             allPassed &= SelfTestCheck(output, "AppendJobIfTargeted excludes disabled entries", TestAppendJobIfTargetedExcludesDisabledEntries);
+            allPassed &= SelfTestCheck(output, "AppendJobIfTargeted excludes a computer named in excludedComputers even when the KB is reported missing, does not affect other computers", TestAppendJobIfTargetedRespectsExcludedComputers);
+            allPassed &= SelfTestCheck(output, "CreateWindowsUpdate/UpdateWindowsUpdate persist excludedComputers", TestCreateAndUpdateWindowsUpdatePersistExcludedComputers);
             allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries WinRM first when both ports are open", TestDecideAutoDetectProtocolsBothOpen);
             allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries only WinRM when just that port is open", TestDecideAutoDetectProtocolsWinRmOnly);
             allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries only SSH when just that port is open", TestDecideAutoDetectProtocolsSshOnly);
@@ -15379,6 +15397,107 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return "expected PC-999 (not a listed target) to NOT receive this job";
             }
             return null;
+        }
+
+        private static string TestAppendJobIfTargetedRespectsExcludedComputers()
+        {
+            ArrayList jobs = new ArrayList();
+            Dictionary<string, object> entry = new Dictionary<string, object>();
+            entry["id"] = "entry-1";
+            entry["name"] = "Test KB";
+            entry["enabled"] = true;
+            entry["targetMode"] = "missingKb";
+            entry["kbId"] = "5031354";
+            entry["excludedComputers"] = "PC-EXCLUDED, PC-ALSO-EXCLUDED";
+            entry["relativePath"] = @"windows-updates\test.msu";
+            entry["arguments"] = "";
+
+            HashSet<string> missingKbIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "5031354" };
+
+            AppendJobIfTargeted(jobs, entry, "windows-update", "PC-EXCLUDED", missingKbIds);
+            if (jobs.Count != 0)
+            {
+                return "expected PC-EXCLUDED to be skipped even though it reports the KB missing";
+            }
+
+            AppendJobIfTargeted(jobs, entry, "windows-update", "PC-NOT-EXCLUDED", missingKbIds);
+            if (jobs.Count != 1)
+            {
+                return "expected PC-NOT-EXCLUDED to still be targeted normally - excludedComputers must not affect other machines";
+            }
+            return null;
+        }
+
+        private static string TestCreateAndUpdateWindowsUpdatePersistExcludedComputers()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-excluded-computers-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                Dictionary<string, object> createBody = new Dictionary<string, object>();
+                createBody["name"] = "Excluded Computers Test";
+                createBody["relativePath"] = @"windows-updates\test.msu";
+                createBody["targetMode"] = "missingKb";
+                createBody["kbId"] = "5031354";
+                createBody["excludedComputers"] = "PC-ONE, PC-TWO";
+
+                RequestContext createRequest = new RequestContext();
+                createRequest.Method = "POST";
+                createRequest.Path = "/api/v1/windows-updates";
+                createRequest.Headers = new Dictionary<string, string>();
+                createRequest.Body = serializer.Serialize(createBody);
+
+                string createResponseText;
+                using (MemoryStream createStream = new MemoryStream())
+                {
+                    server.CreateWindowsUpdate(createStream, createRequest);
+                    createResponseText = Encoding.UTF8.GetString(createStream.ToArray());
+                }
+                if (createResponseText.IndexOf("PC-ONE, PC-TWO", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the create response to echo back excludedComputers, got: " + createResponseText;
+                }
+
+                List<Dictionary<string, object>> stored = server.LoadWindowsUpdates();
+                if (stored.Count != 1 || GetStringValue(stored[0], "excludedComputers") != "PC-ONE, PC-TWO")
+                {
+                    return "expected the stored record's excludedComputers to be 'PC-ONE, PC-TWO'";
+                }
+
+                string id = GetStringValue(stored[0], "id");
+                Dictionary<string, object> updateBody = new Dictionary<string, object>();
+                updateBody["name"] = "Excluded Computers Test";
+                updateBody["relativePath"] = @"windows-updates\test.msu";
+                updateBody["targetMode"] = "missingKb";
+                updateBody["kbId"] = "5031354";
+                updateBody["excludedComputers"] = "PC-THREE";
+
+                RequestContext updateRequest = new RequestContext();
+                updateRequest.Method = "PUT";
+                updateRequest.Path = "/api/v1/windows-updates/" + id;
+                updateRequest.Headers = new Dictionary<string, string>();
+                updateRequest.Body = serializer.Serialize(updateBody);
+
+                using (MemoryStream updateStream = new MemoryStream())
+                {
+                    server.UpdateWindowsUpdate(updateStream, updateRequest);
+                }
+
+                List<Dictionary<string, object>> afterUpdate = server.LoadWindowsUpdates();
+                if (afterUpdate.Count != 1 || GetStringValue(afterUpdate[0], "excludedComputers") != "PC-THREE")
+                {
+                    return "expected excludedComputers to be updatable, got: " + GetStringValue(afterUpdate[0], "excludedComputers");
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
         }
 
         private static string TestAppendJobIfTargetedExcludesDisabledEntries()
