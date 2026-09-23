@@ -1303,6 +1303,8 @@ namespace WindowsInventoryLite
         private Timer clientUpdateScheduleTimer;
         private readonly object wsusDownloadScheduleTimerLock = new object();
         private Timer wsusDownloadScheduleTimer;
+        private readonly object wsusDownloadTriggerLock = new object();
+        private volatile bool wsusDownloadInProgress = false;
         private readonly object reportFileLock = new object();
         // server-config.json holds the DPAPI-encrypted secrets (AdPassword/
         // WebPassword/Token/ClientUpdatePassword) and is now written by more
@@ -1720,14 +1722,33 @@ namespace WindowsInventoryLite
             }
         }
 
-        // NOTE for the next task (Task 5): this tick currently only checks
-        // whether the schedule is due and logs that fact - it does not yet
-        // trigger a real download, since the download routine does not
-        // exist until Task 4. Task 5 replaces the DebugLogger.Log call
-        // below with a real call to the download routine plus the
-        // concurrency guard, matching RunClientUpdateScheduleTick's own
-        // shape exactly. Do not skip Task 5 - a schedule that only logs
-        // and never downloads is not a complete feature.
+        // Claims the single "a WSUS cab download is running" slot, shared
+        // between the schedule tick (Task 5) and the manual trigger (Task
+        // 6) - only one download runs at a time regardless of which side
+        // started it. Returns false if a download is already in progress;
+        // the caller must call ReleaseWsusDownloadInProgress() exactly once
+        // for every successful claim, in a finally block.
+        internal bool TryClaimWsusDownloadInProgress()
+        {
+            lock (wsusDownloadTriggerLock)
+            {
+                if (wsusDownloadInProgress)
+                {
+                    return false;
+                }
+                wsusDownloadInProgress = true;
+                return true;
+            }
+        }
+
+        internal void ReleaseWsusDownloadInProgress()
+        {
+            lock (wsusDownloadTriggerLock)
+            {
+                wsusDownloadInProgress = false;
+            }
+        }
+
         private void RunWsusDownloadScheduleTick(object state)
         {
             try
@@ -1744,7 +1765,29 @@ namespace WindowsInventoryLite
                     return;
                 }
 
-                DebugLogger.Log(options, "Info", "WSUS download schedule is due - Task 5 will wire the real download call here.");
+                if (!TryClaimWsusDownloadInProgress())
+                {
+                    // A manual download is already running right at this
+                    // exact tick - skip this occurrence entirely rather
+                    // than queue behind it. The next scheduled occurrence
+                    // will simply try again, the same way a recurring
+                    // schedule naturally self-heals from any single missed
+                    // tick (see ShouldRunWsusDownloadSchedule's own comment).
+                    return;
+                }
+                try
+                {
+                    PerformWsusCabDownload("scheduled");
+                }
+                finally
+                {
+                    ReleaseWsusDownloadInProgress();
+                }
+
+                options.WsusDownloadScheduleLastRunUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                Dictionary<string, string> updates = new Dictionary<string, string>();
+                updates["WsusDownloadScheduleLastRunUtc"] = options.WsusDownloadScheduleLastRunUtc;
+                SaveServerConfigValues(updates);
             }
             catch (Exception ex)
             {
@@ -14978,6 +15021,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "PerformWsusCabDownloadCore categorizes a suspiciously small download as 'badResponse' without ever attempting to write it", TestPerformWsusCabDownloadCoreCategorizesTinyDownloadAsBadResponse);
             allPassed &= SelfTestCheck(output, "PerformWsusCabDownloadCore categorizes a write-phase exception as 'diskWrite', distinct from a same-typed download-phase exception", TestPerformWsusCabDownloadCoreCategorizesWriteFailureAsDiskWrite);
             allPassed &= SelfTestCheck(output, "BuildOutboundProxy is null and PerformWsusCabDownloadCore still succeeds with no proxy configured", TestPerformWsusCabDownloadCoreWorksWithNoProxyConfigured);
+            allPassed &= SelfTestCheck(output, "TryClaimWsusDownloadInProgress succeeds once, fails while held, succeeds again after release", TestWsusDownloadInProgressGuardClaimAndRelease);
+            allPassed &= SelfTestCheck(output, "RunWsusDownloadScheduleTick updates WsusDownloadScheduleLastRunUtc only when the schedule was actually due", TestRunWsusDownloadScheduleTickUpdatesLastRunOnlyWhenDue);
             return allPassed;
         }
 
@@ -23690,6 +23735,81 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (!result.Success)
                 {
                     return "expected PerformWsusCabDownloadCore to succeed regardless of proxy configuration - it only orchestrates the injected delegates";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestWsusDownloadInProgressGuardClaimAndRelease()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-downloadguard-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo claimMethod = typeof(InventoryServer).GetMethod("TryClaimWsusDownloadInProgress", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                System.Reflection.MethodInfo releaseMethod = typeof(InventoryServer).GetMethod("ReleaseWsusDownloadInProgress", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+                bool firstClaim = (bool)claimMethod.Invoke(server, null);
+                if (!firstClaim)
+                {
+                    return "expected the first claim to succeed";
+                }
+                bool secondClaim = (bool)claimMethod.Invoke(server, null);
+                if (secondClaim)
+                {
+                    return "expected a second claim to fail while the first is still held";
+                }
+                releaseMethod.Invoke(server, null);
+                bool thirdClaim = (bool)claimMethod.Invoke(server, null);
+                if (!thirdClaim)
+                {
+                    return "expected a claim to succeed again after release";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestRunWsusDownloadScheduleTickUpdatesLastRunOnlyWhenDue()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-scheduletick-" + Guid.NewGuid().ToString("N"));
+            options.WsusDownloadScheduleMode = "off";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo tickMethod = typeof(InventoryServer).GetMethod("RunWsusDownloadScheduleTick", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+                // Off mode: tick must be a complete no-op.
+                tickMethod.Invoke(server, new object[] { null });
+                if (!String.IsNullOrEmpty(options.WsusDownloadScheduleLastRunUtc))
+                {
+                    return "expected 'off' mode to never touch LastRunUtc";
+                }
+
+                // Weekly mode, target time far in the future relative to
+                // 'now' as the schedule check will see it (00:00 tomorrow's
+                // weekday would only be due after it actually passes) - use
+                // a target day that is due immediately by picking today's
+                // real UTC weekday and a time in the past.
+                DateTime nowUtc = DateTime.UtcNow;
+                options.WsusDownloadScheduleMode = "weekly";
+                options.WsusDownloadScheduleDayOfWeek = (int)nowUtc.DayOfWeek;
+                options.WsusDownloadScheduleTimeUtc = "00:00";
+                tickMethod.Invoke(server, new object[] { null });
+                if (String.IsNullOrEmpty(options.WsusDownloadScheduleLastRunUtc))
+                {
+                    return "expected a due weekly schedule to update LastRunUtc after the tick runs";
                 }
                 return null;
             }
