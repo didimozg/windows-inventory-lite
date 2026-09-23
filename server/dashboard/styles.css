@@ -1757,6 +1757,17 @@ th.sort-desc::after {
   margin-bottom: var(--space-md);
 }
 
+/* Windows Updates catalog page's auto-create toggle - same orphan
+   .check-label root cause as .windows-self-update-field/
+   .linux-self-update-field above (sits directly in its own
+   .settings-block, not inside a .pkg-grid, so .check-label's own
+   grid-template-columns/align-items never apply without display:grid
+   here). No margin-bottom needed, same reasoning as those two: the
+   .cert-hint immediately below already supplies its own margin-top. */
+.windows-update-auto-create-field {
+  display: grid;
+}
+
 .pkg-grid {
   display: grid;
   grid-template-columns: minmax(240px, 2fr) minmax(160px, 1fr) 110px auto;
