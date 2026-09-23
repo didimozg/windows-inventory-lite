@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.70.1] - WSUS automated-download follow-up fixes
+
+### Fixed
+
+- **Outbound proxy and Software repository settings blocks had their fields overflowing onto the wrong rows** (Username/Password crowding into the button row instead of getting their own). Both now wrap 2 fields per row, with Save/Clear on their own row below.
+- **The "Download now" button gave no indication of progress.** It re-enabled and froze on "Download started" the instant the request began - a slow real download (the file is 600+ MB) left the admin unable to tell whether it was still running, had failed, or had already finished, which could lead to clicking it again while unsure the first click had done anything. It now polls the real cab status until the attempt completes (or a 10-minute safety timeout) and shows the actual result automatically.
+- WSUS download failure messages now include the full exception chain (and the Win32 error code, when present) instead of a bare top-level message, so a real cipher/protocol failure can be told apart from other causes without needing a fresh manual repro.
+
 ## [0.70.0] - WSUS cab automated download + outbound proxy
 
 ### Added
