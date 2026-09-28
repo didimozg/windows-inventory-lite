@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.75.0";
+        internal const string ProductVersion = "0.76.0";
 
         private static int Main(string[] args)
         {
@@ -14331,19 +14331,27 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
-        // Single entry point Task 4's scan wiring calls. Content-based
-        // detection is authoritative whenever it succeeds - see the design
-        // doc for why this means an admin can name a real .msu file
-        // anything at all (including a free-form Cyrillic description) with
-        // no loss of function; the filename fallback only matters when
-        // content extraction fails for some other reason.
+        // Single entry point the scan wiring calls. Content-based detection
+        // is authoritative whenever it succeeds - see the design doc for
+        // why this means an admin can name a real .msu file anything at
+        // all (including a free-form Cyrillic description) with no loss of
+        // function; the filename fallback only matters when content
+        // extraction fails for some other reason. .exe candidates
+        // (standalone update installers, e.g. "windows10.0-kb5029497-x64.exe")
+        // get filename-only detection - there is no vendor-standardized
+        // embedded-metadata format for an arbitrary self-extracting .exe
+        // the way *-pkgProperties.txt exists for every real .msu, so a
+        // content-extraction attempt would only ever fail; skip straight to
+        // the filename regex instead of wasting a process launch on it.
         internal string DetectKbForCandidate(string fullFilePath, string relativePath)
         {
-            if (!relativePath.EndsWith(".msu", StringComparison.OrdinalIgnoreCase))
+            bool isMsu = relativePath.EndsWith(".msu", StringComparison.OrdinalIgnoreCase);
+            bool isExe = relativePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase);
+            if (!isMsu && !isExe)
             {
                 return null;
             }
-            string fromContent = ExtractKbFromMsuFile(fullFilePath);
+            string fromContent = isMsu ? ExtractKbFromMsuFile(fullFilePath) : null;
             if (!String.IsNullOrEmpty(fromContent))
             {
                 return fromContent;
@@ -15646,6 +15654,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "LoadSoftwareJobAttemptLogFromDisk defaults status from a legacy entry's success field, attemptId to null", TestLoadSoftwareJobAttemptLogFromDiskDefaultsStatusFromLegacySuccessField);
             allPassed &= SelfTestCheck(output, "ExtractKbFromFilename matches real Microsoft Update Catalog naming, rejects Cyrillic-labelled names and names with no KB pattern", TestExtractKbFromFilenameMatchesRealMicrosoftNamingPattern);
             allPassed &= SelfTestCheck(output, "FindDuplicateKbIds returns only KBs appearing 2+ times, ignoring null/empty", TestFindDuplicateKbIdsIgnoresNullsAndSingleOccurrences);
+            allPassed &= SelfTestCheck(output, "DetectKbForCandidate uses the filename fallback for a .exe candidate, no content-extraction attempt", TestDetectKbForCandidateUsesFilenameFallbackForExeNoContentAttempt);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository finds only files not already referenced by a catalog entry's relativePath", TestScanSoftwareRepositoryFindsUncatalogedFilesOnly);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository preserves the last successful scan's candidates when a subsequent scan fails", TestScanSoftwareRepositoryPreservesCandidatesOnSubsequentFailure);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository flags every candidate sharing a duplicate detected KB with HasConflict=true, leaves a unique KB unflagged", TestScanSoftwareRepositoryFlagsConflictingKbCandidates);
@@ -25257,6 +25266,47 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return "expected no duplicates when every KB appears exactly once";
             }
             return null;
+        }
+
+        private static string TestDetectKbForCandidateUsesFilenameFallbackForExeNoContentAttempt()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-detect-kb-exe-data-" + Guid.NewGuid().ToString("N"));
+            string tempFile = Path.Combine(Path.GetTempPath(), "wil-detect-kb-exe-" + Guid.NewGuid().ToString("N") + ".exe");
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+
+                // Deliberately not a real PE/CAB file - if content extraction
+                // were attempted for .exe (it must not be, per the design
+                // choice: no vendor-standardized embedded-metadata format
+                // exists for an arbitrary self-extracting .exe the way
+                // *-pkgProperties.txt does for .msu), a real KB-bearing exe
+                // like this would still need to fall back to the filename
+                // anyway, so this fixture proves the filename path alone is
+                // sufficient without needing a real installer binary.
+                File.WriteAllText(tempFile, "not a real installer");
+
+                string detected = server.DetectKbForCandidate(tempFile, @"windows-updates\windows10.0-KB5029497-x64.exe");
+                if (detected != "KB5029497")
+                {
+                    return "expected KB5029497 detected via the filename fallback for a .exe candidate, got: " + detected;
+                }
+
+                string noKbInName = server.DetectKbForCandidate(tempFile, @"windows-updates\some-random-installer.exe");
+                if (noKbInName != null)
+                {
+                    return "expected null for a .exe filename with no KB pattern at all, got: " + noKbInName;
+                }
+                return null;
+            }
+            finally
+            {
+                try { File.Delete(tempFile); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
         }
 
         private static string TestScanSoftwareRepositoryFindsUncatalogedFilesOnly()

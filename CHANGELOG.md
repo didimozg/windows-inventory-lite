@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.76.0] - KB detection for standalone .exe update installers
+
+### Added
+
+- **`.exe` files in the Windows updates share are now KB-detected too**, via the same filename pattern already used as the `.msu` fallback (e.g. `windows10.0-kb5029497-x64.exe` -> `KB5029497`). No content-based extraction is attempted for `.exe` (there's no vendor-standardized embedded-metadata format the way `*-pkgProperties.txt` exists for every `.msu`) - filename-only, matching how most standalone Microsoft update installers are actually named. Flows through the exact same "Add to catalog" pre-fill and auto-create pipeline `.msu` already uses - no special-casing needed.
+
 ## [0.75.0] - Catalog severity/targeting display, Critical-only auto-install, and a real auto-create targeting fix
 
 ### Fixed
