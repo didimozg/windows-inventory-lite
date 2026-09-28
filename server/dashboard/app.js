@@ -84,7 +84,8 @@
       updates: { key: 'computerName', dir: 1 },
       // Most-affected-first by default - the most actionable read of "which
       // missing update should I prioritize" without the admin sorting first.
-      windowsUpdatesMissing: { key: 'machineCount', dir: -1 }
+      windowsUpdatesMissing: { key: 'machineCount', dir: -1 },
+      windowsUpdatesCatalog: { key: 'name', dir: 1 }
     },
     page: { clients: 1, software: 1, hwCpu: 1, hwDisk: 1, hwRam: 1, linuxServices: 1, updates: 1, ingestionRejections: 1, licensesKeys: 1 },
     // clients/software start at a reasonable fallback and are corrected to
@@ -617,6 +618,13 @@
 
   function softwareKey(item) {
     return [item.name || '', item.version || '', item.publisher || ''].join('\u001f').toLowerCase();
+  }
+
+  function formatFileSize(bytes) {
+    if (bytes == null) return '';
+    return bytes >= 1024 * 1024
+      ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+      : `${(bytes / 1024).toFixed(1)} KB`;
   }
 
   function applySort(arr, valueFn, dir) {
@@ -2740,10 +2748,7 @@
     if (!data.present) {
       byId('wsusCabStatus').textContent = 'No wsusscn2.cab file placed yet.';
     } else {
-      const sizeBytes = data.sizeBytes || 0;
-      const sizeText = sizeBytes >= 1024 * 1024
-        ? `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
-        : `${(sizeBytes / 1024).toFixed(1)} KB`;
+      const sizeText = formatFileSize(data.sizeBytes || 0);
       const parts = [
         'Size: ' + sizeText,
         'Modified: ' + escapeHtml(formatDateTime(data.modifiedUtc)),
@@ -4121,7 +4126,7 @@
         renderWindowsUpdates();
       })
       .catch(error => {
-        byId('windowsUpdatesBody').innerHTML = `<tr><td colspan="6" class="empty">Windows updates are not available: ${escapeHtml(error.message)}</td></tr>`;
+        byId('windowsUpdatesBody').innerHTML = `<tr><td colspan="7" class="empty">Windows updates are not available: ${escapeHtml(error.message)}</td></tr>`;
       });
   }
 
@@ -4129,18 +4134,49 @@
     return excludedComputersText.split(/[,;\n]+/).map(s => s.trim()).filter(Boolean).length;
   }
 
+  function windowsUpdatesCatalogTargetingText(entry) {
+    return entry.targetMode === 'missingKb' ? 'Auto: ' + entry.kbId + (entry.excludedComputers ? ` (${excludedComputerCount(entry.excludedComputers)} excluded)` : '') : (entry.targets || '');
+  }
+
+  function windowsUpdatesCatalogSortValue(entry, key) {
+    switch (key) {
+      case 'name': return (entry.name || '').toLowerCase();
+      case 'relativePath': return (entry.relativePath || '').toLowerCase();
+      case 'fileSizeBytes': return entry.fileSizeBytes;
+      case 'targeting': return windowsUpdatesCatalogTargetingText(entry).toLowerCase();
+      case 'enabled': return entry.enabled ? 1 : 0;
+      default: return '';
+    }
+  }
+
+  function windowsUpdatesCatalogMatchesFilters(entry, query) {
+    if (!query) return true;
+    const haystack = `${entry.name || ''} ${entry.relativePath || ''}`.toLowerCase();
+    return haystack.indexOf(query) !== -1;
+  }
+
   function renderWindowsUpdates() {
+    renderSortHeaders();
     const tbody = byId('windowsUpdatesBody');
-    tbody.innerHTML = state.windowsUpdates.map(entry => `
+    const allRows = state.windowsUpdates;
+    const query = byId('windowsUpdatesCatalogSearch').value.trim().toLowerCase();
+    const { key: sortKey, dir: sortDir } = state.sort.windowsUpdatesCatalog;
+
+    const filtered = allRows.filter(entry => windowsUpdatesCatalogMatchesFilters(entry, query));
+    const rows = applySort(filtered, entry => windowsUpdatesCatalogSortValue(entry, sortKey), sortDir);
+    const emptyMessage = allRows.length === 0 ? 'No Windows updates configured yet.' : 'No entries match the current filter.';
+
+    tbody.innerHTML = rows.map(entry => `
       <tr>
         <td>${escapeHtml(entry.name)}</td>
         <td class="mono">${escapeHtml(entry.relativePath)}</td>
-        <td class="mono">${entry.targetMode === 'missingKb' ? 'Auto: ' + escapeHtml(entry.kbId) + (entry.excludedComputers ? ` (${excludedComputerCount(entry.excludedComputers)} excluded)` : '') : escapeHtml(entry.targets)}</td>
+        <td>${escapeHtml(formatFileSize(entry.fileSizeBytes))}</td>
+        <td class="mono">${escapeHtml(windowsUpdatesCatalogTargetingText(entry))}</td>
         <td>${entry.enabled ? 'Yes' : 'No'}</td>
         <td><button data-edit-windows-update="${escapeHtml(entry.id)}" class="export-button" type="button">Edit</button></td>
         <td><button data-delete-windows-update="${escapeHtml(entry.id)}" class="export-button" type="button">Delete</button></td>
       </tr>
-    `).join('') || '<tr><td colspan="6" class="empty">No Windows updates configured.</td></tr>';
+    `).join('') || `<tr><td colspan="7" class="empty">${emptyMessage}</td></tr>`;
 
     tbody.querySelectorAll('[data-edit-windows-update]').forEach(button => {
       button.addEventListener('click', () => openWindowsUpdateForm(button.dataset.editWindowsUpdate));
@@ -5242,10 +5278,7 @@
       })
       .then(data => {
         byId('debugLogContent').textContent = data.content || '(empty)';
-        const sizeBytes = data.sizeBytes || 0;
-        const sizeText = sizeBytes >= 1024 * 1024
-          ? `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
-          : `${(sizeBytes / 1024).toFixed(1)} KB`;
+        const sizeText = formatFileSize(data.sizeBytes || 0);
         const capMb = Number.parseFloat(byId('generalDebugLogMaxSizeMb').value) || 10;
         byId('debugLogMeta').textContent = `${sizeText} / ${capMb} MB cap - ${data.path || ''}`;
       })
@@ -5943,6 +5976,8 @@
         renderLicenseKeySources();
       } else if (table === 'windowsUpdatesMissing') {
         renderWsusMissingSummary();
+      } else if (table === 'windowsUpdatesCatalog') {
+        renderWindowsUpdates();
       } else {
         render();
       }
@@ -6118,6 +6153,7 @@
   byId('windowsUpdatesMissingSearch').addEventListener('input', renderWsusMissingSummary);
   byId('windowsUpdatesMissingSeverityFilter').addEventListener('change', renderWsusMissingSummary);
   byId('windowsUpdatesMissingMachineFilter').addEventListener('change', renderWsusMissingSummary);
+  byId('windowsUpdatesCatalogSearch').addEventListener('input', renderWindowsUpdates);
   byId('installHistoryClearButton').addEventListener('click', clearInstallHistory);
   byId('softwareJobHistoryClearButton').addEventListener('click', clearSoftwareJobHistory);
   byId('deployTab').addEventListener('click', () => setView('deploy', 'actions'));

@@ -895,10 +895,21 @@
             </div>
             <div id="windowsUpdateMessage" class="pkg-message hidden"></div>
           </div>
+          <div class="missing-updates-filters">
+            <input id="windowsUpdatesCatalogSearch" type="search" placeholder="Filter by name or file path">
+          </div>
           <div class="table-wrap">
             <table>
               <thead>
-                <tr><th>Name</th><th>File path</th><th>Targeting</th><th>Enabled</th><th>Edit</th><th>Delete</th></tr>
+                <tr>
+                  <th data-sort-table="windowsUpdatesCatalog" data-sort-key="name" class="sortable">Name</th>
+                  <th data-sort-table="windowsUpdatesCatalog" data-sort-key="relativePath" class="sortable">File path</th>
+                  <th data-sort-table="windowsUpdatesCatalog" data-sort-key="fileSizeBytes" class="sortable">Size</th>
+                  <th data-sort-table="windowsUpdatesCatalog" data-sort-key="targeting" class="sortable">Targeting</th>
+                  <th data-sort-table="windowsUpdatesCatalog" data-sort-key="enabled" class="sortable">Enabled</th>
+                  <th>Edit</th>
+                  <th>Delete</th>
+                </tr>
               </thead>
               <tbody id="windowsUpdatesBody"></tbody>
             </table>

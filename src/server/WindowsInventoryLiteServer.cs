@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.72.1";
+        internal const string ProductVersion = "0.73.0";
 
         private static int Main(string[] args)
         {
@@ -13440,9 +13440,42 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 entries = LoadWindowsUpdates();
             }
 
+            WithSoftwareRepositoryIdentity(options, () =>
+            {
+                foreach (Dictionary<string, object> entry in entries)
+                {
+                    entry["fileSizeBytes"] = GetCatalogFileSizeBytes(GetStringValue(entry, "relativePath"));
+                }
+                return true;
+            });
+
             Dictionary<string, object> response = new Dictionary<string, object>();
             response["windowsUpdates"] = entries;
             SendJson(stream, serializer.Serialize(response));
+        }
+
+        // Computed live from the share on every request instead of captured
+        // once at scan time and persisted onto the entry - a stored value
+        // would need a backfill for every catalog entry created before this
+        // field existed, and would go stale if the file on the share is ever
+        // replaced. A missing/unreachable file returns null (not an error) -
+        // that is an already-surfaced state elsewhere (a still-conflicted or
+        // since-removed candidate), not a fresh failure worth reporting here.
+        private long? GetCatalogFileSizeBytes(string relativePath)
+        {
+            if (String.IsNullOrEmpty(options.SoftwareRepositoryPath) || String.IsNullOrEmpty(relativePath))
+            {
+                return null;
+            }
+            try
+            {
+                FileInfo info = new FileInfo(Path.Combine(options.SoftwareRepositoryPath, relativePath));
+                return info.Exists ? (long?)info.Length : null;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         // Mirrors WindowsInventoryLiteClient.cs's RunOneJob fix (the client
@@ -15374,6 +15407,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository flags every candidate sharing a duplicate detected KB with HasConflict=true, leaves a unique KB unflagged", TestScanSoftwareRepositoryFlagsConflictingKbCandidates);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository auto-creates a missingKb catalog entry when AutoCreateWindowsUpdateCatalogEntries is on, does not duplicate it on a second scan", TestScanSoftwareRepositoryAutoCreatesCatalogEntryWhenEnabled);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository never auto-creates when the setting is off, a KB conflicts, or that KB already has any catalog entry (even disabled)", TestScanSoftwareRepositorySkipsAutoCreateWhenDisabledConflictedOrAlreadyCatalogued);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates reports a catalog entry's real file size from the share, or null when the file no longer exists", TestSendWindowsUpdatesReportsRealFileSizeOrNullWhenMissing);
             allPassed &= SelfTestCheck(output, "Windows updates catalog: Create->Update->Delete through the real CreateWindowsUpdate/UpdateWindowsUpdate/DeleteWindowsUpdate HTTP handlers, then a 404 on both after delete", TestWindowsUpdatesCrudHttpLifecycleThroughRealHandlers);
             allPassed &= SelfTestCheck(output, "Third-party software catalog: Create->Update->Delete through the real CreateThirdPartySoftware/UpdateThirdPartySoftware/DeleteThirdPartySoftware HTTP handlers, then a 404 on both after delete", TestThirdPartySoftwareCrudHttpLifecycleThroughRealHandlers);
             allPassed &= SelfTestCheck(output, "SoftwareCatalogSpec wiring is not cross-contaminated: a Windows-Updates entry never appears in the Third-Party-Software list, and cross-catalog Update/Delete attempts 404 with the OTHER catalog's own not-found message", TestSoftwareCatalogHandlersDoNotCrossContaminateBetweenCatalogs);
@@ -24849,6 +24883,66 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (Convert.ToBoolean(afterEnabledScan[0]["enabled"]))
                 {
                     return "expected the pre-existing disabled entry to remain untouched (still disabled), auto-creation must never modify an entry it did not create";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendWindowsUpdatesReportsRealFileSizeOrNullWhenMissing()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-catalog-size-test-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-catalog-size-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "windows-updates"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                byte[] fileContent = new byte[12345];
+                File.WriteAllBytes(Path.Combine(shareRoot, "windows-updates", "present.msu"), fileContent);
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                Dictionary<string, object> present = new Dictionary<string, object>();
+                present["id"] = "present";
+                present["relativePath"] = @"windows-updates\present.msu";
+                entries.Add(present);
+                Dictionary<string, object> missing = new Dictionary<string, object>();
+                missing["id"] = "missing";
+                missing["relativePath"] = @"windows-updates\does-not-exist.msu";
+                entries.Add(missing);
+                server.SaveWindowsUpdates(entries);
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendWindowsUpdates(stream);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                Dictionary<string, object> response = serializer.Deserialize<Dictionary<string, object>>(ExtractHttpResponseBodyText(responseText));
+                ArrayList windowsUpdates = (ArrayList)response["windowsUpdates"];
+                Dictionary<string, object> presentResult = null;
+                Dictionary<string, object> missingResult = null;
+                foreach (Dictionary<string, object> entry in windowsUpdates)
+                {
+                    if (GetStringValue(entry, "id") == "present") presentResult = entry;
+                    if (GetStringValue(entry, "id") == "missing") missingResult = entry;
+                }
+                if (presentResult == null || Convert.ToInt64(presentResult["fileSizeBytes"]) != fileContent.Length)
+                {
+                    return "expected the present file's real size (" + fileContent.Length + " bytes) on GET /api/v1/windows-updates, got: " + responseText;
+                }
+                if (missingResult == null || missingResult["fileSizeBytes"] != null)
+                {
+                    return "expected fileSizeBytes to be null for a catalog entry whose file no longer exists on the share, got: " + responseText;
                 }
                 return null;
             }
