@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.76.1";
+        internal const string ProductVersion = "0.76.2";
 
         private static int Main(string[] args)
         {
@@ -3106,6 +3106,26 @@ namespace WindowsInventoryLite
         // the same way other per-computer lookups in this file do -
         // returns an empty dictionary rather than failing the whole
         // software-jobs response.
+        // Strips a leading "KB"/"kb" prefix so two kbId strings that refer
+        // to the same real KB compare equal regardless of which format
+        // either side happens to use. Real clients always report "KB" +
+        // digits (WsusScanner.cs), and the content/filename KB-extraction
+        // functions now do too - but a catalog entry auto-created before
+        // that fix shipped still has the OLD bare-digit value sitting in
+        // its stored JSON (that fix only changed what NEW detections
+        // produce, it never touched already-persisted entries), and a
+        // manually-typed entry could always have been entered either way.
+        // Every kbId comparison in this file goes through this first so
+        // none of that stored format drift silently breaks targeting again.
+        private static string NormalizeKbId(string kbId)
+        {
+            if (String.IsNullOrEmpty(kbId))
+            {
+                return kbId;
+            }
+            return kbId.StartsWith("KB", StringComparison.OrdinalIgnoreCase) ? kbId.Substring(2) : kbId;
+        }
+
         private Dictionary<string, string> LoadWsusMissingKbSeverities(string computerName)
         {
             Dictionary<string, string> result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -3131,7 +3151,7 @@ namespace WindowsInventoryLite
                                 string kbId = Convert.ToString(entry["kbId"]);
                                 if (!String.IsNullOrEmpty(kbId))
                                 {
-                                    result[kbId] = GetStringValue(entry, "msrcSeverity");
+                                    result[NormalizeKbId(kbId)] = GetStringValue(entry, "msrcSeverity");
                                 }
                             }
                         }
@@ -3158,7 +3178,7 @@ namespace WindowsInventoryLite
             bool isTargeted;
             if (targetMode == "missingKb")
             {
-                string kbId = GetStringValue(entry, "kbId");
+                string kbId = NormalizeKbId(GetStringValue(entry, "kbId"));
                 isTargeted = !String.IsNullOrEmpty(kbId) && missingKbSeverities != null && missingKbSeverities.ContainsKey(kbId);
                 // Applies only at targeting time, per machine - the catalog
                 // entry itself always exists regardless of severity (see
@@ -9562,17 +9582,24 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     {
                         continue;
                     }
+                    // Keyed by the normalized form so a catalog entry's own
+                    // kbId (which may or may not carry the "KB" prefix,
+                    // depending on when/how it was created) still finds
+                    // this aggregation regardless - see NormalizeKbId's own
+                    // comment. The DISPLAYED "kbId" below stays exactly as
+                    // the client reported it, unnormalized.
+                    string normalizedKbId = NormalizeKbId(kbId);
 
-                    if (!byKbId.ContainsKey(kbId))
+                    if (!byKbId.ContainsKey(normalizedKbId))
                     {
                         Dictionary<string, object> summaryEntry = new Dictionary<string, object>();
                         summaryEntry["kbId"] = kbId;
                         summaryEntry["title"] = GetStringValue(entry, "title");
                         summaryEntry["severity"] = GetStringValue(entry, "msrcSeverity");
-                        byKbId[kbId] = summaryEntry;
-                        computersByKbId[kbId] = new List<string>();
+                        byKbId[normalizedKbId] = summaryEntry;
+                        computersByKbId[normalizedKbId] = new List<string>();
                     }
-                    computersByKbId[kbId].Add(computerName);
+                    computersByKbId[normalizedKbId].Add(computerName);
                 }
             }
 
@@ -13642,7 +13669,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 {
                     continue;
                 }
-                string kbId = GetStringValue(entry, "kbId");
+                string kbId = NormalizeKbId(GetStringValue(entry, "kbId"));
                 Dictionary<string, object> aggregated;
                 if (String.IsNullOrEmpty(kbId) || !missingKbAggregation.TryGetValue(kbId, out aggregated))
                 {
@@ -14492,7 +14519,15 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                         string existingKbId = GetStringValue(entry, "kbId");
                         if (!String.IsNullOrEmpty(existingKbId))
                         {
-                            alreadyCatalogedKbIds.Add(existingKbId);
+                            // Normalized so an already-catalogued entry with
+                            // a legacy bare-digit kbId (from before
+                            // ExtractKbFromFilename/ExtractKbFromMsuFile
+                            // were fixed to include "KB") still counts as
+                            // "already catalogued" against a fresh
+                            // detection, which always produces "KB" + digits
+                            // now - without this, the same KB could get a
+                            // second, duplicate entry auto-created.
+                            alreadyCatalogedKbIds.Add(NormalizeKbId(existingKbId));
                         }
                     }
                 }
@@ -14505,7 +14540,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 {
                     continue;
                 }
-                if (alreadyCatalogedKbIds.Contains(candidate.DetectedKbId))
+                if (alreadyCatalogedKbIds.Contains(NormalizeKbId(candidate.DetectedKbId)))
                 {
                     continue;
                 }
@@ -14538,7 +14573,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 // non-conflicting candidate (should not happen given
                 // FindDuplicateKbIds already flags true duplicates, but this
                 // keeps the invariant correct regardless).
-                alreadyCatalogedKbIds.Add(candidate.DetectedKbId);
+                alreadyCatalogedKbIds.Add(NormalizeKbId(candidate.DetectedKbId));
             }
         }
 
@@ -15333,6 +15368,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "AppendJobIfTargeted excludes disabled entries", TestAppendJobIfTargetedExcludesDisabledEntries);
             allPassed &= SelfTestCheck(output, "AppendJobIfTargeted excludes a computer named in excludedComputers even when the KB is reported missing, does not affect other computers", TestAppendJobIfTargetedRespectsExcludedComputers);
             allPassed &= SelfTestCheck(output, "AppendJobIfTargeted only targets a machine reporting Critical severity when restrictToCriticalOnly is true, targets normally when false", TestAppendJobIfTargetedRestrictsToCriticalSeverityWhenEnabled);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs targets a real client despite a legacy bare-digit catalog kbId", TestSendClientSoftwareJobsTargetsRealClientDespiteLegacyBareDigitCatalogKbId);
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate/UpdateWindowsUpdate persist excludedComputers", TestCreateAndUpdateWindowsUpdatePersistExcludedComputers);
             allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries WinRM first when both ports are open", TestDecideAutoDetectProtocolsBothOpen);
             allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries only WinRM when just that port is open", TestDecideAutoDetectProtocolsWinRmOnly);
@@ -15659,8 +15695,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository preserves the last successful scan's candidates when a subsequent scan fails", TestScanSoftwareRepositoryPreservesCandidatesOnSubsequentFailure);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository flags every candidate sharing a duplicate detected KB with HasConflict=true, leaves a unique KB unflagged", TestScanSoftwareRepositoryFlagsConflictingKbCandidates);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository auto-creates a missingKb catalog entry when AutoCreateWindowsUpdateCatalogEntries is on, does not duplicate it on a second scan", TestScanSoftwareRepositoryAutoCreatesCatalogEntryWhenEnabled);
+            allPassed &= SelfTestCheck(output, "Auto-create recognizes a legacy bare-digit catalog kbId as already covering a freshly-detected 'KB'-prefixed KB, does not create a duplicate", TestAutoCreateSkipsWhenAlreadyCataloguedUnderLegacyBareDigitKbId);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository never auto-creates when the setting is off, a KB conflicts, or that KB already has any catalog entry (even disabled)", TestScanSoftwareRepositorySkipsAutoCreateWhenDisabledConflictedOrAlreadyCatalogued);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates reports a catalog entry's real file size from the share, or null when the file no longer exists", TestSendWindowsUpdatesReportsRealFileSizeOrNullWhenMissing);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates resolves severity/targetedComputerNames for a legacy bare-digit catalog kbId against a real 'KB'-prefixed client report", TestSendWindowsUpdatesResolvesSeverityAndTargetsForLegacyBareDigitKbId);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates reports severity and targetedComputerNames for a missingKb entry, respecting excludedComputers and AutoCreateOnlyCriticalKbs", TestSendWindowsUpdatesReportsSeverityAndTargetedComputersForMissingKbEntries);
             allPassed &= SelfTestCheck(output, "Windows updates catalog: Create->Update->Delete through the real CreateWindowsUpdate/UpdateWindowsUpdate/DeleteWindowsUpdate HTTP handlers, then a 404 on both after delete", TestWindowsUpdatesCrudHttpLifecycleThroughRealHandlers);
             allPassed &= SelfTestCheck(output, "Third-party software catalog: Create->Update->Delete through the real CreateThirdPartySoftware/UpdateThirdPartySoftware/DeleteThirdPartySoftware HTTP handlers, then a 404 on both after delete", TestThirdPartySoftwareCrudHttpLifecycleThroughRealHandlers);
@@ -15887,6 +15925,76 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return "expected a machine reporting Important severity to be targeted normally when restrictToCriticalOnly is false - the restriction must be opt-in";
             }
             return null;
+        }
+
+        // Reproduces a real bug reported live: a catalog entry auto-created
+        // BEFORE the ExtractKbFromFilename/ExtractKbFromMsuFile fix has a
+        // bare-digit kbId ("5099539") permanently stored in its JSON - that
+        // fix only changed what NEW detections produce, it never touched
+        // already-persisted entries. A real client always reports "KB" +
+        // digits. Without normalizing both sides before comparing, this
+        // entry would silently target nobody forever unless manually
+        // re-saved - exactly what the user observed ("recreated it and a
+        // KB that had 0 targets suddenly had several"). End-to-end through
+        // the real HTTP handlers (not a hand-built dictionary bypassing
+        // LoadWsusMissingKbSeverities' own normalization) so this actually
+        // proves the real request pipeline, not just one function in
+        // isolation.
+        private static string TestSendClientSoftwareJobsTargetsRealClientDespiteLegacyBareDigitCatalogKbId()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-legacy-kbid-jobs-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                report["computerName"] = "REAL-CLIENT-PC";
+                ArrayList missingUpdates = new ArrayList();
+                Dictionary<string, object> missingEntry = new Dictionary<string, object>();
+                missingEntry["kbId"] = "KB5099539";
+                missingUpdates.Add(missingEntry);
+                report["wsusMissingUpdates"] = missingUpdates;
+                File.WriteAllText(Path.Combine(dataPath, "REAL-CLIENT-PC.json"), serializer.Serialize(report), new UTF8Encoding(false));
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "entry-1";
+                entry["enabled"] = true;
+                entry["targetMode"] = "missingKb";
+                // Deliberately the legacy pre-fix bare-digit format.
+                entry["kbId"] = "5099539";
+                entry["relativePath"] = @"windows-updates\test.msu";
+                entries.Add(entry);
+                server.SaveWindowsUpdates(entries);
+
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client/software-jobs?computerName=REAL-CLIENT-PC";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "test-token";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendClientSoftwareJobs(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+                if (responseText.IndexOf("\"id\":\"entry-1\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected a legacy bare-digit catalog kbId ('5099539') to still target a real client reporting 'KB5099539', got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
         }
 
         private static string TestCreateAndUpdateWindowsUpdatePersistExcludedComputers()
@@ -25554,6 +25662,58 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
+        // Same real-world regression as the targeting tests above, but for
+        // auto-CREATE's own "already catalogued, don't duplicate" check: a
+        // catalog entry that predates the ExtractKbFromFilename/
+        // ExtractKbFromMsuFile fix has a legacy bare-digit kbId ("5031354")
+        // - a fresh scan detecting the same KB now always produces "KB" +
+        // digits, and without normalizing both sides this would wrongly
+        // look like a NEW, not-yet-catalogued KB and create a duplicate
+        // entry for something already covered.
+        private static string TestAutoCreateSkipsWhenAlreadyCataloguedUnderLegacyBareDigitKbId()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-share-scan-legacy-dedup-test-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-share-scan-legacy-dedup-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "windows-updates"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "third-party-software"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                File.WriteAllText(Path.Combine(shareRoot, "windows-updates", "kb5031354-fix.msu"), "test");
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                options.AutoCreateWindowsUpdateCatalogEntries = true;
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> preExisting = new List<Dictionary<string, object>>();
+                Dictionary<string, object> legacyEntry = new Dictionary<string, object>();
+                legacyEntry["id"] = "pre-existing-legacy";
+                legacyEntry["name"] = "Pre-existing, legacy bare-digit kbId";
+                legacyEntry["relativePath"] = @"windows-updates\some-other-file.msu";
+                legacyEntry["targetMode"] = "missingKb";
+                // Deliberately the legacy pre-fix format - no "KB" prefix.
+                legacyEntry["kbId"] = "5031354";
+                legacyEntry["enabled"] = true;
+                preExisting.Add(legacyEntry);
+                server.SaveWindowsUpdates(preExisting);
+
+                server.ScanSoftwareRepository();
+                List<Dictionary<string, object>> afterScan = server.LoadWindowsUpdates();
+                if (afterScan.Count != 1)
+                {
+                    return "expected the legacy bare-digit entry to be recognized as already covering this KB - no duplicate should be created, got " + afterScan.Count + " entries";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
         private static string TestScanSoftwareRepositorySkipsAutoCreateWhenDisabledConflictedOrAlreadyCatalogued()
         {
             string shareRoot = Path.Combine(Path.GetTempPath(), "wil-share-scan-autocreate-skip-test-" + Guid.NewGuid().ToString("N"));
@@ -25673,6 +25833,70 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // Same real-world regression as
+        // TestAppendJobIfTargetedMatchesRegardlessOfKbPrefixOnEitherSide,
+        // but for the catalog page's own Severity/targeted-count display -
+        // a legacy bare-digit catalog kbId must still resolve against the
+        // "KB"-prefixed format every real client actually reports.
+        private static string TestSendWindowsUpdatesResolvesSeverityAndTargetsForLegacyBareDigitKbId()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-catalog-legacy-kbid-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                Dictionary<string, object> pcReport = new Dictionary<string, object>();
+                pcReport["computerName"] = "REAL-CLIENT-PC";
+                ArrayList pcMissing = new ArrayList();
+                Dictionary<string, object> pcKb = new Dictionary<string, object>();
+                pcKb["kbId"] = "KB5099539";
+                pcKb["msrcSeverity"] = "Critical";
+                pcMissing.Add(pcKb);
+                pcReport["wsusMissingUpdates"] = pcMissing;
+                File.WriteAllText(Path.Combine(dataPath, "REAL-CLIENT-PC.json"), serializer.Serialize(pcReport), new UTF8Encoding(false));
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "entry-1";
+                entry["targetMode"] = "missingKb";
+                // Deliberately the OLD, pre-fix bare-digit format - simulates
+                // a catalog entry auto-created before ExtractKbFromFilename/
+                // ExtractKbFromMsuFile were fixed to include "KB".
+                entry["kbId"] = "5099539";
+                entries.Add(entry);
+                server.SaveWindowsUpdates(entries);
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendWindowsUpdates(stream);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+                Dictionary<string, object> response = serializer.Deserialize<Dictionary<string, object>>(ExtractHttpResponseBodyText(responseText));
+                Dictionary<string, object> result = (Dictionary<string, object>)((ArrayList)response["windowsUpdates"])[0];
+
+                if (GetStringValue(result, "severity") != "Critical")
+                {
+                    return "expected a legacy bare-digit catalog kbId to still resolve severity from a real 'KB'-prefixed client report, got: " + responseText;
+                }
+                ArrayList targeted = (ArrayList)result["targetedComputerNames"];
+                if (targeted.Count != 1 || Convert.ToString(targeted[0]) != "REAL-CLIENT-PC")
+                {
+                    return "expected a legacy bare-digit catalog kbId to still resolve the real targeted client, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
                 try { Directory.Delete(dataPath, true); } catch { }
             }
         }

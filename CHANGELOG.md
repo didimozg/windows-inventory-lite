@@ -6,7 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
-## [0.76.1] - Software job history no longer shows "Unknown" for a job with no error
+## [0.76.2] - Missing-KB targeting no longer breaks on a pre-existing entry's old kbId format
+
+### Fixed
+
+- **A catalog entry auto-created before the 0.75.0 kbId-format fix could silently target nobody forever, even after new clients started reporting the KB as missing** - that fix only changed what NEW detections produce; an already-persisted entry kept its old bare-digit `kbId` (e.g. `"5099539"`) permanently, which no real client's `"KB" + digits` report (`"KB5099539"`) would ever match. Reported live: a KB showing 0 targeted clients stayed at 0 across several page visits, and only started showing the real count after the entry was manually re-saved. Every kbId comparison (job targeting, the Catalog page's Severity/targeted-count display, and auto-create's own "already catalogued" duplicate check) now normalizes both sides first, so an old entry works correctly again with no manual fix needed.
 
 ### Fixed
 
