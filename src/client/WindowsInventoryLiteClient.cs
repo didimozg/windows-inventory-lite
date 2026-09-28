@@ -489,10 +489,13 @@ namespace WindowsInventoryLite
                     string catalogType = InventoryCollector.GetString(job, "catalogType");
                     string relativePath = InventoryCollector.GetString(job, "relativePath");
                     string arguments = InventoryCollector.GetString(job, "arguments");
+                    string attemptId = Guid.NewGuid().ToString("N");
+                    InventoryCollector.ReportJobStart(options.ServerUrl, options.Token, Environment.MachineName, catalogType, id, attemptId, InventoryCollector.PostJson);
 
                     Dictionary<string, object> resultEntry = new Dictionary<string, object>();
                     resultEntry["id"] = id;
                     resultEntry["catalogType"] = catalogType;
+                    resultEntry["attemptId"] = attemptId;
 
                     string localCopyPath = null;
                     try
@@ -2458,6 +2461,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "DownloadAndVerifyWsusCab returns false and does not write the file when the downloaded bytes' hash does not match", TestDownloadAndVerifyWsusCabFailsOnHashMismatch);
             allPassed &= SelfTestCheck(output, "PostWsusScanResults returns true and posts the expected JSON fields when the injected postJson succeeds", TestPostWsusScanResultsReturnsTrueAndPostsExpectedFieldsOnSuccess);
             allPassed &= SelfTestCheck(output, "PostWsusScanResults returns false when the injected postJson throws", TestPostWsusScanResultsReturnsFalseWhenPostJsonThrows);
+            allPassed &= SelfTestCheck(output, "ReportJobStart posts computerName/catalogType/id/attemptId and returns true on success", TestReportJobStartPostsExpectedFieldsAndReturnsTrueOnSuccess);
+            allPassed &= SelfTestCheck(output, "ReportJobStart returns false when the injected postJson throws", TestReportJobStartReturnsFalseWhenPostJsonThrows);
             allPassed &= SelfTestCheck(output, "MaybeRunWsusScanCore does nothing when wsusCabHash is empty or unchanged from the last scan", TestMaybeRunWsusScanCoreNoOpsWhenHashEmptyOrUnchanged);
             return allPassed;
         }
@@ -3533,6 +3538,47 @@ namespace WindowsInventoryLite
             return null;
         }
 
+        private static string TestReportJobStartPostsExpectedFieldsAndReturnsTrueOnSuccess()
+        {
+            string capturedUrl = null;
+            string capturedJson = null;
+            Func<string, string, string, string> fakePostJson = (url, json, token) =>
+            {
+                capturedUrl = url;
+                capturedJson = json;
+                return "{}";
+            };
+
+            bool result = InventoryCollector.ReportJobStart("https://server/api/v1/inventory", "token", "TEST-PC", "windowsUpdate", "wu-1", "attempt-abc", fakePostJson);
+            if (!result)
+            {
+                return "expected ReportJobStart to return true when the injected postJson succeeds";
+            }
+            if (capturedUrl == null || capturedUrl.IndexOf("/api/v1/client/software-jobs/start", StringComparison.Ordinal) < 0)
+            {
+                return "expected the URL to target /api/v1/client/software-jobs/start, got: " + capturedUrl;
+            }
+
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            Dictionary<string, object> parsed = serializer.Deserialize<Dictionary<string, object>>(capturedJson);
+            if ((string)parsed["computerName"] != "TEST-PC" || (string)parsed["catalogType"] != "windowsUpdate" || (string)parsed["id"] != "wu-1" || (string)parsed["attemptId"] != "attempt-abc")
+            {
+                return "expected the posted JSON to contain computerName/catalogType/id/attemptId exactly as passed in, got: " + capturedJson;
+            }
+            return null;
+        }
+
+        private static string TestReportJobStartReturnsFalseWhenPostJsonThrows()
+        {
+            Func<string, string, string, string> throwingPostJson = (url, json, token) => { throw new Exception("network down"); };
+            bool result = InventoryCollector.ReportJobStart("https://server/api/v1/inventory", "token", "TEST-PC", "windowsUpdate", "wu-1", "attempt-abc", throwingPostJson);
+            if (result)
+            {
+                return "expected ReportJobStart to return false when the injected postJson throws";
+            }
+            return null;
+        }
+
         // Only the two "definitely do nothing" no-op paths are testable
         // here without real I/O - see MaybeRunWsusScanCore's own comment.
         // Both fakes below assert they are never invoked; a call into
@@ -3784,6 +3830,28 @@ namespace WindowsInventoryLite
             }
         }
 
+        internal static bool ReportJobStart(string serverUrl, string token, string computerName, string catalogType, string id, string attemptId, Func<string, string, string, string> postJson)
+        {
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            Dictionary<string, object> body = new Dictionary<string, object>();
+            body["computerName"] = computerName;
+            body["catalogType"] = catalogType;
+            body["id"] = id;
+            body["attemptId"] = attemptId;
+            string json = serializer.Serialize(body);
+
+            string url = ToSoftwareJobStartUrl(serverUrl);
+            try
+            {
+                postJson(url, json, token);
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
         // options.ServerUrl is the full URL of the inventory ingestion
         // endpoint (the install wizard asks the admin for exactly
         // "https://server/api/v1/inventory"), so the sibling client endpoints
@@ -3819,6 +3887,11 @@ namespace WindowsInventoryLite
         internal static string ToSoftwareJobResultsUrl(string serverUrl)
         {
             return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/software-jobs/results");
+        }
+
+        internal static string ToSoftwareJobStartUrl(string serverUrl)
+        {
+            return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/software-jobs/start");
         }
     }
 }
