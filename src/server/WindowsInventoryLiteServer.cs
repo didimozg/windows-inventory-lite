@@ -3198,6 +3198,8 @@ namespace WindowsInventoryLite
         // results array or an arbitrarily long errorMessage per entry.
         private const int MaxSoftwareJobResultsPerRequest = 500;
         private const int MaxSoftwareJobErrorMessageLength = 2000;
+        private const int MaxEventLogEntriesPerResult = 5;
+        private const int MaxEventLogMessageLength = 500;
 
         private void ReceiveSoftwareJobStart(Stream stream, RequestContext request)
         {
@@ -3339,6 +3341,31 @@ namespace WindowsInventoryLite
                             errorMessage = errorMessage.Substring(0, MaxSoftwareJobErrorMessageLength);
                         }
                         attempt.ErrorMessage = errorMessage;
+                        attempt.AttemptId = resultEntry.ContainsKey("attemptId") ? GetStringValue(resultEntry, "attemptId") : null;
+                        if (resultEntry.ContainsKey("eventLogEntries") && resultEntry["eventLogEntries"] is ArrayList)
+                        {
+                            List<Dictionary<string, object>> boundedEntries = new List<Dictionary<string, object>>();
+                            foreach (object rawEntry in (ArrayList)resultEntry["eventLogEntries"])
+                            {
+                                if (boundedEntries.Count >= MaxEventLogEntriesPerResult)
+                                {
+                                    break;
+                                }
+                                Dictionary<string, object> rawDict = rawEntry as Dictionary<string, object>;
+                                if (rawDict == null)
+                                {
+                                    continue;
+                                }
+                                Dictionary<string, object> boundedEntry = new Dictionary<string, object>();
+                                boundedEntry["source"] = GetStringValue(rawDict, "source");
+                                boundedEntry["eventId"] = rawDict.ContainsKey("eventId") ? Convert.ToInt32(rawDict["eventId"]) : 0;
+                                boundedEntry["timeCreatedUtc"] = GetStringValue(rawDict, "timeCreatedUtc");
+                                string message = GetStringValue(rawDict, "message") ?? "";
+                                boundedEntry["message"] = message.Length > MaxEventLogMessageLength ? message.Substring(0, MaxEventLogMessageLength) : message;
+                                boundedEntries.Add(boundedEntry);
+                            }
+                            attempt.EventLogEntries = boundedEntries;
+                        }
                         RecordSoftwareJobAttempt(attempt);
                     }
                     catch (Exception ex)
@@ -15415,6 +15442,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "LookupCatalogEntryName returns null for an entry id that is not in the catalog", TestLookupCatalogEntryNameReturnsNullWhenMissing);
             allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobResults snapshots the catalog entry's name onto the recorded attempt", TestReceiveSoftwareJobResultsSnapshotsEntryName);
             allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobResults falls back to '(deleted entry)' when the catalog entry no longer exists", TestReceiveSoftwareJobResultsFallsBackToDeletedEntryLabel);
+            allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobResults passes attemptId through unchanged and bounds eventLogEntries to 5 entries / 500 chars each", TestReceiveSoftwareJobResultsPassesThroughAttemptIdAndBoundedEventLogEntries);
             allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobStart records a running entry with the real catalog entry name resolved", TestReceiveSoftwareJobStartRecordsARunningEntryWithResolvedEntryName);
             allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobStart requires a valid ingestion token, records nothing when rejected", TestReceiveSoftwareJobStartRequiresAValidIngestionToken);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue returns null when no log entry matches the client's IP", TestComputeClientTokenIssueNoMatch);
@@ -18180,6 +18208,88 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveSoftwareJobResultsPassesThroughAttemptIdAndBoundedEventLogEntries()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-job-results-eventlog-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                options.SoftwareJobAttemptLogRetentionDays = 90;
+                options.SoftwareJobAttemptLogMaxEntries = 5000;
+                InventoryServer server = new InventoryServer(options);
+
+                ArrayList eventLogEntries = new ArrayList();
+                for (int i = 0; i < 8; i++)
+                {
+                    Dictionary<string, object> logEntry = new Dictionary<string, object>();
+                    logEntry["source"] = "MsiInstaller";
+                    logEntry["eventId"] = 1033 + i;
+                    logEntry["timeCreatedUtc"] = "2026-09-28T12:00:00Z";
+                    logEntry["message"] = new string('x', 900);
+                    eventLogEntries.Add(logEntry);
+                }
+
+                ArrayList results = new ArrayList();
+                Dictionary<string, object> resultEntry = new Dictionary<string, object>();
+                resultEntry["id"] = "wu-1";
+                resultEntry["catalogType"] = "windowsUpdate";
+                resultEntry["attemptId"] = "attempt-xyz";
+                resultEntry["success"] = true;
+                resultEntry["exitCode"] = 0;
+                resultEntry["eventLogEntries"] = eventLogEntries;
+                results.Add(resultEntry);
+
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                Dictionary<string, object> body = new Dictionary<string, object>();
+                body["computerName"] = "TEST-PC";
+                body["results"] = results;
+
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/client/software-jobs/results";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "test-token";
+                request.Body = serializer.Serialize(body);
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveSoftwareJobResults(stream, request);
+                }
+
+                string historyText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareJobAttemptHistory(stream);
+                    historyText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+                Dictionary<string, object> response = serializer.Deserialize<Dictionary<string, object>>(ExtractHttpResponseBodyText(historyText));
+                Dictionary<string, object> recorded = (Dictionary<string, object>)((ArrayList)response["attempts"])[0];
+                if ((string)recorded["attemptId"] != "attempt-xyz")
+                {
+                    return "expected attemptId to pass through unchanged, got: " + recorded["attemptId"];
+                }
+                ArrayList recordedEntries = (ArrayList)recorded["eventLogEntries"];
+                if (recordedEntries.Count != 5)
+                {
+                    return "expected eventLogEntries to be capped at 5 (client sent 8), got " + recordedEntries.Count;
+                }
+                Dictionary<string, object> firstEntry = (Dictionary<string, object>)recordedEntries[0];
+                string message = (string)firstEntry["message"];
+                if (message.Length != 500)
+                {
+                    return "expected each message to be truncated to 500 chars (client sent 900), got length " + message.Length;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
             }
         }
 
