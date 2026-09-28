@@ -3268,7 +3268,8 @@ namespace WindowsInventoryLite
                         attempt.EntryId = GetStringValue(resultEntry, "id");
                         string entryName = LookupCatalogEntryName(attempt.CatalogType, attempt.EntryId);
                         attempt.EntryName = String.IsNullOrEmpty(entryName) ? "(deleted entry)" : entryName;
-                        attempt.Success = resultEntry.ContainsKey("success") && Convert.ToBoolean(resultEntry["success"]);
+                        bool reportedSuccess = resultEntry.ContainsKey("success") && Convert.ToBoolean(resultEntry["success"]);
+                        attempt.Status = reportedSuccess ? "success" : "failed";
                         attempt.ExitCode = resultEntry.ContainsKey("exitCode") ? Convert.ToInt32(resultEntry["exitCode"]) : -1;
                         string errorMessage = resultEntry.ContainsKey("errorMessage") ? GetStringValue(resultEntry, "errorMessage") : null;
                         if (errorMessage != null && errorMessage.Length > MaxSoftwareJobErrorMessageLength)
@@ -6749,9 +6750,32 @@ namespace WindowsInventoryLite
                         // showing the raw id when this is blank, same as
                         // before this fix shipped.
                         entry.EntryName = GetStringValue(raw, "entryName");
-                        entry.Success = raw.ContainsKey("success") && Convert.ToBoolean(raw["success"]);
+                        entry.AttemptId = raw.ContainsKey("attemptId") ? GetStringValue(raw, "attemptId") : null;
+                        if (raw.ContainsKey("status") && !String.IsNullOrEmpty(Convert.ToString(raw["status"])))
+                        {
+                            entry.Status = Convert.ToString(raw["status"]);
+                        }
+                        else
+                        {
+                            // Backward compatibility: a line written before
+                            // this feature existed has no "status" key at
+                            // all - derive it from the legacy "success" bool
+                            // so an old entry still displays correctly, with
+                            // no migration script and no rewritten file.
+                            bool legacySuccess = raw.ContainsKey("success") && Convert.ToBoolean(raw["success"]);
+                            entry.Status = legacySuccess ? "success" : "failed";
+                        }
                         entry.ExitCode = raw.ContainsKey("exitCode") ? Convert.ToInt32(raw["exitCode"]) : -1;
                         entry.ErrorMessage = GetStringValue(raw, "errorMessage");
+                        if (raw.ContainsKey("eventLogEntries") && raw["eventLogEntries"] != null)
+                        {
+                            List<Dictionary<string, object>> loadedEntries = new List<Dictionary<string, object>>();
+                            foreach (object item in (ArrayList)raw["eventLogEntries"])
+                            {
+                                loadedEntries.Add((Dictionary<string, object>)item);
+                            }
+                            entry.EventLogEntries = loadedEntries;
+                        }
                         softwareJobAttemptLog.Add(entry);
                     }
                     catch
@@ -9209,9 +9233,31 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             // null: "(deleted entry)" when no matching entry was found at
             // record time.
             public string EntryName;
-            public bool Success;
+            // Client-generated GUID, shared by a "running" record and the
+            // later "success"/"failed" record for the SAME job run - the
+            // only correlation key the dashboard uses to merge the two into
+            // one displayed row. Null for any record from before this field
+            // existed, or from a client that didn't send one.
+            public string AttemptId;
+            // "running" | "success" | "failed". Primary state field as of
+            // this change - Success below is now computed FROM this, kept
+            // only so ToDictionary()'s existing "success" JSON key keeps
+            // meaning exactly what it meant before this field existed.
+            public string Status;
             public int ExitCode;
             public string ErrorMessage;
+            // Best-effort Windows Event Log findings (MsiInstaller/
+            // WindowsUpdateClient) attached by the client alongside its
+            // final result. Null/absent is a normal state (no matching
+            // entries found, or the client couldn't read the log), not an
+            // error - never required for a "success"/"failed" record to be
+            // valid. Each entry: {source, eventId, timeCreatedUtc, message}.
+            public List<Dictionary<string, object>> EventLogEntries;
+
+            public bool Success
+            {
+                get { return Status == "success"; }
+            }
 
             public Dictionary<string, object> ToDictionary()
             {
@@ -9221,9 +9267,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 result["catalogType"] = CatalogType;
                 result["entryId"] = EntryId;
                 result["entryName"] = EntryName;
+                result["attemptId"] = AttemptId;
+                result["status"] = Status;
                 result["success"] = Success;
                 result["exitCode"] = ExitCode;
                 result["errorMessage"] = ErrorMessage;
+                result["eventLogEntries"] = EventLogEntries;
                 return result;
             }
         }
@@ -15400,6 +15449,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "SplitDomainUsername handles both DOMAIN\\user and bare-username forms", TestSplitDomainUsernameHandlesBothForms);
             allPassed &= SelfTestCheck(output, "WithSoftwareRepositoryIdentity runs the action directly when no credentials are configured", TestWithSoftwareRepositoryIdentityRunsDirectlyWhenNoCredentialsConfigured);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository reports failure when SoftwareRepositoryPath is not configured", TestScanSoftwareRepositoryReportsMissingConfiguration);
+            allPassed &= SelfTestCheck(output, "SoftwareJobAttempt.ToDictionary includes attemptId/status, and the computed success flag tracks status", TestSoftwareJobAttemptToDictionaryIncludesNewFields);
+            allPassed &= SelfTestCheck(output, "LoadSoftwareJobAttemptLogFromDisk defaults status from a legacy entry's success field, attemptId to null", TestLoadSoftwareJobAttemptLogFromDiskDefaultsStatusFromLegacySuccessField);
             allPassed &= SelfTestCheck(output, "ExtractKbFromFilename matches real Microsoft Update Catalog naming, rejects Cyrillic-labelled names and names with no KB pattern", TestExtractKbFromFilenameMatchesRealMicrosoftNamingPattern);
             allPassed &= SelfTestCheck(output, "FindDuplicateKbIds returns only KBs appearing 2+ times, ignoring null/empty", TestFindDuplicateKbIdsIgnoresNullsAndSingleOccurrences);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository finds only files not already referenced by a catalog entry's relativePath", TestScanSoftwareRepositoryFindsUncatalogedFilesOnly);
@@ -17738,7 +17789,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 attempt.ComputerName = "TEST-PC";
                 attempt.CatalogType = "windowsUpdate";
                 attempt.EntryId = "test-entry";
-                attempt.Success = true;
+                attempt.Status = "success";
                 attempt.ExitCode = 0;
                 server.RecordSoftwareJobAttempt(attempt);
 
@@ -17832,7 +17883,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 attempt.CatalogType = "windowsUpdate";
                 attempt.EntryId = "kb-test";
                 attempt.EntryName = "Test KB";
-                attempt.Success = true;
+                attempt.Status = "success";
                 attempt.ExitCode = 0;
                 server.RecordSoftwareJobAttempt(attempt);
 
@@ -24558,6 +24609,97 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
 
             return null;
+        }
+
+        private static string TestSoftwareJobAttemptToDictionaryIncludesNewFields()
+        {
+            SoftwareJobAttempt attempt = new SoftwareJobAttempt();
+            attempt.TimestampUtc = new DateTime(2026, 9, 28, 12, 0, 0, DateTimeKind.Utc);
+            attempt.ComputerName = "TEST-PC";
+            attempt.CatalogType = "windowsUpdate";
+            attempt.EntryId = "entry-1";
+            attempt.EntryName = "Test Entry";
+            attempt.AttemptId = "abc123";
+            attempt.Status = "running";
+            attempt.ExitCode = -1;
+
+            Dictionary<string, object> dict = attempt.ToDictionary();
+            if (!dict.ContainsKey("attemptId") || (string)dict["attemptId"] != "abc123")
+            {
+                return "expected ToDictionary to include attemptId='abc123', got: " + (dict.ContainsKey("attemptId") ? dict["attemptId"] : "(missing)");
+            }
+            if (!dict.ContainsKey("status") || (string)dict["status"] != "running")
+            {
+                return "expected ToDictionary to include status='running', got: " + (dict.ContainsKey("status") ? dict["status"] : "(missing)");
+            }
+            if (!dict.ContainsKey("success") || (bool)dict["success"] != false)
+            {
+                return "expected the computed 'success' key to be false while status is 'running' (not the same as an actual failure), got: " + (dict.ContainsKey("success") ? dict["success"] : "(missing)");
+            }
+
+            attempt.Status = "success";
+            Dictionary<string, object> dictAfterSuccess = attempt.ToDictionary();
+            if (!dictAfterSuccess.ContainsKey("success") || (bool)dictAfterSuccess["success"] != true)
+            {
+                return "expected the computed 'success' key to be true once status is 'success', got: " + (dictAfterSuccess.ContainsKey("success") ? dictAfterSuccess["success"] : "(missing)");
+            }
+            return null;
+        }
+
+        private static string TestLoadSoftwareJobAttemptLogFromDiskDefaultsStatusFromLegacySuccessField()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-legacy-job-attempt-log-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.LinuxDataPath = Path.Combine(dataPath, "linux-clients");
+                options.ContentPath = Path.Combine(dataPath, "content");
+                options.SoftwareJobAttemptLogRetentionDays = 90;
+                options.SoftwareJobAttemptLogMaxEntries = 5000;
+                string logDir = Path.Combine(dataPath, "_logs");
+                Directory.CreateDirectory(logDir);
+                string logPath = Path.Combine(logDir, "software-job-attempts.jsonl");
+                // A pre-existing line with no "status"/"attemptId"/"eventLogEntries"
+                // keys at all - exactly what this feature's own earlier log
+                // lines look like before this plan shipped.
+                string legacyLine = "{\"timestampUtc\":\"2026-09-01T00:00:00Z\",\"computerName\":\"OLD-PC\",\"catalogType\":\"windowsUpdate\",\"entryId\":\"old-entry\",\"entryName\":\"Old Entry\",\"success\":true,\"exitCode\":0,\"errorMessage\":null}";
+                File.WriteAllText(logPath, legacyLine + Environment.NewLine, new UTF8Encoding(false));
+
+                InventoryServer server = new InventoryServer(options);
+                server.Start();
+                List<Dictionary<string, object>> history;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareJobAttemptHistory(stream);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    JavaScriptSerializer serializer = new JavaScriptSerializer();
+                    Dictionary<string, object> response = serializer.Deserialize<Dictionary<string, object>>(ExtractHttpResponseBodyText(responseText));
+                    history = new List<Dictionary<string, object>>();
+                    foreach (Dictionary<string, object> entry in (ArrayList)response["attempts"])
+                    {
+                        history.Add(entry);
+                    }
+                }
+                if (history.Count != 1)
+                {
+                    return "expected exactly one loaded legacy entry, got " + history.Count;
+                }
+                if ((string)history[0]["status"] != "success")
+                {
+                    return "expected a legacy entry with success=true and no status key to default to status='success', got: " + history[0]["status"];
+                }
+                if (history[0]["attemptId"] != null)
+                {
+                    return "expected a legacy entry with no attemptId key to load as null, got: " + history[0]["attemptId"];
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
         }
 
         private static string TestScanSoftwareRepositoryReportsMissingConfiguration()
