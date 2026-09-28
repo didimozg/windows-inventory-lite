@@ -490,6 +490,7 @@ namespace WindowsInventoryLite
                     string relativePath = InventoryCollector.GetString(job, "relativePath");
                     string arguments = InventoryCollector.GetString(job, "arguments");
                     string attemptId = Guid.NewGuid().ToString("N");
+                    DateTime localStartUtc = DateTime.UtcNow;
                     InventoryCollector.ReportJobStart(options.ServerUrl, options.Token, Environment.MachineName, catalogType, id, attemptId, InventoryCollector.PostJson);
 
                     Dictionary<string, object> resultEntry = new Dictionary<string, object>();
@@ -615,13 +616,14 @@ namespace WindowsInventoryLite
                                 resultEntry["success"] = false;
                                 resultEntry["exitCode"] = -1;
                                 resultEntry["errorMessage"] = "installer did not exit within " + (InstallProcessTimeoutMilliseconds / 60000) + " minutes and was terminated";
-                                return resultEntry;
                             }
-
-                            int exitCode = process.ExitCode;
-                            resultEntry["success"] = exitCode == 0;
-                            resultEntry["exitCode"] = exitCode;
-                            resultEntry["errorMessage"] = exitCode == 0 ? null : ("installer exited with code " + exitCode);
+                            else
+                            {
+                                int exitCode = process.ExitCode;
+                                resultEntry["success"] = exitCode == 0;
+                                resultEntry["exitCode"] = exitCode;
+                                resultEntry["errorMessage"] = exitCode == 0 ? null : ("installer exited with code " + exitCode);
+                            }
                         }
                     }
                     catch (Exception ex)
@@ -638,7 +640,90 @@ namespace WindowsInventoryLite
                         }
                     }
 
+                    resultEntry["eventLogEntries"] = TryCollectEventLogEntries(localStartUtc);
                     return resultEntry;
+                }
+
+                // Best-effort, real-OS-API diagnostic detail - not
+                // unit-testable (a real System.Diagnostics.EventLog read
+                // against this machine's actual Application/System logs),
+                // the same accepted-limitation class as WsusScanner's WUA
+                // COM calls elsewhere in this codebase. Any failure
+                // (access denied, log unavailable) returns an empty list -
+                // never throws, never blocks the caller's own result
+                // reporting. Iterates each log's Entries collection from
+                // the END backward (most recent first) rather than from
+                // the start, so a large, long-lived Application/System log
+                // does not need a full scan just to find a handful of
+                // entries near "now".
+                private static readonly string[] EventLogSourcesToCheck = new string[] { "MsiInstaller", "Microsoft-Windows-WindowsUpdateClient" };
+                private const int MaxEventLogEntriesToCollect = 5;
+                private const int MaxEventLogMessageLength = 500;
+
+                private static List<Dictionary<string, object>> TryCollectEventLogEntries(DateTime localStartUtc)
+                {
+                    List<Dictionary<string, object>> found = new List<Dictionary<string, object>>();
+                    DateTime windowStartUtc = localStartUtc.AddSeconds(-30);
+                    DateTime windowEndUtc = DateTime.UtcNow.AddMinutes(2);
+
+                    string[] logNames = new string[] { "Application", "System" };
+                    foreach (string logName in logNames)
+                    {
+                        if (found.Count >= MaxEventLogEntriesToCollect)
+                        {
+                            break;
+                        }
+                        try
+                        {
+                            using (EventLog log = new EventLog(logName))
+                            {
+                                EventLogEntryCollection entries = log.Entries;
+                                for (int i = entries.Count - 1; i >= 0 && found.Count < MaxEventLogEntriesToCollect; i--)
+                                {
+                                    EventLogEntry entry = entries[i];
+                                    DateTime timeGeneratedUtc = entry.TimeGenerated.ToUniversalTime();
+                                    if (timeGeneratedUtc < windowStartUtc)
+                                    {
+                                        // Entries are chronologically ordered -
+                                        // once we're past the window's start,
+                                        // nothing earlier in this log matters.
+                                        break;
+                                    }
+                                    if (timeGeneratedUtc > windowEndUtc)
+                                    {
+                                        continue;
+                                    }
+                                    bool sourceMatches = false;
+                                    foreach (string source in EventLogSourcesToCheck)
+                                    {
+                                        if (String.Equals(entry.Source, source, StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            sourceMatches = true;
+                                            break;
+                                        }
+                                    }
+                                    if (!sourceMatches)
+                                    {
+                                        continue;
+                                    }
+                                    Dictionary<string, object> foundEntry = new Dictionary<string, object>();
+                                    foundEntry["source"] = entry.Source;
+                                    foundEntry["eventId"] = entry.InstanceId;
+                                    foundEntry["timeCreatedUtc"] = timeGeneratedUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                                    string message = entry.Message ?? "";
+                                    foundEntry["message"] = message.Length > MaxEventLogMessageLength ? message.Substring(0, MaxEventLogMessageLength) : message;
+                                    found.Add(foundEntry);
+                                }
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            // Access denied, log unavailable, etc. - this
+                            // one log's check is skipped, the other log
+                            // (and the job's actual result) are unaffected.
+                        }
+                    }
+                    return found;
                 }
 
                 private string FetchSoftwareRepositoryConnection()
