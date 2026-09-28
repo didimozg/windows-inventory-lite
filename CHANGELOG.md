@@ -6,6 +6,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.74.0] - Job-start signal and Event Log detail in Software job history
+
+### Added
+
+- **Software job history now shows a job going from "Running" to "Success"/"Failed"** instead of only ever showing the final result - the Windows client reports that it has taken a job immediately before running it. A `Running` row that never resolves is itself a visible signal of a stuck or silently-failed job.
+- **A completed job's row can show real Windows Event Log context** for the install - the client checks the `Application` log's `MsiInstaller` source and the `System` log's `Microsoft-Windows-WindowsUpdateClient` source for entries logged during the install window, shown behind an expandable detail toggle when present.
+
+### Notes
+
+- Windows client only - the Linux client is untouched by this feature.
+- Storage stays append-only, exactly as before - a job run now produces two log lines (start + result) sharing one client-generated correlation id instead of one, merged into a single row at display time. No migration; a pre-existing log entry renders exactly as it did before this release.
+- See `docs/superpowers/specs/2026-09-28-wsus-job-logging-design.md` for the full design.
+
+## [Windows client 0.8.0] - Reports job start, collects Event Log detail
+
+### Added
+
+- **The client now reports it has taken a job immediately before running it** (`POST /api/v1/client/software-jobs/start`), best-effort - a failed report never blocks or delays the actual install.
+- **After running a job, the client checks the Windows Event Log** (`Application`/`MsiInstaller`, `System`/`Microsoft-Windows-WindowsUpdateClient`) for entries logged during the install window and attaches up to 5 matching entries to its result report. Best-effort, verified live against a real machine's Event Log (not unit-testable, same accepted-limitation class as the WUA COM calls this client already makes).
+
 ## [0.73.2] - Catalog toolbar layout and compact scan timestamps
 
 ### Fixed
