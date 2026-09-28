@@ -4322,12 +4322,12 @@
         const messageElement = byId('windowsUpdateDiscoveredMessage');
         if (!data.success) {
           messageElement.className = 'pkg-message error';
-          const lastGood = data.lastSuccessfulScanAt ? ` (showing results from the last successful scan: ${data.lastSuccessfulScanAt})` : '';
+          const lastGood = data.lastSuccessfulScanAt ? ` (showing results from the last successful scan: ${formatDateTime(data.lastSuccessfulScanAt)})` : '';
           messageElement.textContent = `Last scan attempt failed: ${data.errorMessage || 'unknown error'}${lastGood}`;
           messageElement.classList.remove('hidden');
         } else if (data.scannedAt) {
           messageElement.className = 'pkg-message';
-          messageElement.textContent = `Last scanned: ${data.scannedAt}`;
+          messageElement.textContent = `Last scanned: ${formatDateTime(data.scannedAt)}`;
           messageElement.classList.remove('hidden');
         } else {
           messageElement.classList.add('hidden');
@@ -4478,12 +4478,12 @@
         const messageElement = byId('thirdPartySoftwareDiscoveredMessage');
         if (!data.success) {
           messageElement.className = 'pkg-message error';
-          const lastGood = data.lastSuccessfulScanAt ? ` (showing results from the last successful scan: ${data.lastSuccessfulScanAt})` : '';
+          const lastGood = data.lastSuccessfulScanAt ? ` (showing results from the last successful scan: ${formatDateTime(data.lastSuccessfulScanAt)})` : '';
           messageElement.textContent = `Last scan attempt failed: ${data.errorMessage || 'unknown error'}${lastGood}`;
           messageElement.classList.remove('hidden');
         } else if (data.scannedAt) {
           messageElement.className = 'pkg-message';
-          messageElement.textContent = `Last scanned: ${data.scannedAt}`;
+          messageElement.textContent = `Last scanned: ${formatDateTime(data.scannedAt)}`;
           messageElement.classList.remove('hidden');
         } else {
           messageElement.classList.add('hidden');

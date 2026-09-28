@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.73.2] - Catalog toolbar layout and compact scan timestamps
+
+### Fixed
+
+- **The Catalog page's search box sat on its own row below the toolbar**, breaking an existing spacing rule that expected the discovered-files table, the (usually hidden) entry form, and the catalog table to sit directly adjacent - the search row silently absorbed the gap meant for the table below it. Moved into the toolbar itself, alongside "Add entry"/"Refresh discovered files", restoring the original spacing.
+- **"Last scanned"/"last successful scan" messages showed a raw UTC timestamp** (`2026-09-28T11:29:24Z`) instead of a readable local date/time, on both the Windows updates and Third-party software discovered-files panels.
+
 ## [0.73.1] - Machine names on hover for Missing updates
 
 ### Added

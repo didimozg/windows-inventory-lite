@@ -1551,6 +1551,17 @@ th.sort-desc::after {
   margin-bottom: 8px;
 }
 
+/* A toolbar-embedded search box (Windows updates catalog) sits at the
+   start, buttons stay right-aligned via the toolbar's own flex-end - the
+   shared input { width: 100% } rule would otherwise fight the buttons for
+   space, same class of override .missing-updates-filters select already
+   needs. */
+.windows-update-catalog-search {
+  width: auto;
+  min-width: 220px;
+  margin-right: auto;
+}
+
 /* Missing updates' own filter row - left-aligned and wrapping, unlike
    .view-toolbar's right-aligned button row above. The shared select rule
    (textarea/input[type=text]/.../select { width: 100% }) would otherwise

@@ -826,6 +826,7 @@
 
         <section id="windowsUpdatesView" class="hidden" aria-label="Windows updates catalog">
           <div class="view-toolbar">
+            <input id="windowsUpdatesCatalogSearch" type="search" class="windows-update-catalog-search" placeholder="Filter by name or file path">
             <button id="windowsUpdateAddButton" class="primary-button" type="button">Add entry</button>
             <button id="windowsUpdateScanButton" class="export-button" type="button">Refresh discovered files</button>
           </div>
@@ -894,9 +895,6 @@
               <button id="windowsUpdateCancelButton" class="export-button" type="button">Cancel</button>
             </div>
             <div id="windowsUpdateMessage" class="pkg-message hidden"></div>
-          </div>
-          <div class="missing-updates-filters">
-            <input id="windowsUpdatesCatalogSearch" type="search" placeholder="Filter by name or file path">
           </div>
           <div class="table-wrap">
             <table>
