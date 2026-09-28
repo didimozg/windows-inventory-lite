@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.72.0] - Automatic KB detection and catalog matching
+
+### Added
+
+- **The server can now determine which KB article a discovered `.msu` file corresponds to on its own**, by reading the file's own embedded Windows Update manifest (no full unpack - only the small metadata is extracted) rather than guessing from the filename. A filename-based fallback still applies when content-based detection fails.
+- **An opt-in setting (Software > Windows updates, off by default) automatically creates the matching Missing-KB catalog entry** for a successfully detected, non-conflicting KB that isn't already catalogued - installs then start through the existing dynamic Missing-KB targeting with no manual review. Two files resolving to the same KB are always flagged as a conflict requiring a human decision, never auto-resolved.
+- **A new "Excluded computers" field on Missing-KB catalog entries** lets an admin exclude specific machines from an otherwise fleet-wide automatic rollout, without switching the whole entry to a static, hand-maintained target list.
+
+### Notes
+
+- Server + dashboard only - neither the Windows nor Linux client is touched by this feature.
+- See `docs/superpowers/specs/2026-09-23-wsus-kb-auto-matching-design.md` for the full design.
+
 ## [0.71.0] - Sorting and filters for Missing updates
 
 ### Added
