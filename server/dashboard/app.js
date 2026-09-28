@@ -4102,7 +4102,7 @@
         <td class="mono">${escapeHtml(entry.kbId)}</td>
         <td>${escapeHtml(entry.title || '')}</td>
         <td>${escapeHtml(entry.severity || '')}</td>
-        <td>${entry.machineCount}</td>
+        <td title="${escapeHtml((entry.computerNames || []).slice().sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })).join('\n'))}">${entry.machineCount}</td>
         <td><button data-add-catalog-for-kb="${escapeHtml(entry.kbId)}" class="export-button" type="button">+ Add catalog entry</button></td>
       </tr>
     `).join('') || `<tr><td colspan="5" class="empty">${emptyMessage}</td></tr>`;
