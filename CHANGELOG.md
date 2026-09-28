@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.76.1] - Software job history no longer shows "Unknown" for a job with no error
+
+### Fixed
+
+- **The Error column showed "Unknown" for any job with no error** - a `Running` job (hasn't failed - or succeeded - yet) or a completed `Success` (no error message at all), not just a genuine failure. Found live on a real test client's data right after 0.74.0 shipped. Now blank whenever there's genuinely nothing to report, matching this dashboard's own established convention for a field where blank is a valid, correct state (used elsewhere for free-form license fields).
+
 ## [0.76.0] - KB detection for standalone .exe update installers
 
 ### Added

@@ -4574,7 +4574,7 @@
             <td>${escapeHtml(a.entryName || a.entryId)}</td>
             <td>${softwareJobHistoryResultText(a)}</td>
             <td>${a.status === 'running' ? '' : escapeHtml(String(a.exitCode))}</td>
-            <td>${escapeHtml(a.errorMessage || '')}</td>
+            <td>${escapeHtmlOrEmpty(a.errorMessage)}</td>
             <td>${toggleCell}</td>
           </tr>${detailRow}`;
         }).join('') || '<tr><td colspan="8" class="empty">No attempts recorded yet.</td></tr>';
