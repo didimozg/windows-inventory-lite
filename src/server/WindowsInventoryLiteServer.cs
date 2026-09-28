@@ -2239,6 +2239,10 @@ namespace WindowsInventoryLite
                     {
                         SendClientSoftwareJobs(stream, request);
                     }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/client/software-jobs/start")
+                    {
+                        ReceiveSoftwareJobStart(stream, request);
+                    }
                     else if (request.Method == "POST" && request.Path == "/api/v1/client/software-jobs/results")
                     {
                         ReceiveSoftwareJobResults(stream, request);
@@ -3194,6 +3198,64 @@ namespace WindowsInventoryLite
         // results array or an arbitrarily long errorMessage per entry.
         private const int MaxSoftwareJobResultsPerRequest = 500;
         private const int MaxSoftwareJobErrorMessageLength = 2000;
+
+        private void ReceiveSoftwareJobStart(Stream stream, RequestContext request)
+        {
+            string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
+            // Same unconditional gate as ReceiveSoftwareJobResults - this
+            // writes into the same fleet-wide attempt-history log.
+            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            {
+                RecordIngestionRejection(request, "software-job-start", ResolveIngestionRejectionReason(token));
+                SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string computerName = NormalizeReportIdentifier(payload.ContainsKey("computerName") ? Convert.ToString(payload["computerName"]) : null);
+            if (IsReportIdentifierTooLong(computerName))
+            {
+                DebugLogger.Log(options, "Client", "Rejected software job start: computerName exceeds " + MaxReportIdentifierLength + " characters");
+                SendText(stream, "{\"error\":\"computerName is too long\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            try
+            {
+                SoftwareJobAttempt attempt = new SoftwareJobAttempt();
+                attempt.TimestampUtc = DateTime.UtcNow;
+                attempt.ComputerName = computerName;
+                attempt.CatalogType = GetStringValue(payload, "catalogType");
+                attempt.EntryId = GetStringValue(payload, "id");
+                string entryName = LookupCatalogEntryName(attempt.CatalogType, attempt.EntryId);
+                attempt.EntryName = String.IsNullOrEmpty(entryName) ? "(deleted entry)" : entryName;
+                attempt.AttemptId = GetStringValue(payload, "attemptId");
+                attempt.Status = "running";
+                attempt.ExitCode = -1;
+                RecordSoftwareJobAttempt(attempt);
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Client", "Skipped a malformed software job start: " + ex.Message);
+            }
+
+            SendJson(stream, "{\"acknowledged\":true}");
+        }
 
         private void ReceiveSoftwareJobResults(Stream stream, RequestContext request)
         {
@@ -15353,6 +15415,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "LookupCatalogEntryName returns null for an entry id that is not in the catalog", TestLookupCatalogEntryNameReturnsNullWhenMissing);
             allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobResults snapshots the catalog entry's name onto the recorded attempt", TestReceiveSoftwareJobResultsSnapshotsEntryName);
             allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobResults falls back to '(deleted entry)' when the catalog entry no longer exists", TestReceiveSoftwareJobResultsFallsBackToDeletedEntryLabel);
+            allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobStart records a running entry with the real catalog entry name resolved", TestReceiveSoftwareJobStartRecordsARunningEntryWithResolvedEntryName);
+            allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobStart requires a valid ingestion token, records nothing when rejected", TestReceiveSoftwareJobStartRequiresAValidIngestionToken);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue returns null when no log entry matches the client's IP", TestComputeClientTokenIssueNoMatch);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue ignores a matching-IP rejection older than the client's last report", TestComputeClientTokenIssueStaleRejectionIgnored);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue flags a matching-IP rejection newer than the client's last report", TestComputeClientTokenIssueRecentRejectionFlagged);
@@ -18116,6 +18180,135 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveSoftwareJobStartRecordsARunningEntryWithResolvedEntryName()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-job-start-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                options.SoftwareJobAttemptLogRetentionDays = 90;
+                options.SoftwareJobAttemptLogMaxEntries = 5000;
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> windowsUpdates = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "wu-1";
+                entry["name"] = "Test Windows Update";
+                windowsUpdates.Add(entry);
+                server.SaveWindowsUpdates(windowsUpdates);
+
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                Dictionary<string, object> body = new Dictionary<string, object>();
+                body["computerName"] = "TEST-PC";
+                body["catalogType"] = "windowsUpdate";
+                body["id"] = "wu-1";
+                body["attemptId"] = "attempt-abc";
+
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/client/software-jobs/start";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "test-token";
+                request.Body = serializer.Serialize(body);
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveSoftwareJobStart(stream, request);
+                }
+
+                string historyText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareJobAttemptHistory(stream);
+                    historyText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+                Dictionary<string, object> response = serializer.Deserialize<Dictionary<string, object>>(ExtractHttpResponseBodyText(historyText));
+                ArrayList attempts = (ArrayList)response["attempts"];
+                if (attempts.Count != 1)
+                {
+                    return "expected exactly one recorded attempt, got " + attempts.Count;
+                }
+                Dictionary<string, object> recorded = (Dictionary<string, object>)attempts[0];
+                if ((string)recorded["status"] != "running")
+                {
+                    return "expected status='running', got: " + recorded["status"];
+                }
+                if ((string)recorded["attemptId"] != "attempt-abc")
+                {
+                    return "expected attemptId='attempt-abc', got: " + recorded["attemptId"];
+                }
+                if ((string)recorded["entryName"] != "Test Windows Update")
+                {
+                    return "expected entryName resolved to the real catalog entry's name, got: " + recorded["entryName"];
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveSoftwareJobStartRequiresAValidIngestionToken()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-job-start-token-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "real-token";
+                options.SoftwareJobAttemptLogRetentionDays = 90;
+                options.SoftwareJobAttemptLogMaxEntries = 5000;
+                InventoryServer server = new InventoryServer(options);
+
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                Dictionary<string, object> body = new Dictionary<string, object>();
+                body["computerName"] = "TEST-PC";
+                body["catalogType"] = "windowsUpdate";
+                body["id"] = "wu-1";
+                body["attemptId"] = "attempt-abc";
+
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/client/software-jobs/start";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "wrong-token";
+                request.Body = serializer.Serialize(body);
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveSoftwareJobStart(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+                if (responseText.IndexOf("401", StringComparison.Ordinal) < 0)
+                {
+                    return "expected a 401 response for a wrong ingestion token, got: " + responseText;
+                }
+
+                string historyText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareJobAttemptHistory(stream);
+                    historyText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+                Dictionary<string, object> response = serializer.Deserialize<Dictionary<string, object>>(ExtractHttpResponseBodyText(historyText));
+                if (((ArrayList)response["attempts"]).Count != 0)
+                {
+                    return "expected a rejected job-start call to record nothing";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
             }
         }
 
