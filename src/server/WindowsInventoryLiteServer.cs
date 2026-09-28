@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.72.0";
+        internal const string ProductVersion = "0.72.1";
 
         private static int Main(string[] args)
         {
@@ -14157,6 +14157,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 {
                     result.Success = false;
                     result.ErrorMessage = ex.Message;
+                    DebugLogger.Log(options, "Error", "Software repository scan failed: " + ex);
                 }
             }
 

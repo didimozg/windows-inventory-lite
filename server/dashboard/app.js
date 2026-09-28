@@ -4313,6 +4313,7 @@
     fetch('/api/v1/software-repository/scan', { method: 'POST', cache: 'no-store' })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        loadWindowsUpdates();
         return loadWindowsUpdateDiscovered();
       })
       .catch(error => window.alert(`Failed to start scan: ${error.message}`))
