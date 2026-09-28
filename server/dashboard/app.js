@@ -4492,6 +4492,41 @@
       .catch(() => {});
   }
 
+  // Merges a "running" record with its later "success"/"failed" record into
+  // one displayed row when they share an attemptId - the server storage
+  // stays append-only (both records are still on disk, unmodified); this is
+  // purely a render-time view. A record with no attemptId (a legacy
+  // pre-feature entry, or a not-yet-updated client) never merges - it
+  // renders standalone exactly as it always has.
+  function mergeSoftwareJobAttempts(attempts) {
+    const byAttemptId = new Map();
+    const standalone = [];
+    attempts.forEach(a => {
+      if (!a.attemptId) {
+        standalone.push(a);
+        return;
+      }
+      const existing = byAttemptId.get(a.attemptId);
+      if (!existing) {
+        byAttemptId.set(a.attemptId, a);
+        return;
+      }
+      // Whichever of the pair is NOT "running" is the more complete record -
+      // keep it, but carry the running record's own timestamp forward as
+      // "startedAt" so the merged row can still show when the job actually
+      // started, not just when it finished.
+      const runningOne = existing.status === 'running' ? existing : a;
+      const finalOne = existing.status === 'running' ? a : existing;
+      byAttemptId.set(a.attemptId, Object.assign({}, finalOne, { startedAt: runningOne.timestampUtc }));
+    });
+    return standalone.concat(Array.from(byAttemptId.values()));
+  }
+
+  function softwareJobHistoryResultText(a) {
+    if (a.status === 'running') return 'Running' + (a.timestampUtc ? ` (since ${escapeHtml(a.timestampUtc)})` : '');
+    return a.success ? 'Success' : 'Failed';
+  }
+
   function loadSoftwareJobHistory() {
     fetch('/api/v1/software-repository/attempt-history', { cache: 'no-store' })
       .then(response => {
@@ -4500,18 +4535,34 @@
       })
       .then(data => {
         const attempts = data.attempts || [];
-        const sorted = attempts.slice().reverse();
-        byId('softwareJobHistoryBody').innerHTML = sorted.map(a => `
+        const merged = mergeSoftwareJobAttempts(attempts);
+        const sorted = merged.slice().sort((x, y) => String(y.timestampUtc).localeCompare(String(x.timestampUtc)));
+        byId('softwareJobHistoryBody').innerHTML = sorted.map((a, index) => {
+          const rowKey = a.attemptId || `standalone-${index}`;
+          const hasEventLog = Array.isArray(a.eventLogEntries) && a.eventLogEntries.length > 0;
+          const detailsHidden = state.expandedDetails.has('software-job:' + rowKey) ? '' : 'hidden';
+          const toggleCell = hasEventLog ? `<button class="link-button" type="button" data-software-job-toggle="${escapeHtml(rowKey)}">Details</button>` : '';
+          const detailRow = hasEventLog ? `
+          <tr class="details-row ${detailsHidden}" data-software-job-details="${escapeHtml(rowKey)}">
+            <td colspan="8">
+              <div class="details">
+                ${a.eventLogEntries.map(e => `<div>${escapeHtml(e.source)} #${escapeHtml(String(e.eventId))} (${escapeHtml(e.timeCreatedUtc)}): ${escapeHtml(e.message)}</div>`).join('')}
+              </div>
+            </td>
+          </tr>` : '';
+          const timeText = a.startedAt ? `${escapeHtml(a.timestampUtc)} (started ${escapeHtml(a.startedAt)})` : escapeHtml(a.timestampUtc);
+          return `
           <tr>
-            <td>${escapeHtml(a.timestampUtc)}</td>
+            <td>${timeText}</td>
             <td>${escapeHtml(a.computerName)}</td>
             <td>${escapeHtml(a.catalogType)}</td>
             <td>${escapeHtml(a.entryName || a.entryId)}</td>
-            <td>${a.success ? 'Success' : 'Failed'}</td>
-            <td>${escapeHtml(String(a.exitCode))}</td>
+            <td>${softwareJobHistoryResultText(a)}</td>
+            <td>${a.status === 'running' ? '' : escapeHtml(String(a.exitCode))}</td>
             <td>${escapeHtml(a.errorMessage || '')}</td>
-          </tr>
-        `).join('') || '<tr><td colspan="7" class="empty">No attempts recorded yet.</td></tr>';
+            <td>${toggleCell}</td>
+          </tr>${detailRow}`;
+        }).join('') || '<tr><td colspan="8" class="empty">No attempts recorded yet.</td></tr>';
       })
       .catch(() => {});
   }
@@ -6089,6 +6140,18 @@
     if (linuxServicesBtn) {
       const key = 'linux-services:' + linuxServicesBtn.dataset.linuxServices;
       const row = document.querySelector(`[data-linux-services-details="${linuxServicesBtn.dataset.linuxServices}"]`);
+      if (row) {
+        const nowHidden = row.classList.toggle('hidden');
+        if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
+      }
+      return;
+    }
+
+    const softwareJobBtn = e.target.closest('[data-software-job-toggle]');
+    if (softwareJobBtn) {
+      const rowKey = softwareJobBtn.dataset.softwareJobToggle;
+      const key = 'software-job:' + rowKey;
+      const row = document.querySelector(`[data-software-job-details="${CSS.escape(rowKey)}"]`);
       if (row) {
         const nowHidden = row.classList.toggle('hidden');
         if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
