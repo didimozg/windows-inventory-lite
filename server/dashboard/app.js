@@ -4126,7 +4126,7 @@
         renderWindowsUpdates();
       })
       .catch(error => {
-        byId('windowsUpdatesBody').innerHTML = `<tr><td colspan="7" class="empty">Windows updates are not available: ${escapeHtml(error.message)}</td></tr>`;
+        byId('windowsUpdatesBody').innerHTML = `<tr><td colspan="8" class="empty">Windows updates are not available: ${escapeHtml(error.message)}</td></tr>`;
       });
   }
 
@@ -4135,7 +4135,18 @@
   }
 
   function windowsUpdatesCatalogTargetingText(entry) {
-    return entry.targetMode === 'missingKb' ? 'Auto: ' + entry.kbId + (entry.excludedComputers ? ` (${excludedComputerCount(entry.excludedComputers)} excluded)` : '') : (entry.targets || '');
+    if (entry.targetMode !== 'missingKb') return entry.targets || '';
+    const parts = [`${(entry.targetedComputerNames || []).length} targeted`];
+    if (entry.excludedComputers) parts.push(`${excludedComputerCount(entry.excludedComputers)} excluded`);
+    return `Auto: ${entry.kbId} (${parts.join(', ')})`;
+  }
+
+  // Hover-only detail (matches the Missing updates page's own machine-count
+  // tooltip convention) - the visible cell text is just a count, the actual
+  // names are one hover away rather than crowding the table.
+  function windowsUpdatesCatalogTargetedTitle(entry) {
+    if (entry.targetMode !== 'missingKb') return '';
+    return (entry.targetedComputerNames || []).slice().sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })).join('\n');
   }
 
   function windowsUpdatesCatalogSortValue(entry, key) {
@@ -4143,6 +4154,7 @@
       case 'name': return (entry.name || '').toLowerCase();
       case 'relativePath': return (entry.relativePath || '').toLowerCase();
       case 'fileSizeBytes': return entry.fileSizeBytes;
+      case 'severity': return (entry.severity || '').toLowerCase();
       case 'targeting': return windowsUpdatesCatalogTargetingText(entry).toLowerCase();
       case 'enabled': return entry.enabled ? 1 : 0;
       default: return '';
@@ -4171,12 +4183,13 @@
         <td>${escapeHtml(entry.name)}</td>
         <td class="mono">${escapeHtml(entry.relativePath)}</td>
         <td>${escapeHtml(formatFileSize(entry.fileSizeBytes))}</td>
-        <td class="mono">${escapeHtml(windowsUpdatesCatalogTargetingText(entry))}</td>
+        <td>${entry.targetMode === 'missingKb' ? escapeHtml(entry.severity || '') : ''}</td>
+        <td class="mono" title="${escapeHtml(windowsUpdatesCatalogTargetedTitle(entry))}">${escapeHtml(windowsUpdatesCatalogTargetingText(entry))}</td>
         <td>${entry.enabled ? 'Yes' : 'No'}</td>
         <td><button data-edit-windows-update="${escapeHtml(entry.id)}" class="export-button" type="button">Edit</button></td>
         <td><button data-delete-windows-update="${escapeHtml(entry.id)}" class="export-button" type="button">Delete</button></td>
       </tr>
-    `).join('') || `<tr><td colspan="7" class="empty">${emptyMessage}</td></tr>`;
+    `).join('') || `<tr><td colspan="8" class="empty">${emptyMessage}</td></tr>`;
 
     tbody.querySelectorAll('[data-edit-windows-update]').forEach(button => {
       button.addEventListener('click', () => openWindowsUpdateForm(button.dataset.editWindowsUpdate));
@@ -4267,6 +4280,7 @@
       })
       .then(data => {
         byId('windowsUpdateAutoCreateEnabled').checked = !!data.autoCreateWindowsUpdateCatalogEntries;
+        byId('windowsUpdateAutoCreateCriticalOnlyEnabled').checked = !!data.autoCreateOnlyCriticalKbs;
       })
       .catch(() => {});
   }
@@ -4274,12 +4288,13 @@
   function saveWindowsUpdateAutoCreateSetting() {
     const messageElement = byId('windowsUpdateAutoCreateMessage');
     const enabled = byId('windowsUpdateAutoCreateEnabled').checked;
+    const criticalOnly = byId('windowsUpdateAutoCreateCriticalOnlyEnabled').checked;
     byId('windowsUpdateAutoCreateSaveButton').disabled = true;
     fetch('/api/v1/server/settings', {
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ autoCreateWindowsUpdateCatalogEntries: enabled })
+      body: JSON.stringify({ autoCreateWindowsUpdateCatalogEntries: enabled, autoCreateOnlyCriticalKbs: criticalOnly })
     })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -4304,8 +4319,8 @@
         const candidates = data.windowsUpdateCandidates || [];
         tbody.innerHTML = candidates.map(candidate => {
           const kbText = candidate.hasConflict
-            ? `<span class="usb-badge" title="Another discovered file also resolves to this same KB - resolve manually, neither will auto-create">CONFLICT: KB${escapeHtml(candidate.detectedKbId)}</span>`
-            : (candidate.detectedKbId ? `KB${escapeHtml(candidate.detectedKbId)}` : '&mdash;');
+            ? `<span class="usb-badge" title="Another discovered file also resolves to this same KB - resolve manually, neither will auto-create">CONFLICT: ${escapeHtml(candidate.detectedKbId)}</span>`
+            : (candidate.detectedKbId ? escapeHtml(candidate.detectedKbId) : '&mdash;');
           return `
           <tr>
             <td class="mono">${escapeHtml(candidate.relativePath)}</td>

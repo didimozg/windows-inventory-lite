@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.74.0";
+        internal const string ProductVersion = "0.75.0";
 
         private static int Main(string[] args)
         {
@@ -245,6 +245,16 @@ namespace WindowsInventoryLite
         // may reasonably want one without the other.
         public bool EnableWindowsClientSelfUpdate;
         public bool AutoCreateWindowsUpdateCatalogEntries;
+        // Dependent on the toggle above - narrows which missingKb-mode
+        // catalog entries actually target a machine to those whose KB is
+        // reported Critical by that specific machine's own scan. Applied at
+        // targeting time (AppendJobIfTargeted), not at catalog-creation
+        // time - severity isn't knowable from the file itself when a
+        // candidate is first detected, only once a client's scan reports
+        // it. The catalog entry itself is unaffected either way; a
+        // non-Critical KB still gets an entry, it just never targets
+        // anyone while this is on and stays non-Critical.
+        public bool AutoCreateOnlyCriticalKbs;
         public bool EnableLinuxClientSelfUpdate;
         public bool ConsoleMode;
         public bool ShowVersion;
@@ -638,6 +648,11 @@ namespace WindowsInventoryLite
                 {
                     string autoCreateWindowsUpdateCatalogEntriesText = GetConfigString(config, "AutoCreateWindowsUpdateCatalogEntries");
                     options.AutoCreateWindowsUpdateCatalogEntries = String.Equals(autoCreateWindowsUpdateCatalogEntriesText, "true", StringComparison.OrdinalIgnoreCase);
+                }
+                if (!options.AutoCreateOnlyCriticalKbs)
+                {
+                    string autoCreateOnlyCriticalKbsText = GetConfigString(config, "AutoCreateOnlyCriticalKbs");
+                    options.AutoCreateOnlyCriticalKbs = String.Equals(autoCreateOnlyCriticalKbsText, "true", StringComparison.OrdinalIgnoreCase);
                 }
                 if (!options.EnableLinuxClientSelfUpdate)
                 {
@@ -3049,20 +3064,20 @@ namespace WindowsInventoryLite
                 return;
             }
 
-            HashSet<string> missingKbIds = LoadWsusMissingKbIds(computerName);
+            Dictionary<string, string> missingKbSeverities = LoadWsusMissingKbSeverities(computerName);
             ArrayList jobs = new ArrayList();
             lock (windowsUpdatesLock)
             {
                 foreach (Dictionary<string, object> entry in LoadWindowsUpdates())
                 {
-                    AppendJobIfTargeted(jobs, entry, "windowsUpdate", computerName, missingKbIds);
+                    AppendJobIfTargeted(jobs, entry, "windowsUpdate", computerName, missingKbSeverities, options.AutoCreateOnlyCriticalKbs);
                 }
             }
             lock (thirdPartySoftwareLock)
             {
                 foreach (Dictionary<string, object> entry in LoadThirdPartySoftware())
                 {
-                    AppendJobIfTargeted(jobs, entry, "thirdPartySoftware", computerName, missingKbIds);
+                    AppendJobIfTargeted(jobs, entry, "thirdPartySoftware", computerName, missingKbSeverities, options.AutoCreateOnlyCriticalKbs);
                 }
             }
 
@@ -3081,18 +3096,19 @@ namespace WindowsInventoryLite
             SendJson(stream, serializer.Serialize(response));
         }
 
-        // Loads just the one computer's own set of currently-missing KB
-        // IDs, for the missingKb targeting-mode resolution below. A
-        // dedicated single-file read (not LoadClientReports(), which
-        // scans every stored report) since this runs once per
-        // software-jobs poll from every single client - reading the
-        // whole fleet's reports on every poll would not scale. Tolerates
-        // a missing/corrupt report the same way other per-computer
-        // lookups in this file do - returns an empty set rather than
-        // failing the whole software-jobs response.
-        private HashSet<string> LoadWsusMissingKbIds(string computerName)
+        // Loads just the one computer's own currently-missing KB ids
+        // (mapped to that computer's own reported severity per KB), for
+        // the missingKb targeting-mode resolution below. A dedicated
+        // single-file read (not LoadClientReports(), which scans every
+        // stored report) since this runs once per software-jobs poll from
+        // every single client - reading the whole fleet's reports on
+        // every poll would not scale. Tolerates a missing/corrupt report
+        // the same way other per-computer lookups in this file do -
+        // returns an empty dictionary rather than failing the whole
+        // software-jobs response.
+        private Dictionary<string, string> LoadWsusMissingKbSeverities(string computerName)
         {
-            HashSet<string> result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, string> result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
             if (!File.Exists(path))
             {
@@ -3115,7 +3131,7 @@ namespace WindowsInventoryLite
                                 string kbId = Convert.ToString(entry["kbId"]);
                                 if (!String.IsNullOrEmpty(kbId))
                                 {
-                                    result.Add(kbId);
+                                    result[kbId] = GetStringValue(entry, "msrcSeverity");
                                 }
                             }
                         }
@@ -3130,7 +3146,7 @@ namespace WindowsInventoryLite
             return result;
         }
 
-        private static void AppendJobIfTargeted(ArrayList jobs, Dictionary<string, object> entry, string catalogType, string computerName, HashSet<string> missingKbIds)
+        private static void AppendJobIfTargeted(ArrayList jobs, Dictionary<string, object> entry, string catalogType, string computerName, Dictionary<string, string> missingKbSeverities, bool restrictToCriticalOnly)
         {
             bool enabled = entry.ContainsKey("enabled") && Convert.ToBoolean(entry["enabled"]);
             if (!enabled)
@@ -3143,7 +3159,16 @@ namespace WindowsInventoryLite
             if (targetMode == "missingKb")
             {
                 string kbId = GetStringValue(entry, "kbId");
-                isTargeted = !String.IsNullOrEmpty(kbId) && missingKbIds != null && missingKbIds.Contains(kbId);
+                isTargeted = !String.IsNullOrEmpty(kbId) && missingKbSeverities != null && missingKbSeverities.ContainsKey(kbId);
+                // Applies only at targeting time, per machine - the catalog
+                // entry itself always exists regardless of severity (see
+                // AutoCreateOnlyCriticalKbs's own comment). A machine whose
+                // own scan reports this KB as anything other than Critical
+                // simply never gets the job while this restriction is on.
+                if (isTargeted && restrictToCriticalOnly && !String.Equals(missingKbSeverities[kbId], "Critical", StringComparison.OrdinalIgnoreCase))
+                {
+                    isTargeted = false;
+                }
                 if (isTargeted)
                 {
                     string excludedComputersText = GetStringValue(entry, "excludedComputers");
@@ -9499,7 +9524,15 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // matches this project's own established preference for
         // computing from the source of truth on read rather than
         // maintaining a second copy that could drift.
-        private void SendWsusMissingSummary(Stream stream)
+        // Shared across SendWsusMissingSummary and SendWindowsUpdates (the
+        // catalog's own Severity/targeted-machines display) - one pass over
+        // every stored client report, keyed by kbId. Each value carries
+        // "kbId"/"title"/"severity" (from whichever report first mentioned
+        // that KB - WUA's own severity classification for a fixed KB does
+        // not vary by machine, so the first-seen value is representative)
+        // plus "machineCount"/"computerNames" (every machine currently
+        // reporting that KB missing, in report order).
+        private Dictionary<string, Dictionary<string, object>> BuildMissingKbAggregation()
         {
             Dictionary<string, Dictionary<string, object>> byKbId = new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
             Dictionary<string, List<string>> computersByKbId = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
@@ -9543,13 +9576,22 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 }
             }
 
-            ArrayList summary = new ArrayList();
             foreach (string kbId in byKbId.Keys)
             {
                 Dictionary<string, object> summaryEntry = byKbId[kbId];
                 List<string> computers = computersByKbId[kbId];
                 summaryEntry["machineCount"] = computers.Count;
                 summaryEntry["computerNames"] = new ArrayList(computers);
+            }
+            return byKbId;
+        }
+
+        private void SendWsusMissingSummary(Stream stream)
+        {
+            Dictionary<string, Dictionary<string, object>> byKbId = BuildMissingKbAggregation();
+            ArrayList summary = new ArrayList();
+            foreach (Dictionary<string, object> summaryEntry in byKbId.Values)
+            {
                 summary.Add(summaryEntry);
             }
 
@@ -10076,6 +10118,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             result["hstsEnabled"] = options.HstsEnabled;
             result["enableWindowsClientSelfUpdate"] = options.EnableWindowsClientSelfUpdate;
             result["autoCreateWindowsUpdateCatalogEntries"] = options.AutoCreateWindowsUpdateCatalogEntries;
+            result["autoCreateOnlyCriticalKbs"] = options.AutoCreateOnlyCriticalKbs;
             result["enableLinuxClientSelfUpdate"] = options.EnableLinuxClientSelfUpdate;
             result["hstsMaxAgeHours"] = options.HstsMaxAgeHours;
             result["thumbprint"] = options.CertificateThumbprint;
@@ -11204,6 +11247,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 options.AutoCreateWindowsUpdateCatalogEntries = Convert.ToBoolean(payload["autoCreateWindowsUpdateCatalogEntries"]);
                 updates["AutoCreateWindowsUpdateCatalogEntries"] = options.AutoCreateWindowsUpdateCatalogEntries ? "true" : "false";
+            }
+            if (payload.ContainsKey("autoCreateOnlyCriticalKbs"))
+            {
+                options.AutoCreateOnlyCriticalKbs = Convert.ToBoolean(payload["autoCreateOnlyCriticalKbs"]);
+                updates["AutoCreateOnlyCriticalKbs"] = options.AutoCreateOnlyCriticalKbs ? "true" : "false";
             }
             if (payload.ContainsKey("enableLinuxClientSelfUpdate"))
             {
@@ -13587,6 +13635,49 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return true;
             });
 
+            Dictionary<string, Dictionary<string, object>> missingKbAggregation = BuildMissingKbAggregation();
+            foreach (Dictionary<string, object> entry in entries)
+            {
+                if (GetStringValue(entry, "targetMode") != "missingKb")
+                {
+                    continue;
+                }
+                string kbId = GetStringValue(entry, "kbId");
+                Dictionary<string, object> aggregated;
+                if (String.IsNullOrEmpty(kbId) || !missingKbAggregation.TryGetValue(kbId, out aggregated))
+                {
+                    entry["severity"] = null;
+                    entry["targetedComputerNames"] = new ArrayList();
+                    continue;
+                }
+
+                string severity = GetStringValue(aggregated, "severity");
+                entry["severity"] = severity;
+
+                HashSet<string> excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string name in ExpandInstallTargets(GetStringValue(entry, "excludedComputers")))
+                {
+                    excluded.Add(name);
+                }
+                // Mirrors AppendJobIfTargeted's own two gates (excludedComputers,
+                // and - when the option is on - Critical-only severity) so this
+                // display reflects who would actually be targeted right now, not
+                // just who reports the KB missing.
+                bool restrictedOut = options.AutoCreateOnlyCriticalKbs && !String.Equals(severity, "Critical", StringComparison.OrdinalIgnoreCase);
+                ArrayList targeted = new ArrayList();
+                if (!restrictedOut)
+                {
+                    foreach (object name in (ArrayList)aggregated["computerNames"])
+                    {
+                        if (!excluded.Contains(Convert.ToString(name)))
+                        {
+                            targeted.Add(name);
+                        }
+                    }
+                }
+                entry["targetedComputerNames"] = targeted;
+            }
+
             Dictionary<string, object> response = new Dictionary<string, object>();
             response["windowsUpdates"] = entries;
             SendJson(stream, serializer.Serialize(response));
@@ -14128,8 +14219,13 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // never depends on the filename at all).
         internal static string ExtractKbFromFilename(string relativePath)
         {
+            // "KB" + digits, matching the format the real client itself
+            // reports (WsusScanner.cs) and every other kbId in this system
+            // (manual entry, the Missing-updates "+ Add catalog entry"
+            // quick-fill) - a bare-digit return here would silently never
+            // match what any client actually sends.
             Match match = Regex.Match(relativePath, "kb(\\d{6,7})", RegexOptions.IgnoreCase);
-            return match.Success ? match.Groups[1].Value : null;
+            return match.Success ? "KB" + match.Groups[1].Value : null;
         }
 
         // Two files resolving to the same KB is always a conflict requiring
@@ -14216,7 +14312,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     Match match = Regex.Match(content, "KB Article Number=\"(\\d+)\"", RegexOptions.IgnoreCase);
                     if (match.Success)
                     {
-                        foundKbIds.Add(match.Groups[1].Value);
+                        // "KB" + digits - see ExtractKbFromFilename's own
+                        // comment for why a bare digit string here would
+                        // silently never match a real client's report.
+                        foundKbIds.Add("KB" + match.Groups[1].Value);
                     }
                 }
 
@@ -14407,7 +14506,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 string defaultArguments = extension == "msu" ? "/quiet /norestart" : "";
 
                 Dictionary<string, object> createBody = new Dictionary<string, object>();
-                createBody["name"] = "Auto: KB" + candidate.DetectedKbId;
+                createBody["name"] = "Auto: " + candidate.DetectedKbId;
                 createBody["relativePath"] = candidate.RelativePath;
                 createBody["arguments"] = defaultArguments;
                 createBody["targetMode"] = "missingKb";
@@ -15225,6 +15324,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "AppendJobIfTargeted includes matching computer only", TestAppendJobIfTargetedIncludesMatchingComputerOnly);
             allPassed &= SelfTestCheck(output, "AppendJobIfTargeted excludes disabled entries", TestAppendJobIfTargetedExcludesDisabledEntries);
             allPassed &= SelfTestCheck(output, "AppendJobIfTargeted excludes a computer named in excludedComputers even when the KB is reported missing, does not affect other computers", TestAppendJobIfTargetedRespectsExcludedComputers);
+            allPassed &= SelfTestCheck(output, "AppendJobIfTargeted only targets a machine reporting Critical severity when restrictToCriticalOnly is true, targets normally when false", TestAppendJobIfTargetedRestrictsToCriticalSeverityWhenEnabled);
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate/UpdateWindowsUpdate persist excludedComputers", TestCreateAndUpdateWindowsUpdatePersistExcludedComputers);
             allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries WinRM first when both ports are open", TestDecideAutoDetectProtocolsBothOpen);
             allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries only WinRM when just that port is open", TestDecideAutoDetectProtocolsWinRmOnly);
@@ -15268,6 +15368,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips showUsbStorageIndicator", TestConfigureServerSettingsRoundTripsShowUsbStorageIndicator);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips enableWindowsClientSelfUpdate/enableLinuxClientSelfUpdate", TestConfigureServerSettingsRoundTripsSelfUpdateToggles);
             allPassed &= SelfTestCheck(output, "autoCreateWindowsUpdateCatalogEntries defaults to false and round-trips through the real settings GET/POST handlers", TestAutoCreateWindowsUpdateCatalogEntriesSettingRoundTrips);
+            allPassed &= SelfTestCheck(output, "autoCreateOnlyCriticalKbs defaults to false and round-trips through the real settings GET/POST handlers", TestAutoCreateOnlyCriticalKbsSettingRoundTrips);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips debugLogRetentionDays/debugLogMaxSizeMb", TestConfigureServerSettingsRoundTripsDebugLogCaps);
             allPassed &= SelfTestCheck(output, "SendDebugLog returns empty content when the log file does not exist", TestSendDebugLogReturnsEmptyContentWhenFileMissing);
             allPassed &= SelfTestCheck(output, "SendDebugLog round-trips real file content", TestSendDebugLogRoundTripsRealFileContent);
@@ -15551,6 +15652,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository auto-creates a missingKb catalog entry when AutoCreateWindowsUpdateCatalogEntries is on, does not duplicate it on a second scan", TestScanSoftwareRepositoryAutoCreatesCatalogEntryWhenEnabled);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository never auto-creates when the setting is off, a KB conflicts, or that KB already has any catalog entry (even disabled)", TestScanSoftwareRepositorySkipsAutoCreateWhenDisabledConflictedOrAlreadyCatalogued);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates reports a catalog entry's real file size from the share, or null when the file no longer exists", TestSendWindowsUpdatesReportsRealFileSizeOrNullWhenMissing);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates reports severity and targetedComputerNames for a missingKb entry, respecting excludedComputers and AutoCreateOnlyCriticalKbs", TestSendWindowsUpdatesReportsSeverityAndTargetedComputersForMissingKbEntries);
             allPassed &= SelfTestCheck(output, "Windows updates catalog: Create->Update->Delete through the real CreateWindowsUpdate/UpdateWindowsUpdate/DeleteWindowsUpdate HTTP handlers, then a 404 on both after delete", TestWindowsUpdatesCrudHttpLifecycleThroughRealHandlers);
             allPassed &= SelfTestCheck(output, "Third-party software catalog: Create->Update->Delete through the real CreateThirdPartySoftware/UpdateThirdPartySoftware/DeleteThirdPartySoftware HTTP handlers, then a 404 on both after delete", TestThirdPartySoftwareCrudHttpLifecycleThroughRealHandlers);
             allPassed &= SelfTestCheck(output, "SoftwareCatalogSpec wiring is not cross-contaminated: a Windows-Updates entry never appears in the Third-Party-Software list, and cross-catalog Update/Delete attempts 404 with the OTHER catalog's own not-found message", TestSoftwareCatalogHandlersDoNotCrossContaminateBetweenCatalogs);
@@ -15698,14 +15800,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             entry["arguments"] = "/quiet";
             entry["requiresReboot"] = true;
 
-            AppendJobIfTargeted(jobs, entry, "windowsUpdate", "PC-002", null);
+            AppendJobIfTargeted(jobs, entry, "windowsUpdate", "PC-002", null, false);
             if (jobs.Count != 1)
             {
                 return "expected PC-002 (a listed target) to receive this job";
             }
 
             jobs.Clear();
-            AppendJobIfTargeted(jobs, entry, "windowsUpdate", "PC-999", null);
+            AppendJobIfTargeted(jobs, entry, "windowsUpdate", "PC-999", null, false);
             if (jobs.Count != 0)
             {
                 return "expected PC-999 (not a listed target) to NOT receive this job";
@@ -15726,18 +15828,54 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             entry["relativePath"] = @"windows-updates\test.msu";
             entry["arguments"] = "";
 
-            HashSet<string> missingKbIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "5031354" };
+            Dictionary<string, string> missingKbSeverities = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { { "5031354", "Important" } };
 
-            AppendJobIfTargeted(jobs, entry, "windows-update", "PC-EXCLUDED", missingKbIds);
+            AppendJobIfTargeted(jobs, entry, "windows-update", "PC-EXCLUDED", missingKbSeverities, false);
             if (jobs.Count != 0)
             {
                 return "expected PC-EXCLUDED to be skipped even though it reports the KB missing";
             }
 
-            AppendJobIfTargeted(jobs, entry, "windows-update", "PC-NOT-EXCLUDED", missingKbIds);
+            AppendJobIfTargeted(jobs, entry, "windows-update", "PC-NOT-EXCLUDED", missingKbSeverities, false);
             if (jobs.Count != 1)
             {
                 return "expected PC-NOT-EXCLUDED to still be targeted normally - excludedComputers must not affect other machines";
+            }
+            return null;
+        }
+
+        private static string TestAppendJobIfTargetedRestrictsToCriticalSeverityWhenEnabled()
+        {
+            ArrayList jobs = new ArrayList();
+            Dictionary<string, object> entry = new Dictionary<string, object>();
+            entry["id"] = "entry-1";
+            entry["name"] = "Test KB";
+            entry["enabled"] = true;
+            entry["targetMode"] = "missingKb";
+            entry["kbId"] = "5031354";
+            entry["relativePath"] = @"windows-updates\test.msu";
+            entry["arguments"] = "";
+
+            Dictionary<string, string> importantSeverity = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { { "5031354", "Important" } };
+            Dictionary<string, string> criticalSeverity = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { { "5031354", "Critical" } };
+
+            AppendJobIfTargeted(jobs, entry, "windows-update", "PC-IMPORTANT", importantSeverity, true);
+            if (jobs.Count != 0)
+            {
+                return "expected a machine reporting Important severity to NOT be targeted when restrictToCriticalOnly is true";
+            }
+
+            AppendJobIfTargeted(jobs, entry, "windows-update", "PC-CRITICAL", criticalSeverity, true);
+            if (jobs.Count != 1)
+            {
+                return "expected a machine reporting Critical severity to still be targeted when restrictToCriticalOnly is true";
+            }
+
+            jobs.Clear();
+            AppendJobIfTargeted(jobs, entry, "windows-update", "PC-IMPORTANT", importantSeverity, false);
+            if (jobs.Count != 1)
+            {
+                return "expected a machine reporting Important severity to be targeted normally when restrictToCriticalOnly is false - the restriction must be opt-in";
             }
             return null;
         }
@@ -15821,7 +15959,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             entry["id"] = "job-1";
             entry["enabled"] = false;
             entry["targets"] = "PC-001";
-            AppendJobIfTargeted(jobs, entry, "windowsUpdate", "PC-001", null);
+            AppendJobIfTargeted(jobs, entry, "windowsUpdate", "PC-001", null, false);
             if (jobs.Count != 0)
             {
                 return "expected a disabled entry to never be assigned, even to a listed target";
@@ -16942,6 +17080,60 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     getResponseText = Encoding.UTF8.GetString(getStream.ToArray());
                 }
                 if (getResponseText.IndexOf("\"autoCreateWindowsUpdateCatalogEntries\":true", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the settings GET response to reflect the new value, got: " + getResponseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestAutoCreateOnlyCriticalKbsSettingRoundTrips()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.EnableHttp = true;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-critical-only-setting-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                if (options.AutoCreateOnlyCriticalKbs)
+                {
+                    return "expected AutoCreateOnlyCriticalKbs to default to false";
+                }
+
+                RequestContext postRequest = new RequestContext();
+                postRequest.Method = "POST";
+                postRequest.Path = "/api/v1/server/settings";
+                postRequest.Headers = new Dictionary<string, string>();
+                postRequest.Body = "{\"autoCreateOnlyCriticalKbs\":true}";
+
+                using (MemoryStream postStream = new MemoryStream())
+                {
+                    server.ConfigureServerSettings(postStream, postRequest);
+                }
+                if (!options.AutoCreateOnlyCriticalKbs)
+                {
+                    return "expected the live options object to be updated to true after POST";
+                }
+
+                RequestContext getRequest = new RequestContext();
+                getRequest.Method = "GET";
+                getRequest.Path = "/api/v1/server/settings";
+                getRequest.Headers = new Dictionary<string, string>();
+
+                string getResponseText;
+                using (MemoryStream getStream = new MemoryStream())
+                {
+                    server.SendServerSettings(getStream);
+                    getResponseText = Encoding.UTF8.GetString(getStream.ToArray());
+                }
+                if (getResponseText.IndexOf("\"autoCreateOnlyCriticalKbs\":true", StringComparison.Ordinal) < 0)
                 {
                     return "expected the settings GET response to reflect the new value, got: " + getResponseText;
                 }
@@ -25023,13 +25215,19 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private static string TestExtractKbFromFilenameMatchesRealMicrosoftNamingPattern()
         {
-            if (ExtractKbFromFilename(@"windows-updates\windows10.0-kb5031354-x64_abc123.msu") != "5031354")
+            // Must match the "KB" + digits format the client itself reports
+            // (WsusScanner.cs: kbId = "KB" + Convert.ToString(firstKb)) - a
+            // bare-digit return here was a real, shipped bug: an
+            // auto-created catalog entry's kbId ("5031354") could never
+            // equal what any real client actually sends ("KB5031354"), so
+            // dynamic missingKb targeting silently matched nobody, ever.
+            if (ExtractKbFromFilename(@"windows-updates\windows10.0-kb5031354-x64_abc123.msu") != "KB5031354")
             {
-                return "expected to extract 5031354 from a real-shaped Microsoft Update Catalog filename";
+                return "expected to extract KB5031354 from a real-shaped Microsoft Update Catalog filename";
             }
-            if (ExtractKbFromFilename(@"windows-updates\KB5099539.msu") != "5099539")
+            if (ExtractKbFromFilename(@"windows-updates\KB5099539.msu") != "KB5099539")
             {
-                return "expected to extract 5099539 from a bare KB-prefixed filename";
+                return "expected to extract KB5099539 from a bare KB-prefixed filename";
             }
             if (ExtractKbFromFilename(@"windows-updates\office2016-word-update.msu") != null)
             {
@@ -25203,7 +25401,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 foreach (WindowsUpdateCandidate candidate in result.WindowsUpdateCandidates)
                 {
                     bool isConflictingFile = candidate.RelativePath.IndexOf("kb5031354", StringComparison.OrdinalIgnoreCase) >= 0;
-                    if (candidate.DetectedKbId != "5031354" && candidate.DetectedKbId != "5099539")
+                    if (candidate.DetectedKbId != "KB5031354" && candidate.DetectedKbId != "KB5099539")
                     {
                         return "expected every candidate to have its KB detected via the filename fallback, got: " + candidate.RelativePath + " -> " + candidate.DetectedKbId;
                     }
@@ -25240,6 +25438,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 options.DataPath = dataPath;
                 options.SoftwareRepositoryPath = shareRoot;
                 options.AutoCreateWindowsUpdateCatalogEntries = true;
+                options.Token = "test-token";
                 InventoryServer server = new InventoryServer(options);
 
                 server.ScanSoftwareRepository();
@@ -25249,9 +25448,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 {
                     return "expected exactly one catalog entry to be auto-created, got " + stored.Count;
                 }
-                if (GetStringValue(stored[0], "targetMode") != "missingKb" || GetStringValue(stored[0], "kbId") != "5031354")
+                if (GetStringValue(stored[0], "targetMode") != "missingKb" || GetStringValue(stored[0], "kbId") != "KB5031354")
                 {
-                    return "expected the auto-created entry to target missingKb 5031354, got targetMode=" + GetStringValue(stored[0], "targetMode") + " kbId=" + GetStringValue(stored[0], "kbId");
+                    return "expected the auto-created entry to target missingKb KB5031354, got targetMode=" + GetStringValue(stored[0], "targetMode") + " kbId=" + GetStringValue(stored[0], "kbId");
                 }
                 if (!Convert.ToBoolean(stored[0]["enabled"]))
                 {
@@ -25265,6 +25464,36 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (afterSecondScan.Count != 1)
                 {
                     return "expected a second scan to find the KB already catalogued and NOT create a duplicate, got " + afterSecondScan.Count + " entries";
+                }
+
+                // The real regression this test exists to catch: an
+                // auto-created entry's kbId must actually match what a real
+                // client reports (WsusScanner.cs's own "KB" + digits
+                // format), or the dynamic missingKb targeting below would
+                // silently never assign this job to anyone, forever.
+                Dictionary<string, object> clientReport = new Dictionary<string, object>();
+                clientReport["computerName"] = "REAL-CLIENT-PC";
+                ArrayList missingUpdates = new ArrayList();
+                Dictionary<string, object> missingEntry = new Dictionary<string, object>();
+                missingEntry["kbId"] = "KB5031354";
+                missingUpdates.Add(missingEntry);
+                clientReport["wsusMissingUpdates"] = missingUpdates;
+                File.WriteAllText(Path.Combine(dataPath, "REAL-CLIENT-PC.json"), new JavaScriptSerializer().Serialize(clientReport), new UTF8Encoding(false));
+
+                string jobsResponseText;
+                RequestContext jobsRequest = new RequestContext();
+                jobsRequest.Method = "GET";
+                jobsRequest.Path = "/api/v1/client/software-jobs?computerName=REAL-CLIENT-PC";
+                jobsRequest.Headers = new Dictionary<string, string>();
+                jobsRequest.Headers["x-inventory-token"] = "test-token";
+                using (MemoryStream jobsStream = new MemoryStream())
+                {
+                    server.SendClientSoftwareJobs(jobsStream, jobsRequest);
+                    jobsResponseText = Encoding.UTF8.GetString(jobsStream.ToArray());
+                }
+                if (jobsResponseText.IndexOf("KB5031354", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    return "expected the auto-created entry to actually target a real client reporting this exact KB missing, got: " + jobsResponseText;
                 }
                 return null;
             }
@@ -25302,7 +25531,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 alreadyDisabledEntry["name"] = "Pre-existing, deliberately disabled";
                 alreadyDisabledEntry["relativePath"] = @"windows-updates\some-other-file.msu";
                 alreadyDisabledEntry["targetMode"] = "missingKb";
-                alreadyDisabledEntry["kbId"] = "5099539";
+                alreadyDisabledEntry["kbId"] = "KB5099539";
                 alreadyDisabledEntry["enabled"] = false;
                 preExisting.Add(alreadyDisabledEntry);
                 server.SaveWindowsUpdates(preExisting);
@@ -25394,6 +25623,91 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendWindowsUpdatesReportsSeverityAndTargetedComputersForMissingKbEntries()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-catalog-targeted-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                Dictionary<string, object> pc1Report = new Dictionary<string, object>();
+                pc1Report["computerName"] = "PC1";
+                ArrayList pc1Missing = new ArrayList();
+                Dictionary<string, object> pc1Kb = new Dictionary<string, object>();
+                pc1Kb["kbId"] = "KB5031354";
+                pc1Kb["msrcSeverity"] = "Important";
+                pc1Missing.Add(pc1Kb);
+                pc1Report["wsusMissingUpdates"] = pc1Missing;
+                File.WriteAllText(Path.Combine(dataPath, "PC1.json"), serializer.Serialize(pc1Report), new UTF8Encoding(false));
+
+                Dictionary<string, object> pc2Report = new Dictionary<string, object>();
+                pc2Report["computerName"] = "PC2-EXCLUDED";
+                ArrayList pc2Missing = new ArrayList();
+                Dictionary<string, object> pc2Kb = new Dictionary<string, object>();
+                pc2Kb["kbId"] = "KB5031354";
+                pc2Kb["msrcSeverity"] = "Important";
+                pc2Missing.Add(pc2Kb);
+                pc2Report["wsusMissingUpdates"] = pc2Missing;
+                File.WriteAllText(Path.Combine(dataPath, "PC2-EXCLUDED.json"), serializer.Serialize(pc2Report), new UTF8Encoding(false));
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "entry-1";
+                entry["targetMode"] = "missingKb";
+                entry["kbId"] = "KB5031354";
+                entry["excludedComputers"] = "PC2-EXCLUDED";
+                entries.Add(entry);
+                server.SaveWindowsUpdates(entries);
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendWindowsUpdates(stream);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+                Dictionary<string, object> response = serializer.Deserialize<Dictionary<string, object>>(ExtractHttpResponseBodyText(responseText));
+                Dictionary<string, object> result = (Dictionary<string, object>)((ArrayList)response["windowsUpdates"])[0];
+
+                if (GetStringValue(result, "severity") != "Important")
+                {
+                    return "expected severity='Important' aggregated from a real client report, got: " + responseText;
+                }
+                ArrayList targeted = (ArrayList)result["targetedComputerNames"];
+                if (targeted.Count != 1 || Convert.ToString(targeted[0]) != "PC1")
+                {
+                    return "expected targetedComputerNames to include PC1 but exclude the excluded PC2-EXCLUDED, got: " + responseText;
+                }
+
+                // Now enable Critical-only restriction - this KB is only
+                // Important, so nobody should be targeted anymore even
+                // though PC1 still genuinely reports it missing.
+                options.AutoCreateOnlyCriticalKbs = true;
+                string restrictedResponseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendWindowsUpdates(stream);
+                    restrictedResponseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+                Dictionary<string, object> restrictedResponse = serializer.Deserialize<Dictionary<string, object>>(ExtractHttpResponseBodyText(restrictedResponseText));
+                Dictionary<string, object> restrictedResult = (Dictionary<string, object>)((ArrayList)restrictedResponse["windowsUpdates"])[0];
+                ArrayList restrictedTargeted = (ArrayList)restrictedResult["targetedComputerNames"];
+                if (restrictedTargeted.Count != 0)
+                {
+                    return "expected targetedComputerNames to be empty once AutoCreateOnlyCriticalKbs is on and this KB is only Important severity, got: " + restrictedResponseText;
+                }
+                return null;
+            }
+            finally
+            {
                 try { Directory.Delete(dataPath, true); } catch { }
             }
         }

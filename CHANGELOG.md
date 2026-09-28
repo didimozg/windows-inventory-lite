@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.75.0] - Catalog severity/targeting display, Critical-only auto-install, and a real auto-create targeting fix
+
+### Fixed
+
+- **Auto-created Windows updates catalog entries never actually targeted any machine, ever, since the feature shipped (0.72.0).** The KB-detection functions (`ExtractKbFromFilename`/`ExtractKbFromMsuFile`) returned a bare digit string (e.g. `"5031354"`), but every real client reports its missing KBs as `"KB" + digits` (e.g. `"KB5031354"`) - the two strings never matched, so the dynamic Missing-KB targeting silently found nobody to install on. Fixed at the source (both detection functions now return the same `"KB..."` format the rest of the system already uses); a new end-to-end self-test seeds a real client report and confirms an auto-created entry actually resolves a real target, closing the exact gap that let this ship unnoticed.
+
+### Added
+
+- **The Windows updates catalog table now shows each entry's Severity** (for Auto/missingKb entries, aggregated live from the fleet's own scan reports) and **which specific machines are currently targeted** (a count with the real names one hover away, matching the same pattern already used on the Missing updates page).
+- **A new "Only for Critical severity KBs" option**, dependent on the existing auto-create toggle: when on, an auto-matched KB still gets a catalog entry the moment it's detected (unchanged), but a machine is only actually targeted for install if its own scan reports that specific KB as Critical severity. A KB that turns out not to be Critical can always still be installed manually.
+
 ## [0.74.0] - Job-start signal and Event Log detail in Software job history
 
 ### Added

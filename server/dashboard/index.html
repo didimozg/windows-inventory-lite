@@ -836,7 +836,11 @@
               <input id="windowsUpdateAutoCreateEnabled" type="checkbox">
               Automatically add matched updates to the catalog and start installing
             </label>
-            <p class="cert-hint">When on, a discovered .msu file with a successfully detected, non-conflicting KB that isn't already catalogued gets a new catalog entry created automatically on the next scan - and, through the existing Missing-KB targeting, installs start on affected machines with no manual review. Off by default. A conflict (two files, same KB) is never auto-resolved.</p>
+            <label class="check-label windows-update-critical-only-field">
+              <input id="windowsUpdateAutoCreateCriticalOnlyEnabled" type="checkbox">
+              Only for Critical severity KBs
+            </label>
+            <p class="cert-hint">When on, a discovered .msu file with a successfully detected, non-conflicting KB that isn't already catalogued gets a new catalog entry created automatically on the next scan - and, through the existing Missing-KB targeting, installs start on affected machines with no manual review. Off by default. A conflict (two files, same KB) is never auto-resolved. "Only for Critical severity KBs" doesn't change what gets catalogued - it only restricts which machines actually receive the install, to those whose own scan reports the KB as Critical severity.</p>
             <div class="pkg-buttons">
               <button id="windowsUpdateAutoCreateSaveButton" class="primary-button" type="button">Save</button>
             </div>
@@ -903,6 +907,7 @@
                   <th data-sort-table="windowsUpdatesCatalog" data-sort-key="name" class="sortable">Name</th>
                   <th data-sort-table="windowsUpdatesCatalog" data-sort-key="relativePath" class="sortable">File path</th>
                   <th data-sort-table="windowsUpdatesCatalog" data-sort-key="fileSizeBytes" class="sortable">Size</th>
+                  <th data-sort-table="windowsUpdatesCatalog" data-sort-key="severity" class="sortable">Severity</th>
                   <th data-sort-table="windowsUpdatesCatalog" data-sort-key="targeting" class="sortable">Targeting</th>
                   <th data-sort-table="windowsUpdatesCatalog" data-sort-key="enabled" class="sortable">Enabled</th>
                   <th>Edit</th>

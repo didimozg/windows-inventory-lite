@@ -1773,9 +1773,19 @@ th.sort-desc::after {
    .linux-self-update-field above (sits directly in its own
    .settings-block, not inside a .pkg-grid, so .check-label's own
    grid-template-columns/align-items never apply without display:grid
-   here). No margin-bottom needed, same reasoning as those two: the
-   .cert-hint immediately below already supplies its own margin-top. */
+   here). Explicit margin-bottom matching .cert-hint's own margin-top
+   (12px) - this checkbox is no longer immediately adjacent to that
+   hint now that the Critical-only checkbox sits between them, so it
+   can no longer rely on the hint's margin-top for its own spacing. */
 .windows-update-auto-create-field {
+  display: grid;
+  margin-bottom: 12px;
+}
+
+/* Same orphan-.check-label fix as above. This one IS still immediately
+   adjacent to .cert-hint, so it keeps relying on that element's own
+   margin-top - no margin-bottom needed here. */
+.windows-update-critical-only-field {
   display: grid;
 }
 
