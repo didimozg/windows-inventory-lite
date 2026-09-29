@@ -5170,7 +5170,7 @@
       const sortedClientSoftware = applySort(clientSoftware, item => clientSoftwareSortValue(item, clientSoftwareSortKey), clientSoftwareSortDir);
 
       const nestedTable = isWindows
-        ? `<h2>${escapeHtml(client.computerName)} software</h2>
+        ? `<h2>${escapeHtml(client.computerName)} software <button type="button" class="export-button rescan-wsus-now-button" data-rescan-wsus-now="${escapeHtml(client.computerName)}">Rescan WSUS now</button><span class="rescan-wsus-now-status" data-rescan-wsus-now-status="${escapeHtml(client.computerName)}"></span></h2>
             <table class="nested-table">
               <thead><tr>
                 <th data-sort-table="clientSoftware" data-sort-key="name" class="sortable">Name</th>
@@ -6254,6 +6254,29 @@
         const nowHidden = row.classList.toggle('hidden');
         if (nowHidden) { state.expandedDetails.delete(key); } else { state.expandedDetails.add(key); }
       }
+      return;
+    }
+
+    const rescanWsusBtn = e.target.closest('[data-rescan-wsus-now]');
+    if (rescanWsusBtn) {
+      const computerName = rescanWsusBtn.dataset.rescanWsusNow;
+      // Direct interpolation into the attribute selector, matching this
+      // same listener's other computer/job-keyed lookups above (data-client,
+      // data-software, data-linux-client) - no cssEscape helper exists in
+      // this file, and computer names don't contain quote characters.
+      const statusEl = document.querySelector(`[data-rescan-wsus-now-status="${computerName}"]`);
+      rescanWsusBtn.disabled = true;
+      fetch(`/api/v1/windows-updates/rescan-now?computerName=${encodeURIComponent(computerName)}`, { method: 'POST' })
+        .then(res => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          if (statusEl) statusEl.textContent = 'Rescan requested - will run on this client\'s next check-in.';
+        })
+        .catch(() => {
+          if (statusEl) statusEl.textContent = 'Request failed - try again.';
+        })
+        .finally(() => {
+          rescanWsusBtn.disabled = false;
+        });
       return;
     }
 
