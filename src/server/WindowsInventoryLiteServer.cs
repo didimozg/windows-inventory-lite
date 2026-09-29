@@ -10761,6 +10761,103 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return new WsusCabDownloadResult { Success = true, Sha256Hash = hash, SizeBytes = bytes.LongLength };
         }
 
+        internal sealed class WsusKbDownloadResult
+        {
+            internal bool Success;
+            internal string ErrorCategory;
+            internal string ErrorMessage;
+            internal string RelativePath;
+            internal long SizeBytes;
+        }
+
+        // Same "reject an obviously-wrong response" reasoning as
+        // MinimumPlausibleWsusCabBytes, scaled down - a real KB installer
+        // can legitimately be much smaller than a cab (the live PoC's
+        // smallest real example was ~1.8MB, but there is no guarantee a
+        // future KB's real content won't be smaller still), so this only
+        // exists to reject a captive-portal/error-page-sized response, not
+        // to second-guess a genuinely small real file.
+        private const long MinimumPlausibleKbFileBytes = 1024;
+
+        // Discards Microsoft's own content-hash-based filename (e.g.
+        // "vstor_redist_e7a2976ca...exe" - no KB number anywhere in it,
+        // confirmed by the live proof-of-concept) in favor of one this
+        // project's own KB-based tooling (conflict detection, catalog
+        // display) can work with directly. A repeat download of the same
+        // KB overwrites its own prior file rather than accumulating
+        // hash-suffixed duplicates.
+        internal static string BuildKbDownloadFileName(string kbId, string downloadUrl)
+        {
+            string normalized = kbId.StartsWith("KB", StringComparison.OrdinalIgnoreCase) ? kbId.Substring(2) : kbId;
+            string extension = ".exe";
+            try
+            {
+                Uri uri = new Uri(downloadUrl);
+                string urlExtension = Path.GetExtension(uri.AbsolutePath);
+                if (!String.IsNullOrEmpty(urlExtension))
+                {
+                    extension = urlExtension;
+                }
+            }
+            catch
+            {
+                // Malformed URL - fall back to .exe; the download attempt
+                // itself will fail downstream (DownloadBytesFromUrl throws
+                // on an invalid URI) and surface a clear error before this
+                // filename is ever actually used to write a file.
+            }
+            return "KB" + normalized + extension;
+        }
+
+        // Pure orchestration, mirroring PerformWsusCabDownloadCore's own
+        // shape exactly - every I/O boundary is an injected delegate so
+        // the sequencing and error-phase disambiguation is fully
+        // self-tested without any real network/disk access.
+        internal static WsusKbDownloadResult PerformWsusKbDownloadCore(string kbId, string downloadUrl, Func<string, byte[]> downloadBytes, Action<string, byte[]> writeBytes)
+        {
+            byte[] bytes;
+            try
+            {
+                bytes = downloadBytes(downloadUrl);
+            }
+            catch (WebException webEx)
+            {
+                return new WsusKbDownloadResult
+                {
+                    Success = false,
+                    ErrorCategory = webEx.Status == WebExceptionStatus.ProtocolError ? "badResponse" : "network",
+                    ErrorMessage = DescribeExceptionChain(webEx)
+                };
+            }
+            catch (Exception ex)
+            {
+                return new WsusKbDownloadResult { Success = false, ErrorCategory = "network", ErrorMessage = DescribeExceptionChain(ex) };
+            }
+
+            if (bytes == null || bytes.LongLength < MinimumPlausibleKbFileBytes)
+            {
+                long actualLength = bytes == null ? 0 : bytes.LongLength;
+                return new WsusKbDownloadResult
+                {
+                    Success = false,
+                    ErrorCategory = "badResponse",
+                    ErrorMessage = "Downloaded content is too small to be a real update installer (" + actualLength + " bytes)"
+                };
+            }
+
+            string relativePath = "windows-updates\\" + BuildKbDownloadFileName(kbId, downloadUrl);
+            try
+            {
+                writeBytes(relativePath, bytes);
+            }
+            catch (Exception ex)
+            {
+                return new WsusKbDownloadResult { Success = false, ErrorCategory = "diskWrite", ErrorMessage = ex.Message };
+            }
+
+            return new WsusKbDownloadResult { Success = true, RelativePath = relativePath, SizeBytes = bytes.LongLength };
+        }
+
         // Shared by the cab downloader and the per-KB file downloader
         // (Task 6 of docs/superpowers/plans/2026-09-29-wsus-kb-file-download.md) -
         // both need the exact same TLS/proxy/timeout setup, just against a
@@ -15744,6 +15841,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "PerformWsusCabDownloadCore categorizes a suspiciously small download as 'badResponse' without ever attempting to write it", TestPerformWsusCabDownloadCoreCategorizesTinyDownloadAsBadResponse);
             allPassed &= SelfTestCheck(output, "PerformWsusCabDownloadCore categorizes a write-phase exception as 'diskWrite', distinct from a same-typed download-phase exception", TestPerformWsusCabDownloadCoreCategorizesWriteFailureAsDiskWrite);
             allPassed &= SelfTestCheck(output, "BuildOutboundProxy is null and PerformWsusCabDownloadCore still succeeds with no proxy configured", TestPerformWsusCabDownloadCoreWorksWithNoProxyConfigured);
+            allPassed &= SelfTestCheck(output, "BuildKbDownloadFileName uses the KB id and the URL's own extension", TestBuildKbDownloadFileNameUsesKbIdAndUrlExtension);
+            allPassed &= SelfTestCheck(output, "BuildKbDownloadFileName normalizes a bare-digit kbId to the canonical 'KB' form", TestBuildKbDownloadFileNameNormalizesBareDigitKbId);
+            allPassed &= SelfTestCheck(output, "BuildKbDownloadFileName falls back to .exe for a malformed URL rather than throwing", TestBuildKbDownloadFileNameFallsBackToExeForAMalformedUrl);
+            allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore succeeds and reports the deterministic windows-updates\\KB{n}{ext} relativePath", TestPerformWsusKbDownloadCoreSucceedsAndWritesUnderDeterministicName);
+            allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore categorizes a non-ProtocolError WebException as 'network'", TestPerformWsusKbDownloadCoreCategorizesNetworkFailure);
+            allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore categorizes a ProtocolError WebException as 'badResponse'", TestPerformWsusKbDownloadCoreCategorizesProtocolErrorAsBadResponse);
+            allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore categorizes a suspiciously small download as 'badResponse' without attempting to write it", TestPerformWsusKbDownloadCoreCategorizesTinyDownloadAsBadResponse);
+            allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore categorizes a write-phase exception as 'diskWrite'", TestPerformWsusKbDownloadCoreCategorizesWriteFailureAsDiskWrite);
             allPassed &= SelfTestCheck(output, "TryClaimWsusDownloadInProgress succeeds once, fails while held, succeeds again after release", TestWsusDownloadInProgressGuardClaimAndRelease);
             allPassed &= SelfTestCheck(output, "RunWsusDownloadScheduleTick updates WsusDownloadScheduleLastRunUtc only when the schedule was actually due", TestRunWsusDownloadScheduleTickUpdatesLastRunOnlyWhenDue);
             allPassed &= SelfTestCheck(output, "POST /api/v1/windows-updates/cab-download-now returns started and has already claimed the guard synchronously before returning", TestTriggerWsusCabDownloadNowStartsAndReleasesGuard);
@@ -24993,6 +25098,119 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 try { Directory.Delete(options.DataPath, true); } catch { }
             }
+        }
+
+        private static string TestBuildKbDownloadFileNameUsesKbIdAndUrlExtension()
+        {
+            string result = InventoryServer.BuildKbDownloadFileName("KB5029497", "http://download.windowsupdate.com/d/msdownload/update/software/secu/2023/08/vstor_redist_e7a2976ca89418fd18158d4799cdf9493deedc2c.exe");
+            if (result != "KB5029497.exe")
+            {
+                return "expected 'KB5029497.exe', got: " + result;
+            }
+            return null;
+        }
+
+        private static string TestBuildKbDownloadFileNameNormalizesBareDigitKbId()
+        {
+            string result = InventoryServer.BuildKbDownloadFileName("5031539", "http://download.windowsupdate.com/c/msdownload/update/software/secu/2023/10/ssu-19041.3562-x64_bf1e4bd96a843cc56a3127ca721a5415ff3100e6.cab");
+            if (result != "KB5031539.cab")
+            {
+                return "expected 'KB5031539.cab' for a bare-digit kbId, got: " + result;
+            }
+            return null;
+        }
+
+        private static string TestBuildKbDownloadFileNameFallsBackToExeForAMalformedUrl()
+        {
+            string result = InventoryServer.BuildKbDownloadFileName("KB1234567", "not a real url");
+            if (result != "KB1234567.exe")
+            {
+                return "expected a safe .exe fallback for a malformed URL, got: " + result;
+            }
+            return null;
+        }
+
+        private static string TestPerformWsusKbDownloadCoreSucceedsAndWritesUnderDeterministicName()
+        {
+            byte[] fakeContent = new byte[2048];
+            string writtenPath = null;
+            byte[] writtenBytes = null;
+            InventoryServer.WsusKbDownloadResult result = InventoryServer.PerformWsusKbDownloadCore(
+                "KB5029497",
+                "http://example.com/vstor_redist_hash.exe",
+                url => fakeContent,
+                (relativePath, bytes) => { writtenPath = relativePath; writtenBytes = bytes; });
+
+            if (!result.Success)
+            {
+                return "expected success, got error: [" + result.ErrorCategory + "] " + result.ErrorMessage;
+            }
+            if (result.RelativePath != @"windows-updates\KB5029497.exe")
+            {
+                return @"expected relativePath 'windows-updates\KB5029497.exe', got: " + result.RelativePath;
+            }
+            if (writtenPath != result.RelativePath || writtenBytes != fakeContent)
+            {
+                return "expected the write delegate to receive the same relativePath and bytes reported in the result";
+            }
+            if (result.SizeBytes != fakeContent.LongLength)
+            {
+                return "expected SizeBytes to match the downloaded content length";
+            }
+            return null;
+        }
+
+        private static string TestPerformWsusKbDownloadCoreCategorizesNetworkFailure()
+        {
+            InventoryServer.WsusKbDownloadResult result = InventoryServer.PerformWsusKbDownloadCore(
+                "KB1111111", "http://example.com/x.exe",
+                url => { throw new WebException("boom", WebExceptionStatus.ConnectFailure); },
+                (relativePath, bytes) => { });
+            if (result.Success || result.ErrorCategory != "network")
+            {
+                return "expected a 'network' failure for a non-ProtocolError WebException, got success=" + result.Success + " category=" + result.ErrorCategory;
+            }
+            return null;
+        }
+
+        private static string TestPerformWsusKbDownloadCoreCategorizesProtocolErrorAsBadResponse()
+        {
+            InventoryServer.WsusKbDownloadResult result = InventoryServer.PerformWsusKbDownloadCore(
+                "KB1111111", "http://example.com/x.exe",
+                url => { throw new WebException("boom", null, WebExceptionStatus.ProtocolError, null); },
+                (relativePath, bytes) => { });
+            if (result.Success || result.ErrorCategory != "badResponse")
+            {
+                return "expected a 'badResponse' failure for a ProtocolError WebException, got success=" + result.Success + " category=" + result.ErrorCategory;
+            }
+            return null;
+        }
+
+        private static string TestPerformWsusKbDownloadCoreCategorizesTinyDownloadAsBadResponse()
+        {
+            InventoryServer.WsusKbDownloadResult result = InventoryServer.PerformWsusKbDownloadCore(
+                "KB1111111", "http://example.com/x.exe",
+                url => new byte[10],
+                (relativePath, bytes) => { throw new InvalidOperationException("should never be called for a too-small download"); });
+            if (result.Success || result.ErrorCategory != "badResponse")
+            {
+                return "expected a 'badResponse' failure for an implausibly small download, got success=" + result.Success + " category=" + result.ErrorCategory;
+            }
+            return null;
+        }
+
+        private static string TestPerformWsusKbDownloadCoreCategorizesWriteFailureAsDiskWrite()
+        {
+            byte[] fakeContent = new byte[2048];
+            InventoryServer.WsusKbDownloadResult result = InventoryServer.PerformWsusKbDownloadCore(
+                "KB1111111", "http://example.com/x.exe",
+                url => fakeContent,
+                (relativePath, bytes) => { throw new IOException("disk full"); });
+            if (result.Success || result.ErrorCategory != "diskWrite")
+            {
+                return "expected a 'diskWrite' failure when the write delegate throws, got success=" + result.Success + " category=" + result.ErrorCategory;
+            }
+            return null;
         }
 
         private static string TestWsusDownloadInProgressGuardClaimAndRelease()
