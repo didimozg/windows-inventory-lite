@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.78.0] - WSUS missing-KB scan freshness
+
+### Added
+
+- **A successfully-installed KB now disappears from the Catalog page's "targeted" count immediately**, instead of staying stuck indefinitely. Previously, the only thing that refreshed a machine's missing-KB status was a full WUA rescan, which only ran when Microsoft published a new `wsusscn2.cab` - an event with no relationship to what this project itself just installed. Found live: KB5029497 installed successfully (confirmed via the real `MsiInstaller` log) but the Catalog page kept showing the machine as "targeted" regardless.
+- **A configurable maximum scan age** (`WsusScanMaxAgeDays`, default 7 days, Software > Windows updates settings) now forces a full rescan even when the cab hash hasn't changed, bounding any other kind of staleness (a reimage, a manually-applied update, etc.) that the optimistic per-install update above doesn't cover.
+- **A "Rescan WSUS now" button** on a Windows client's expanded row (Clients page) lets an admin force an immediate rescan of one machine on its next check-in, without waiting for either of the above.
+
+### Notes
+
+- Full design: `docs/superpowers/specs/2026-09-30-wsus-scan-freshness-design.md`.
+
+## [Windows client 0.10.0] - Age- and force-aware WSUS rescan triggers
+
+### Added
+
+- **The client's existing WSUS scan-trigger check now also rescans when the last scan is older than the server's configured `WsusScanMaxAgeDays`, or when the server has flagged this machine for an immediate rescan** - previously it only ever re-ran when the server's `wsusscn2.cab` hash changed.
+
 ## [0.77.3] - Live download progress for the WSUS cab and per-KB downloads
 
 ### Added
