@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.77.1";
+        internal const string ProductVersion = "0.77.2";
 
         private static int Main(string[] args)
         {
@@ -14131,6 +14131,20 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 return false;
             }
+            // A path ending in a separator names a folder, not a file - the
+            // placeholder shape an admin types before a KB's real download
+            // has completed (e.g. "windows-updates\Windows 10\"). Path.GetFullPath
+            // below does not reject this (it stays inside the right subfolder),
+            // so this entry would otherwise save successfully and then get
+            // dispatched as a real install job against a file that doesn't
+            // exist - the client's own File.Copy against a trailing-separator
+            // path throws a raw OS "invalid name" error, not caught by any of
+            // its specific FileNotFoundException/DirectoryNotFoundException/
+            // UnauthorizedAccessException handlers.
+            if (relativePath.EndsWith("\\") || relativePath.EndsWith("/"))
+            {
+                return false;
+            }
             try
             {
                 const string dummyRoot = @"C:\__wil-catalog-path-check__";
@@ -23863,7 +23877,18 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             string[] invalid = {
                 null, "", "test.msu", @"third-party-software\setup.exe",
                 @"windows-updates\..\..\etc\evil.exe", @"..\windows-updates\test.msu",
-                @"C:\windows-updates\test.msu"
+                @"C:\windows-updates\test.msu",
+                // Regression coverage for a real production incident: a
+                // catalog entry saved with a folder-only relativePath (no
+                // filename - the placeholder an admin types before a KB's
+                // real download has completed) was accepted here, then
+                // dispatched as a real install job to every targeted
+                // machine. The client's own File.Copy against a path ending
+                // in a separator throws a raw OS "invalid name" error that
+                // isn't one of the specific exception types it catches,
+                // failing every affected machine identically and repeatedly
+                // until an admin noticed and manually disabled the entry.
+                @"windows-updates\Windows 10\", "windows-updates/Windows 10/"
             };
             foreach (string relativePath in invalid)
             {

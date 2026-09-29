@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.77.2] - A catalog entry's file path can no longer be saved as a bare folder
+
+### Fixed
+
+- **A Windows update catalog entry with a folder-only `relativePath` (no filename - the placeholder shape typed before a KB's real download has completed, e.g. `windows-updates\Windows 10\`) could be saved successfully, then got dispatched as a real install job against a file that doesn't exist.** The client's own file copy against a path ending in a separator throws a raw OS "invalid name" error, not one of the specific error types the client already handles cleanly - every targeted machine failed identically and repeatedly ("Синтаксическая ошибка в имени файла, имени папки или метке тома") until an admin noticed and manually disabled the entry. Found live: the same failure recurring hourly across 4+ real fleet machines for one KB, and once for another KB whose real file hadn't finished downloading yet. `relativePath` validation now rejects anything ending in `\` or `/` at save time - a placeholder value is still fully supported (e.g. `windows-updates\KB1234567.pending`), it just needs to look like a file, not a folder. If such a placeholder ever does get dispatched before its real download completes, the client now correctly reports a clean "file not found" error instead of the cryptic OS message.
+
 ## [0.77.1] - Auto-created .exe update entries no longer default to a guaranteed install hang
 
 ### Fixed
