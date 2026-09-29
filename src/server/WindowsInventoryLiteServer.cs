@@ -9596,6 +9596,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                         summaryEntry["kbId"] = kbId;
                         summaryEntry["title"] = GetStringValue(entry, "title");
                         summaryEntry["severity"] = GetStringValue(entry, "msrcSeverity");
+                        summaryEntry["downloadUrl"] = GetStringValue(entry, "downloadUrl");
                         byKbId[normalizedKbId] = summaryEntry;
                         computersByKbId[normalizedKbId] = new List<string>();
                     }
@@ -13675,11 +13676,13 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 {
                     entry["severity"] = null;
                     entry["targetedComputerNames"] = new ArrayList();
+                    entry["downloadUrl"] = "";
                     continue;
                 }
 
                 string severity = GetStringValue(aggregated, "severity");
                 entry["severity"] = severity;
+                entry["downloadUrl"] = GetStringValue(aggregated, "downloadUrl");
 
                 HashSet<string> excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (string name in ExpandInstallTargets(GetStringValue(entry, "excludedComputers")))
@@ -15700,6 +15703,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates reports a catalog entry's real file size from the share, or null when the file no longer exists", TestSendWindowsUpdatesReportsRealFileSizeOrNullWhenMissing);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates resolves severity/targetedComputerNames for a legacy bare-digit catalog kbId against a real 'KB'-prefixed client report", TestSendWindowsUpdatesResolvesSeverityAndTargetsForLegacyBareDigitKbId);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates reports severity and targetedComputerNames for a missingKb entry, respecting excludedComputers and AutoCreateOnlyCriticalKbs", TestSendWindowsUpdatesReportsSeverityAndTargetedComputersForMissingKbEntries);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates exposes downloadUrl for a missingKb entry when a client has reported one", TestSendWindowsUpdatesExposesDownloadUrlForMissingKbEntries);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates returns an empty downloadUrl for a missingKb entry no client has reported", TestSendWindowsUpdatesReturnsEmptyDownloadUrlWhenNoClientHasReportedOne);
             allPassed &= SelfTestCheck(output, "Windows updates catalog: Create->Update->Delete through the real CreateWindowsUpdate/UpdateWindowsUpdate/DeleteWindowsUpdate HTTP handlers, then a 404 on both after delete", TestWindowsUpdatesCrudHttpLifecycleThroughRealHandlers);
             allPassed &= SelfTestCheck(output, "Third-party software catalog: Create->Update->Delete through the real CreateThirdPartySoftware/UpdateThirdPartySoftware/DeleteThirdPartySoftware HTTP handlers, then a 404 on both after delete", TestThirdPartySoftwareCrudHttpLifecycleThroughRealHandlers);
             allPassed &= SelfTestCheck(output, "SoftwareCatalogSpec wiring is not cross-contaminated: a Windows-Updates entry never appears in the Third-Party-Software list, and cross-catalog Update/Delete attempts 404 with the OTHER catalog's own not-found message", TestSoftwareCatalogHandlersDoNotCrossContaminateBetweenCatalogs);
@@ -25983,6 +25988,102 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendWindowsUpdatesExposesDownloadUrlForMissingKbEntries()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            try
+            {
+                InventoryServer server = new InventoryServer(new ServerOptions { DataPath = tempDir });
+
+                Dictionary<string, object> clientReport = new Dictionary<string, object>();
+                clientReport["computerName"] = "KB-DOWNLOAD-URL-PC";
+                ArrayList missing = new ArrayList();
+                Dictionary<string, object> missingEntry = new Dictionary<string, object>();
+                missingEntry["kbId"] = "KB5029497";
+                missingEntry["title"] = "Test update";
+                missingEntry["msrcSeverity"] = "Critical";
+                missingEntry["downloadUrl"] = "http://download.windowsupdate.com/d/msdownload/update/software/secu/2023/08/vstor_redist_test.exe";
+                missing.Add(missingEntry);
+                clientReport["wsusMissingUpdates"] = missing;
+                File.WriteAllText(Path.Combine(tempDir, "KB-DOWNLOAD-URL-PC.json"), new JavaScriptSerializer().Serialize(clientReport));
+
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                Dictionary<string, object> catalogEntry = new Dictionary<string, object>();
+                catalogEntry["id"] = "entry-1";
+                catalogEntry["name"] = "Test KB";
+                catalogEntry["targetMode"] = "missingKb";
+                catalogEntry["kbId"] = "KB5029497";
+                catalogEntry["relativePath"] = "";
+                catalogEntry["enabled"] = true;
+                entries.Add(catalogEntry);
+
+                System.Reflection.MethodInfo saveMethod = typeof(InventoryServer).GetMethod("SaveWindowsUpdates", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                saveMethod.Invoke(server, new object[] { entries });
+
+                MemoryStream stream = new MemoryStream();
+                System.Reflection.MethodInfo sendMethod = typeof(InventoryServer).GetMethod("SendWindowsUpdates", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                sendMethod.Invoke(server, new object[] { stream });
+
+                string responseText = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream.ToArray()));
+                Dictionary<string, object> response = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText);
+                ArrayList windowsUpdates = (ArrayList)response["windowsUpdates"];
+                Dictionary<string, object> returnedEntry = (Dictionary<string, object>)windowsUpdates[0];
+
+                if (Convert.ToString(returnedEntry["downloadUrl"]) != "http://download.windowsupdate.com/d/msdownload/update/software/secu/2023/08/vstor_redist_test.exe")
+                {
+                    return "expected downloadUrl to be resolved from the client's reported wsusMissingUpdates entry, got: " + Convert.ToString(returnedEntry["downloadUrl"]);
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(tempDir, true);
+            }
+        }
+
+        private static string TestSendWindowsUpdatesReturnsEmptyDownloadUrlWhenNoClientHasReportedOne()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            try
+            {
+                InventoryServer server = new InventoryServer(new ServerOptions { DataPath = tempDir });
+
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                Dictionary<string, object> catalogEntry = new Dictionary<string, object>();
+                catalogEntry["id"] = "entry-1";
+                catalogEntry["name"] = "Test KB";
+                catalogEntry["targetMode"] = "missingKb";
+                catalogEntry["kbId"] = "KB9999999";
+                catalogEntry["relativePath"] = "";
+                catalogEntry["enabled"] = true;
+                entries.Add(catalogEntry);
+
+                System.Reflection.MethodInfo saveMethod = typeof(InventoryServer).GetMethod("SaveWindowsUpdates", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                saveMethod.Invoke(server, new object[] { entries });
+
+                MemoryStream stream = new MemoryStream();
+                System.Reflection.MethodInfo sendMethod = typeof(InventoryServer).GetMethod("SendWindowsUpdates", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                sendMethod.Invoke(server, new object[] { stream });
+
+                string responseText = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream.ToArray()));
+                Dictionary<string, object> response = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText);
+                ArrayList windowsUpdates = (ArrayList)response["windowsUpdates"];
+                Dictionary<string, object> returnedEntry = (Dictionary<string, object>)windowsUpdates[0];
+
+                if (!String.IsNullOrEmpty(Convert.ToString(returnedEntry["downloadUrl"])))
+                {
+                    return "expected an empty downloadUrl when no client has reported this KB, got: " + Convert.ToString(returnedEntry["downloadUrl"]);
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(tempDir, true);
             }
         }
 
