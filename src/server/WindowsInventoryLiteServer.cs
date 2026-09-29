@@ -10670,19 +10670,6 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendJson(stream, "{\"status\":\"ok\"}");
         }
 
-        private List<Dictionary<string, object>> GetWsusDownloadLogEntries()
-        {
-            List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
-            lock (wsusDownloadLogLock)
-            {
-                for (int i = wsusDownloadLog.Count - 1; i >= 0; i--)
-                {
-                    entries.Add(WsusDownloadLogEntryToDictionary(wsusDownloadLog[i]));
-                }
-            }
-            return entries;
-        }
-
         internal sealed class WsusCabDownloadResult
         {
             internal bool Success;
@@ -25072,12 +25059,22 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 System.Reflection.MethodInfo loadMethod = typeof(InventoryServer).GetMethod("LoadWsusDownloadLogFromDisk", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
                 loadMethod.Invoke(server, null);
 
-                System.Reflection.MethodInfo listMethod = typeof(InventoryServer).GetMethod("GetWsusDownloadLogEntries", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                List<Dictionary<string, object>> entries = (List<Dictionary<string, object>>)listMethod.Invoke(server, null);
+                // Read the loaded entry's Kind field directly off the
+                // server's private in-memory log - not through
+                // WsusDownloadLogEntryToDictionary, which has its own
+                // independent "cab" default and would mask a broken or
+                // missing default in LoadWsusDownloadLogFromDisk itself.
+                System.Reflection.FieldInfo logField = typeof(InventoryServer).GetField("wsusDownloadLog", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                IList entries = (IList)logField.GetValue(server);
 
-                if (entries.Count != 1 || Convert.ToString(entries[0]["kind"]) != "cab")
+                if (entries.Count != 1)
                 {
-                    return "expected the legacy entry to load with kind defaulted to 'cab'";
+                    return "expected exactly one loaded entry, got: " + entries.Count;
+                }
+                InventoryServer.WsusDownloadLogEntry entry = (InventoryServer.WsusDownloadLogEntry)entries[0];
+                if (entry.Kind != "cab")
+                {
+                    return "expected the legacy entry to load with kind defaulted to 'cab', got: " + entry.Kind;
                 }
                 return null;
             }
