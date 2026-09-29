@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.77.0";
+        internal const string ProductVersion = "0.77.1";
 
         private static int Main(string[] args)
         {
@@ -14831,7 +14831,20 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 }
 
                 string extension = candidate.RelativePath.Contains(".") ? candidate.RelativePath.Substring(candidate.RelativePath.LastIndexOf('.') + 1).ToLowerInvariant() : "";
-                string defaultArguments = extension == "msu" ? "/quiet /norestart" : "";
+                // A real production incident (KB5029497, vstor_redist.exe)
+                // showed that an empty default for .exe candidates isn't
+                // just "less correct" than a real per-installer switch -
+                // it guarantees a fully interactive install attempt, which
+                // hangs forever under this client's Session-0-isolated
+                // service context (no desktop ever reaches the installer's
+                // UI) until the 30-minute watchdog kills it. "/S" (the same
+                // default already used for a manually-added third-party
+                // .exe, see promoteWindowsUpdateCandidate) isn't universally
+                // correct either - installer conventions vary - but it's a
+                // real, working default for many .exe installers and never
+                // worse than running fully interactive. An admin can always
+                // override it per KB via Edit.
+                string defaultArguments = extension == "msu" ? "/quiet /norestart" : (extension == "exe" ? "/S" : "");
 
                 Dictionary<string, object> createBody = new Dictionary<string, object>();
                 createBody["name"] = "Auto: " + candidate.DetectedKbId;
@@ -15981,6 +15994,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository flags every candidate sharing a duplicate detected KB with HasConflict=true, leaves a unique KB unflagged", TestScanSoftwareRepositoryFlagsConflictingKbCandidates);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository auto-creates a missingKb catalog entry when AutoCreateWindowsUpdateCatalogEntries is on, does not duplicate it on a second scan", TestScanSoftwareRepositoryAutoCreatesCatalogEntryWhenEnabled);
             allPassed &= SelfTestCheck(output, "Auto-create recognizes a legacy bare-digit catalog kbId as already covering a freshly-detected 'KB'-prefixed KB, does not create a duplicate", TestAutoCreateSkipsWhenAlreadyCataloguedUnderLegacyBareDigitKbId);
+            allPassed &= SelfTestCheck(output, "Auto-create defaults a detected .exe candidate's arguments to '/S' instead of leaving them empty (a real production hang, not just interactive-install risk)", TestAutoCreateDefaultsExeArgumentsToSlashS);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository never auto-creates when the setting is off, a KB conflicts, or that KB already has any catalog entry (even disabled)", TestScanSoftwareRepositorySkipsAutoCreateWhenDisabledConflictedOrAlreadyCatalogued);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates reports a catalog entry's real file size from the share, or null when the file no longer exists", TestSendWindowsUpdatesReportsRealFileSizeOrNullWhenMissing);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates resolves severity/targetedComputerNames for a legacy bare-digit catalog kbId against a real 'KB'-prefixed client report", TestSendWindowsUpdatesResolvesSeverityAndTargetsForLegacyBareDigitKbId);
@@ -26342,6 +26356,58 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (afterScan.Count != 1)
                 {
                     return "expected the legacy bare-digit entry to be recognized as already covering this KB - no duplicate should be created, got " + afterScan.Count + " entries";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // Regression coverage for a real, reproduced production incident:
+        // an auto-created .exe entry (a standalone KB installer, not an
+        // .msu) got zero default arguments, so the client ran it fully
+        // interactively - which hangs forever under the client's
+        // Session-0-isolated service context (no desktop ever reaches the
+        // installer's UI), until the 30-minute install watchdog kills it.
+        // Confirmed live: KB5029497 (vstor_redist.exe) failed this exact
+        // way on a real fleet machine, arguments="" in its real stored
+        // catalog entry. /S (this project's own existing default for a
+        // manually-added third-party .exe, from promoteWindowsUpdateCandidate)
+        // is not universally correct for every .exe installer convention -
+        // vstor_redist's own real silent switch is "/q /norestart" - but it
+        // is a working default for many real .exe installers and, critically,
+        // never worse than the previous default of running fully interactive.
+        // An admin can always override it via Edit for a specific KB.
+        private static string TestAutoCreateDefaultsExeArgumentsToSlashS()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-share-scan-exe-args-test-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-share-scan-exe-args-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "windows-updates"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "third-party-software"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                File.WriteAllText(Path.Combine(shareRoot, "windows-updates", "windows10.0-kb5029497-x64.exe"), "test");
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                options.AutoCreateWindowsUpdateCatalogEntries = true;
+                InventoryServer server = new InventoryServer(options);
+
+                server.ScanSoftwareRepository();
+                List<Dictionary<string, object>> afterScan = server.LoadWindowsUpdates();
+                if (afterScan.Count != 1)
+                {
+                    return "expected exactly one auto-created entry for the .exe candidate, got " + afterScan.Count;
+                }
+                string arguments = GetStringValue(afterScan[0], "arguments");
+                if (arguments != "/S")
+                {
+                    return "expected an auto-created .exe entry to default arguments to '/S', got: '" + arguments + "'";
                 }
                 return null;
             }

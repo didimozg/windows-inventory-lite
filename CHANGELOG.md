@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.77.1] - Auto-created .exe update entries no longer default to a guaranteed install hang
+
+### Fixed
+
+- **An auto-created `.exe`-based Windows update entry got no default install arguments at all**, unlike `.msu` (which already defaulted to `/quiet /norestart`). Running an installer with zero arguments means it starts fully interactive - and since the client runs as a Session-0-isolated Windows service, any window the installer tries to show is permanently unreachable, so the install just hangs until the 30-minute watchdog kills it. Found live: KB5029497 (a real `vstor_redist.exe` update) failed this way identically on every one of 5+ real attempts on a real fleet machine. Auto-created `.exe` entries now default to `/S` (the same default already used for a manually-added third-party `.exe`) - not universally correct for every installer convention, but a real working default for many, and never worse than running fully interactive. An admin can still override it per KB via Edit.
+
 ## [0.77.0] - Automatic KB installer download
 
 ### Added
