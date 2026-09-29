@@ -2880,6 +2880,9 @@
           const attemptCompleted = data.lastAttemptUtc && data.lastAttemptUtc !== previousAttemptUtc;
           const timedOut = Date.now() - startedAtMs > wsusDownloadPollMaxMs;
           if (!attemptCompleted && !timedOut) {
+            if (typeof data.downloadBytesReceived === 'number') {
+              messageElement.textContent = `Download in progress - ${formatDownloadProgressText(data.downloadBytesReceived, data.downloadTotalBytes)}`;
+            }
             return;
           }
           window.clearInterval(state.wsusDownloadPollTimer);
@@ -4234,6 +4237,16 @@
       });
   }
 
+  function formatDownloadProgressText(bytesReceived, totalBytes) {
+    const receivedMb = (bytesReceived / (1024 * 1024)).toFixed(1);
+    if (!totalBytes || totalBytes <= 0) {
+      return `${receivedMb} MB downloaded`;
+    }
+    const totalMb = (totalBytes / (1024 * 1024)).toFixed(1);
+    const percent = Math.round((bytesReceived / totalBytes) * 100);
+    return `${receivedMb} / ${totalMb} MB (${percent}%)`;
+  }
+
   function pollWindowsUpdateKbDownloadCompletion(id, previousRelativePath, startedAtMs) {
     const timer = window.setInterval(() => {
       fetch('/api/v1/windows-updates', { cache: 'no-store' })
@@ -4247,6 +4260,12 @@
           const changed = entry && (entry.relativePath || '') !== previousRelativePath;
           const timedOut = Date.now() - startedAtMs > windowsUpdateKbDownloadPollMaxMs;
           if (!changed && !timedOut) {
+            if (entry && typeof entry.downloadBytesReceived === 'number') {
+              const button = document.querySelector(`[data-download-windows-update="${id}"]`);
+              if (button) {
+                button.textContent = formatDownloadProgressText(entry.downloadBytesReceived, entry.downloadTotalBytes);
+              }
+            }
             return;
           }
           window.clearInterval(timer);
