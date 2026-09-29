@@ -301,6 +301,13 @@ namespace WindowsInventoryLite
         // field and WindowsInventoryLiteClient.cs's ApplyConfigFromServer.
         public int WindowsDefaultIntervalHours;
         public int WindowsDefaultSoftwareCheckIntervalHours;
+        // How old a client's last WSUS scan is allowed to get before the
+        // server forces an out-of-band rescan via forceWsusRescanComputers
+        // (see TriggerWsusRescanNow/SendClientSoftwareJobs) - a later task
+        // (Task 4) makes the Windows client actually compare this against
+        // its own last-scan timestamp; this server-side piece only stores
+        // and exposes the configured value.
+        public int WsusScanMaxAgeDays;
         // Restricts when the Windows client is allowed to actually run
         // pending windowsUpdate/thirdPartySoftware catalog jobs (does not
         // affect how often it checks in - SoftwareCheckIntervalHours above
@@ -409,6 +416,7 @@ namespace WindowsInventoryLite
             options.LinuxDefaultInstallPath = "/opt/windows-inventory-lite";
             options.WindowsDefaultIntervalHours = 6;
             options.WindowsDefaultSoftwareCheckIntervalHours = 6;
+            options.WsusScanMaxAgeDays = 7;
             options.SoftwareInstallWindowEnabled = false;
             options.SoftwareInstallWindowStartUtc = "02:00";
             options.SoftwareInstallWindowEndUtc = "04:00";
@@ -829,6 +837,15 @@ namespace WindowsInventoryLite
                     if (!String.IsNullOrEmpty(windowsDefaultSoftwareCheckIntervalText) && Int32.TryParse(windowsDefaultSoftwareCheckIntervalText, out windowsDefaultSoftwareCheckIntervalFromConfig) && windowsDefaultSoftwareCheckIntervalFromConfig >= 1 && windowsDefaultSoftwareCheckIntervalFromConfig <= 24)
                     {
                         options.WindowsDefaultSoftwareCheckIntervalHours = windowsDefaultSoftwareCheckIntervalFromConfig;
+                    }
+                }
+                if (options.WsusScanMaxAgeDays == 7)
+                {
+                    string wsusScanMaxAgeDaysText = GetConfigString(config, "WsusScanMaxAgeDays");
+                    int wsusScanMaxAgeDaysFromConfig;
+                    if (!String.IsNullOrEmpty(wsusScanMaxAgeDaysText) && Int32.TryParse(wsusScanMaxAgeDaysText, out wsusScanMaxAgeDaysFromConfig) && wsusScanMaxAgeDaysFromConfig >= 1 && wsusScanMaxAgeDaysFromConfig <= 90)
+                    {
+                        options.WsusScanMaxAgeDays = wsusScanMaxAgeDaysFromConfig;
                     }
                 }
                 if (options.TokenOverlapHours == 24)
@@ -1330,6 +1347,15 @@ namespace WindowsInventoryLite
         private readonly object wsusDownloadTriggerLock = new object();
         private volatile bool wsusDownloadInProgress = false;
         private WsusDownloadProgressState wsusCabDownloadProgress;
+        // Computer names an admin has asked to rescan WSUS "right now" via
+        // TriggerWsusRescanNow, surfaced to that exact client on its next
+        // GET /api/v1/client/software-jobs poll as forceWsusRescan=true
+        // (see SendClientSoftwareJobs) and cleared once that client's next
+        // real wsus-scan-results report arrives (see ReceiveWsusScanResults).
+        // Deliberately its own lock, never nested with reportFileLock or
+        // windowsUpdatesLock - this set is unrelated to either.
+        private readonly object forceWsusRescanLock = new object();
+        private readonly HashSet<string> forceWsusRescanComputers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly object reportFileLock = new object();
         // server-config.json holds the DPAPI-encrypted secrets (AdPassword/
         // WebPassword/Token/ClientUpdatePassword) and is now written by more
@@ -2608,6 +2634,10 @@ namespace WindowsInventoryLite
                     {
                         TriggerWsusCabDownloadNow(stream, request);
                     }
+                    else if (request.Method == "POST" && request.Path.StartsWith("/api/v1/windows-updates/rescan-now", StringComparison.OrdinalIgnoreCase))
+                    {
+                        TriggerWsusRescanNow(stream, request);
+                    }
                     else if (request.Method == "POST" && request.Path.StartsWith("/api/v1/windows-updates/", StringComparison.OrdinalIgnoreCase) && request.Path.EndsWith("/download-now", StringComparison.OrdinalIgnoreCase))
                     {
                         // EndsWith("/download-now") (with the leading slash)
@@ -3135,6 +3165,13 @@ namespace WindowsInventoryLite
             response["jobs"] = jobs;
             WsusCabStatus wsusCabStatus = GetWsusCabStatus();
             response["wsusCabHash"] = wsusCabStatus.Present ? wsusCabStatus.Sha256Hash : "";
+            response["wsusScanMaxAgeDays"] = options.WsusScanMaxAgeDays;
+            bool forceWsusRescan;
+            lock (forceWsusRescanLock)
+            {
+                forceWsusRescan = forceWsusRescanComputers.Contains(computerName);
+            }
+            response["forceWsusRescan"] = forceWsusRescan;
             SendJson(stream, serializer.Serialize(response));
         }
 
@@ -3638,6 +3675,15 @@ namespace WindowsInventoryLite
                 report["wsusScanAt"] = DateTime.UtcNow.ToString("o");
                 report["wuServiceUnavailable"] = !wuServiceAvailable;
                 File.WriteAllText(path, serializer.Serialize(report), new UTF8Encoding(false));
+            }
+            // Own lock, taken after reportFileLock has already been
+            // released above - never nested with it (see forceWsusRescanLock's
+            // declaration comment). A real scan-results report is the
+            // clearest possible signal that the rescan this flag was
+            // requesting has now happened, whatever triggered it.
+            lock (forceWsusRescanLock)
+            {
+                forceWsusRescanComputers.Remove(computerName);
             }
 
             SendJson(stream, "{\"status\":\"ok\"}");
@@ -11320,6 +11366,48 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendJson(stream, serializer.Serialize(result));
         }
 
+        // Marks one computer as due for an immediate WSUS rescan, surfaced
+        // to that exact client via forceWsusRescan on its next
+        // GET /api/v1/client/software-jobs poll (SendClientSoftwareJobs)
+        // and cleared once its next real wsus-scan-results report arrives
+        // (ReceiveWsusScanResults). Task 4 (not this one) makes the actual
+        // Windows client read and act on the flag; Task 5 wires a dashboard
+        // button to this endpoint. No ingestion token check - this is an
+        // admin-triggered action reached only through the authenticated
+        // dashboard/API surface, same as TriggerWsusKbDownloadNow above.
+        private void TriggerWsusRescanNow(Stream stream, RequestContext request)
+        {
+            string computerName = null;
+            int queryStart = request.Path.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                string query = request.Path.Substring(queryStart + 1);
+                foreach (string pair in query.Split('&'))
+                {
+                    int equalsIndex = pair.IndexOf('=');
+                    if (equalsIndex > 0 && pair.Substring(0, equalsIndex) == "computerName")
+                    {
+                        computerName = Uri.UnescapeDataString(pair.Substring(equalsIndex + 1));
+                    }
+                }
+            }
+            if (String.IsNullOrEmpty(computerName))
+            {
+                SendText(stream, "{\"error\":\"computerName is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            lock (forceWsusRescanLock)
+            {
+                forceWsusRescanComputers.Add(computerName);
+            }
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["status"] = "requested";
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
         private string GetCertificateHistoryDirectory()
         {
             return Path.Combine(options.DataPath, "_certificates");
@@ -11491,6 +11579,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             result["linuxDefaultInstallPath"] = options.LinuxDefaultInstallPath;
             result["windowsDefaultIntervalHours"] = options.WindowsDefaultIntervalHours;
             result["windowsDefaultSoftwareCheckIntervalHours"] = options.WindowsDefaultSoftwareCheckIntervalHours;
+            result["wsusScanMaxAgeDays"] = options.WsusScanMaxAgeDays;
             result["softwareInstallWindowEnabled"] = options.SoftwareInstallWindowEnabled;
             result["softwareInstallWindowStartUtc"] = options.SoftwareInstallWindowStartUtc;
             result["softwareInstallWindowEndUtc"] = options.SoftwareInstallWindowEndUtc;
@@ -11897,6 +11986,18 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 }
                 options.WindowsDefaultSoftwareCheckIntervalHours = windowsDefaultSoftwareCheckIntervalHours;
                 updates["WindowsDefaultSoftwareCheckIntervalHours"] = windowsDefaultSoftwareCheckIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (payload.ContainsKey("wsusScanMaxAgeDays"))
+            {
+                int wsusScanMaxAgeDays;
+                if (!Int32.TryParse(Convert.ToString(payload["wsusScanMaxAgeDays"]), out wsusScanMaxAgeDays) || wsusScanMaxAgeDays < 1 || wsusScanMaxAgeDays > 90)
+                {
+                    SendText(stream, "{\"error\":\"wsusScanMaxAgeDays must be between 1 and 90\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                options.WsusScanMaxAgeDays = wsusScanMaxAgeDays;
+                updates["WsusScanMaxAgeDays"] = wsusScanMaxAgeDays.ToString(System.Globalization.CultureInfo.InvariantCulture);
             }
 
             if (payload.ContainsKey("softwareInstallWindowEnabled"))
@@ -15916,6 +16017,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings validates sessionLifetimeHours is between 1 and 720", TestConfigureServerSettingsValidatesSessionLifetimeHours);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips softwareJobAttemptLogRetentionDays/MaxEntries", TestConfigureServerSettingsRoundTripsSoftwareJobAttemptLogRetention);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips windowsDefaultIntervalHours/SoftwareCheckIntervalHours/tokenOverlapHours", TestConfigureServerSettingsRoundTripsWindowsDefaultsAndTokenOverlap);
+            allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips wsusScanMaxAgeDays", TestConfigureServerSettingsRoundTripsWsusScanMaxAgeDays);
+            allPassed &= SelfTestCheck(output, "ConfigureServerSettings rejects an out-of-range wsusScanMaxAgeDays, leaving the option unchanged", TestConfigureServerSettingsRejectsWsusScanMaxAgeDaysOutOfRange);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips the software install window and validates its fields", TestConfigureServerSettingsRoundTripsSoftwareInstallWindow);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips showUsbStorageIndicator", TestConfigureServerSettingsRoundTripsShowUsbStorageIndicator);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips enableWindowsClientSelfUpdate/enableLinuxClientSelfUpdate", TestConfigureServerSettingsRoundTripsSelfUpdateToggles);
@@ -15967,6 +16070,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs does not target a missingKb-mode entry to a computer that never reported that KB as missing", TestSendClientSoftwareJobsDoesNotTargetMissingKbEntryWhenNotMissing);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs still targets a static-mode entry by hostname unchanged, zero regression from the missingKb addition", TestSendClientSoftwareJobsStaticTargetingUnaffected);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs includes wsusCabHash, empty when no cab is configured and the real hash once one is", TestSendClientSoftwareJobsIncludesWsusCabHash);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs includes wsusScanMaxAgeDays and forceWsusRescan, flipping to true only after a rescan-now request for that exact computer", TestSendClientSoftwareJobsIncludesWsusScanMaxAgeDaysAndForceFlag);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall updates a target's stored clientVersion", TestPatchClientReportVersionAfterInstallUpdatesVersion);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall's lastInstalledAtUtc is cleared once a real report overwrites the file", TestPatchClientReportVersionAfterInstallFieldClearedByRealReport);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall is a no-op when the target has no stored report yet", TestPatchClientReportVersionAfterInstallMissingReport);
@@ -16233,6 +16337,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results writes wsusMissingUpdates/wsusScannedCabHash/wsusScanAt onto the real stored report and preserves other pre-existing fields", TestReceiveWsusScanResultsWritesFieldsOntoExistingReportAndPreservesOtherFields);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results with wuServiceAvailable=false still writes wuServiceUnavailable=true and an empty missing-updates list", TestReceiveWsusScanResultsRecordsServiceUnavailableFlag);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results is a no-op for an unknown computer with no stored report", TestReceiveWsusScanResultsIsNoOpForUnknownComputer);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results clears a pending forceWsusRescan flag for that computer once a real report arrives", TestReceiveWsusScanResultsClearsForceWsusRescanFlag);
             allPassed &= SelfTestCheck(output, "A routine POST /api/v1/windows-inventory report does not erase wsusMissingUpdates/wsusScannedCabHash/wsusScanAt/wuServiceUnavailable written by an earlier wsus-scan-results report", TestReceiveInventoryPreservesWsusFieldsFromPreviousReport);
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate accepts targetMode=missingKb with a kbId and persists both fields", TestCreateWindowsUpdateAcceptsMissingKbTargetMode);
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate rejects targetMode=missingKb with no kbId", TestCreateWindowsUpdateRejectsMissingKbTargetModeWithoutKbId);
@@ -17472,6 +17577,91 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     return "expected GET /api/v1/server/settings to echo back the saved values, got: " + responseText;
                 }
 
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestConfigureServerSettingsRoundTripsWsusScanMaxAgeDays()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.EnableHttp = true;
+            options.WsusScanMaxAgeDays = 7;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-wsusscanmaxage-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext postRequest = new RequestContext();
+                postRequest.Method = "POST";
+                postRequest.Path = "/api/v1/server/settings";
+                postRequest.Headers = new Dictionary<string, string>();
+                postRequest.Body = "{\"wsusScanMaxAgeDays\":14}";
+
+                using (MemoryStream postStream = new MemoryStream())
+                {
+                    server.ConfigureServerSettings(postStream, postRequest);
+                }
+
+                if (options.WsusScanMaxAgeDays != 14)
+                {
+                    return "expected the live options object to be updated to 14, got " + options.WsusScanMaxAgeDays;
+                }
+
+                string responseText;
+                using (MemoryStream getStream = new MemoryStream())
+                {
+                    server.SendServerSettings(getStream);
+                    responseText = Encoding.UTF8.GetString(getStream.ToArray());
+                }
+
+                if (responseText.IndexOf("\"wsusScanMaxAgeDays\":14", StringComparison.Ordinal) < 0)
+                {
+                    return "expected GET /api/v1/server/settings to echo back wsusScanMaxAgeDays:14, got: " + responseText;
+                }
+
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestConfigureServerSettingsRejectsWsusScanMaxAgeDaysOutOfRange()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.EnableHttp = true;
+            options.WsusScanMaxAgeDays = 7;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-wsusscanmaxagereject-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext postRequest = new RequestContext();
+                postRequest.Method = "POST";
+                postRequest.Path = "/api/v1/server/settings";
+                postRequest.Headers = new Dictionary<string, string>();
+                postRequest.Body = "{\"wsusScanMaxAgeDays\":0}";
+
+                using (MemoryStream postStream = new MemoryStream())
+                {
+                    server.ConfigureServerSettings(postStream, postRequest);
+                }
+
+                if (options.WsusScanMaxAgeDays != 7)
+                {
+                    return "expected an out-of-range value (0) to be rejected, leaving the option unchanged at 7, got " + options.WsusScanMaxAgeDays;
+                }
                 return null;
             }
             finally
@@ -20554,6 +20744,72 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendClientSoftwareJobsIncludesWsusScanMaxAgeDaysAndForceFlag()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-forcerescan-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                options.WsusScanMaxAgeDays = 9;
+                InventoryServer server = new InventoryServer(options);
+
+                string computerName = "PC-FORCE-1";
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                report["computerName"] = computerName;
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                File.WriteAllText(Path.Combine(dataPath, computerName + ".json"), serializer.Serialize(report), new UTF8Encoding(false));
+
+                RequestContext jobsRequest = new RequestContext();
+                jobsRequest.Method = "GET";
+                jobsRequest.Path = "/api/v1/client/software-jobs?computerName=" + computerName;
+                jobsRequest.Headers = new Dictionary<string, string>();
+                jobsRequest.Headers["x-inventory-token"] = "test-token";
+
+                string beforeResponse;
+                using (MemoryStream jobsStream = new MemoryStream())
+                {
+                    server.SendClientSoftwareJobs(jobsStream, jobsRequest);
+                    beforeResponse = Encoding.UTF8.GetString(jobsStream.ToArray());
+                }
+                if (beforeResponse.IndexOf("\"wsusScanMaxAgeDays\":9", StringComparison.Ordinal) < 0)
+                {
+                    return "expected wsusScanMaxAgeDays:9 in the response, got: " + beforeResponse;
+                }
+                if (beforeResponse.IndexOf("\"forceWsusRescan\":false", StringComparison.Ordinal) < 0)
+                {
+                    return "expected forceWsusRescan:false before any rescan-now request, got: " + beforeResponse;
+                }
+
+                RequestContext rescanRequest = new RequestContext();
+                rescanRequest.Method = "POST";
+                rescanRequest.Path = "/api/v1/windows-updates/rescan-now?computerName=" + computerName;
+                rescanRequest.Headers = new Dictionary<string, string>();
+                using (MemoryStream rescanStream = new MemoryStream())
+                {
+                    server.TriggerWsusRescanNow(rescanStream, rescanRequest);
+                }
+
+                string afterResponse;
+                using (MemoryStream jobsStreamAfter = new MemoryStream())
+                {
+                    server.SendClientSoftwareJobs(jobsStreamAfter, jobsRequest);
+                    afterResponse = Encoding.UTF8.GetString(jobsStreamAfter.ToArray());
+                }
+                if (afterResponse.IndexOf("\"forceWsusRescan\":true", StringComparison.Ordinal) < 0)
+                {
+                    return "expected forceWsusRescan:true after a rescan-now request for this exact computer, got: " + afterResponse;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
             }
         }
 
@@ -28773,6 +29029,67 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveWsusScanResultsClearsForceWsusRescanFlag()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-clearforcerescan-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                InventoryServer server = new InventoryServer(options);
+
+                string computerName = "PC-FORCE-2";
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                report["computerName"] = computerName;
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                File.WriteAllText(Path.Combine(dataPath, computerName + ".json"), serializer.Serialize(report), new UTF8Encoding(false));
+
+                RequestContext rescanRequest = new RequestContext();
+                rescanRequest.Method = "POST";
+                rescanRequest.Path = "/api/v1/windows-updates/rescan-now?computerName=" + computerName;
+                rescanRequest.Headers = new Dictionary<string, string>();
+                using (MemoryStream rescanStream = new MemoryStream())
+                {
+                    server.TriggerWsusRescanNow(rescanStream, rescanRequest);
+                }
+
+                RequestContext scanResultsRequest = new RequestContext();
+                scanResultsRequest.Method = "POST";
+                scanResultsRequest.Path = "/api/v1/client/wsus-scan-results";
+                scanResultsRequest.Headers = new Dictionary<string, string>();
+                scanResultsRequest.Headers["x-inventory-token"] = "test-token";
+                scanResultsRequest.Body = "{\"computerName\":\"" + computerName + "\",\"cabHash\":\"abc\",\"wuServiceAvailable\":true,\"missingUpdates\":[]}";
+                using (MemoryStream scanResultsStream = new MemoryStream())
+                {
+                    server.ReceiveWsusScanResults(scanResultsStream, scanResultsRequest);
+                }
+
+                RequestContext jobsRequest = new RequestContext();
+                jobsRequest.Method = "GET";
+                jobsRequest.Path = "/api/v1/client/software-jobs?computerName=" + computerName;
+                jobsRequest.Headers = new Dictionary<string, string>();
+                jobsRequest.Headers["x-inventory-token"] = "test-token";
+
+                string responseText;
+                using (MemoryStream jobsStream = new MemoryStream())
+                {
+                    server.SendClientSoftwareJobs(jobsStream, jobsRequest);
+                    responseText = Encoding.UTF8.GetString(jobsStream.ToArray());
+                }
+                if (responseText.IndexOf("\"forceWsusRescan\":false", StringComparison.Ordinal) < 0)
+                {
+                    return "expected forceWsusRescan to be cleared back to false once a real wsus-scan-results report arrives, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
             }
         }
 
