@@ -331,22 +331,35 @@ namespace WindowsInventoryLite
                     JavaScriptSerializer serializer = new JavaScriptSerializer();
                     Dictionary<string, object> jobsResponse = serializer.Deserialize<Dictionary<string, object>>(jobsJson);
 
-                    // The server advertises its current WSUS cab hash on
-                    // this same poll response regardless of whether any
-                    // software job is queued, so this check runs
-                    // unconditionally here - before the jobs-empty early
-                    // return below - rather than being folded into the
-                    // job-processing path further down.
+                    // The server advertises its current WSUS cab hash, the
+                    // configured max scan age, and whether an admin has
+                    // requested an immediate rescan of this machine on this
+                    // same poll response regardless of whether any software
+                    // job is queued, so this check runs unconditionally here
+                    // - before the jobs-empty early return below - rather
+                    // than being folded into the job-processing path further
+                    // down.
                     string wsusCabHash = jobsResponse == null ? "" : (InventoryCollector.GetString(jobsResponse, "wsusCabHash") ?? "");
+                    int wsusScanMaxAgeDays = jobsResponse != null && jobsResponse.ContainsKey("wsusScanMaxAgeDays") ? Convert.ToInt32(jobsResponse["wsusScanMaxAgeDays"]) : 7;
+                    bool forceWsusRescan = jobsResponse != null && jobsResponse.ContainsKey("forceWsusRescan") && Convert.ToBoolean(jobsResponse["forceWsusRescan"]);
                     InventoryCollector wsusStateCollector = new InventoryCollector(options);
                     Dictionary<string, object> learnedWsusState = wsusStateCollector.LoadLearnedState();
                     string lastScannedWsusHash = learnedWsusState.ContainsKey("wsusScannedCabHash") ? Convert.ToString(learnedWsusState["wsusScannedCabHash"]) : "";
+                    DateTime? lastScanAtUtc = null;
+                    if (learnedWsusState.ContainsKey("wsusLastScanAtUtc"))
+                    {
+                        DateTime parsed;
+                        if (DateTime.TryParse(Convert.ToString(learnedWsusState["wsusLastScanAtUtc"]), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out parsed))
+                        {
+                            lastScanAtUtc = parsed;
+                        }
+                    }
                     bool wsusScannedAndReported = InventoryCollector.MaybeRunWsusScanCore(
                         wsusCabHash,
                         lastScannedWsusHash,
-                        null,
-                        7,
-                        false,
+                        lastScanAtUtc,
+                        wsusScanMaxAgeDays,
+                        forceWsusRescan,
                         WsusScanner.IsWuauservRunning,
                         WsusScanner.ScanForMissingUpdates,
                         (hash, destPath) => InventoryCollector.DownloadAndVerifyWsusCab(options.ServerUrl, options.Token, hash, destPath, InventoryCollector.HttpGetBytes),
@@ -354,6 +367,7 @@ namespace WindowsInventoryLite
                     if (wsusScannedAndReported)
                     {
                         learnedWsusState["wsusScannedCabHash"] = wsusCabHash;
+                        learnedWsusState["wsusLastScanAtUtc"] = DateTime.UtcNow.ToString("o");
                         wsusStateCollector.SaveLearnedState(learnedWsusState);
                     }
 
@@ -2541,6 +2555,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "The pinned self-update public key constants are valid base64", TestSelfUpdatePublicKeyConstantsAreValidBase64);
             allPassed &= SelfTestCheck(output, "LoadLearnedState returns an empty (not null) dictionary when no cache file exists", TestLoadLearnedStateReturnsEmptyDictWhenNoFileExists);
             allPassed &= SelfTestCheck(output, "SaveLearnedState/LoadLearnedState round-trip a dictionary with mixed value types", TestSaveLearnedStateRoundTripsMixedValueTypes);
+            allPassed &= SelfTestCheck(output, "SaveLearnedState/LoadLearnedState round-trip the wsusLastScanAtUtc key", TestSaveLearnedStatePersistsWsusLastScanAtUtcKey);
             allPassed &= SelfTestCheck(output, "ApplyInventoryAckResponse does not lose a previously-learned field when a later ack only carries a different one", TestApplyInventoryAckResponsePreservesUnrelatedLearnedFields);
             allPassed &= SelfTestCheck(output, "ApplyConfigFromServer ignores an out-of-range interval and applies an in-range one", TestApplyConfigFromServerValidatesIntervalRange);
             allPassed &= SelfTestCheck(output, "LoadLicenseKeySourcesCache parses a source written via ApplyInventoryAckResponse", TestLoadLicenseKeySourcesCacheParsesEntryWrittenThroughAckResponse);
@@ -3396,6 +3411,35 @@ namespace WindowsInventoryLite
                 if (loadedSources == null || loadedSources.Count != 1)
                 {
                     return "expected exactly one license key source to round-trip";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
+        private static string TestSaveLearnedStatePersistsWsusLastScanAtUtcKey()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-learnedstate-wsuslastscan-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(tempDir);
+                ClientOptions options = new ClientOptions();
+                options.OutputPath = tempDir;
+                InventoryCollector collector = new InventoryCollector(options);
+
+                Dictionary<string, object> learned = new Dictionary<string, object>();
+                learned["wsusScannedCabHash"] = "abc123";
+                DateTime now = DateTime.UtcNow;
+                learned["wsusLastScanAtUtc"] = now.ToString("o");
+                collector.SaveLearnedState(learned);
+
+                Dictionary<string, object> reloaded = collector.LoadLearnedState();
+                if (!reloaded.ContainsKey("wsusLastScanAtUtc"))
+                {
+                    return "expected wsusLastScanAtUtc to round-trip through SaveLearnedState/LoadLearnedState";
                 }
                 return null;
             }
