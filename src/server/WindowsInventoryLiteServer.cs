@@ -1301,6 +1301,8 @@ namespace WindowsInventoryLite
         private readonly object licensesLock = new object();
         private readonly object licenseKeySourcesLock = new object();
         private readonly object windowsUpdatesLock = new object();
+        private readonly object wsusKbDownloadTriggerLock = new object();
+        private readonly HashSet<string> wsusKbDownloadsInProgress = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly object thirdPartySoftwareLock = new object();
         private readonly object certificateHistoryLock = new object();
         private readonly object listenerRestartLock = new object();
@@ -2574,6 +2576,15 @@ namespace WindowsInventoryLite
                     else if (request.Method == "POST" && request.Path == "/api/v1/windows-updates/cab-download-now")
                     {
                         TriggerWsusCabDownloadNow(stream, request);
+                    }
+                    else if (request.Method == "POST" && request.Path.StartsWith("/api/v1/windows-updates/", StringComparison.OrdinalIgnoreCase) && request.Path.EndsWith("/download-now", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // EndsWith("/download-now") (with the leading slash)
+                        // deliberately does NOT match the exact-match
+                        // "cab-download-now" route above - that path ends in
+                        // "cab-download-now" with a hyphen, not a slash,
+                        // immediately before "download-now".
+                        TriggerWsusKbDownloadNow(stream, request);
                     }
                     else if (request.Method == "DELETE" && request.Path.StartsWith("/api/v1/windows-updates/", StringComparison.OrdinalIgnoreCase))
                     {
@@ -10967,6 +10978,154 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendJson(stream, serializer.Serialize(result));
         }
 
+        // Per-catalog-entry guard, unlike TryClaimWsusDownloadInProgress's
+        // single shared slot - concurrent downloads of DIFFERENT KBs are
+        // fine and not serialized against each other, only two triggers
+        // for the SAME entry id race.
+        internal bool TryClaimWsusKbDownloadInProgress(string id)
+        {
+            lock (wsusKbDownloadTriggerLock)
+            {
+                if (wsusKbDownloadsInProgress.Contains(id))
+                {
+                    return false;
+                }
+                wsusKbDownloadsInProgress.Add(id);
+                return true;
+            }
+        }
+
+        internal void ReleaseWsusKbDownloadInProgress(string id)
+        {
+            lock (wsusKbDownloadTriggerLock)
+            {
+                wsusKbDownloadsInProgress.Remove(id);
+            }
+        }
+
+        private static string ExtractWindowsUpdateKbDownloadId(string path)
+        {
+            const string prefix = "/api/v1/windows-updates/";
+            const string suffix = "/download-now";
+            string idPortion = path.Substring(prefix.Length, path.Length - prefix.Length - suffix.Length);
+            return Uri.UnescapeDataString(idPortion).Trim();
+        }
+
+        // The single real entry point the manual trigger below calls.
+        // Records the attempt to the same WSUS Downloads log the cab
+        // downloader uses (kind="kb", distinguishing it from kind="cab"
+        // entries), and on success updates the catalog entry's own
+        // relativePath directly - no round-trip through the Discovered-
+        // files filename/content-sniffing flow, since the KB id is already
+        // known with certainty from the catalog entry that triggered this.
+        private void PerformWsusKbDownload(string id, string kbId, string downloadUrl, string source)
+        {
+            WsusKbDownloadResult result = PerformWsusKbDownloadCore(
+                kbId,
+                downloadUrl,
+                url => DownloadBytesFromUrl(url, 300000),
+                (relativePath, bytes) => WithSoftwareRepositoryIdentity(options, () =>
+                {
+                    string fullPath = Path.Combine(options.SoftwareRepositoryPath, relativePath);
+                    string directory = Path.GetDirectoryName(fullPath);
+                    if (!String.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+                    {
+                        Directory.CreateDirectory(directory);
+                    }
+                    File.WriteAllBytes(fullPath, bytes);
+                    return true;
+                }));
+
+            WsusDownloadLogEntry logEntry = new WsusDownloadLogEntry();
+            logEntry.TimestampUtc = DateTime.UtcNow;
+            logEntry.Source = source;
+            logEntry.Success = result.Success;
+            logEntry.ErrorCategory = result.ErrorCategory ?? "";
+            logEntry.ErrorMessage = result.ErrorMessage ?? "";
+            logEntry.Kind = "kb";
+            logEntry.KbId = kbId;
+            logEntry.SizeBytes = result.SizeBytes;
+            RecordWsusDownloadAttempt(logEntry);
+
+            if (result.Success)
+            {
+                lock (windowsUpdatesLock)
+                {
+                    List<Dictionary<string, object>> entries = LoadWindowsUpdates();
+                    Dictionary<string, object> entry = entries.Find(e => String.Equals(GetStringValue(e, "id"), id, StringComparison.OrdinalIgnoreCase));
+                    if (entry != null)
+                    {
+                        entry["relativePath"] = result.RelativePath;
+                        entry["updatedAt"] = DateTime.UtcNow.ToString("o");
+                        SaveWindowsUpdates(entries);
+                    }
+                }
+            }
+            else
+            {
+                DebugLogger.Log(options, "Error", "WSUS KB download (" + kbId + ", " + source + ") failed: [" + result.ErrorCategory + "] " + result.ErrorMessage);
+            }
+        }
+
+        private void TriggerWsusKbDownloadNow(Stream stream, RequestContext request)
+        {
+            string id = ExtractWindowsUpdateKbDownloadId(request.Path);
+
+            Dictionary<string, object> entry;
+            lock (windowsUpdatesLock)
+            {
+                List<Dictionary<string, object>> entries = LoadWindowsUpdates();
+                entry = entries.Find(e => String.Equals(GetStringValue(e, "id"), id, StringComparison.OrdinalIgnoreCase));
+            }
+            if (entry == null)
+            {
+                SendText(stream, "{\"error\":\"windows update entry not found\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+            if (GetStringValue(entry, "targetMode") != "missingKb")
+            {
+                SendText(stream, "{\"error\":\"Download is only available for Missing-KB targeted entries.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string kbId = GetStringValue(entry, "kbId");
+            string normalizedKbId = NormalizeKbId(kbId);
+            Dictionary<string, Dictionary<string, object>> aggregation = BuildMissingKbAggregation();
+            Dictionary<string, object> aggregated;
+            string downloadUrl = null;
+            if (!String.IsNullOrEmpty(normalizedKbId) && aggregation.TryGetValue(normalizedKbId, out aggregated))
+            {
+                downloadUrl = GetStringValue(aggregated, "downloadUrl");
+            }
+            if (String.IsNullOrEmpty(downloadUrl))
+            {
+                SendText(stream, "{\"error\":\"No client has reported a download URL for this KB yet.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            if (!TryClaimWsusKbDownloadInProgress(id))
+            {
+                SendText(stream, "{\"error\":\"A download for this entry is already in progress.\"}", "application/json; charset=utf-8", 409);
+                return;
+            }
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    PerformWsusKbDownload(id, kbId, downloadUrl, "manual");
+                }
+                finally
+                {
+                    ReleaseWsusKbDownloadInProgress(id);
+                }
+            });
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["status"] = "started";
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
         private string GetCertificateHistoryDirectory()
         {
             return Path.Combine(options.DataPath, "_certificates");
@@ -15863,6 +16022,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "RunWsusDownloadScheduleTick updates WsusDownloadScheduleLastRunUtc only when the schedule was actually due", TestRunWsusDownloadScheduleTickUpdatesLastRunOnlyWhenDue);
             allPassed &= SelfTestCheck(output, "POST /api/v1/windows-updates/cab-download-now returns started and has already claimed the guard synchronously before returning", TestTriggerWsusCabDownloadNowStartsAndReleasesGuard);
             allPassed &= SelfTestCheck(output, "POST /api/v1/windows-updates/cab-download-now returns 409 when a download is already in progress", TestTriggerWsusCabDownloadNowRejectsWhileInProgress);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/windows-updates/{id}/download-now returns 404 for an unknown catalog entry id", TestTriggerWsusKbDownloadNowReturns404ForUnknownId);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/windows-updates/{id}/download-now rejects a non-missingKb entry with 400", TestTriggerWsusKbDownloadNowRejectsWhenNotMissingKbMode);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/windows-updates/{id}/download-now rejects with 400 when no client has reported a downloadUrl", TestTriggerWsusKbDownloadNowRejectsWhenNoDownloadUrlKnown);
+            allPassed &= SelfTestCheck(output, "The per-KB download in-progress guard is scoped per entry id, not shared globally", TestWsusKbDownloadInProgressGuardIsPerEntryId);
             return allPassed;
         }
 
@@ -25503,6 +25666,132 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 try { Directory.Delete(options.DataPath, true); } catch { }
             }
+        }
+
+        private static string TestTriggerWsusKbDownloadNowReturns404ForUnknownId()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            try
+            {
+                InventoryServer server = new InventoryServer(new ServerOptions { DataPath = tempDir });
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/windows-updates/does-not-exist/download-now";
+                request.Headers = new Dictionary<string, string>();
+
+                MemoryStream stream = new MemoryStream();
+                System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("TriggerWsusKbDownloadNow", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                method.Invoke(server, new object[] { stream, request });
+
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (response.IndexOf("404", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    return "expected a 404 response for an unknown catalog entry id, got: " + response;
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(tempDir, true);
+            }
+        }
+
+        private static string TestTriggerWsusKbDownloadNowRejectsWhenNotMissingKbMode()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            try
+            {
+                InventoryServer server = new InventoryServer(new ServerOptions { DataPath = tempDir });
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "static-entry";
+                entry["targetMode"] = "static";
+                entry["kbId"] = "";
+                entries.Add(entry);
+                System.Reflection.MethodInfo saveMethod = typeof(InventoryServer).GetMethod("SaveWindowsUpdates", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                saveMethod.Invoke(server, new object[] { entries });
+
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/windows-updates/static-entry/download-now";
+                request.Headers = new Dictionary<string, string>();
+
+                MemoryStream stream = new MemoryStream();
+                System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("TriggerWsusKbDownloadNow", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                method.Invoke(server, new object[] { stream, request });
+
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (response.IndexOf("400", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    return "expected a 400 response for a non-missingKb entry, got: " + response;
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(tempDir, true);
+            }
+        }
+
+        private static string TestTriggerWsusKbDownloadNowRejectsWhenNoDownloadUrlKnown()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            try
+            {
+                InventoryServer server = new InventoryServer(new ServerOptions { DataPath = tempDir });
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "missing-kb-entry";
+                entry["targetMode"] = "missingKb";
+                entry["kbId"] = "KB0000001";
+                entries.Add(entry);
+                System.Reflection.MethodInfo saveMethod = typeof(InventoryServer).GetMethod("SaveWindowsUpdates", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                saveMethod.Invoke(server, new object[] { entries });
+                // Deliberately no client report at all - no client has ever
+                // reported KB0000001, so no downloadUrl can be known.
+
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/windows-updates/missing-kb-entry/download-now";
+                request.Headers = new Dictionary<string, string>();
+
+                MemoryStream stream = new MemoryStream();
+                System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("TriggerWsusKbDownloadNow", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                method.Invoke(server, new object[] { stream, request });
+
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (response.IndexOf("400", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    return "expected a 400 response when no client has reported a downloadUrl, got: " + response;
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(tempDir, true);
+            }
+        }
+
+        private static string TestWsusKbDownloadInProgressGuardIsPerEntryId()
+        {
+            InventoryServer server = new InventoryServer(new ServerOptions { DataPath = Path.GetTempPath() });
+            System.Reflection.MethodInfo claimMethod = typeof(InventoryServer).GetMethod("TryClaimWsusKbDownloadInProgress", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            System.Reflection.MethodInfo releaseMethod = typeof(InventoryServer).GetMethod("ReleaseWsusKbDownloadInProgress", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+            bool firstClaim = (bool)claimMethod.Invoke(server, new object[] { "entry-a" });
+            bool secondClaimSameId = (bool)claimMethod.Invoke(server, new object[] { "entry-a" });
+            bool claimDifferentId = (bool)claimMethod.Invoke(server, new object[] { "entry-b" });
+            releaseMethod.Invoke(server, new object[] { "entry-a" });
+            bool claimAfterRelease = (bool)claimMethod.Invoke(server, new object[] { "entry-a" });
+
+            if (!firstClaim || secondClaimSameId || !claimDifferentId || !claimAfterRelease)
+            {
+                return "expected the guard to be per-entry-id: first claim true, same-id re-claim false, different-id claim true, claim-after-release true";
+            }
+            return null;
         }
 
         private static string TestSplitDomainUsernameHandlesBothForms()
