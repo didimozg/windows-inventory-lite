@@ -1302,7 +1302,7 @@ namespace WindowsInventoryLite
         private readonly object licenseKeySourcesLock = new object();
         private readonly object windowsUpdatesLock = new object();
         private readonly object wsusKbDownloadTriggerLock = new object();
-        private readonly HashSet<string> wsusKbDownloadsInProgress = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, WsusDownloadProgressState> wsusKbDownloadsInProgress = new Dictionary<string, WsusDownloadProgressState>(StringComparer.OrdinalIgnoreCase);
         private readonly object thirdPartySoftwareLock = new object();
         private readonly object certificateHistoryLock = new object();
         private readonly object listenerRestartLock = new object();
@@ -1329,6 +1329,7 @@ namespace WindowsInventoryLite
         private Timer wsusDownloadScheduleTimer;
         private readonly object wsusDownloadTriggerLock = new object();
         private volatile bool wsusDownloadInProgress = false;
+        private WsusDownloadProgressState wsusCabDownloadProgress;
         private readonly object reportFileLock = new object();
         // server-config.json holds the DPAPI-encrypted secrets (AdPassword/
         // WebPassword/Token/ClientUpdatePassword) and is now written by more
@@ -1761,6 +1762,7 @@ namespace WindowsInventoryLite
                     return false;
                 }
                 wsusDownloadInProgress = true;
+                wsusCabDownloadProgress = new WsusDownloadProgressState();
                 return true;
             }
         }
@@ -1770,6 +1772,35 @@ namespace WindowsInventoryLite
             lock (wsusDownloadTriggerLock)
             {
                 wsusDownloadInProgress = false;
+                wsusCabDownloadProgress = null;
+            }
+        }
+
+        internal void UpdateWsusCabDownloadProgress(long bytesReceived, long totalBytes)
+        {
+            lock (wsusDownloadTriggerLock)
+            {
+                if (wsusCabDownloadProgress != null)
+                {
+                    wsusCabDownloadProgress.BytesReceived = bytesReceived;
+                    wsusCabDownloadProgress.TotalBytes = totalBytes;
+                }
+            }
+        }
+
+        internal bool TryGetWsusCabDownloadProgress(out long bytesReceived, out long totalBytes)
+        {
+            lock (wsusDownloadTriggerLock)
+            {
+                if (wsusCabDownloadProgress != null)
+                {
+                    bytesReceived = wsusCabDownloadProgress.BytesReceived;
+                    totalBytes = wsusCabDownloadProgress.TotalBytes;
+                    return true;
+                }
+                bytesReceived = 0;
+                totalBytes = 0;
+                return false;
             }
         }
 
@@ -10875,6 +10906,15 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return new WsusKbDownloadResult { Success = true, RelativePath = relativePath, SizeBytes = bytes.LongLength };
         }
 
+        // Transient, in-memory only, never persisted - mirrors the existing
+        // "is a download in progress" guards it lives inside. One instance
+        // tracks one in-flight download's byte progress.
+        internal sealed class WsusDownloadProgressState
+        {
+            internal long BytesReceived;
+            internal long TotalBytes;
+        }
+
         // Shared by the cab downloader and the per-KB file downloader
         // (Task 6 of docs/superpowers/plans/2026-09-29-wsus-kb-file-download.md) -
         // both need the exact same TLS/proxy/timeout setup, just against a
@@ -10986,11 +11026,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         {
             lock (wsusKbDownloadTriggerLock)
             {
-                if (wsusKbDownloadsInProgress.Contains(id))
+                if (wsusKbDownloadsInProgress.ContainsKey(id))
                 {
                     return false;
                 }
-                wsusKbDownloadsInProgress.Add(id);
+                wsusKbDownloadsInProgress[id] = new WsusDownloadProgressState();
                 return true;
             }
         }
@@ -11000,6 +11040,36 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             lock (wsusKbDownloadTriggerLock)
             {
                 wsusKbDownloadsInProgress.Remove(id);
+            }
+        }
+
+        internal void UpdateWsusKbDownloadProgress(string id, long bytesReceived, long totalBytes)
+        {
+            lock (wsusKbDownloadTriggerLock)
+            {
+                WsusDownloadProgressState state;
+                if (wsusKbDownloadsInProgress.TryGetValue(id, out state))
+                {
+                    state.BytesReceived = bytesReceived;
+                    state.TotalBytes = totalBytes;
+                }
+            }
+        }
+
+        internal bool TryGetWsusKbDownloadProgress(string id, out long bytesReceived, out long totalBytes)
+        {
+            lock (wsusKbDownloadTriggerLock)
+            {
+                WsusDownloadProgressState state;
+                if (wsusKbDownloadsInProgress.TryGetValue(id, out state))
+                {
+                    bytesReceived = state.BytesReceived;
+                    totalBytes = state.TotalBytes;
+                    return true;
+                }
+                bytesReceived = 0;
+                totalBytes = 0;
+                return false;
             }
         }
 
@@ -16049,6 +16119,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore categorizes a suspiciously small download as 'badResponse' without attempting to write it", TestPerformWsusKbDownloadCoreCategorizesTinyDownloadAsBadResponse);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore categorizes a write-phase exception as 'diskWrite'", TestPerformWsusKbDownloadCoreCategorizesWriteFailureAsDiskWrite);
             allPassed &= SelfTestCheck(output, "TryClaimWsusDownloadInProgress succeeds once, fails while held, succeeds again after release", TestWsusDownloadInProgressGuardClaimAndRelease);
+            allPassed &= SelfTestCheck(output, "WSUS cab download progress is readable while claimed and gone after release", TestWsusCabDownloadProgressTracksBytesWhileClaimedAndClearsOnRelease);
             allPassed &= SelfTestCheck(output, "RunWsusDownloadScheduleTick updates WsusDownloadScheduleLastRunUtc only when the schedule was actually due", TestRunWsusDownloadScheduleTickUpdatesLastRunOnlyWhenDue);
             allPassed &= SelfTestCheck(output, "POST /api/v1/windows-updates/cab-download-now returns started and has already claimed the guard synchronously before returning", TestTriggerWsusCabDownloadNowStartsAndReleasesGuard);
             allPassed &= SelfTestCheck(output, "POST /api/v1/windows-updates/cab-download-now returns 409 when a download is already in progress", TestTriggerWsusCabDownloadNowRejectsWhileInProgress);
@@ -16056,6 +16127,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "POST /api/v1/windows-updates/{id}/download-now rejects a non-missingKb entry with 400", TestTriggerWsusKbDownloadNowRejectsWhenNotMissingKbMode);
             allPassed &= SelfTestCheck(output, "POST /api/v1/windows-updates/{id}/download-now rejects with 400 when no client has reported a downloadUrl", TestTriggerWsusKbDownloadNowRejectsWhenNoDownloadUrlKnown);
             allPassed &= SelfTestCheck(output, "The per-KB download in-progress guard is scoped per entry id, not shared globally", TestWsusKbDownloadInProgressGuardIsPerEntryId);
+            allPassed &= SelfTestCheck(output, "Per-KB download progress is scoped to its own entry id and gone after release", TestWsusKbDownloadProgressIsPerEntryIdAndClearsOnRelease);
             return allPassed;
         }
 
@@ -25548,6 +25620,31 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
+        private static string TestWsusCabDownloadProgressTracksBytesWhileClaimedAndClearsOnRelease()
+        {
+            InventoryServer server = new InventoryServer(new ServerOptions { DataPath = Path.GetTempPath() });
+            long bytesReceived, totalBytes;
+            if (server.TryGetWsusCabDownloadProgress(out bytesReceived, out totalBytes))
+            {
+                return "expected no progress before any download is claimed";
+            }
+            if (!server.TryClaimWsusDownloadInProgress())
+            {
+                return "expected the first claim to succeed";
+            }
+            server.UpdateWsusCabDownloadProgress(1024, 4096);
+            if (!server.TryGetWsusCabDownloadProgress(out bytesReceived, out totalBytes) || bytesReceived != 1024 || totalBytes != 4096)
+            {
+                return "expected progress to be readable while the download is in progress, got bytesReceived=" + bytesReceived + " totalBytes=" + totalBytes;
+            }
+            server.ReleaseWsusDownloadInProgress();
+            if (server.TryGetWsusCabDownloadProgress(out bytesReceived, out totalBytes))
+            {
+                return "expected progress to be gone after release";
+            }
+            return null;
+        }
+
         private static string TestRunWsusDownloadScheduleTickUpdatesLastRunOnlyWhenDue()
         {
             ServerOptions options = new ServerOptions();
@@ -25820,6 +25917,29 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (!firstClaim || secondClaimSameId || !claimDifferentId || !claimAfterRelease)
             {
                 return "expected the guard to be per-entry-id: first claim true, same-id re-claim false, different-id claim true, claim-after-release true";
+            }
+            return null;
+        }
+
+        private static string TestWsusKbDownloadProgressIsPerEntryIdAndClearsOnRelease()
+        {
+            InventoryServer server = new InventoryServer(new ServerOptions { DataPath = Path.GetTempPath() });
+            long bytesReceived, totalBytes;
+            server.TryClaimWsusKbDownloadInProgress("entry-a");
+            server.UpdateWsusKbDownloadProgress("entry-a", 2048, 8192);
+
+            if (!server.TryGetWsusKbDownloadProgress("entry-a", out bytesReceived, out totalBytes) || bytesReceived != 2048 || totalBytes != 8192)
+            {
+                return "expected entry-a's own progress to be readable, got bytesReceived=" + bytesReceived + " totalBytes=" + totalBytes;
+            }
+            if (server.TryGetWsusKbDownloadProgress("entry-b", out bytesReceived, out totalBytes))
+            {
+                return "expected no progress for a different, never-claimed entry id";
+            }
+            server.ReleaseWsusKbDownloadInProgress("entry-a");
+            if (server.TryGetWsusKbDownloadProgress("entry-a", out bytesReceived, out totalBytes))
+            {
+                return "expected entry-a's progress to be gone after release";
             }
             return null;
         }
