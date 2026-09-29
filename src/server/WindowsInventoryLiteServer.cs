@@ -10524,6 +10524,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             internal string ErrorMessage;
             internal string Sha256Hash;
             internal long SizeBytes;
+            internal string Kind;
+            internal string KbId;
         }
 
         private string GetWsusDownloadLogPath()
@@ -10541,6 +10543,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             line["errorMessage"] = entry.ErrorMessage ?? "";
             line["sha256Hash"] = entry.Sha256Hash ?? "";
             line["sizeBytes"] = entry.SizeBytes;
+            line["kind"] = String.IsNullOrEmpty(entry.Kind) ? "cab" : entry.Kind;
+            line["kbId"] = entry.KbId ?? "";
             return line;
         }
 
@@ -10582,6 +10586,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                         entry.ErrorMessage = line.ContainsKey("errorMessage") ? Convert.ToString(line["errorMessage"]) : "";
                         entry.Sha256Hash = line.ContainsKey("sha256Hash") ? Convert.ToString(line["sha256Hash"]) : "";
                         entry.SizeBytes = line.ContainsKey("sizeBytes") ? Convert.ToInt64(line["sizeBytes"]) : 0;
+                        entry.Kind = line.ContainsKey("kind") ? Convert.ToString(line["kind"]) : "cab";
+                        entry.KbId = line.ContainsKey("kbId") ? Convert.ToString(line["kbId"]) : "";
                         wsusDownloadLog.Add(entry);
                     }
                 }
@@ -10662,6 +10668,19 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 RewriteWsusDownloadLogFileLocked();
             }
             SendJson(stream, "{\"status\":\"ok\"}");
+        }
+
+        private List<Dictionary<string, object>> GetWsusDownloadLogEntries()
+        {
+            List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+            lock (wsusDownloadLogLock)
+            {
+                for (int i = wsusDownloadLog.Count - 1; i >= 0; i--)
+                {
+                    entries.Add(WsusDownloadLogEntryToDictionary(wsusDownloadLog[i]));
+                }
+            }
+            return entries;
         }
 
         internal sealed class WsusCabDownloadResult
@@ -10914,6 +10933,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             WsusDownloadLogEntry entry = new WsusDownloadLogEntry();
             entry.TimestampUtc = DateTime.UtcNow;
             entry.Source = source;
+            entry.Kind = "cab";
             entry.Success = result.Success;
             entry.ErrorCategory = result.ErrorCategory ?? "";
             entry.ErrorMessage = result.ErrorMessage ?? "";
@@ -15835,6 +15855,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "RecordWsusDownloadAttempt prunes down to WsusDownloadLogMaxEntries once the limit is exceeded", TestRecordWsusDownloadAttemptPrunesOverMaxEntries);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates/download-log returns entries newest-first", TestSendWsusDownloadLogReturnsNewestFirst);
             allPassed &= SelfTestCheck(output, "DELETE /api/v1/windows-updates/download-log clears every entry and the file on disk", TestClearWsusDownloadLogRemovesEverything);
+            allPassed &= SelfTestCheck(output, "WsusDownloadLogEntryToDictionary defaults an unset Kind to 'cab'", TestWsusDownloadLogEntryToDictionaryDefaultsKindToCabWhenUnset);
+            allPassed &= SelfTestCheck(output, "WsusDownloadLogEntryToDictionary preserves an explicit kind='kb' and kbId", TestWsusDownloadLogEntryToDictionaryPreservesKbKind);
+            allPassed &= SelfTestCheck(output, "LoadWsusDownloadLogFromDisk defaults kind to 'cab' for a legacy entry with no kind field on disk", TestLoadWsusDownloadLogFromDiskDefaultsKindToCabForLegacyEntries);
             allPassed &= SelfTestCheck(output, "PerformWsusCabDownloadCore succeeds and returns the real hash/size when download and write both succeed", TestPerformWsusCabDownloadCoreSucceeds);
             allPassed &= SelfTestCheck(output, "PerformWsusCabDownloadCore categorizes a WebException with a non-ProtocolError status as 'network'", TestPerformWsusCabDownloadCoreCategorizesNetworkFailure);
             allPassed &= SelfTestCheck(output, "PerformWsusCabDownloadCore categorizes a WebException with ProtocolError status as 'badResponse'", TestPerformWsusCabDownloadCoreCategorizesProtocolErrorAsBadResponse);
@@ -24974,6 +24997,93 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestWsusDownloadLogEntryToDictionaryDefaultsKindToCabWhenUnset()
+        {
+            InventoryServer.WsusDownloadLogEntry entry = new InventoryServer.WsusDownloadLogEntry();
+            entry.TimestampUtc = DateTime.UtcNow;
+            entry.Source = "manual";
+            entry.Success = true;
+            entry.Sha256Hash = "abc";
+            entry.SizeBytes = 12345;
+            // Kind/KbId deliberately left unset, matching every entry
+            // written before this task existed.
+
+            System.Reflection.MethodInfo toDictMethod = typeof(InventoryServer).GetMethod("WsusDownloadLogEntryToDictionary", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            InventoryServer server = new InventoryServer(new ServerOptions { DataPath = Path.GetTempPath() });
+            Dictionary<string, object> line = (Dictionary<string, object>)toDictMethod.Invoke(server, new object[] { entry });
+
+            if (Convert.ToString(line["kind"]) != "cab")
+            {
+                return "expected an unset Kind to default to 'cab', got: " + Convert.ToString(line["kind"]);
+            }
+            if (Convert.ToString(line["kbId"]) != "")
+            {
+                return "expected an unset KbId to serialize as an empty string, got: " + Convert.ToString(line["kbId"]);
+            }
+            return null;
+        }
+
+        private static string TestWsusDownloadLogEntryToDictionaryPreservesKbKind()
+        {
+            InventoryServer.WsusDownloadLogEntry entry = new InventoryServer.WsusDownloadLogEntry();
+            entry.TimestampUtc = DateTime.UtcNow;
+            entry.Source = "manual";
+            entry.Success = true;
+            entry.Kind = "kb";
+            entry.KbId = "KB5029497";
+
+            System.Reflection.MethodInfo toDictMethod = typeof(InventoryServer).GetMethod("WsusDownloadLogEntryToDictionary", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            InventoryServer server = new InventoryServer(new ServerOptions { DataPath = Path.GetTempPath() });
+            Dictionary<string, object> line = (Dictionary<string, object>)toDictMethod.Invoke(server, new object[] { entry });
+
+            if (Convert.ToString(line["kind"]) != "kb" || Convert.ToString(line["kbId"]) != "KB5029497")
+            {
+                return "expected kind='kb' and kbId='KB5029497' to round-trip, got kind=" + Convert.ToString(line["kind"]) + " kbId=" + Convert.ToString(line["kbId"]);
+            }
+            return null;
+        }
+
+        private static string TestLoadWsusDownloadLogFromDiskDefaultsKindToCabForLegacyEntries()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            try
+            {
+                InventoryServer server = new InventoryServer(new ServerOptions { DataPath = tempDir });
+                System.Reflection.MethodInfo dirMethod = typeof(InventoryServer).GetMethod("GetWsusDirectory", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                string wsusDir = (string)dirMethod.Invoke(server, null);
+                Directory.CreateDirectory(wsusDir);
+
+                // A legacy line with no "kind"/"kbId" key at all - exactly
+                // what every entry written before this task looked like.
+                ArrayList legacyLines = new ArrayList();
+                Dictionary<string, object> legacyLine = new Dictionary<string, object>();
+                legacyLine["timestampUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                legacyLine["source"] = "scheduled";
+                legacyLine["success"] = true;
+                legacyLine["sha256Hash"] = "abc123";
+                legacyLine["sizeBytes"] = 999;
+                legacyLines.Add(legacyLine);
+                File.WriteAllText(Path.Combine(wsusDir, "download-log.json"), new JavaScriptSerializer().Serialize(legacyLines));
+
+                System.Reflection.MethodInfo loadMethod = typeof(InventoryServer).GetMethod("LoadWsusDownloadLogFromDisk", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                loadMethod.Invoke(server, null);
+
+                System.Reflection.MethodInfo listMethod = typeof(InventoryServer).GetMethod("GetWsusDownloadLogEntries", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                List<Dictionary<string, object>> entries = (List<Dictionary<string, object>>)listMethod.Invoke(server, null);
+
+                if (entries.Count != 1 || Convert.ToString(entries[0]["kind"]) != "cab")
+                {
+                    return "expected the legacy entry to load with kind defaulted to 'cab'";
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(tempDir, true);
             }
         }
 
