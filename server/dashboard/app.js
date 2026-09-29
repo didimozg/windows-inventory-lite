@@ -4126,7 +4126,7 @@
         renderWindowsUpdates();
       })
       .catch(error => {
-        byId('windowsUpdatesBody').innerHTML = `<tr><td colspan="8" class="empty">Windows updates are not available: ${escapeHtml(error.message)}</td></tr>`;
+        byId('windowsUpdatesBody').innerHTML = `<tr><td colspan="9" class="empty">Windows updates are not available: ${escapeHtml(error.message)}</td></tr>`;
       });
   }
 
@@ -4186,10 +4186,11 @@
         <td>${entry.targetMode === 'missingKb' ? escapeHtml(entry.severity || '') : ''}</td>
         <td class="mono" title="${escapeHtml(windowsUpdatesCatalogTargetedTitle(entry))}">${escapeHtml(windowsUpdatesCatalogTargetingText(entry))}</td>
         <td>${entry.enabled ? 'Yes' : 'No'}</td>
+        <td>${windowsUpdatesCatalogDownloadButtonHtml(entry)}</td>
         <td><button data-edit-windows-update="${escapeHtml(entry.id)}" class="export-button" type="button">Edit</button></td>
         <td><button data-delete-windows-update="${escapeHtml(entry.id)}" class="export-button" type="button">Delete</button></td>
       </tr>
-    `).join('') || `<tr><td colspan="8" class="empty">${emptyMessage}</td></tr>`;
+    `).join('') || `<tr><td colspan="9" class="empty">${emptyMessage}</td></tr>`;
 
     tbody.querySelectorAll('[data-edit-windows-update]').forEach(button => {
       button.addEventListener('click', () => openWindowsUpdateForm(button.dataset.editWindowsUpdate));
@@ -4197,6 +4198,61 @@
     tbody.querySelectorAll('[data-delete-windows-update]').forEach(button => {
       button.addEventListener('click', () => removeWindowsUpdate(button.dataset.deleteWindowsUpdate));
     });
+    tbody.querySelectorAll('[data-download-windows-update]').forEach(button => {
+      button.addEventListener('click', () => downloadWindowsUpdateKb(button.dataset.downloadWindowsUpdate));
+    });
+  }
+
+  function windowsUpdatesCatalogDownloadButtonHtml(entry) {
+    if (entry.targetMode !== 'missingKb') return '';
+    const disabled = !entry.downloadUrl;
+    const title = disabled ? 'No client has reported a download URL for this update yet.' : '';
+    return `<button data-download-windows-update="${escapeHtml(entry.id)}" class="export-button" type="button" ${disabled ? 'disabled' : ''} title="${escapeHtml(title)}">Download</button>`;
+  }
+
+  const windowsUpdateKbDownloadPollMaxMs = 120000;
+
+  function downloadWindowsUpdateKb(id) {
+    const entry = state.windowsUpdates.find(e => e.id === id);
+    if (!entry) return;
+    const previousRelativePath = entry.relativePath || '';
+    const button = document.querySelector(`[data-download-windows-update="${id}"]`);
+    if (button) {
+      button.disabled = true;
+      button.textContent = 'Downloading...';
+    }
+
+    fetch(`/api/v1/windows-updates/${encodeURIComponent(id)}/download-now`, { method: 'POST', cache: 'no-store' })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Failed to start download.');
+        pollWindowsUpdateKbDownloadCompletion(id, previousRelativePath, Date.now());
+      })
+      .catch(error => {
+        window.alert(`Failed to start download: ${error.message}`);
+        loadWindowsUpdates();
+      });
+  }
+
+  function pollWindowsUpdateKbDownloadCompletion(id, previousRelativePath, startedAtMs) {
+    const timer = window.setInterval(() => {
+      fetch('/api/v1/windows-updates', { cache: 'no-store' })
+        .then(response => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.json();
+        })
+        .then(data => {
+          state.windowsUpdates = data.windowsUpdates || [];
+          const entry = state.windowsUpdates.find(e => e.id === id);
+          const changed = entry && (entry.relativePath || '') !== previousRelativePath;
+          const timedOut = Date.now() - startedAtMs > windowsUpdateKbDownloadPollMaxMs;
+          if (changed || timedOut) {
+            window.clearInterval(timer);
+          }
+          renderWindowsUpdates();
+        })
+        .catch(() => window.clearInterval(timer));
+    }, 3000);
   }
 
   function openWindowsUpdateForm(entryId, prefill) {
