@@ -6,6 +6,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.77.0] - Automatic KB installer download
+
+### Added
+
+- **A "Download" button on any Missing-KB Catalog entry fetches the real installer file directly from Microsoft**, into the `windows-updates` repository share - closing the loop on the previous manual-only file placement step. Disabled with a tooltip until a client has reported a real download URL for that KB. Manual trigger only this pass - no scheduled/automatic downloading.
+- **The WSUS Downloads log now shows which item each attempt was for** - the real KB id for a per-KB download, or `wsusscn2.cab` for the existing shared cab download.
+
+### Notes
+
+- A live proof-of-concept found that a server-side WUA search is unreliable for this purpose - it only returns updates applicable to the server's own machine, not the fleet's. The architecture instead has the Windows client resolve each missing KB's real download URL during its existing WUA scan (a real, previously-unknown WUA behavior this same proof-of-concept uncovered: the download content lives one level down, inside `BundledUpdates[0]`, not on the top-level update object). The server fetches the URL on a manual click, reusing the outbound-proxy infrastructure already built for `wsusscn2.cab`.
+- Live-verified end-to-end against a real KB (KB5029497, a ~40MB Visual Studio Tools for Office Runtime update) on a scratch server: real download, real file at the deterministic path, real download-log entry, real Catalog UI state (button disabled/enabled, real polling to completion).
+- Full design: `docs/superpowers/specs/2026-09-29-wsus-kb-file-download-design.md`.
+
+## [Windows client 0.9.0] - Resolves each missing KB's real download URL
+
+### Added
+
+- **The client's existing WUA scan now also resolves each missing update's real download URL** (`WsusScanner.ScanForMissingUpdates`), reported alongside the KB id it already sends. Enables the server to fetch the actual installer file without running its own, less reliable WUA search.
+
 ## [0.76.2] - Missing-KB targeting no longer breaks on a pre-existing entry's old kbId format
 
 ### Fixed
