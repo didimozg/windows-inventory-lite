@@ -14031,6 +14031,16 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return true;
             });
 
+            foreach (Dictionary<string, object> entry in entries)
+            {
+                long progressBytesReceived, progressTotalBytes;
+                if (TryGetWsusKbDownloadProgress(GetStringValue(entry, "id"), out progressBytesReceived, out progressTotalBytes))
+                {
+                    entry["downloadBytesReceived"] = progressBytesReceived;
+                    entry["downloadTotalBytes"] = progressTotalBytes;
+                }
+            }
+
             Dictionary<string, Dictionary<string, object>> missingKbAggregation = BuildMissingKbAggregation();
             foreach (Dictionary<string, object> entry in entries)
             {
@@ -14433,6 +14443,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     result["lastAttemptErrorMessage"] = lastAttempt.ErrorMessage;
                 }
             }
+
+            long cabBytesReceived, cabTotalBytes;
+            if (TryGetWsusCabDownloadProgress(out cabBytesReceived, out cabTotalBytes))
+            {
+                result["downloadBytesReceived"] = cabBytesReceived;
+                result["downloadTotalBytes"] = cabTotalBytes;
+            }
+
             SendJson(stream, serializer.Serialize(result));
         }
 
@@ -16086,6 +16104,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates resolves severity/targetedComputerNames for a legacy bare-digit catalog kbId against a real 'KB'-prefixed client report", TestSendWindowsUpdatesResolvesSeverityAndTargetsForLegacyBareDigitKbId);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates reports severity and targetedComputerNames for a missingKb entry, respecting excludedComputers and AutoCreateOnlyCriticalKbs", TestSendWindowsUpdatesReportsSeverityAndTargetedComputersForMissingKbEntries);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates exposes downloadUrl for a missingKb entry when a client has reported one", TestSendWindowsUpdatesExposesDownloadUrlForMissingKbEntries);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates exposes downloadBytesReceived/downloadTotalBytes for an entry with a download in progress, omits them otherwise", TestSendWindowsUpdatesExposesDownloadProgressWhileInProgress);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates returns an empty downloadUrl for a missingKb entry no client has reported", TestSendWindowsUpdatesReturnsEmptyDownloadUrlWhenNoClientHasReportedOne);
             allPassed &= SelfTestCheck(output, "Windows updates catalog: Create->Update->Delete through the real CreateWindowsUpdate/UpdateWindowsUpdate/DeleteWindowsUpdate HTTP handlers, then a 404 on both after delete", TestWindowsUpdatesCrudHttpLifecycleThroughRealHandlers);
             allPassed &= SelfTestCheck(output, "Third-party software catalog: Create->Update->Delete through the real CreateThirdPartySoftware/UpdateThirdPartySoftware/DeleteThirdPartySoftware HTTP handlers, then a 404 on both after delete", TestThirdPartySoftwareCrudHttpLifecycleThroughRealHandlers);
@@ -16096,6 +16115,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "GetWsusCabStatus computes the real SHA-256 hash, size, and modified time of an existing cab file", TestGetWsusCabStatusComputesRealHashSizeAndModifiedTime);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates/cab-status returns present=false with no cab file, then present=true with real hash/size/modifiedUtc once one exists", TestSendWsusCabStatusReflectsRealFileState);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates/cab-status includes lastAttempt fields once a download has been recorded, omits them when none exists yet", TestSendWsusCabStatusIncludesLastAttempt);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates/cab-status exposes downloadBytesReceived/downloadTotalBytes while a cab download is in progress, omits them otherwise", TestSendWsusCabStatusExposesDownloadProgressWhileInProgress);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/wsus-cab-download requires a valid ingestion token unconditionally, rejects with 401 when missing/wrong", TestDownloadWsusCabRejectsWithoutValidToken);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/wsus-cab-download streams the real cab bytes on success, 404s when the file does not exist", TestDownloadWsusCabStreamsRealBytesOrReturns404);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results requires a valid ingestion token unconditionally", TestReceiveWsusScanResultsRejectsWithoutValidToken);
@@ -26922,6 +26942,60 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
+        private static string TestSendWindowsUpdatesExposesDownloadProgressWhileInProgress()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            try
+            {
+                InventoryServer server = new InventoryServer(new ServerOptions { DataPath = tempDir });
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "entry-progress-test";
+                entry["name"] = "Test KB";
+                entry["targetMode"] = "missingKb";
+                entry["kbId"] = "KB0000002";
+                entry["relativePath"] = "";
+                entry["enabled"] = true;
+                entries.Add(entry);
+                server.SaveWindowsUpdates(entries);
+
+                server.TryClaimWsusKbDownloadInProgress("entry-progress-test");
+                server.UpdateWsusKbDownloadProgress("entry-progress-test", 512, 2048);
+
+                MemoryStream stream = new MemoryStream();
+                System.Reflection.MethodInfo sendMethod = typeof(InventoryServer).GetMethod("SendWindowsUpdates", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                sendMethod.Invoke(server, new object[] { stream });
+
+                string responseText = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream.ToArray()));
+                Dictionary<string, object> response = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText);
+                ArrayList windowsUpdates = (ArrayList)response["windowsUpdates"];
+                Dictionary<string, object> returnedEntry = (Dictionary<string, object>)windowsUpdates[0];
+
+                if (Convert.ToInt64(returnedEntry["downloadBytesReceived"]) != 512 || Convert.ToInt64(returnedEntry["downloadTotalBytes"]) != 2048)
+                {
+                    return "expected downloadBytesReceived=512/downloadTotalBytes=2048 while a download is in progress, got: " + new JavaScriptSerializer().Serialize(returnedEntry);
+                }
+
+                server.ReleaseWsusKbDownloadInProgress("entry-progress-test");
+                MemoryStream stream2 = new MemoryStream();
+                sendMethod.Invoke(server, new object[] { stream2 });
+                string responseText2 = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream2.ToArray()));
+                Dictionary<string, object> response2 = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText2);
+                ArrayList windowsUpdates2 = (ArrayList)response2["windowsUpdates"];
+                Dictionary<string, object> returnedEntry2 = (Dictionary<string, object>)windowsUpdates2[0];
+                if (returnedEntry2.ContainsKey("downloadBytesReceived"))
+                {
+                    return "expected downloadBytesReceived to be absent once the download is no longer in progress";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
         // Administrators+SYSTEM only would permanently lock out a service
         // configured to run under a custom account (sc.exe config ... obj=)
         // the moment it saved once - matching ApplyRestrictedDirectoryAcl's
@@ -28004,6 +28078,45 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendWsusCabStatusExposesDownloadProgressWhileInProgress()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            try
+            {
+                InventoryServer server = new InventoryServer(new ServerOptions { DataPath = tempDir });
+                server.TryClaimWsusDownloadInProgress();
+                server.UpdateWsusCabDownloadProgress(1000, 5000);
+
+                MemoryStream stream = new MemoryStream();
+                System.Reflection.MethodInfo sendMethod = typeof(InventoryServer).GetMethod("SendWsusCabStatus", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                sendMethod.Invoke(server, new object[] { stream });
+
+                string responseText = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream.ToArray()));
+                Dictionary<string, object> response = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText);
+
+                if (Convert.ToInt64(response["downloadBytesReceived"]) != 1000 || Convert.ToInt64(response["downloadTotalBytes"]) != 5000)
+                {
+                    return "expected downloadBytesReceived=1000/downloadTotalBytes=5000 while a cab download is in progress, got: " + new JavaScriptSerializer().Serialize(response);
+                }
+
+                server.ReleaseWsusDownloadInProgress();
+                MemoryStream stream2 = new MemoryStream();
+                sendMethod.Invoke(server, new object[] { stream2 });
+                string responseText2 = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream2.ToArray()));
+                Dictionary<string, object> response2 = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText2);
+                if (response2.ContainsKey("downloadBytesReceived"))
+                {
+                    return "expected downloadBytesReceived to be absent once no cab download is in progress";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
             }
         }
 
