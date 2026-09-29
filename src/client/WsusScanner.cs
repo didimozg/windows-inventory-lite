@@ -112,10 +112,40 @@ namespace WindowsInventoryLite
                     continue;
                 }
 
+                // A live proof-of-concept (2026-09-29, see
+                // docs/superpowers/specs/2026-09-29-wsus-kb-file-download-design.md)
+                // found that every real IUpdate returned by an offline-cab
+                // search is a "bundle" wrapping exactly one real
+                // content-bearing child - the top-level update's own
+                // DownloadContents is empty, and the real DownloadUrl lives
+                // on BundledUpdates.Item(0). Checked defensively in both
+                // orders (top-level first) rather than assuming bundling is
+                // the only shape any future update will ever have.
+                object bundledUpdates = update.GetType().InvokeMember("BundledUpdates", BindingFlags.GetProperty, null, update, null);
+                int bundledCount = (int)bundledUpdates.GetType().InvokeMember("Count", BindingFlags.GetProperty, null, bundledUpdates, null);
+
+                object contentSource = update;
+                object topLevelContents = update.GetType().InvokeMember("DownloadContents", BindingFlags.GetProperty, null, update, null);
+                int topLevelContentCount = (int)topLevelContents.GetType().InvokeMember("Count", BindingFlags.GetProperty, null, topLevelContents, null);
+                if (topLevelContentCount == 0 && bundledCount > 0)
+                {
+                    contentSource = bundledUpdates.GetType().InvokeMember("Item", BindingFlags.GetProperty, null, bundledUpdates, new object[] { 0 });
+                }
+
+                object downloadContents = contentSource.GetType().InvokeMember("DownloadContents", BindingFlags.GetProperty, null, contentSource, null);
+                int downloadContentsCount = (int)downloadContents.GetType().InvokeMember("Count", BindingFlags.GetProperty, null, downloadContents, null);
+                string downloadUrl = "";
+                if (downloadContentsCount > 0)
+                {
+                    object firstContent = downloadContents.GetType().InvokeMember("Item", BindingFlags.GetProperty, null, downloadContents, new object[] { 0 });
+                    downloadUrl = Convert.ToString(firstContent.GetType().InvokeMember("DownloadUrl", BindingFlags.GetProperty, null, firstContent, null) ?? "");
+                }
+
                 Dictionary<string, object> entry = new Dictionary<string, object>();
                 entry["kbId"] = kbId;
                 entry["title"] = title;
                 entry["msrcSeverity"] = msrcSeverity;
+                entry["downloadUrl"] = downloadUrl;
                 results.Add(entry);
             }
 
