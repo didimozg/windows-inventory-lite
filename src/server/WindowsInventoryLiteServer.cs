@@ -10920,7 +10920,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // both need the exact same TLS/proxy/timeout setup, just against a
         // different URL. Real network call - NOT unit-testable, same
         // accepted-limitation class as the WsusScanner WUA COM code.
-        private byte[] DownloadBytesFromUrl(string url, int timeoutMs)
+        // The buffered loop (rather than a single CopyTo) exists so
+        // onProgress can be sampled mid-download - 81920 bytes matches
+        // Stream.CopyTo's own default buffer size, so this is not a
+        // performance regression versus the single-call version it
+        // replaces. response.ContentLength is -1 when the server doesn't
+        // advertise a length; callers/consumers treat a non-positive
+        // totalBytes as "unknown size."
+        private byte[] DownloadBytesFromUrl(string url, int timeoutMs, Action<long, long> onProgress)
         {
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
             if (url.StartsWith("https:", StringComparison.OrdinalIgnoreCase))
@@ -10938,7 +10945,16 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             using (Stream responseStream = response.GetResponseStream())
             using (MemoryStream memoryStream = new MemoryStream())
             {
-                responseStream.CopyTo(memoryStream);
+                long totalBytes = response.ContentLength;
+                byte[] buffer = new byte[81920];
+                long bytesRead = 0;
+                int read;
+                while ((read = responseStream.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    memoryStream.Write(buffer, 0, read);
+                    bytesRead += read;
+                    onProgress(bytesRead, totalBytes);
+                }
                 return memoryStream.ToArray();
             }
         }
@@ -10946,7 +10962,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         private byte[] DownloadWsusCabBytesFromMicrosoft()
         {
             const string url = "https://go.microsoft.com/fwlink/?LinkID=74689";
-            return DownloadBytesFromUrl(url, 300000);
+            return DownloadBytesFromUrl(url, 300000, UpdateWsusCabDownloadProgress);
         }
 
         private void WriteWsusCabBytes(byte[] bytes)
@@ -11104,7 +11120,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 WsusKbDownloadResult result = PerformWsusKbDownloadCore(
                     kbId,
                     downloadUrl,
-                    url => DownloadBytesFromUrl(url, 300000),
+                    url => DownloadBytesFromUrl(url, 300000, (bytesReceived, totalBytes) => UpdateWsusKbDownloadProgress(id, bytesReceived, totalBytes)),
                     (relativePath, bytes) => WithSoftwareRepositoryIdentity(options, () =>
                     {
                         string fullPath = Path.Combine(options.SoftwareRepositoryPath, relativePath);
