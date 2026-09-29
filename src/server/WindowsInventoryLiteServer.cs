@@ -3168,6 +3168,94 @@ namespace WindowsInventoryLite
             return kbId.StartsWith("KB", StringComparison.OrdinalIgnoreCase) ? kbId.Substring(2) : kbId;
         }
 
+        // Called from ReceiveSoftwareJobResults for every reported-success
+        // windowsUpdate result. Closes the exact gap reproduced live 2026-09-30:
+        // a real, confirmed-successful KB install (KB5029497 on KLG-WS10-010)
+        // left the Catalog page showing "1 targeted" indefinitely, because the
+        // only thing that normally refreshes wsusMissingUpdates is a full WUA
+        // rescan, which only runs when wsusscn2.cab's hash changes - an event
+        // with no relationship to what this project itself just installed.
+        // This is a cheap, immediate correction of that one specific KB's status
+        // on that one specific machine - it does not replace a real rescan (see
+        // WsusScanner.ShouldRescan's new age/force parameters for the general case).
+        private void PruneResolvedMissingKb(string computerName, string catalogType, string entryId)
+        {
+            if (!String.Equals(catalogType, "windowsUpdate", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            string kbId;
+            lock (windowsUpdatesLock)
+            {
+                List<Dictionary<string, object>> entries = LoadWindowsUpdates();
+                Dictionary<string, object> entry = entries.Find(e => String.Equals(GetStringValue(e, "id"), entryId, StringComparison.OrdinalIgnoreCase));
+                if (entry == null || GetStringValue(entry, "targetMode") != "missingKb")
+                {
+                    return;
+                }
+                kbId = GetStringValue(entry, "kbId");
+            }
+
+            string normalizedTargetKbId = NormalizeKbId(kbId);
+            if (String.IsNullOrEmpty(normalizedTargetKbId))
+            {
+                return;
+            }
+
+            string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
+            lock (reportFileLock)
+            {
+                if (!File.Exists(path))
+                {
+                    return;
+                }
+
+                JavaScriptSerializer serializer = CreateJsonSerializer();
+                Dictionary<string, object> report;
+                try
+                {
+                    report = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                }
+                catch
+                {
+                    return;
+                }
+                if (report == null || !report.ContainsKey("wsusMissingUpdates"))
+                {
+                    return;
+                }
+
+                ArrayList missing = report["wsusMissingUpdates"] as ArrayList;
+                if (missing == null || missing.Count == 0)
+                {
+                    return;
+                }
+
+                ArrayList kept = new ArrayList();
+                bool removedAny = false;
+                foreach (object item in missing)
+                {
+                    Dictionary<string, object> missingEntry = item as Dictionary<string, object>;
+                    string missingKbId = missingEntry != null ? NormalizeKbId(GetStringValue(missingEntry, "kbId")) : null;
+                    if (missingEntry != null && String.Equals(missingKbId, normalizedTargetKbId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        removedAny = true;
+                        continue;
+                    }
+                    kept.Add(item);
+                }
+
+                if (!removedAny)
+                {
+                    return;
+                }
+
+                report["wsusMissingUpdates"] = kept;
+                File.WriteAllText(path, serializer.Serialize(report), new UTF8Encoding(false));
+            }
+        }
+
         private Dictionary<string, string> LoadWsusMissingKbSeverities(string computerName)
         {
             Dictionary<string, string> result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -3454,6 +3542,10 @@ namespace WindowsInventoryLite
                             attempt.EventLogEntries = boundedEntries;
                         }
                         RecordSoftwareJobAttempt(attempt);
+                        if (reportedSuccess)
+                        {
+                            PruneResolvedMissingKb(computerName, attempt.CatalogType, attempt.EntryId);
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -16004,6 +16096,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobResults snapshots the catalog entry's name onto the recorded attempt", TestReceiveSoftwareJobResultsSnapshotsEntryName);
             allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobResults falls back to '(deleted entry)' when the catalog entry no longer exists", TestReceiveSoftwareJobResultsFallsBackToDeletedEntryLabel);
             allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobResults passes attemptId through unchanged and bounds eventLogEntries to 5 entries / 500 chars each", TestReceiveSoftwareJobResultsPassesThroughAttemptIdAndBoundedEventLogEntries);
+            allPassed &= SelfTestCheck(output, "PruneResolvedMissingKb removes the matching kbId from a computer's stored wsusMissingUpdates on a windowsUpdate success", TestPruneResolvedMissingKbRemovesMatchingEntryOnSuccess);
+            allPassed &= SelfTestCheck(output, "PruneResolvedMissingKb matches regardless of which side has the KB prefix", TestPruneResolvedMissingKbMatchesRegardlessOfKbPrefixFormat);
+            allPassed &= SelfTestCheck(output, "PruneResolvedMissingKb leaves non-matching wsusMissingUpdates entries alone", TestPruneResolvedMissingKbLeavesNonMatchingEntriesAlone);
+            allPassed &= SelfTestCheck(output, "PruneResolvedMissingKb never touches wsusMissingUpdates for a thirdPartySoftware result", TestPruneResolvedMissingKbNoOpsForThirdPartySoftwareCatalogType);
+            allPassed &= SelfTestCheck(output, "PruneResolvedMissingKb is a no-op for a deleted entry id or a non-missingKb-mode entry, never throws", TestPruneResolvedMissingKbNoOpsWhenEntryDeletedOrNotMissingKbMode);
             allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobStart records a running entry with the real catalog entry name resolved", TestReceiveSoftwareJobStartRecordsARunningEntryWithResolvedEntryName);
             allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobStart requires a valid ingestion token, records nothing when rejected", TestReceiveSoftwareJobStartRequiresAValidIngestionToken);
             allPassed &= SelfTestCheck(output, "ComputeClientTokenIssue returns null when no log entry matches the client's IP", TestComputeClientTokenIssueNoMatch);
@@ -19032,6 +19129,230 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 {
                     return "expected each message to be truncated to 500 chars (client sent 900), got length " + message.Length;
                 }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestPruneResolvedMissingKbRemovesMatchingEntryOnSuccess()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-pruneresolved-remove-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                InventoryServer server = new InventoryServer(options);
+
+                string computerName = "PC-PRUNE-1";
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                report["computerName"] = computerName;
+                ArrayList missing = new ArrayList();
+                Dictionary<string, object> missingEntry = new Dictionary<string, object>();
+                missingEntry["kbId"] = "KB5029497";
+                missingEntry["msrcSeverity"] = "Important";
+                missing.Add(missingEntry);
+                report["wsusMissingUpdates"] = missing;
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                File.WriteAllText(Path.Combine(dataPath, computerName + ".json"), serializer.Serialize(report), new UTF8Encoding(false));
+
+                Dictionary<string, object> catalogEntry = new Dictionary<string, object>();
+                catalogEntry["id"] = "entry-1";
+                catalogEntry["name"] = "Auto: KB5029497";
+                catalogEntry["targetMode"] = "missingKb";
+                catalogEntry["kbId"] = "KB5029497";
+                catalogEntry["enabled"] = true;
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                entries.Add(catalogEntry);
+                server.SaveWindowsUpdates(entries);
+
+                System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("PruneResolvedMissingKb", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                method.Invoke(server, new object[] { computerName, "windowsUpdate", "entry-1" });
+
+                Dictionary<string, object> updated = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(Path.Combine(dataPath, computerName + ".json"), Encoding.UTF8));
+                ArrayList updatedMissing = updated["wsusMissingUpdates"] as ArrayList;
+                if (updatedMissing == null || updatedMissing.Count != 0)
+                {
+                    return "expected wsusMissingUpdates to be empty after pruning the only matching entry, got " + (updatedMissing == null ? "null" : updatedMissing.Count.ToString());
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestPruneResolvedMissingKbMatchesRegardlessOfKbPrefixFormat()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-pruneresolved-prefix-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                InventoryServer server = new InventoryServer(options);
+
+                string computerName = "PC-PRUNE-2";
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                ArrayList missing = new ArrayList();
+                Dictionary<string, object> missingEntry = new Dictionary<string, object>();
+                missingEntry["kbId"] = "5029497"; // stored bare-digit, pre-normalization era
+                missing.Add(missingEntry);
+                report["wsusMissingUpdates"] = missing;
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                File.WriteAllText(Path.Combine(dataPath, computerName + ".json"), serializer.Serialize(report), new UTF8Encoding(false));
+
+                Dictionary<string, object> catalogEntry = new Dictionary<string, object>();
+                catalogEntry["id"] = "entry-2";
+                catalogEntry["targetMode"] = "missingKb";
+                catalogEntry["kbId"] = "KB5029497"; // catalog stores "KB"-prefixed
+                catalogEntry["enabled"] = true;
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                entries.Add(catalogEntry);
+                server.SaveWindowsUpdates(entries);
+
+                System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("PruneResolvedMissingKb", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                method.Invoke(server, new object[] { computerName, "windowsUpdate", "entry-2" });
+
+                Dictionary<string, object> updated = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(Path.Combine(dataPath, computerName + ".json"), Encoding.UTF8));
+                ArrayList updatedMissing = updated["wsusMissingUpdates"] as ArrayList;
+                if (updatedMissing == null || updatedMissing.Count != 0)
+                {
+                    return "expected the bare-digit stored entry to be pruned by a KB-prefixed catalog kbId, got count " + (updatedMissing == null ? "null" : updatedMissing.Count.ToString());
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestPruneResolvedMissingKbLeavesNonMatchingEntriesAlone()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-pruneresolved-nonmatch-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                InventoryServer server = new InventoryServer(options);
+
+                string computerName = "PC-PRUNE-3";
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                ArrayList missing = new ArrayList();
+                Dictionary<string, object> keep = new Dictionary<string, object>();
+                keep["kbId"] = "KB1111111";
+                missing.Add(keep);
+                Dictionary<string, object> remove = new Dictionary<string, object>();
+                remove["kbId"] = "KB2222222";
+                missing.Add(remove);
+                report["wsusMissingUpdates"] = missing;
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                File.WriteAllText(Path.Combine(dataPath, computerName + ".json"), serializer.Serialize(report), new UTF8Encoding(false));
+
+                Dictionary<string, object> catalogEntry = new Dictionary<string, object>();
+                catalogEntry["id"] = "entry-3";
+                catalogEntry["targetMode"] = "missingKb";
+                catalogEntry["kbId"] = "KB2222222";
+                catalogEntry["enabled"] = true;
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                entries.Add(catalogEntry);
+                server.SaveWindowsUpdates(entries);
+
+                System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("PruneResolvedMissingKb", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                method.Invoke(server, new object[] { computerName, "windowsUpdate", "entry-3" });
+
+                Dictionary<string, object> updated = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(Path.Combine(dataPath, computerName + ".json"), Encoding.UTF8));
+                ArrayList updatedMissing = updated["wsusMissingUpdates"] as ArrayList;
+                if (updatedMissing == null || updatedMissing.Count != 1)
+                {
+                    return "expected exactly the non-matching KB1111111 entry to remain, got count " + (updatedMissing == null ? "null" : updatedMissing.Count.ToString());
+                }
+                Dictionary<string, object> remaining = updatedMissing[0] as Dictionary<string, object>;
+                if (remaining == null || Convert.ToString(remaining["kbId"]) != "KB1111111")
+                {
+                    return "expected the remaining entry to be KB1111111";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestPruneResolvedMissingKbNoOpsForThirdPartySoftwareCatalogType()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-pruneresolved-tps-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                InventoryServer server = new InventoryServer(options);
+
+                string computerName = "PC-PRUNE-4";
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                ArrayList missing = new ArrayList();
+                Dictionary<string, object> entryLeftAlone = new Dictionary<string, object>();
+                entryLeftAlone["kbId"] = "KB3333333";
+                missing.Add(entryLeftAlone);
+                report["wsusMissingUpdates"] = missing;
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                File.WriteAllText(Path.Combine(dataPath, computerName + ".json"), serializer.Serialize(report), new UTF8Encoding(false));
+
+                System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("PruneResolvedMissingKb", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                method.Invoke(server, new object[] { computerName, "thirdPartySoftware", "some-id" });
+
+                Dictionary<string, object> updated = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(Path.Combine(dataPath, computerName + ".json"), Encoding.UTF8));
+                ArrayList updatedMissing = updated["wsusMissingUpdates"] as ArrayList;
+                if (updatedMissing == null || updatedMissing.Count != 1)
+                {
+                    return "expected thirdPartySoftware results to never touch wsusMissingUpdates, got count " + (updatedMissing == null ? "null" : updatedMissing.Count.ToString());
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestPruneResolvedMissingKbNoOpsWhenEntryDeletedOrNotMissingKbMode()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-pruneresolved-noop-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("PruneResolvedMissingKb", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+                // Deleted/unknown entry id - must not throw.
+                method.Invoke(server, new object[] { "PC-NOENTRY", "windowsUpdate", "does-not-exist" });
+
+                // A static-target entry (not missingKb) - must not throw, must not require a kbId.
+                Dictionary<string, object> staticEntry = new Dictionary<string, object>();
+                staticEntry["id"] = "entry-static";
+                staticEntry["targetMode"] = "static";
+                staticEntry["targets"] = "PC-1";
+                staticEntry["enabled"] = true;
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                entries.Add(staticEntry);
+                server.SaveWindowsUpdates(entries);
+                method.Invoke(server, new object[] { "PC-NOENTRY", "windowsUpdate", "entry-static" });
+
                 return null;
             }
             finally
