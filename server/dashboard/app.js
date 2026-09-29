@@ -5441,7 +5441,7 @@
       })
       .then(data => renderWsusDownloadLog(data.entries || []))
       .catch(error => {
-        byId('wsusDownloadLogBody').innerHTML = `<tr><td colspan="4" class="empty">Log unavailable: ${escapeHtml(error.message)}</td></tr>`;
+        byId('wsusDownloadLogBody').innerHTML = `<tr><td colspan="5" class="empty">Log unavailable: ${escapeHtml(error.message)}</td></tr>`;
       });
   }
 
@@ -5454,15 +5454,17 @@
       const detailsText = entry.success
         ? `${escapeHtml((entry.sha256Hash || '').substring(0, 12))}... - ${entry.sizeBytes || 0} bytes`
         : escapeHtml(entry.errorMessage || '');
+      const itemText = entry.kind === 'kb' ? escapeHtml(entry.kbId || '') : 'wsusscn2.cab';
       return `
         <tr>
           <td>${escapeHtml(formatDateTime(entry.timestampUtc))}</td>
           <td>${escapeHtml(entry.source)}</td>
+          <td>${itemText}</td>
           <td>${resultText}</td>
           <td>${detailsText}</td>
         </tr>
       `;
-    }).join('') || '<tr><td colspan="4" class="empty">No WSUS download attempts recorded yet.</td></tr>';
+    }).join('') || '<tr><td colspan="5" class="empty">No WSUS download attempts recorded yet.</td></tr>';
   }
 
   function clearWsusDownloadLog() {
