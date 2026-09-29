@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.77.3] - Live download progress for the WSUS cab and per-KB downloads
+
+### Added
+
+- **Both the WSUS cab download and the per-KB "Download" button now show live progress** ("12.4 / 39.7 MB (31%)") instead of a static "Downloading..." message, updating every 3 seconds while the download is in flight.
+
+### Notes
+
+- Found live: an admin reported no way to tell whether a click on "Download" was actually progressing or stuck. Full rationale: `docs/superpowers/specs/2026-09-29-download-progress-design.md`.
+
 ## [0.77.2] - A catalog entry's file path can no longer be saved as a bare folder
 
 ### Fixed
