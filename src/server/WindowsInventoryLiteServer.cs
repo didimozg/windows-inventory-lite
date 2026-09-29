@@ -11020,50 +11020,66 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // known with certainty from the catalog entry that triggered this.
         private void PerformWsusKbDownload(string id, string kbId, string downloadUrl, string source)
         {
-            WsusKbDownloadResult result = PerformWsusKbDownloadCore(
-                kbId,
-                downloadUrl,
-                url => DownloadBytesFromUrl(url, 300000),
-                (relativePath, bytes) => WithSoftwareRepositoryIdentity(options, () =>
-                {
-                    string fullPath = Path.Combine(options.SoftwareRepositoryPath, relativePath);
-                    string directory = Path.GetDirectoryName(fullPath);
-                    if (!String.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-                    {
-                        Directory.CreateDirectory(directory);
-                    }
-                    File.WriteAllBytes(fullPath, bytes);
-                    return true;
-                }));
-
-            WsusDownloadLogEntry logEntry = new WsusDownloadLogEntry();
-            logEntry.TimestampUtc = DateTime.UtcNow;
-            logEntry.Source = source;
-            logEntry.Success = result.Success;
-            logEntry.ErrorCategory = result.ErrorCategory ?? "";
-            logEntry.ErrorMessage = result.ErrorMessage ?? "";
-            logEntry.Kind = "kb";
-            logEntry.KbId = kbId;
-            logEntry.SizeBytes = result.SizeBytes;
-            RecordWsusDownloadAttempt(logEntry);
-
-            if (result.Success)
+            // Whole body wrapped defensively: this runs on a ThreadPool
+            // worker thread (see TriggerWsusKbDownloadNow below) with no
+            // surrounding dispatch try/catch and no AppDomain.UnhandledException
+            // handler anywhere in this process. Unlike the HTTP-request-handler
+            // path, an exception that escapes here - e.g. from LoadWindowsUpdates/
+            // SaveWindowsUpdates hitting a transient file lock or a corrupt
+            // windows-updates.json - would otherwise go unhandled on the worker
+            // thread and, by default .NET Framework behavior, terminate the
+            // entire server process rather than just failing this one download.
+            try
             {
-                lock (windowsUpdatesLock)
-                {
-                    List<Dictionary<string, object>> entries = LoadWindowsUpdates();
-                    Dictionary<string, object> entry = entries.Find(e => String.Equals(GetStringValue(e, "id"), id, StringComparison.OrdinalIgnoreCase));
-                    if (entry != null)
+                WsusKbDownloadResult result = PerformWsusKbDownloadCore(
+                    kbId,
+                    downloadUrl,
+                    url => DownloadBytesFromUrl(url, 300000),
+                    (relativePath, bytes) => WithSoftwareRepositoryIdentity(options, () =>
                     {
-                        entry["relativePath"] = result.RelativePath;
-                        entry["updatedAt"] = DateTime.UtcNow.ToString("o");
-                        SaveWindowsUpdates(entries);
+                        string fullPath = Path.Combine(options.SoftwareRepositoryPath, relativePath);
+                        string directory = Path.GetDirectoryName(fullPath);
+                        if (!String.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+                        {
+                            Directory.CreateDirectory(directory);
+                        }
+                        File.WriteAllBytes(fullPath, bytes);
+                        return true;
+                    }));
+
+                WsusDownloadLogEntry logEntry = new WsusDownloadLogEntry();
+                logEntry.TimestampUtc = DateTime.UtcNow;
+                logEntry.Source = source;
+                logEntry.Success = result.Success;
+                logEntry.ErrorCategory = result.ErrorCategory ?? "";
+                logEntry.ErrorMessage = result.ErrorMessage ?? "";
+                logEntry.Kind = "kb";
+                logEntry.KbId = kbId;
+                logEntry.SizeBytes = result.SizeBytes;
+                RecordWsusDownloadAttempt(logEntry);
+
+                if (result.Success)
+                {
+                    lock (windowsUpdatesLock)
+                    {
+                        List<Dictionary<string, object>> entries = LoadWindowsUpdates();
+                        Dictionary<string, object> entry = entries.Find(e => String.Equals(GetStringValue(e, "id"), id, StringComparison.OrdinalIgnoreCase));
+                        if (entry != null)
+                        {
+                            entry["relativePath"] = result.RelativePath;
+                            entry["updatedAt"] = DateTime.UtcNow.ToString("o");
+                            SaveWindowsUpdates(entries);
+                        }
                     }
                 }
+                else
+                {
+                    DebugLogger.Log(options, "Error", "WSUS KB download (" + kbId + ", " + source + ") failed: [" + result.ErrorCategory + "] " + result.ErrorMessage);
+                }
             }
-            else
+            catch (Exception ex)
             {
-                DebugLogger.Log(options, "Error", "WSUS KB download (" + kbId + ", " + source + ") failed: [" + result.ErrorCategory + "] " + result.ErrorMessage);
+                DebugLogger.Log(options, "Error", "WSUS KB download (" + kbId + ", " + source + ") threw an unhandled exception: " + ex);
             }
         }
 
