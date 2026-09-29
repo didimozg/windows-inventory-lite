@@ -344,6 +344,9 @@ namespace WindowsInventoryLite
                     bool wsusScannedAndReported = InventoryCollector.MaybeRunWsusScanCore(
                         wsusCabHash,
                         lastScannedWsusHash,
+                        null,
+                        7,
+                        false,
                         WsusScanner.IsWuauservRunning,
                         WsusScanner.ScanForMissingUpdates,
                         (hash, destPath) => InventoryCollector.DownloadAndVerifyWsusCab(options.ServerUrl, options.Token, hash, destPath, InventoryCollector.HttpGetBytes),
@@ -2477,9 +2480,9 @@ namespace WindowsInventoryLite
         // hash untouched: a wuauserv-down or report failure is retried
         // automatically on the next poll, with no separate retry/calendar
         // mechanism.
-        internal static bool MaybeRunWsusScanCore(string wsusCabHash, string lastScannedHash, Func<bool> isWuauservRunning, Func<string, List<Dictionary<string, object>>> scanForMissingUpdates, Func<string, string, bool> downloadAndVerifyCab, Func<string, bool, List<Dictionary<string, object>>, bool> postResults)
+        internal static bool MaybeRunWsusScanCore(string wsusCabHash, string lastScannedHash, DateTime? lastScanAtUtc, int maxAgeDays, bool force, Func<bool> isWuauservRunning, Func<string, List<Dictionary<string, object>>> scanForMissingUpdates, Func<string, string, bool> downloadAndVerifyCab, Func<string, bool, List<Dictionary<string, object>>, bool> postResults)
         {
-            if (!WsusScanner.ShouldRescan(wsusCabHash, lastScannedHash))
+            if (!WsusScanner.ShouldRescan(wsusCabHash, lastScannedHash, lastScanAtUtc, maxAgeDays, force))
             {
                 return false;
             }
@@ -2549,6 +2552,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ReportJobStart posts computerName/catalogType/id/attemptId and returns true on success", TestReportJobStartPostsExpectedFieldsAndReturnsTrueOnSuccess);
             allPassed &= SelfTestCheck(output, "ReportJobStart returns false when the injected postJson throws", TestReportJobStartReturnsFalseWhenPostJsonThrows);
             allPassed &= SelfTestCheck(output, "MaybeRunWsusScanCore does nothing when wsusCabHash is empty or unchanged from the last scan", TestMaybeRunWsusScanCoreNoOpsWhenHashEmptyOrUnchanged);
+            allPassed &= SelfTestCheck(output, "MaybeRunWsusScanCore runs when the hash is unchanged but the last scan is older than the configured max age", TestMaybeRunWsusScanCoreRunsWhenStaleByAgeEvenIfHashUnchanged);
+            allPassed &= SelfTestCheck(output, "MaybeRunWsusScanCore runs when forced, regardless of hash or age", TestMaybeRunWsusScanCoreRunsWhenForcedEvenIfFreshAndHashUnchanged);
             return allPassed;
         }
 
@@ -3491,21 +3496,37 @@ namespace WindowsInventoryLite
 
         private static string TestWsusScannerShouldRescanCompares()
         {
-            if (!WsusScanner.ShouldRescan("abc123", ""))
+            if (!WsusScanner.ShouldRescan("abc123", "", null, 7, false))
             {
-                return "expected ShouldRescan to return true when the client has never scanned (empty last-scanned hash)";
+                return "expected true when the client has never scanned (empty last-scanned hash)";
             }
-            if (!WsusScanner.ShouldRescan("abc123", "def456"))
+            if (!WsusScanner.ShouldRescan("abc123", "def456", null, 7, false))
             {
-                return "expected ShouldRescan to return true when the hashes differ";
+                return "expected true when the hashes differ";
             }
-            if (WsusScanner.ShouldRescan("abc123", "abc123"))
+            if (WsusScanner.ShouldRescan("abc123", "abc123", null, 7, false))
             {
-                return "expected ShouldRescan to return false when the hashes already match";
+                return "expected false when the hashes already match and no scan timestamp is on record (avoids an upgrade-day rescan storm)";
             }
-            if (WsusScanner.ShouldRescan("", "abc123"))
+            if (WsusScanner.ShouldRescan("", "abc123", null, 7, false))
             {
-                return "expected ShouldRescan to return false when the server has no cab configured (empty server hash), regardless of the client's own last-scanned hash";
+                return "expected false when the server has no cab configured (empty server hash), regardless of the client's own last-scanned hash";
+            }
+            if (WsusScanner.ShouldRescan("abc123", "abc123", DateTime.UtcNow.AddDays(-1), 7, false))
+            {
+                return "expected false when the hashes match and the last scan is well within the max age";
+            }
+            if (!WsusScanner.ShouldRescan("abc123", "abc123", DateTime.UtcNow.AddDays(-8), 7, false))
+            {
+                return "expected true when the hashes match but the last scan is older than the configured max age";
+            }
+            if (!WsusScanner.ShouldRescan("abc123", "xyz999", DateTime.UtcNow, 7, true))
+            {
+                return "expected true when force is set, regardless of hash or age";
+            }
+            if (WsusScanner.ShouldRescan("", "abc123", null, 7, true))
+            {
+                return "expected false even under force when the server has no cab configured at all - nothing to scan against";
             }
             return null;
         }
@@ -3676,16 +3697,50 @@ namespace WindowsInventoryLite
             Func<string, string, bool> fakeDownloadAndVerifyCab = (hash, destPath) => true;
             Func<string, bool, List<Dictionary<string, object>>, bool> fakePostResults = (hash, available, missing) => true;
 
-            bool ranWithEmptyHash = MaybeRunWsusScanCore("", "previous-hash", fakeIsWuauservRunning, fakeScan, fakeDownloadAndVerifyCab, fakePostResults);
+            bool ranWithEmptyHash = MaybeRunWsusScanCore("", "previous-hash", null, 7, false, fakeIsWuauservRunning, fakeScan, fakeDownloadAndVerifyCab, fakePostResults);
             if (scanWasCalled || ranWithEmptyHash)
             {
                 return "expected no scan when wsusCabHash is empty (no cab configured)";
             }
 
-            bool ranWithUnchangedHash = MaybeRunWsusScanCore("same-hash", "same-hash", fakeIsWuauservRunning, fakeScan, fakeDownloadAndVerifyCab, fakePostResults);
+            bool ranWithUnchangedHash = MaybeRunWsusScanCore("same-hash", "same-hash", null, 7, false, fakeIsWuauservRunning, fakeScan, fakeDownloadAndVerifyCab, fakePostResults);
             if (scanWasCalled || ranWithUnchangedHash)
             {
                 return "expected no scan when wsusCabHash matches the last-scanned hash already";
+            }
+            return null;
+        }
+
+        private static string TestMaybeRunWsusScanCoreRunsWhenStaleByAgeEvenIfHashUnchanged()
+        {
+            bool scanRan = false;
+            Func<bool> fakeIsWuauservRunning = () => true;
+            Func<string, List<Dictionary<string, object>>> fakeScan = (cabPath) => { scanRan = true; return new List<Dictionary<string, object>>(); };
+            Func<string, string, bool> fakeDownloadAndVerifyCab = (hash, destPath) => true;
+            Func<string, bool, List<Dictionary<string, object>>, bool> fakePostResults = (hash, available, missing) => true;
+
+            bool ran = InventoryCollector.MaybeRunWsusScanCore("same-hash", "same-hash", DateTime.UtcNow.AddDays(-8), 7, false, fakeIsWuauservRunning, fakeScan, fakeDownloadAndVerifyCab, fakePostResults);
+
+            if (!ran || !scanRan)
+            {
+                return "expected a rescan to run when the hash is unchanged but the last scan exceeds the configured max age";
+            }
+            return null;
+        }
+
+        private static string TestMaybeRunWsusScanCoreRunsWhenForcedEvenIfFreshAndHashUnchanged()
+        {
+            bool scanRan = false;
+            Func<bool> fakeIsWuauservRunning = () => true;
+            Func<string, List<Dictionary<string, object>>> fakeScan = (cabPath) => { scanRan = true; return new List<Dictionary<string, object>>(); };
+            Func<string, string, bool> fakeDownloadAndVerifyCab = (hash, destPath) => true;
+            Func<string, bool, List<Dictionary<string, object>>, bool> fakePostResults = (hash, available, missing) => true;
+
+            bool ran = InventoryCollector.MaybeRunWsusScanCore("same-hash", "same-hash", DateTime.UtcNow, 7, true, fakeIsWuauservRunning, fakeScan, fakeDownloadAndVerifyCab, fakePostResults);
+
+            if (!ran || !scanRan)
+            {
+                return "expected a rescan to run when forced, even though the hash matches and the last scan is brand new";
             }
             return null;
         }

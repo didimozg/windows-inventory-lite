@@ -42,13 +42,29 @@ namespace WindowsInventoryLite
         // configured on the server at all, in which case there is
         // nothing to scan against regardless of what the client last
         // scanned.
-        internal static bool ShouldRescan(string serverCabHash, string lastScannedHash)
+        internal static bool ShouldRescan(string serverCabHash, string lastScannedHash, DateTime? lastScanAtUtc, int maxAgeDays, bool force)
         {
             if (String.IsNullOrEmpty(serverCabHash))
             {
                 return false;
             }
-            return !String.Equals(serverCabHash, lastScannedHash, StringComparison.OrdinalIgnoreCase);
+            if (force)
+            {
+                return true;
+            }
+            if (!String.Equals(serverCabHash, lastScannedHash, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            if (lastScanAtUtc == null)
+            {
+                // Hash already matches but no scan timestamp on record - this is
+                // the upgrade case, where an existing install scanned before this
+                // field existed. Treat as fresh rather than forcing every
+                // already-deployed client to rescan the moment the server upgrades.
+                return false;
+            }
+            return (DateTime.UtcNow - lastScanAtUtc.Value).TotalDays >= maxAgeDays;
         }
 
         // Real WUA COM interop, late-bound. Not unit-testable (requires a
