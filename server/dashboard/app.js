@@ -4207,7 +4207,7 @@
     if (entry.targetMode !== 'missingKb') return '';
     const disabled = !entry.downloadUrl;
     const title = disabled ? 'No client has reported a download URL for this update yet.' : '';
-    return `<button data-download-windows-update="${escapeHtml(entry.id)}" class="export-button" type="button" ${disabled ? 'disabled' : ''} title="${escapeHtml(title)}">Download</button>`;
+    return `<button data-download-windows-update="${escapeHtml(entry.id)}" class="export-button" type="button" ${disabled ? 'disabled' : ''} title="${escapeHtmlOrEmpty(title)}">Download</button>`;
   }
 
   const windowsUpdateKbDownloadPollMaxMs = 120000;
@@ -4242,16 +4242,22 @@
           return response.json();
         })
         .then(data => {
-          state.windowsUpdates = data.windowsUpdates || [];
-          const entry = state.windowsUpdates.find(e => e.id === id);
+          const windowsUpdates = data.windowsUpdates || [];
+          const entry = windowsUpdates.find(e => e.id === id);
           const changed = entry && (entry.relativePath || '') !== previousRelativePath;
           const timedOut = Date.now() - startedAtMs > windowsUpdateKbDownloadPollMaxMs;
-          if (changed || timedOut) {
-            window.clearInterval(timer);
+          if (!changed && !timedOut) {
+            return;
           }
+          window.clearInterval(timer);
+          state.windowsUpdates = windowsUpdates;
           renderWindowsUpdates();
         })
-        .catch(() => window.clearInterval(timer));
+        .catch(() => {
+          // Transient poll failure - keep trying on the next tick rather
+          // than giving up on one dropped request; windowsUpdateKbDownloadPollMaxMs
+          // above still bounds how long this can go on for.
+        });
     }, 3000);
   }
 
