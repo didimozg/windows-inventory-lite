@@ -10761,23 +10761,20 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return new WsusCabDownloadResult { Success = true, Sha256Hash = hash, SizeBytes = bytes.LongLength };
         }
 
-        // Real network call - NOT unit-testable, matching the WsusScanner
-        // WUA-COM precedent from the prior WSUS feature. Verify live
-        // against a real network (and a real proxy, if one is available)
-        // before this feature is considered fully done. 5-minute timeout:
-        // a real wsusscn2.cab is large and this runs on a background
-        // ThreadPool thread, never the HTTP request thread, so a slow
-        // download does not block the dashboard or any client poll.
-        private byte[] DownloadWsusCabBytesFromMicrosoft()
+        // Shared by the cab downloader and the per-KB file downloader
+        // (Task 6 of docs/superpowers/plans/2026-09-29-wsus-kb-file-download.md) -
+        // both need the exact same TLS/proxy/timeout setup, just against a
+        // different URL. Real network call - NOT unit-testable, same
+        // accepted-limitation class as the WsusScanner WUA COM code.
+        private byte[] DownloadBytesFromUrl(string url, int timeoutMs)
         {
-            const string url = "https://go.microsoft.com/fwlink/?LinkID=74689";
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
             if (url.StartsWith("https:", StringComparison.OrdinalIgnoreCase))
             {
                 ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
             }
-            request.Timeout = 300000;
-            request.ReadWriteTimeout = 300000;
+            request.Timeout = timeoutMs;
+            request.ReadWriteTimeout = timeoutMs;
             IWebProxy proxy = BuildOutboundProxy();
             if (proxy != null)
             {
@@ -10790,6 +10787,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 responseStream.CopyTo(memoryStream);
                 return memoryStream.ToArray();
             }
+        }
+
+        private byte[] DownloadWsusCabBytesFromMicrosoft()
+        {
+            const string url = "https://go.microsoft.com/fwlink/?LinkID=74689";
+            return DownloadBytesFromUrl(url, 300000);
         }
 
         private void WriteWsusCabBytes(byte[] bytes)
