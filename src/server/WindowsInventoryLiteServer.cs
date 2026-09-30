@@ -308,7 +308,7 @@ namespace WindowsInventoryLite
         public int ThirdPartySoftwareCheckIntervalHours;
         // How old a client's last WSUS scan is allowed to get before the
         // server forces an out-of-band rescan via forceWsusRescanComputers
-        // (see TriggerWsusRescanNow/SendClientSoftwareJobs) - a later task
+        // (see TriggerWsusRescanNow/SendWindowsUpdateJobs) - a later task
         // (Task 4) makes the Windows client actually compare this against
         // its own last-scan timestamp; this server-side piece only stores
         // and exposes the configured value.
@@ -1405,15 +1405,24 @@ namespace WindowsInventoryLite
         private WsusDownloadProgressState wsusCabDownloadProgress;
         // Computer names an admin has asked to rescan WSUS "right now" via
         // TriggerWsusRescanNow, surfaced to that exact client on its next
-        // GET /api/v1/client/software-jobs poll as forceWsusRescan=true
-        // (see SendClientSoftwareJobs) and cleared once that client's next
+        // GET /api/v1/client/windows-update-jobs poll as forceWsusRescan=true
+        // (see SendWindowsUpdateJobs) and cleared once that client's next
         // real wsus-scan-results report arrives (see ReceiveWsusScanResults).
         // Deliberately its own lock, never nested with reportFileLock or
         // windowsUpdatesLock - this set is unrelated to either.
         private readonly object forceWsusRescanLock = new object();
         private readonly HashSet<string> forceWsusRescanComputers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        private readonly object forceImmediateSoftwareCheckLock = new object();
-        private readonly HashSet<string> forceImmediateSoftwareCheckComputers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Split by catalog type (windowsUpdate vs. thirdPartySoftware), each
+        // with its own lock and set - see SendWindowsUpdateJobs/
+        // SendThirdPartySoftwareJobs (which clear their own set
+        // unconditionally on any real call) and TriggerInstallWindowsUpdatesNow/
+        // TriggerInstallThirdPartySoftwareNow (which set it). Surfaced only
+        // via ReceiveInventory's ack response, never on the jobs endpoints'
+        // own response - see that method's own comment for why.
+        private readonly object forceImmediateWindowsUpdateCheckLock = new object();
+        private readonly HashSet<string> forceImmediateWindowsUpdateCheckComputers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly object forceImmediateThirdPartySoftwareCheckLock = new object();
+        private readonly HashSet<string> forceImmediateThirdPartySoftwareCheckComputers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly object reportFileLock = new object();
         // server-config.json holds the DPAPI-encrypted secrets (AdPassword/
         // WebPassword/Token/ClientUpdatePassword) and is now written by more
@@ -2367,9 +2376,13 @@ namespace WindowsInventoryLite
                     {
                         ReceiveLinuxServiceStatus(stream, request);
                     }
-                    else if (request.Method == "GET" && request.Path.StartsWith("/api/v1/client/software-jobs", StringComparison.OrdinalIgnoreCase))
+                    else if (request.Method == "GET" && request.Path.StartsWith("/api/v1/client/windows-update-jobs", StringComparison.OrdinalIgnoreCase))
                     {
-                        SendClientSoftwareJobs(stream, request);
+                        SendWindowsUpdateJobs(stream, request);
+                    }
+                    else if (request.Method == "GET" && request.Path.StartsWith("/api/v1/client/third-party-software-jobs", StringComparison.OrdinalIgnoreCase))
+                    {
+                        SendThirdPartySoftwareJobs(stream, request);
                     }
                     else if (request.Method == "POST" && request.Path == "/api/v1/client/software-jobs/start")
                     {
@@ -2696,9 +2709,13 @@ namespace WindowsInventoryLite
                     {
                         TriggerWsusRescanNow(stream, request);
                     }
-                    else if (request.Method == "POST" && request.Path.StartsWith("/api/v1/clients/check-now", StringComparison.OrdinalIgnoreCase))
+                    else if (request.Method == "POST" && request.Path.StartsWith("/api/v1/clients/install-windows-updates-now", StringComparison.OrdinalIgnoreCase))
                     {
-                        TriggerCheckNow(stream, request);
+                        TriggerInstallWindowsUpdatesNow(stream, request);
+                    }
+                    else if (request.Method == "POST" && request.Path.StartsWith("/api/v1/clients/install-third-party-software-now", StringComparison.OrdinalIgnoreCase))
+                    {
+                        TriggerInstallThirdPartySoftwareNow(stream, request);
                     }
                     else if (request.Method == "POST" && request.Path.StartsWith("/api/v1/windows-updates/", StringComparison.OrdinalIgnoreCase) && request.Path.EndsWith("/download-now", StringComparison.OrdinalIgnoreCase))
                     {
@@ -3073,19 +3090,33 @@ namespace WindowsInventoryLite
             // would hand the real, current secret token to that
             // unauthenticated caller, who could then replay it against
             // endpoints that always require a real token (e.g.
-            // SendSoftwareRepositoryConnectionInfo, SendClientSoftwareJobs).
+            // SendSoftwareRepositoryConnectionInfo, SendWindowsUpdateJobs,
+            // SendThirdPartySoftwareJobs).
             // So ingestionToken is only ever populated from inside the
             // strict, unconditional check below, alongside licenseKeySources.
             Dictionary<string, object> configResponse = new Dictionary<string, object>();
             configResponse["intervalHours"] = options.WindowsDefaultIntervalHours;
             configResponse["softwareCheckIntervalHours"] = options.WindowsUpdateCheckIntervalHours;
             ackResponse["config"] = configResponse;
-            bool forceImmediateSoftwareCheck;
-            lock (forceImmediateSoftwareCheckLock)
+            // Surfaced only here, never on SendWindowsUpdateJobs'/
+            // SendThirdPartySoftwareJobs' own response - the inventory
+            // report is a more frequent, independent channel than the jobs
+            // poll itself, so a flag surfaced only there would arrive too
+            // late to accelerate anything (see the design doc's "Important
+            // correction" for the full reasoning). Each jobs endpoint only
+            // clears its own set unconditionally, never reads it back.
+            bool forceImmediateWindowsUpdateCheck;
+            lock (forceImmediateWindowsUpdateCheckLock)
             {
-                forceImmediateSoftwareCheck = forceImmediateSoftwareCheckComputers.Contains(computerName);
+                forceImmediateWindowsUpdateCheck = forceImmediateWindowsUpdateCheckComputers.Contains(computerName);
             }
-            ackResponse["forceImmediateSoftwareCheck"] = forceImmediateSoftwareCheck;
+            ackResponse["forceImmediateWindowsUpdateCheck"] = forceImmediateWindowsUpdateCheck;
+            bool forceImmediateThirdPartySoftwareCheck;
+            lock (forceImmediateThirdPartySoftwareCheckLock)
+            {
+                forceImmediateThirdPartySoftwareCheck = forceImmediateThirdPartySoftwareCheckComputers.Contains(computerName);
+            }
+            ackResponse["forceImmediateThirdPartySoftwareCheck"] = forceImmediateThirdPartySoftwareCheck;
             // The basic report-acceptance gate above deliberately honors the
             // admin-toggleable RequireIngestionToken (fake inventory
             // submission is accepted as low-sensitivity risk when no token
@@ -3095,7 +3126,8 @@ namespace WindowsInventoryLite
             // model - it is fleet-wide admin-defined metadata about where to
             // find real product keys - so it always requires a real, matching
             // token regardless of that toggle, same as
-            // SendSoftwareRepositoryConnectionInfo/SendClientSoftwareJobs. A
+            // SendSoftwareRepositoryConnectionInfo/SendWindowsUpdateJobs/
+            // SendThirdPartySoftwareJobs. A
             // caller with no valid token still gets its report accepted; it
             // just never receives this catalog.
             if (!IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
@@ -3166,7 +3198,7 @@ namespace WindowsInventoryLite
             SendJson(stream, serializer.Serialize(result));
         }
 
-        private void SendClientSoftwareJobs(Stream stream, RequestContext request)
+        private void SendWindowsUpdateJobs(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
             // Always requires a real, matching token regardless of
@@ -3178,7 +3210,7 @@ namespace WindowsInventoryLite
             // low-sensitivity risk model that toggle was designed around.
             if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
             {
-                RecordIngestionRejection(request, "software-jobs", ResolveIngestionRejectionReason(token));
+                RecordIngestionRejection(request, "windows-update-jobs", ResolveIngestionRejectionReason(token));
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
                 return;
             }
@@ -3213,30 +3245,20 @@ namespace WindowsInventoryLite
                     AppendJobIfTargeted(jobs, entry, "windowsUpdate", computerName, missingKbSeverities, options.AutoCreateOnlyCriticalKbs);
                 }
             }
-            lock (thirdPartySoftwareLock)
-            {
-                foreach (Dictionary<string, object> entry in LoadThirdPartySoftware())
-                {
-                    AppendJobIfTargeted(jobs, entry, "thirdPartySoftware", computerName, missingKbSeverities, options.AutoCreateOnlyCriticalKbs);
-                }
-            }
 
-            // This endpoint still gates both catalogs' jobs together as a
-            // single combined admission check, pending Task 2's split of
-            // this endpoint per catalog. Mapped onto the windowsUpdate
-            // install window fields as the minimal change that keeps
-            // today's behavior identical after ServerOptions'
-            // SoftwareInstallWindow* fields were split in two (Task 1).
             bool admitted = ShouldAdmitSoftwareInstallWindowRequest(DateTime.UtcNow, options.WindowsUpdateInstallWindowEnabled, options.WindowsUpdateInstallWindowStartUtc, options.WindowsUpdateInstallWindowEndUtc, options.WindowsUpdateInstallWindowJitterMinutes, NextSoftwareInstallWindowRandomSample());
             if (!admitted && jobs.Count > 0)
             {
-                DebugLogger.Log(options, "Schedule", jobs.Count + " software job(s) for '" + DebugLogger.SanitizeForLog(computerName) + "' deferred by the software install window.");
+                DebugLogger.Log(options, "Schedule", jobs.Count + " windows-update job(s) for '" + DebugLogger.SanitizeForLog(computerName) + "' deferred by the windows-update install window.");
                 jobs = new ArrayList();
             }
 
             JavaScriptSerializer serializer = CreateJsonSerializer();
             Dictionary<string, object> response = new Dictionary<string, object>();
             response["jobs"] = jobs;
+            // WSUS-scan fields stay attached to this endpoint (not the
+            // thirdPartySoftware one) - scanning for missing KBs is a
+            // KB/windowsUpdate-domain concern.
             WsusCabStatus wsusCabStatus = GetWsusCabStatus();
             response["wsusCabHash"] = wsusCabStatus.Present ? wsusCabStatus.Sha256Hash : "";
             response["wsusScanMaxAgeDays"] = options.WsusScanMaxAgeDays;
@@ -3246,9 +3268,88 @@ namespace WindowsInventoryLite
                 forceWsusRescan = forceWsusRescanComputers.Contains(computerName);
             }
             response["forceWsusRescan"] = forceWsusRescan;
-            lock (forceImmediateSoftwareCheckLock)
+            // Cleared unconditionally on any real call, whatever triggered
+            // it - never read back here, only surfaced via ReceiveInventory's
+            // ack (see that method's own comment for why).
+            lock (forceImmediateWindowsUpdateCheckLock)
             {
-                forceImmediateSoftwareCheckComputers.Remove(computerName);
+                forceImmediateWindowsUpdateCheckComputers.Remove(computerName);
+            }
+            SendJson(stream, serializer.Serialize(response));
+        }
+
+        private void SendThirdPartySoftwareJobs(Stream stream, RequestContext request)
+        {
+            string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
+            // Always requires a real, matching token regardless of
+            // options.RequireIngestionToken - see
+            // SendSoftwareRepositoryConnectionInfo above for the full
+            // reasoning. This endpoint returns the fleet's job assignments
+            // for any computer name the caller names, which is a map of what
+            // is about to be executed where; that is not covered by the
+            // low-sensitivity risk model that toggle was designed around.
+            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            {
+                RecordIngestionRejection(request, "third-party-software-jobs", ResolveIngestionRejectionReason(token));
+                SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
+                return;
+            }
+
+            string computerName = null;
+            int queryStart = request.Path.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                string query = request.Path.Substring(queryStart + 1);
+                foreach (string pair in query.Split('&'))
+                {
+                    int equalsIndex = pair.IndexOf('=');
+                    if (equalsIndex > 0 && pair.Substring(0, equalsIndex) == "computerName")
+                    {
+                        computerName = Uri.UnescapeDataString(pair.Substring(equalsIndex + 1));
+                    }
+                }
+            }
+
+            if (String.IsNullOrEmpty(computerName))
+            {
+                SendText(stream, "{\"error\":\"computerName is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            // AppendJobIfTargeted's missingKb targeting mode is not
+            // restricted to the windowsUpdate catalog at the data-model
+            // level - CreateSoftwareCatalogEntry/UpdateSoftwareCatalogEntry
+            // accept targetMode=missingKb for a thirdPartySoftware entry
+            // just as readily as for a windowsUpdate one - so this call
+            // cannot be skipped or passed null without silently breaking
+            // targeting for any thirdPartySoftware entry an admin happens
+            // to have created that way.
+            Dictionary<string, string> missingKbSeverities = LoadWsusMissingKbSeverities(computerName);
+            ArrayList jobs = new ArrayList();
+            lock (thirdPartySoftwareLock)
+            {
+                foreach (Dictionary<string, object> entry in LoadThirdPartySoftware())
+                {
+                    AppendJobIfTargeted(jobs, entry, "thirdPartySoftware", computerName, missingKbSeverities, options.AutoCreateOnlyCriticalKbs);
+                }
+            }
+
+            bool admitted = ShouldAdmitSoftwareInstallWindowRequest(DateTime.UtcNow, options.ThirdPartySoftwareInstallWindowEnabled, options.ThirdPartySoftwareInstallWindowStartUtc, options.ThirdPartySoftwareInstallWindowEndUtc, options.ThirdPartySoftwareInstallWindowJitterMinutes, NextSoftwareInstallWindowRandomSample());
+            if (!admitted && jobs.Count > 0)
+            {
+                DebugLogger.Log(options, "Schedule", jobs.Count + " third-party-software job(s) for '" + DebugLogger.SanitizeForLog(computerName) + "' deferred by the third-party-software install window.");
+                jobs = new ArrayList();
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["jobs"] = jobs;
+            // Cleared unconditionally on any real call, whatever triggered
+            // it - never read back here, only surfaced via ReceiveInventory's
+            // ack (see that method's own comment for why).
+            lock (forceImmediateThirdPartySoftwareCheckLock)
+            {
+                forceImmediateThirdPartySoftwareCheckComputers.Remove(computerName);
             }
             SendJson(stream, serializer.Serialize(response));
         }
@@ -4040,7 +4141,8 @@ namespace WindowsInventoryLite
             return Math.Min(1.0, elapsedMinutes / effectiveJitterMinutes);
         }
 
-        // Single entry point SendClientSoftwareJobs uses. randomSample is
+        // Single entry point SendWindowsUpdateJobs/SendThirdPartySoftwareJobs
+        // each call once with their own settings. randomSample is
         // caller-injected (normally a fresh cryptographically random [0,1)
         // value - see NextSoftwareInstallWindowRandomSample) so this
         // function stays pure and directly self-testable with fixed
@@ -11464,7 +11566,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         // Marks one computer as due for an immediate WSUS rescan, surfaced
         // to that exact client via forceWsusRescan on its next
-        // GET /api/v1/client/software-jobs poll (SendClientSoftwareJobs)
+        // GET /api/v1/client/windows-update-jobs poll (SendWindowsUpdateJobs)
         // and cleared once its next real wsus-scan-results report arrives
         // (ReceiveWsusScanResults). Task 4 (not this one) makes the actual
         // Windows client read and act on the flag; Task 5 wires a dashboard
@@ -11504,19 +11606,19 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendJson(stream, serializer.Serialize(result));
         }
 
-        // Set by an admin (dashboard "Check now" action, per-row or bulk),
-        // consumed by ReceiveInventory's ack response - NOT this same
-        // request/response, since the whole point is to make the client
-        // poll GET /api/v1/client/software-jobs sooner than its own
-        // SoftwareCheckIntervalHours cadence would; that response is the
-        // one the client isn't due to ask for yet. Cleared unconditionally
-        // by SendClientSoftwareJobs the moment that poll actually happens,
-        // whatever triggered it - the forced ACTION here is "the client
-        // checked," not "a job inside that check succeeded," so there is
-        // no separate later confirmation step to wait for (contrast with
-        // forceWsusRescanComputers, cleared only once a real scan result
-        // arrives).
-        private void TriggerCheckNow(Stream stream, RequestContext request)
+        // Set by an admin (dashboard "Install Windows updates now" action,
+        // per-row or bulk), consumed by ReceiveInventory's ack response -
+        // NOT this same request/response, since the whole point is to make
+        // the client poll GET /api/v1/client/windows-update-jobs sooner
+        // than its own WindowsUpdateCheckIntervalHours cadence would; that
+        // response is the one the client isn't due to ask for yet. Cleared
+        // unconditionally by SendWindowsUpdateJobs the moment that poll
+        // actually happens, whatever triggered it - the forced ACTION here
+        // is "the client checked," not "a job inside that check succeeded,"
+        // so there is no separate later confirmation step to wait for
+        // (contrast with forceWsusRescanComputers, cleared only once a real
+        // scan result arrives).
+        private void TriggerInstallWindowsUpdatesNow(Stream stream, RequestContext request)
         {
             string computerName = null;
             int queryStart = request.Path.IndexOf('?');
@@ -11538,9 +11640,48 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return;
             }
 
-            lock (forceImmediateSoftwareCheckLock)
+            lock (forceImmediateWindowsUpdateCheckLock)
             {
-                forceImmediateSoftwareCheckComputers.Add(computerName);
+                forceImmediateWindowsUpdateCheckComputers.Add(computerName);
+            }
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["status"] = "requested";
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        // Set by an admin (dashboard "Install third-party software now"
+        // action, per-row or bulk), consumed by ReceiveInventory's ack
+        // response - see TriggerInstallWindowsUpdatesNow's own comment for
+        // the full reasoning, mirrored here for the thirdPartySoftware
+        // pipeline. Cleared unconditionally by SendThirdPartySoftwareJobs
+        // the moment that poll actually happens.
+        private void TriggerInstallThirdPartySoftwareNow(Stream stream, RequestContext request)
+        {
+            string computerName = null;
+            int queryStart = request.Path.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                string query = request.Path.Substring(queryStart + 1);
+                foreach (string pair in query.Split('&'))
+                {
+                    int equalsIndex = pair.IndexOf('=');
+                    if (equalsIndex > 0 && pair.Substring(0, equalsIndex) == "computerName")
+                    {
+                        computerName = Uri.UnescapeDataString(pair.Substring(equalsIndex + 1));
+                    }
+                }
+            }
+            if (String.IsNullOrEmpty(computerName))
+            {
+                SendText(stream, "{\"error\":\"computerName is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            lock (forceImmediateThirdPartySoftwareCheckLock)
+            {
+                forceImmediateThirdPartySoftwareCheckComputers.Add(computerName);
             }
 
             Dictionary<string, object> result = new Dictionary<string, object>();
@@ -16165,7 +16306,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "AppendJobIfTargeted excludes disabled entries", TestAppendJobIfTargetedExcludesDisabledEntries);
             allPassed &= SelfTestCheck(output, "AppendJobIfTargeted excludes a computer named in excludedComputers even when the KB is reported missing, does not affect other computers", TestAppendJobIfTargetedRespectsExcludedComputers);
             allPassed &= SelfTestCheck(output, "AppendJobIfTargeted only targets a machine reporting Critical severity when restrictToCriticalOnly is true, targets normally when false", TestAppendJobIfTargetedRestrictsToCriticalSeverityWhenEnabled);
-            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs targets a real client despite a legacy bare-digit catalog kbId", TestSendClientSoftwareJobsTargetsRealClientDespiteLegacyBareDigitCatalogKbId);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/windows-update-jobs targets a real client despite a legacy bare-digit catalog kbId", TestSendWindowsUpdateJobsTargetsRealClientDespiteLegacyBareDigitCatalogKbId);
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate/UpdateWindowsUpdate persist excludedComputers", TestCreateAndUpdateWindowsUpdatePersistExcludedComputers);
             allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries WinRM first when both ports are open", TestDecideAutoDetectProtocolsBothOpen);
             allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries only WinRM when just that port is open", TestDecideAutoDetectProtocolsWinRmOnly);
@@ -16256,12 +16397,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ShouldAdmitSoftwareInstallWindowRequest is false outside the window regardless of sample", TestShouldAdmitSoftwareInstallWindowRequestOutsideWindowAlwaysFalse);
             allPassed &= SelfTestCheck(output, "ShouldAdmitSoftwareInstallWindowRequest inside the window compares the sample against the ramp probability", TestShouldAdmitSoftwareInstallWindowRequestInsideWindowComparesSample);
             allPassed &= SelfTestCheck(output, "ShouldAdmitSoftwareInstallWindowRequest fails open when the configured window is unparsable", TestShouldAdmitSoftwareInstallWindowRequestFailsOpenOnBadConfig);
-            allPassed &= SelfTestCheck(output, "SendClientSoftwareJobs withholds a targeted job outside the configured install window, and delivers it once the window is disabled", TestSendClientSoftwareJobsWithheldOutsideInstallWindow);
-            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs targets a missingKb-mode entry to a computer whose last scan reported that exact KB as missing", TestSendClientSoftwareJobsTargetsMissingKbEntryDynamically);
-            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs does not target a missingKb-mode entry to a computer that never reported that KB as missing", TestSendClientSoftwareJobsDoesNotTargetMissingKbEntryWhenNotMissing);
-            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs still targets a static-mode entry by hostname unchanged, zero regression from the missingKb addition", TestSendClientSoftwareJobsStaticTargetingUnaffected);
-            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs includes wsusCabHash, empty when no cab is configured and the real hash once one is", TestSendClientSoftwareJobsIncludesWsusCabHash);
-            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-jobs includes wsusScanMaxAgeDays and forceWsusRescan, flipping to true only after a rescan-now request for that exact computer", TestSendClientSoftwareJobsIncludesWsusScanMaxAgeDaysAndForceFlag);
+            allPassed &= SelfTestCheck(output, "SendWindowsUpdateJobs withholds a targeted job outside the configured install window, and delivers it once the window is disabled", TestSendWindowsUpdateJobsWithheldOutsideInstallWindow);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/windows-update-jobs targets a missingKb-mode entry to a computer whose last scan reported that exact KB as missing", TestSendWindowsUpdateJobsTargetsMissingKbEntryDynamically);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/windows-update-jobs does not target a missingKb-mode entry to a computer that never reported that KB as missing", TestSendWindowsUpdateJobsDoesNotTargetMissingKbEntryWhenNotMissing);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/windows-update-jobs still targets a static-mode entry by hostname unchanged, zero regression from the missingKb addition", TestSendWindowsUpdateJobsStaticTargetingUnaffected);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/windows-update-jobs includes wsusCabHash, empty when no cab is configured and the real hash once one is", TestSendWindowsUpdateJobsIncludesWsusCabHash);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/windows-update-jobs includes wsusScanMaxAgeDays and forceWsusRescan, flipping to true only after a rescan-now request for that exact computer", TestSendWindowsUpdateJobsIncludesWsusScanMaxAgeDaysAndForceFlag);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall updates a target's stored clientVersion", TestPatchClientReportVersionAfterInstallUpdatesVersion);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall's lastInstalledAtUtc is cleared once a real report overwrites the file", TestPatchClientReportVersionAfterInstallFieldClearedByRealReport);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall is a no-op when the target has no stored report yet", TestPatchClientReportVersionAfterInstallMissingReport);
@@ -16529,9 +16670,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results with wuServiceAvailable=false still writes wuServiceUnavailable=true and an empty missing-updates list", TestReceiveWsusScanResultsRecordsServiceUnavailableFlag);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results is a no-op for an unknown computer with no stored report", TestReceiveWsusScanResultsIsNoOpForUnknownComputer);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results clears a pending forceWsusRescan flag for that computer once a real report arrives", TestReceiveWsusScanResultsClearsForceWsusRescanFlag);
-            allPassed &= SelfTestCheck(output, "TriggerCheckNow sets the flag, reflected true only for the named computer's next inventory ack", TestTriggerCheckNowSetsFlagOnlyForNamedComputer);
-            allPassed &= SelfTestCheck(output, "SendClientSoftwareJobs unconditionally clears a pending forceImmediateSoftwareCheck flag for that computer", TestSendClientSoftwareJobsClearsForceImmediateCheckFlagUnconditionally);
-            allPassed &= SelfTestCheck(output, "TriggerCheckNow rejects a request with no computerName", TestTriggerCheckNowRejectsMissingComputerName);
+            allPassed &= SelfTestCheck(output, "TriggerInstallWindowsUpdatesNow sets the flag, reflected true only for the named computer's next inventory ack", TestTriggerInstallWindowsUpdatesNowSetsFlagOnlyForNamedComputer);
+            allPassed &= SelfTestCheck(output, "TriggerInstallWindowsUpdatesNow rejects a request with no computerName", TestTriggerInstallWindowsUpdatesNowRejectsMissingComputerName);
+            allPassed &= SelfTestCheck(output, "TriggerInstallThirdPartySoftwareNow rejects a request with no computerName", TestTriggerInstallThirdPartySoftwareNowRejectsMissingComputerName);
+            allPassed &= SelfTestCheck(output, "SendWindowsUpdateJobs only returns windowsUpdate catalog entries (never thirdPartySoftware) and unconditionally clears its own forceImmediateWindowsUpdateCheck flag", TestSendWindowsUpdateJobsOnlyReturnsWindowsUpdateEntriesAndClearsItsOwnFlag);
+            allPassed &= SelfTestCheck(output, "TriggerInstallThirdPartySoftwareNow sets forceImmediateThirdPartySoftwareCheck without touching forceImmediateWindowsUpdateCheck for the same computer", TestInstallThirdPartySoftwareNowFlagIsIndependentOfWindowsUpdateFlag);
+            allPassed &= SelfTestCheck(output, "SendWindowsUpdateJobs/SendThirdPartySoftwareJobs gate on their own independent install window settings", TestWindowsUpdateAndThirdPartySoftwareInstallWindowsGateIndependently);
             allPassed &= SelfTestCheck(output, "A routine POST /api/v1/windows-inventory report does not erase wsusMissingUpdates/wsusScannedCabHash/wsusScanAt/wuServiceUnavailable written by an earlier wsus-scan-results report", TestReceiveInventoryPreservesWsusFieldsFromPreviousReport);
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate accepts targetMode=missingKb with a kbId and persists both fields", TestCreateWindowsUpdateAcceptsMissingKbTargetMode);
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate rejects targetMode=missingKb with no kbId", TestCreateWindowsUpdateRejectsMissingKbTargetModeWithoutKbId);
@@ -16774,7 +16918,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // LoadWsusMissingKbSeverities' own normalization) so this actually
         // proves the real request pipeline, not just one function in
         // isolation.
-        private static string TestSendClientSoftwareJobsTargetsRealClientDespiteLegacyBareDigitCatalogKbId()
+        private static string TestSendWindowsUpdateJobsTargetsRealClientDespiteLegacyBareDigitCatalogKbId()
         {
             string dataPath = Path.Combine(Path.GetTempPath(), "wil-legacy-kbid-jobs-test-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(dataPath);
@@ -16809,14 +16953,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 RequestContext request = new RequestContext();
                 request.Method = "GET";
-                request.Path = "/api/v1/client/software-jobs?computerName=REAL-CLIENT-PC";
+                request.Path = "/api/v1/client/windows-update-jobs?computerName=REAL-CLIENT-PC";
                 request.Headers = new Dictionary<string, string>();
                 request.Headers["x-inventory-token"] = "test-token";
 
                 string responseText;
                 using (MemoryStream stream = new MemoryStream())
                 {
-                    server.SendClientSoftwareJobs(stream, request);
+                    server.SendWindowsUpdateJobs(stream, request);
                     responseText = Encoding.UTF8.GetString(stream.ToArray());
                 }
                 if (responseText.IndexOf("\"id\":\"entry-1\"", StringComparison.Ordinal) < 0)
@@ -20888,7 +21032,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return null;
         }
 
-        private static string TestSendClientSoftwareJobsWithheldOutsideInstallWindow()
+        private static string TestSendWindowsUpdateJobsWithheldOutsideInstallWindow()
         {
             ServerOptions options = new ServerOptions();
             options.DataPath = Path.Combine(Path.GetTempPath(), "wil-software-jobs-installwindow-test-" + Guid.NewGuid().ToString("N"));
@@ -20924,14 +21068,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 RequestContext request = new RequestContext();
                 request.Method = "GET";
-                request.Path = "/api/v1/client/software-jobs?computerName=WINDOW-TEST-PC";
+                request.Path = "/api/v1/client/windows-update-jobs?computerName=WINDOW-TEST-PC";
                 request.Headers = new Dictionary<string, string>();
                 request.Headers["x-inventory-token"] = "shared-secret";
 
                 string responseText;
                 using (MemoryStream stream = new MemoryStream())
                 {
-                    server.SendClientSoftwareJobs(stream, request);
+                    server.SendWindowsUpdateJobs(stream, request);
                     responseText = Encoding.UTF8.GetString(stream.ToArray());
                 }
 
@@ -20944,7 +21088,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 using (MemoryStream stream = new MemoryStream())
                 {
-                    server.SendClientSoftwareJobs(stream, request);
+                    server.SendWindowsUpdateJobs(stream, request);
                     responseText = Encoding.UTF8.GetString(stream.ToArray());
                 }
 
@@ -20961,7 +21105,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
-        private static string TestSendClientSoftwareJobsTargetsMissingKbEntryDynamically()
+        private static string TestSendWindowsUpdateJobsTargetsMissingKbEntryDynamically()
         {
             ServerOptions options = new ServerOptions();
             options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-dynamictarget-" + Guid.NewGuid().ToString("N"));
@@ -20997,13 +21141,13 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 RequestContext jobsRequest = new RequestContext();
                 jobsRequest.Method = "GET";
-                jobsRequest.Path = "/api/v1/client/software-jobs?computerName=PC-MISSING";
+                jobsRequest.Path = "/api/v1/client/windows-update-jobs?computerName=PC-MISSING";
                 jobsRequest.Headers = new Dictionary<string, string>();
                 jobsRequest.Headers["x-inventory-token"] = "real-token";
                 jobsRequest.RemoteAddress = IPAddress.Loopback;
                 using (MemoryStream stream = new MemoryStream())
                 {
-                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendClientSoftwareJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendWindowsUpdateJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
                     method.Invoke(server, new object[] { stream, jobsRequest });
                     string responseText = Encoding.UTF8.GetString(stream.ToArray());
                     if (responseText.IndexOf("\"relativePath\":\"windows-updates\\\\kb5099539.msu\"", StringComparison.OrdinalIgnoreCase) < 0)
@@ -21019,7 +21163,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
-        private static string TestSendClientSoftwareJobsDoesNotTargetMissingKbEntryWhenNotMissing()
+        private static string TestSendWindowsUpdateJobsDoesNotTargetMissingKbEntryWhenNotMissing()
         {
             ServerOptions options = new ServerOptions();
             options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-notmissing-" + Guid.NewGuid().ToString("N"));
@@ -21049,13 +21193,13 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 RequestContext jobsRequest = new RequestContext();
                 jobsRequest.Method = "GET";
-                jobsRequest.Path = "/api/v1/client/software-jobs?computerName=PC-CLEAN";
+                jobsRequest.Path = "/api/v1/client/windows-update-jobs?computerName=PC-CLEAN";
                 jobsRequest.Headers = new Dictionary<string, string>();
                 jobsRequest.Headers["x-inventory-token"] = "real-token";
                 jobsRequest.RemoteAddress = IPAddress.Loopback;
                 using (MemoryStream stream = new MemoryStream())
                 {
-                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendClientSoftwareJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendWindowsUpdateJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
                     method.Invoke(server, new object[] { stream, jobsRequest });
                     string responseText = Encoding.UTF8.GetString(stream.ToArray());
                     if (responseText.IndexOf("kb5099539.msu", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -21071,7 +21215,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
-        private static string TestSendClientSoftwareJobsStaticTargetingUnaffected()
+        private static string TestSendWindowsUpdateJobsStaticTargetingUnaffected()
         {
             ServerOptions options = new ServerOptions();
             options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-staticunaffected-" + Guid.NewGuid().ToString("N"));
@@ -21094,13 +21238,13 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 RequestContext jobsRequest = new RequestContext();
                 jobsRequest.Method = "GET";
-                jobsRequest.Path = "/api/v1/client/software-jobs?computerName=PC-STATIC";
+                jobsRequest.Path = "/api/v1/client/windows-update-jobs?computerName=PC-STATIC";
                 jobsRequest.Headers = new Dictionary<string, string>();
                 jobsRequest.Headers["x-inventory-token"] = "real-token";
                 jobsRequest.RemoteAddress = IPAddress.Loopback;
                 using (MemoryStream stream = new MemoryStream())
                 {
-                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendClientSoftwareJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendWindowsUpdateJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
                     method.Invoke(server, new object[] { stream, jobsRequest });
                     string responseText = Encoding.UTF8.GetString(stream.ToArray());
                     if (responseText.IndexOf("static.msu", StringComparison.OrdinalIgnoreCase) < 0)
@@ -21116,7 +21260,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
-        private static string TestSendClientSoftwareJobsIncludesWsusCabHash()
+        private static string TestSendWindowsUpdateJobsIncludesWsusCabHash()
         {
             ServerOptions options = new ServerOptions();
             options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-jobscabhash-" + Guid.NewGuid().ToString("N"));
@@ -21127,14 +21271,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 InventoryServer server = new InventoryServer(options);
                 RequestContext request = new RequestContext();
                 request.Method = "GET";
-                request.Path = "/api/v1/client/software-jobs?computerName=TEST-PC";
+                request.Path = "/api/v1/client/windows-update-jobs?computerName=TEST-PC";
                 request.Headers = new Dictionary<string, string>();
                 request.Headers["x-inventory-token"] = "real-token";
                 request.RemoteAddress = IPAddress.Loopback;
 
                 using (MemoryStream stream = new MemoryStream())
                 {
-                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendClientSoftwareJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendWindowsUpdateJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
                     method.Invoke(server, new object[] { stream, request });
                     string responseText = Encoding.UTF8.GetString(stream.ToArray());
                     if (responseText.IndexOf("\"wsusCabHash\":\"\"", StringComparison.OrdinalIgnoreCase) < 0)
@@ -21152,7 +21296,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 using (MemoryStream stream = new MemoryStream())
                 {
-                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendClientSoftwareJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("SendWindowsUpdateJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
                     method.Invoke(server, new object[] { stream, request });
                     string responseText = Encoding.UTF8.GetString(stream.ToArray());
                     if (responseText.IndexOf("\"wsusCabHash\":\"\"", StringComparison.OrdinalIgnoreCase) >= 0 || responseText.IndexOf("\"wsusCabHash\":", StringComparison.OrdinalIgnoreCase) < 0)
@@ -21168,7 +21312,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
-        private static string TestSendClientSoftwareJobsIncludesWsusScanMaxAgeDaysAndForceFlag()
+        private static string TestSendWindowsUpdateJobsIncludesWsusScanMaxAgeDaysAndForceFlag()
         {
             string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-forcerescan-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(dataPath);
@@ -21188,14 +21332,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 RequestContext jobsRequest = new RequestContext();
                 jobsRequest.Method = "GET";
-                jobsRequest.Path = "/api/v1/client/software-jobs?computerName=" + computerName;
+                jobsRequest.Path = "/api/v1/client/windows-update-jobs?computerName=" + computerName;
                 jobsRequest.Headers = new Dictionary<string, string>();
                 jobsRequest.Headers["x-inventory-token"] = "test-token";
 
                 string beforeResponse;
                 using (MemoryStream jobsStream = new MemoryStream())
                 {
-                    server.SendClientSoftwareJobs(jobsStream, jobsRequest);
+                    server.SendWindowsUpdateJobs(jobsStream, jobsRequest);
                     beforeResponse = Encoding.UTF8.GetString(jobsStream.ToArray());
                 }
                 if (beforeResponse.IndexOf("\"wsusScanMaxAgeDays\":9", StringComparison.Ordinal) < 0)
@@ -21219,7 +21363,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 string afterResponse;
                 using (MemoryStream jobsStreamAfter = new MemoryStream())
                 {
-                    server.SendClientSoftwareJobs(jobsStreamAfter, jobsRequest);
+                    server.SendWindowsUpdateJobs(jobsStreamAfter, jobsRequest);
                     afterResponse = Encoding.UTF8.GetString(jobsStreamAfter.ToArray());
                 }
                 if (afterResponse.IndexOf("\"forceWsusRescan\":true", StringComparison.Ordinal) < 0)
@@ -27472,12 +27616,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 string jobsResponseText;
                 RequestContext jobsRequest = new RequestContext();
                 jobsRequest.Method = "GET";
-                jobsRequest.Path = "/api/v1/client/software-jobs?computerName=REAL-CLIENT-PC";
+                jobsRequest.Path = "/api/v1/client/windows-update-jobs?computerName=REAL-CLIENT-PC";
                 jobsRequest.Headers = new Dictionary<string, string>();
                 jobsRequest.Headers["x-inventory-token"] = "test-token";
                 using (MemoryStream jobsStream = new MemoryStream())
                 {
-                    server.SendClientSoftwareJobs(jobsStream, jobsRequest);
+                    server.SendWindowsUpdateJobs(jobsStream, jobsRequest);
                     jobsResponseText = Encoding.UTF8.GetString(jobsStream.ToArray());
                 }
                 if (jobsResponseText.IndexOf("KB5031354", StringComparison.OrdinalIgnoreCase) < 0)
@@ -29492,14 +29636,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 RequestContext jobsRequest = new RequestContext();
                 jobsRequest.Method = "GET";
-                jobsRequest.Path = "/api/v1/client/software-jobs?computerName=" + computerName;
+                jobsRequest.Path = "/api/v1/client/windows-update-jobs?computerName=" + computerName;
                 jobsRequest.Headers = new Dictionary<string, string>();
                 jobsRequest.Headers["x-inventory-token"] = "test-token";
 
                 string responseText;
                 using (MemoryStream jobsStream = new MemoryStream())
                 {
-                    server.SendClientSoftwareJobs(jobsStream, jobsRequest);
+                    server.SendWindowsUpdateJobs(jobsStream, jobsRequest);
                     responseText = Encoding.UTF8.GetString(jobsStream.ToArray());
                 }
                 if (responseText.IndexOf("\"forceWsusRescan\":false", StringComparison.Ordinal) < 0)
@@ -29514,7 +29658,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
-        private static string TestTriggerCheckNowSetsFlagOnlyForNamedComputer()
+        private static string TestTriggerInstallWindowsUpdatesNowSetsFlagOnlyForNamedComputer()
         {
             string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-checkNow-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(dataPath);
@@ -29527,11 +29671,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 RequestContext triggerRequest = new RequestContext();
                 triggerRequest.Method = "POST";
-                triggerRequest.Path = "/api/v1/clients/check-now?computerName=PC-CHECKNOW-1";
+                triggerRequest.Path = "/api/v1/clients/install-windows-updates-now?computerName=PC-CHECKNOW-1";
                 triggerRequest.Headers = new Dictionary<string, string>();
                 using (MemoryStream triggerStream = new MemoryStream())
                 {
-                    server.TriggerCheckNow(triggerStream, triggerRequest);
+                    server.TriggerInstallWindowsUpdatesNow(triggerStream, triggerRequest);
                     string triggerResponse = Encoding.UTF8.GetString(triggerStream.ToArray());
                     if (triggerResponse.IndexOf("\"status\":\"requested\"", StringComparison.Ordinal) < 0)
                     {
@@ -29558,9 +29702,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     server.ReceiveInventory(inventoryStream1, inventoryRequest1);
                     ack1 = Encoding.UTF8.GetString(inventoryStream1.ToArray());
                 }
-                if (ack1.IndexOf("\"forceImmediateSoftwareCheck\":true", StringComparison.Ordinal) < 0)
+                if (ack1.IndexOf("\"forceImmediateWindowsUpdateCheck\":true", StringComparison.Ordinal) < 0)
                 {
-                    return "expected forceImmediateSoftwareCheck:true in PC-CHECKNOW-1's inventory ack, got: " + ack1;
+                    return "expected forceImmediateWindowsUpdateCheck:true in PC-CHECKNOW-1's inventory ack, got: " + ack1;
                 }
 
                 RequestContext inventoryRequest2 = new RequestContext();
@@ -29574,9 +29718,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     server.ReceiveInventory(inventoryStream2, inventoryRequest2);
                     ack2 = Encoding.UTF8.GetString(inventoryStream2.ToArray());
                 }
-                if (ack2.IndexOf("\"forceImmediateSoftwareCheck\":false", StringComparison.Ordinal) < 0)
+                if (ack2.IndexOf("\"forceImmediateWindowsUpdateCheck\":false", StringComparison.Ordinal) < 0)
                 {
-                    return "expected forceImmediateSoftwareCheck:false for the untouched PC-CHECKNOW-2, got: " + ack2;
+                    return "expected forceImmediateWindowsUpdateCheck:false for the untouched PC-CHECKNOW-2, got: " + ack2;
                 }
                 return null;
             }
@@ -29586,65 +29730,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
-        private static string TestSendClientSoftwareJobsClearsForceImmediateCheckFlagUnconditionally()
-        {
-            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-clearcheck-" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(dataPath);
-            try
-            {
-                ServerOptions options = new ServerOptions();
-                options.DataPath = dataPath;
-                options.Token = "test-token";
-                InventoryServer server = new InventoryServer(options);
-
-                RequestContext triggerRequest = new RequestContext();
-                triggerRequest.Method = "POST";
-                triggerRequest.Path = "/api/v1/clients/check-now?computerName=PC-CHECKNOW-3";
-                triggerRequest.Headers = new Dictionary<string, string>();
-                using (MemoryStream triggerStream = new MemoryStream())
-                {
-                    server.TriggerCheckNow(triggerStream, triggerRequest);
-                }
-
-                RequestContext jobsRequest = new RequestContext();
-                jobsRequest.Method = "GET";
-                jobsRequest.Path = "/api/v1/client/software-jobs?computerName=PC-CHECKNOW-3";
-                jobsRequest.Headers = new Dictionary<string, string>();
-                jobsRequest.Headers["x-inventory-token"] = "test-token";
-                using (MemoryStream jobsStream = new MemoryStream())
-                {
-                    server.SendClientSoftwareJobs(jobsStream, jobsRequest);
-                }
-
-                Dictionary<string, object> report = new Dictionary<string, object>();
-                report["computerName"] = "PC-CHECKNOW-3";
-                JavaScriptSerializer serializer = new JavaScriptSerializer();
-                File.WriteAllText(Path.Combine(dataPath, "PC-CHECKNOW-3.json"), serializer.Serialize(report), new UTF8Encoding(false));
-
-                RequestContext inventoryRequest = new RequestContext();
-                inventoryRequest.Method = "POST";
-                inventoryRequest.Path = "/api/v1/windows-inventory";
-                inventoryRequest.Body = "{\"computerName\":\"PC-CHECKNOW-3\"}";
-                inventoryRequest.Headers = new Dictionary<string, string>();
-                string ack;
-                using (MemoryStream inventoryStream = new MemoryStream())
-                {
-                    server.ReceiveInventory(inventoryStream, inventoryRequest);
-                    ack = Encoding.UTF8.GetString(inventoryStream.ToArray());
-                }
-                if (ack.IndexOf("\"forceImmediateSoftwareCheck\":false", StringComparison.Ordinal) < 0)
-                {
-                    return "expected the flag to already be cleared by the earlier SendClientSoftwareJobs call, got: " + ack;
-                }
-                return null;
-            }
-            finally
-            {
-                try { Directory.Delete(dataPath, true); } catch { }
-            }
-        }
-
-        private static string TestTriggerCheckNowRejectsMissingComputerName()
+        private static string TestTriggerInstallWindowsUpdatesNowRejectsMissingComputerName()
         {
             ServerOptions options = new ServerOptions();
             options.Token = "test-token";
@@ -29652,12 +29738,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
             RequestContext triggerRequest = new RequestContext();
             triggerRequest.Method = "POST";
-            triggerRequest.Path = "/api/v1/clients/check-now";
+            triggerRequest.Path = "/api/v1/clients/install-windows-updates-now";
             triggerRequest.Headers = new Dictionary<string, string>();
             string response;
             using (MemoryStream triggerStream = new MemoryStream())
             {
-                server.TriggerCheckNow(triggerStream, triggerRequest);
+                server.TriggerInstallWindowsUpdatesNow(triggerStream, triggerRequest);
                 response = Encoding.UTF8.GetString(triggerStream.ToArray());
             }
 
@@ -29666,6 +29752,243 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return "expected a computerName-required error, got: " + response;
             }
             return null;
+        }
+
+        private static string TestTriggerInstallThirdPartySoftwareNowRejectsMissingComputerName()
+        {
+            ServerOptions options = new ServerOptions();
+            options.Token = "test-token";
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext triggerRequest = new RequestContext();
+            triggerRequest.Method = "POST";
+            triggerRequest.Path = "/api/v1/clients/install-third-party-software-now";
+            triggerRequest.Headers = new Dictionary<string, string>();
+            string response;
+            using (MemoryStream triggerStream = new MemoryStream())
+            {
+                server.TriggerInstallThirdPartySoftwareNow(triggerStream, triggerRequest);
+                response = Encoding.UTF8.GetString(triggerStream.ToArray());
+            }
+
+            if (response.IndexOf("computerName is required", StringComparison.Ordinal) < 0)
+            {
+                return "expected a computerName-required error, got: " + response;
+            }
+            return null;
+        }
+
+        private static string TestSendWindowsUpdateJobsOnlyReturnsWindowsUpdateEntriesAndClearsItsOwnFlag()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-wujobs-split-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                InventoryServer server = new InventoryServer(options);
+
+                Dictionary<string, object> wuEntry = new Dictionary<string, object>();
+                wuEntry["id"] = "wu-1";
+                wuEntry["targetMode"] = "static";
+                wuEntry["targets"] = "PC-SPLIT-1";
+                wuEntry["enabled"] = true;
+                wuEntry["updatedAt"] = "2026-09-30T00:00:00Z";
+                List<Dictionary<string, object>> wuEntries = new List<Dictionary<string, object>>();
+                wuEntries.Add(wuEntry);
+                server.SaveWindowsUpdates(wuEntries);
+
+                Dictionary<string, object> tpEntry = new Dictionary<string, object>();
+                tpEntry["id"] = "tp-1";
+                tpEntry["targets"] = "PC-SPLIT-1";
+                tpEntry["enabled"] = true;
+                tpEntry["updatedAt"] = "2026-09-30T00:00:00Z";
+                List<Dictionary<string, object>> tpEntries = new List<Dictionary<string, object>>();
+                tpEntries.Add(tpEntry);
+                server.SaveThirdPartySoftware(tpEntries);
+
+                RequestContext triggerRequest = new RequestContext();
+                triggerRequest.Method = "POST";
+                triggerRequest.Path = "/api/v1/clients/install-windows-updates-now?computerName=PC-SPLIT-1";
+                triggerRequest.Headers = new Dictionary<string, string>();
+                using (MemoryStream triggerStream = new MemoryStream())
+                {
+                    server.TriggerInstallWindowsUpdatesNow(triggerStream, triggerRequest);
+                }
+
+                RequestContext jobsRequest = new RequestContext();
+                jobsRequest.Method = "GET";
+                jobsRequest.Path = "/api/v1/client/windows-update-jobs?computerName=PC-SPLIT-1";
+                jobsRequest.Headers = new Dictionary<string, string>();
+                jobsRequest.Headers["x-inventory-token"] = "test-token";
+                string jobsResponse;
+                using (MemoryStream jobsStream = new MemoryStream())
+                {
+                    server.SendWindowsUpdateJobs(jobsStream, jobsRequest);
+                    jobsResponse = Encoding.UTF8.GetString(jobsStream.ToArray());
+                }
+                if (jobsResponse.IndexOf("\"id\":\"wu-1\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the windowsUpdate job in the response, got: " + jobsResponse;
+                }
+                if (jobsResponse.IndexOf("\"id\":\"tp-1\"", StringComparison.Ordinal) >= 0)
+                {
+                    return "expected the thirdPartySoftware job to NOT appear in the windows-update-jobs response, got: " + jobsResponse;
+                }
+
+                File.WriteAllText(Path.Combine(dataPath, "PC-SPLIT-1.json"), "{\"computerName\":\"PC-SPLIT-1\"}", new UTF8Encoding(false));
+                RequestContext inventoryRequest = new RequestContext();
+                inventoryRequest.Method = "POST";
+                inventoryRequest.Path = "/api/v1/inventory";
+                inventoryRequest.Body = "{\"computerName\":\"PC-SPLIT-1\"}";
+                inventoryRequest.Headers = new Dictionary<string, string>();
+                string ack;
+                using (MemoryStream inventoryStream = new MemoryStream())
+                {
+                    server.ReceiveInventory(inventoryStream, inventoryRequest);
+                    ack = Encoding.UTF8.GetString(inventoryStream.ToArray());
+                }
+                if (ack.IndexOf("\"forceImmediateWindowsUpdateCheck\":false", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the windowsUpdate force-flag to already be cleared by the earlier SendWindowsUpdateJobs call, got: " + ack;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestInstallThirdPartySoftwareNowFlagIsIndependentOfWindowsUpdateFlag()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-tpflag-independent-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                InventoryServer server = new InventoryServer(options);
+                File.WriteAllText(Path.Combine(dataPath, "PC-SPLIT-2.json"), "{\"computerName\":\"PC-SPLIT-2\"}", new UTF8Encoding(false));
+
+                RequestContext triggerRequest = new RequestContext();
+                triggerRequest.Method = "POST";
+                triggerRequest.Path = "/api/v1/clients/install-third-party-software-now?computerName=PC-SPLIT-2";
+                triggerRequest.Headers = new Dictionary<string, string>();
+                using (MemoryStream triggerStream = new MemoryStream())
+                {
+                    server.TriggerInstallThirdPartySoftwareNow(triggerStream, triggerRequest);
+                }
+
+                RequestContext inventoryRequest = new RequestContext();
+                inventoryRequest.Method = "POST";
+                inventoryRequest.Path = "/api/v1/inventory";
+                inventoryRequest.Body = "{\"computerName\":\"PC-SPLIT-2\"}";
+                inventoryRequest.Headers = new Dictionary<string, string>();
+                string ack;
+                using (MemoryStream inventoryStream = new MemoryStream())
+                {
+                    server.ReceiveInventory(inventoryStream, inventoryRequest);
+                    ack = Encoding.UTF8.GetString(inventoryStream.ToArray());
+                }
+                if (ack.IndexOf("\"forceImmediateThirdPartySoftwareCheck\":true", StringComparison.Ordinal) < 0)
+                {
+                    return "expected forceImmediateThirdPartySoftwareCheck:true, got: " + ack;
+                }
+                if (ack.IndexOf("\"forceImmediateWindowsUpdateCheck\":false", StringComparison.Ordinal) < 0)
+                {
+                    return "expected forceImmediateWindowsUpdateCheck to remain false - the two flags must be fully independent, got: " + ack;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestWindowsUpdateAndThirdPartySoftwareInstallWindowsGateIndependently()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-windows-independent-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+
+                // A narrow window computed relative to the real wall clock at
+                // test-run time, not a fixed clock time (e.g. "00:00-00:01")
+                // - see TestSendWindowsUpdateJobsWithheldOutsideInstallWindow's
+                // own comment for why a hardcoded window would make this test
+                // flaky depending on when it happens to run.
+                DateTime windowStart = DateTime.UtcNow.AddHours(6);
+                DateTime windowEnd = windowStart.AddMinutes(30);
+                options.WindowsUpdateInstallWindowEnabled = true;
+                options.WindowsUpdateInstallWindowStartUtc = windowStart.ToString("HH\\:mm", System.Globalization.CultureInfo.InvariantCulture);
+                options.WindowsUpdateInstallWindowEndUtc = windowEnd.ToString("HH\\:mm", System.Globalization.CultureInfo.InvariantCulture);
+                options.WindowsUpdateInstallWindowJitterMinutes = 30;
+                options.ThirdPartySoftwareInstallWindowEnabled = false;
+                InventoryServer server = new InventoryServer(options);
+
+                Dictionary<string, object> wuEntry = new Dictionary<string, object>();
+                wuEntry["id"] = "wu-2";
+                wuEntry["targetMode"] = "static";
+                wuEntry["targets"] = "PC-SPLIT-3";
+                wuEntry["enabled"] = true;
+                wuEntry["updatedAt"] = "2026-09-30T00:00:00Z";
+                List<Dictionary<string, object>> wuEntries = new List<Dictionary<string, object>>();
+                wuEntries.Add(wuEntry);
+                server.SaveWindowsUpdates(wuEntries);
+
+                Dictionary<string, object> tpEntry = new Dictionary<string, object>();
+                tpEntry["id"] = "tp-2";
+                tpEntry["targets"] = "PC-SPLIT-3";
+                tpEntry["enabled"] = true;
+                tpEntry["updatedAt"] = "2026-09-30T00:00:00Z";
+                List<Dictionary<string, object>> tpEntries = new List<Dictionary<string, object>>();
+                tpEntries.Add(tpEntry);
+                server.SaveThirdPartySoftware(tpEntries);
+
+                RequestContext wuJobsRequest = new RequestContext();
+                wuJobsRequest.Method = "GET";
+                wuJobsRequest.Path = "/api/v1/client/windows-update-jobs?computerName=PC-SPLIT-3";
+                wuJobsRequest.Headers = new Dictionary<string, string>();
+                wuJobsRequest.Headers["x-inventory-token"] = "test-token";
+                string wuResponse;
+                using (MemoryStream wuJobsStream = new MemoryStream())
+                {
+                    server.SendWindowsUpdateJobs(wuJobsStream, wuJobsRequest);
+                    wuResponse = Encoding.UTF8.GetString(wuJobsStream.ToArray());
+                }
+                if (wuResponse.IndexOf("\"jobs\":[]", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the windowsUpdate job list to be deferred (empty) by its own enabled-but-currently-closed install window, got: " + wuResponse;
+                }
+
+                RequestContext tpJobsRequest = new RequestContext();
+                tpJobsRequest.Method = "GET";
+                tpJobsRequest.Path = "/api/v1/client/third-party-software-jobs?computerName=PC-SPLIT-3";
+                tpJobsRequest.Headers = new Dictionary<string, string>();
+                tpJobsRequest.Headers["x-inventory-token"] = "test-token";
+                string tpResponse;
+                using (MemoryStream tpJobsStream = new MemoryStream())
+                {
+                    server.SendThirdPartySoftwareJobs(tpJobsStream, tpJobsRequest);
+                    tpResponse = Encoding.UTF8.GetString(tpJobsStream.ToArray());
+                }
+                if (tpResponse.IndexOf("\"id\":\"tp-2\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the thirdPartySoftware job to be admitted (its own install window is disabled, independent of windowsUpdate's), got: " + tpResponse;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
         }
 
         private static string TestReceiveWsusScanResultsRecordsServiceUnavailableFlag()
