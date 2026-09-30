@@ -255,7 +255,11 @@
   }
 
   function loadWindowsUpdatesSubviewData(subview) {
-    if (subview === 'missing') loadWsusMissingSummary();
+    // The Missing-updates row template's "already in catalog" badge
+    // (isKbAlreadyInCatalog) cross-references state.windowsUpdates, which
+    // otherwise only gets loaded by visiting the Catalog subview - without
+    // this, the badge would silently never appear on a fresh page load.
+    if (subview === 'missing') { loadWsusMissingSummary(); loadWindowsUpdates(); }
     if (subview === 'catalog') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); loadWindowsUpdateAutoCreateSetting(); }
   }
 
@@ -4085,6 +4089,19 @@
     return true;
   }
 
+  // Mirrors the server's own NormalizeKbId (WindowsInventoryLiteServer.cs) -
+  // strips a leading "KB"/"kb" so a bare-digit kbId (an older catalog entry,
+  // saved before the 0.76.2 normalization fix) still compares equal to the
+  // "KB"+digits format every real client report always uses.
+  function normalizeKbIdForComparison(kbId) {
+    return (kbId || '').replace(/^kb/i, '');
+  }
+
+  function isKbAlreadyInCatalog(kbId) {
+    const normalized = normalizeKbIdForComparison(kbId);
+    return state.windowsUpdates.some(entry => entry.targetMode === 'missingKb' && normalizeKbIdForComparison(entry.kbId) === normalized);
+  }
+
   function renderWsusMissingSummary() {
     renderSortHeaders();
     const tbody = byId('windowsUpdatesMissingBody');
@@ -4106,7 +4123,9 @@
         <td>${escapeHtml(entry.title || '')}</td>
         <td>${escapeHtml(entry.severity || '')}</td>
         <td title="${escapeHtml((entry.computerNames || []).slice().sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })).join('\n'))}">${entry.machineCount}</td>
-        <td><button data-add-catalog-for-kb="${escapeHtml(entry.kbId)}" class="export-button" type="button">+ Add catalog entry</button></td>
+        <td>${isKbAlreadyInCatalog(entry.kbId)
+          ? '<span class="platform-tag">✓ In catalog</span>'
+          : `<button data-add-catalog-for-kb="${escapeHtml(entry.kbId)}" class="export-button" type="button">+ Add catalog entry</button>`}</td>
       </tr>
     `).join('') || `<tr><td colspan="5" class="empty">${emptyMessage}</td></tr>`;
 
@@ -4134,6 +4153,12 @@
       .then(data => {
         state.windowsUpdates = data.windowsUpdates || [];
         renderWindowsUpdates();
+        // Also refresh Missing updates' "already in catalog" badges - this
+        // fetch and loadWsusMissingSummary's are independent and can finish
+        // in either order (loadWindowsUpdatesSubviewData fires both when the
+        // Missing-updates subview loads), so whichever finishes last must
+        // still leave both tables correct.
+        renderWsusMissingSummary();
       })
       .catch(error => {
         byId('windowsUpdatesBody').innerHTML = `<tr><td colspan="9" class="empty">Windows updates are not available: ${escapeHtml(error.message)}</td></tr>`;
