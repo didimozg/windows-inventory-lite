@@ -3075,7 +3075,8 @@ namespace WindowsInventoryLite
             DebugLogger.Log(options, "Client", "Inventory report accepted from '" + DebugLogger.SanitizeForLog(computerName) + "'");
             Dictionary<string, object> ackResponse = new Dictionary<string, object>();
             ackResponse["status"] = "ok";
-            // intervalHours/softwareCheckIntervalHours are not gated on a
+            // intervalHours/windowsUpdateCheckIntervalHours/
+            // thirdPartySoftwareCheckIntervalHours are not gated on a
             // valid token - the fleet-wide interval defaults are not
             // sensitive. ingestionToken (the actual secret) is deliberately
             // NOT decided by AuthenticatedWithPreviousToken alone here: that
@@ -3096,7 +3097,8 @@ namespace WindowsInventoryLite
             // strict, unconditional check below, alongside licenseKeySources.
             Dictionary<string, object> configResponse = new Dictionary<string, object>();
             configResponse["intervalHours"] = options.WindowsDefaultIntervalHours;
-            configResponse["softwareCheckIntervalHours"] = options.WindowsUpdateCheckIntervalHours;
+            configResponse["windowsUpdateCheckIntervalHours"] = options.WindowsUpdateCheckIntervalHours;
+            configResponse["thirdPartySoftwareCheckIntervalHours"] = options.ThirdPartySoftwareCheckIntervalHours;
             ackResponse["config"] = configResponse;
             // Surfaced only here, never on SendWindowsUpdateJobs'/
             // SendThirdPartySoftwareJobs' own response - the inventory
@@ -22602,6 +22604,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             options.Token = "shared-secret";
             options.WindowsDefaultIntervalHours = 9;
             options.WindowsUpdateCheckIntervalHours = 4;
+            options.ThirdPartySoftwareCheckIntervalHours = 7;
             Directory.CreateDirectory(options.DataPath);
             try
             {
@@ -22619,9 +22622,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     responseText = Encoding.UTF8.GetString(stream.ToArray());
                 }
 
-                if (responseText.IndexOf("\"intervalHours\":9", StringComparison.Ordinal) < 0 || responseText.IndexOf("\"softwareCheckIntervalHours\":4", StringComparison.Ordinal) < 0)
+                if (responseText.IndexOf("\"intervalHours\":9", StringComparison.Ordinal) < 0 || responseText.IndexOf("\"windowsUpdateCheckIntervalHours\":4", StringComparison.Ordinal) < 0 || responseText.IndexOf("\"thirdPartySoftwareCheckIntervalHours\":7", StringComparison.Ordinal) < 0)
                 {
-                    return "expected the ack's config object to carry the current WindowsDefaultIntervalHours/WindowsUpdateCheckIntervalHours, got: " + responseText;
+                    return "expected the ack's config object to carry the current WindowsDefaultIntervalHours/WindowsUpdateCheckIntervalHours/ThirdPartySoftwareCheckIntervalHours, got: " + responseText;
                 }
                 if (responseText.IndexOf("\"ingestionToken\"", StringComparison.Ordinal) >= 0)
                 {

@@ -1992,9 +1992,10 @@ namespace WindowsInventoryLite
         // Everything the server can push down to an already-running
         // client that needs to survive a process restart, keyed by the
         // same names the ack response itself uses (intervalHours,
-        // softwareCheckIntervalHours, licenseKeySources) - one JSON
-        // object, one file, read once and written once per ack that
-        // actually changes something. The ingestion token is the one
+        // windowsUpdateCheckIntervalHours, thirdPartySoftwareCheckIntervalHours,
+        // licenseKeySources) - one JSON object, one file, read once and
+        // written once per ack that actually changes something. The
+        // ingestion token is the one
         // exception: it lives in the service's own registry Environment
         // value instead, since a restart's SCM-launched process needs to
         // see it as an environment variable before this code ever runs
@@ -2060,11 +2061,12 @@ namespace WindowsInventoryLite
             }
         }
 
-        // Applies intervalHours/softwareCheckIntervalHours/ingestionToken/
-        // update learned from the inventory ack. Mutates options directly
-        // for all four; additionally mutates the caller-owned `learned`
-        // dict (persisted by the caller, ApplyInventoryAckResponse, once
-        // per ack rather than once per field here) for the two interval
+        // Applies intervalHours/windowsUpdateCheckIntervalHours/
+        // thirdPartySoftwareCheckIntervalHours/ingestionToken/update
+        // learned from the inventory ack. Mutates options directly for
+        // all five; additionally mutates the caller-owned `learned` dict
+        // (persisted by the caller, ApplyInventoryAckResponse, once per
+        // ack rather than once per field here) for the three interval
         // fields only - ingestionToken goes to the registry
         // (ApplyLearnedIngestionToken) and update triggers an immediate
         // action (ApplySelfUpdateFromServer), neither is cache-file
@@ -2099,22 +2101,24 @@ namespace WindowsInventoryLite
                 }
             }
 
-            // The ack's "config" object currently carries this interval
-            // under its pre-split wire name and only ever reflects the
-            // server's WindowsUpdateCheckIntervalHours value (see
-            // ReceiveInventory's configResponse on the server side) - there
-            // is no equivalent live-push field for
-            // ThirdPartySoftwareCheckIntervalHours yet. Learned under the
-            // new split key name regardless, so OnStart's own lookup (which
-            // now checks "windowsUpdateCheckIntervalHours") finds it after a
-            // restart.
-            if (config.ContainsKey("softwareCheckIntervalHours"))
+            if (config.ContainsKey("windowsUpdateCheckIntervalHours"))
             {
                 int parsedWindowsUpdateInterval;
-                if (Int32.TryParse(Convert.ToString(config["softwareCheckIntervalHours"]), out parsedWindowsUpdateInterval) && parsedWindowsUpdateInterval >= 1 && parsedWindowsUpdateInterval <= 24 && parsedWindowsUpdateInterval != options.WindowsUpdateCheckIntervalHours)
+                if (Int32.TryParse(Convert.ToString(config["windowsUpdateCheckIntervalHours"]), out parsedWindowsUpdateInterval) && parsedWindowsUpdateInterval >= 1 && parsedWindowsUpdateInterval <= 24 && parsedWindowsUpdateInterval != options.WindowsUpdateCheckIntervalHours)
                 {
                     options.WindowsUpdateCheckIntervalHours = parsedWindowsUpdateInterval;
                     learned["windowsUpdateCheckIntervalHours"] = parsedWindowsUpdateInterval;
+                    changed = true;
+                }
+            }
+
+            if (config.ContainsKey("thirdPartySoftwareCheckIntervalHours"))
+            {
+                int parsedThirdPartySoftwareInterval;
+                if (Int32.TryParse(Convert.ToString(config["thirdPartySoftwareCheckIntervalHours"]), out parsedThirdPartySoftwareInterval) && parsedThirdPartySoftwareInterval >= 1 && parsedThirdPartySoftwareInterval <= 24 && parsedThirdPartySoftwareInterval != options.ThirdPartySoftwareCheckIntervalHours)
+                {
+                    options.ThirdPartySoftwareCheckIntervalHours = parsedThirdPartySoftwareInterval;
+                    learned["thirdPartySoftwareCheckIntervalHours"] = parsedThirdPartySoftwareInterval;
                     changed = true;
                 }
             }
