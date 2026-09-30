@@ -4112,7 +4112,14 @@
 
     tbody.querySelectorAll('[data-add-catalog-for-kb]').forEach(button => {
       button.addEventListener('click', () => {
-        openWindowsUpdateForm(null, { targetMode: 'missingKb', kbId: button.dataset.addCatalogForKb });
+        const kbId = button.dataset.addCatalogForKb;
+        const missingEntry = allRows.find(e => e.kbId === kbId);
+        openWindowsUpdateForm(null, {
+          targetMode: 'missingKb',
+          kbId,
+          name: (missingEntry && missingEntry.title) || kbId,
+          relativePath: `windows-updates\\${kbId}`
+        });
         setView('windowsUpdates', 'catalog');
       });
     });
@@ -4284,8 +4291,8 @@
     state.editingWindowsUpdateId = entryId || null;
     const entry = entryId ? state.windowsUpdates.find(e => e.id === entryId) : null;
     const targetMode = entry ? (entry.targetMode || 'static') : (prefill ? prefill.targetMode : 'static') || 'static';
-    byId('windowsUpdateName').value = entry ? entry.name : '';
-    byId('windowsUpdateRelativePath').value = entry ? entry.relativePath : '';
+    byId('windowsUpdateName').value = entry ? entry.name : (prefill ? prefill.name : '') || '';
+    byId('windowsUpdateRelativePath').value = entry ? entry.relativePath : (prefill ? prefill.relativePath : '') || '';
     byId('windowsUpdateArguments').value = entry ? entry.arguments : '';
     byId('windowsUpdateTargets').value = entry ? entry.targets : '';
     byId('windowsUpdateTargetMode').value = targetMode;
