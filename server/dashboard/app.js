@@ -57,14 +57,21 @@
     thirdPartySoftware: [], editingThirdPartySoftwareId: null,
     revealedLicenseKeys: {},
     // Rows checked in the Clients table for the bulk "Check selected now"
-    // action, keyed by the row's own real identifier (client.computerName /
-    // client.hostname - same raw value data-check-now/data-delete-client
-    // already key on), not safeId()'s DOM-safe hash used elsewhere on the
-    // row purely for expand/collapse wiring. Unlike selectedUpdates below,
-    // there is no cross-page "select all matching" here - the header
-    // checkbox only ever toggles the currently rendered page's rows, so a
-    // plain persistent Set (surviving sort/filter/page changes, cleared per
-    // key in deleteClient/deleteLinuxClient) is all this needs.
+    // action, keyed by client.computerName - same raw value data-check-now/
+    // data-delete-client already key on, not safeId()'s DOM-safe hash used
+    // elsewhere on the row purely for expand/collapse wiring. Windows-only:
+    // the checkbox itself only renders for Windows rows (see checkboxCell in
+    // renderClientsTable), mirroring the per-row "Check now" button (Task 3)
+    // - forceImmediateSoftwareCheck is only ever read/cleared by the
+    // Windows-facing ReceiveInventory/SendClientSoftwareJobs handlers on the
+    // server, never by ReceiveLinuxInventory, so a Linux hostname must never
+    // end up in this Set. Unlike selectedUpdates below, there is no
+    // cross-page "select all matching" here - the header checkbox only ever
+    // toggles the currently rendered page's rows, so a plain persistent Set
+    // (surviving sort/filter/page changes, cleared in deleteClient - the
+    // same cleanup call in deleteLinuxClient is now a permanent no-op, left
+    // in place as a harmless safety net rather than removed) is all this
+    // needs.
     selectedClients: new Set(),
     sort: {
       // 'name', not 'computerName': the Clients table is cross-platform
@@ -492,9 +499,10 @@
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         state.linuxClients = state.linuxClients.filter(client => client.hostname !== hostname);
-        // Otherwise a deleted machine stays "selected" forever - the bulk
-        // bar's count would include it, and "Check selected now" would
-        // POST for a computer name that no longer exists.
+        // The select checkbox is Windows-only (see checkboxCell in
+        // renderClientsTable), so a Linux hostname can never actually be in
+        // state.selectedClients - this delete() is a permanent no-op, kept
+        // as a harmless defensive cleanup rather than removed.
         state.selectedClients.delete(hostname);
         // Every view that reads state.linuxClients has to be redrawn, not just the
         // Linux Clients table. Since the Dashboard/Hardware merge, the combined
@@ -5157,9 +5165,16 @@
       // and what POST /api/v1/clients/check-now?computerName= expects.
       const rowKey = isWindows ? client.computerName : client.hostname;
       const clientId = safeId(rowKey || '');
-      // Platform-agnostic: both Windows and Linux rows get a select
-      // checkbox, keyed by the row's own rowKey above.
-      const checkboxCell = `<td><input type="checkbox" class="client-select-checkbox" data-client-select="${escapeHtml(rowKey)}"${state.selectedClients.has(rowKey) ? ' checked' : ''}></td>`;
+      // Windows-only, same gating as the per-row "Check now" button inside
+      // nestedTable below: the bulk action this checkbox feeds into POSTs
+      // check-now, which only has a real effect through the Windows-facing
+      // ReceiveInventory/SendClientSoftwareJobs handlers - ReceiveLinuxInventory
+      // never reads forceImmediateSoftwareCheck at all. A Linux row gets an
+      // empty cell instead of a non-functional checkbox that would silently
+      // "succeed" and leave the flag stuck server-side forever.
+      const checkboxCell = isWindows
+        ? `<td><input type="checkbox" class="client-select-checkbox" data-client-select="${escapeHtml(rowKey)}"${state.selectedClients.has(rowKey) ? ' checked' : ''}></td>`
+        : '<td></td>';
       const stale = isStale(client);
       const awaitingReport = !!client.lastInstalledAtUtc;
       const staleClass = stale ? ' stale' : '';
@@ -5339,14 +5354,18 @@
   }
 
   // Reflects state.selectedClients onto the Clients table's header "select
-  // all" checkbox: checked when every currently rendered row is selected,
-  // indeterminate when some (but not all) are. Reads the live checkboxes
-  // (not pageItems, which is local to renderClientsTable) so this also
-  // stays correct after a single row's own checkbox change, mirroring
-  // updateUpdatesSelectAllUi's "state, not a captured array" approach -
-  // minus that function's cross-page "select all matching" hint, which this
-  // simpler feature has no equivalent of (see state.selectedClients' doc
-  // comment).
+  // all" checkbox: checked when every currently rendered SELECTABLE row is
+  // selected, indeterminate when some (but not all) are. Reads the live
+  // .client-select-checkbox nodes (not pageItems, which is local to
+  // renderClientsTable) so this also stays correct after a single row's own
+  // checkbox change, mirroring updateUpdatesSelectAllUi's "state, not a
+  // captured array" approach - minus that function's cross-page "select all
+  // matching" hint, which this simpler feature has no equivalent of (see
+  // state.selectedClients' doc comment). Linux rows render no checkbox at
+  // all (see checkboxCell above), so pageKeys here already excludes them
+  // without any extra filtering - a page of 2 Windows + 1 Linux row with
+  // both Windows rows checked reports checked=true (2 of 2 selectable),
+  // never indeterminate, because the Linux row was never counted.
   function updateClientsSelectAllUi() {
     const selectAllCheckbox = byId('clientsSelectAll');
     if (!selectAllCheckbox) return;
@@ -6203,7 +6222,11 @@
   byId('clientsSelectAll').addEventListener('change', () => {
     // Only ever toggles the CURRENTLY RENDERED page's rows, same scope
     // updatesSelectAll's own handler below documents - there is no
-    // cross-page "select all matching" for this simpler feature.
+    // cross-page "select all matching" for this simpler feature. Querying
+    // .client-select-checkbox already excludes Linux rows (no such element
+    // renders for them - see checkboxCell in renderClientsTable), so this
+    // loop naturally only ever touches Windows rows without needing an
+    // isWindows check of its own.
     const checked = byId('clientsSelectAll').checked;
     document.querySelectorAll('.client-select-checkbox').forEach(checkbox => {
       checkbox.checked = checked;
