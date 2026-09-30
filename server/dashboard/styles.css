@@ -1599,17 +1599,20 @@ th.sort-desc::after {
   color: var(--accent);
 }
 
-/* Rescan WSUS now: reuses .export-button's sizing/border/hover treatment,
-   but that class assumes a standalone toolbar context with no preceding
-   inline text - sitting inline after a client's <h2> heading text needs
+/* Rescan WSUS now / Check now: both reuse .export-button's sizing/border/
+   hover treatment, but that class assumes a standalone toolbar context with
+   no preceding inline text - sitting inline after a client's <h2> heading
+   text (and, for Check now, after the WSUS button's own status span) needs
    its own left margin and baseline alignment, which .export-button alone
    doesn't provide. */
-.rescan-wsus-now-button {
+.rescan-wsus-now-button,
+.check-now-button {
   margin-left: var(--space-md);
   vertical-align: middle;
 }
 
-.rescan-wsus-now-status {
+.rescan-wsus-now-status,
+.check-now-status {
   margin-left: var(--space-sm);
   color: var(--muted);
   font-size: var(--font-size-sm);

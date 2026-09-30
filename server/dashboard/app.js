@@ -5202,7 +5202,7 @@
       const sortedClientSoftware = applySort(clientSoftware, item => clientSoftwareSortValue(item, clientSoftwareSortKey), clientSoftwareSortDir);
 
       const nestedTable = isWindows
-        ? `<h2>${escapeHtml(client.computerName)} software <button type="button" class="export-button rescan-wsus-now-button" data-rescan-wsus-now="${escapeHtml(client.computerName)}">Rescan WSUS now</button><span class="rescan-wsus-now-status" data-rescan-wsus-now-status="${escapeHtml(client.computerName)}"></span></h2>
+        ? `<h2>${escapeHtml(client.computerName)} software <button type="button" class="export-button rescan-wsus-now-button" data-rescan-wsus-now="${escapeHtml(client.computerName)}">Rescan WSUS now</button><span class="rescan-wsus-now-status" data-rescan-wsus-now-status="${escapeHtml(client.computerName)}"></span> <button type="button" class="export-button check-now-button" data-check-now="${escapeHtml(client.computerName)}">Check now</button><span class="check-now-status" data-check-now-status="${escapeHtml(client.computerName)}"></span></h2>
             <table class="nested-table">
               <thead><tr>
                 <th data-sort-table="clientSoftware" data-sort-key="name" class="sortable">Name</th>
@@ -6308,6 +6308,25 @@
         })
         .finally(() => {
           rescanWsusBtn.disabled = false;
+        });
+      return;
+    }
+
+    const checkNowBtn = e.target.closest('[data-check-now]');
+    if (checkNowBtn) {
+      const computerName = checkNowBtn.dataset.checkNow;
+      const statusEl = document.querySelector(`[data-check-now-status="${computerName}"]`);
+      checkNowBtn.disabled = true;
+      fetch(`/api/v1/clients/check-now?computerName=${encodeURIComponent(computerName)}`, { method: 'POST' })
+        .then(res => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          if (statusEl) statusEl.textContent = 'Check requested - will run on this client\'s next contact.';
+        })
+        .catch(() => {
+          if (statusEl) statusEl.textContent = 'Request failed - try again.';
+        })
+        .finally(() => {
+          checkNowBtn.disabled = false;
         });
       return;
     }
