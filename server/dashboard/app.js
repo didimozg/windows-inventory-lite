@@ -56,17 +56,20 @@
     wsusMissingSummary: [],
     thirdPartySoftware: [], editingThirdPartySoftwareId: null,
     revealedLicenseKeys: {},
-    // Rows checked in the Clients table for the bulk "Install WSUS/soft on
-    // selected" and "Rescan WSUS on selected" actions, keyed by
-    // client.computerName - same raw value data-install-wsus-soft-now/
-    // data-delete-client already key on, not safeId()'s DOM-safe hash used
-    // elsewhere on the row purely for expand/collapse wiring. Windows-only:
-    // the checkbox itself only renders for Windows rows (see checkboxCell in
-    // renderClientsTable), mirroring the per-row "Install WSUS/soft now"
-    // button (Task 3) - forceImmediateSoftwareCheck is only ever read/cleared
-    // by the Windows-facing ReceiveInventory/SendClientSoftwareJobs handlers on the
-    // server, never by ReceiveLinuxInventory, so a Linux hostname must never
-    // end up in this Set. Unlike selectedUpdates below, there is no
+    // Rows checked in the Clients table for the bulk "Install Windows
+    // updates on selected"/"Install third-party software on selected" and
+    // "Rescan WSUS on selected" actions, keyed by client.computerName - same
+    // raw value data-install-windows-updates-now/data-delete-client already
+    // key on, not safeId()'s DOM-safe hash used elsewhere on the row purely
+    // for expand/collapse wiring. Windows-only: the checkbox itself only
+    // renders for Windows rows (see checkboxCell in renderClientsTable),
+    // mirroring the per-row "Install Windows updates now"/"Install
+    // third-party software now" buttons - forceImmediateWindowsUpdateCheck/
+    // forceImmediateThirdPartySoftwareCheck are only ever read/cleared by
+    // the Windows-facing ReceiveInventory/SendWindowsUpdateJobs/
+    // SendThirdPartySoftwareJobs handlers on the server, never by
+    // ReceiveLinuxInventory, so a Linux hostname must never end up in this
+    // Set. Unlike selectedUpdates below, there is no
     // cross-page "select all matching" here - the header checkbox only ever
     // toggles the currently rendered page's rows, so a plain persistent Set
     // (surviving sort/filter/page changes, cleared in deleteClient - the
@@ -5178,19 +5181,21 @@
     const rows = pageItems.map(client => {
       const isWindows = clientPlatformLabel(client) === 'Windows';
       // Real identifier (not safeId()'s DOM-safe hash just below) - the
-      // same raw value data-install-wsus-soft-now/data-delete-client already
-      // key on, and what POST /api/v1/clients/check-now?computerName=
-      // expects (the API route itself keeps its original "check-now" name -
-      // only the user-facing "Install WSUS/soft now" label and the
-      // dashboard-side identifiers built around it were renamed).
+      // same raw value data-install-windows-updates-now/
+      // data-install-third-party-software-now/data-delete-client already
+      // key on, and what POST /api/v1/clients/install-windows-updates-now
+      // and /api/v1/clients/install-third-party-software-now both expect as
+      // their computerName query parameter.
       const rowKey = isWindows ? client.computerName : client.hostname;
       const clientId = safeId(rowKey || '');
-      // Windows-only, same gating as the per-row "Install WSUS/soft now"
-      // button inside nestedTable below: the bulk action this checkbox feeds
-      // into POSTs check-now, which only has a real effect through the
-      // Windows-facing ReceiveInventory/SendClientSoftwareJobs handlers -
-      // ReceiveLinuxInventory never reads forceImmediateSoftwareCheck at
-      // all. A Linux row gets an empty cell instead of a non-functional
+      // Windows-only, same gating as the per-row "Install Windows updates
+      // now"/"Install third-party software now" buttons inside nestedTable
+      // below: the bulk actions this checkbox feeds into POST those same two
+      // endpoints, which only have a real effect through the Windows-facing
+      // ReceiveInventory/SendWindowsUpdateJobs/SendThirdPartySoftwareJobs
+      // handlers - ReceiveLinuxInventory never reads
+      // forceImmediateWindowsUpdateCheck/forceImmediateThirdPartySoftwareCheck
+      // at all. A Linux row gets an empty cell instead of a non-functional
       // checkbox that would silently "succeed" and leave the flag stuck
       // server-side forever.
       const checkboxCell = isWindows
@@ -5261,7 +5266,7 @@
       const sortedClientSoftware = applySort(clientSoftware, item => clientSoftwareSortValue(item, clientSoftwareSortKey), clientSoftwareSortDir);
 
       const nestedTable = isWindows
-        ? `<h2>${escapeHtml(client.computerName)} software <button type="button" class="export-button rescan-wsus-now-button" data-rescan-wsus-now="${escapeHtml(client.computerName)}">Rescan WSUS now</button><span class="rescan-wsus-now-status" data-rescan-wsus-now-status="${escapeHtml(client.computerName)}"></span> <button type="button" class="export-button install-wsus-soft-now-button" data-install-wsus-soft-now="${escapeHtml(client.computerName)}">Install WSUS/soft now</button><span class="install-wsus-soft-now-status" data-install-wsus-soft-now-status="${escapeHtml(client.computerName)}"></span></h2>
+        ? `<h2>${escapeHtml(client.computerName)} software <button type="button" class="export-button rescan-wsus-now-button" data-rescan-wsus-now="${escapeHtml(client.computerName)}">Rescan WSUS now</button><span class="rescan-wsus-now-status" data-rescan-wsus-now-status="${escapeHtml(client.computerName)}"></span> <button type="button" class="export-button install-windows-updates-now-button" data-install-windows-updates-now="${escapeHtml(client.computerName)}">Install Windows updates now</button><span class="install-windows-updates-now-status" data-install-windows-updates-now-status="${escapeHtml(client.computerName)}"></span> <button type="button" class="export-button install-third-party-software-now-button" data-install-third-party-software-now="${escapeHtml(client.computerName)}">Install third-party software now</button><span class="install-third-party-software-now-status" data-install-third-party-software-now-status="${escapeHtml(client.computerName)}"></span></h2>
             <table class="nested-table">
               <thead><tr>
                 <th data-sort-table="clientSoftware" data-sort-key="name" class="sortable">Name</th>
@@ -5408,23 +5413,45 @@
     if (countEl) countEl.textContent = `${state.selectedClients.size} selected`;
   }
 
-  // Fires the same per-machine POST /api/v1/clients/check-now the per-row
-  // "Install WSUS/soft now" button (Task 3, see the delegated
-  // [data-install-wsus-soft-now] handler below) already uses, once per
+  // Fires the same per-machine POST /api/v1/clients/install-windows-updates-now
+  // the per-row "Install Windows updates now" button (see the delegated
+  // [data-install-windows-updates-now] handler below) already uses, once per
   // selected computer, and reports how many of the selection actually
   // succeeded. Promise.all (not allSettled) is fine here - a network
   // failure is already caught inline and a non-ok response is already
   // treated as "didn't count" without the promise ever rejecting.
-  function installSelectedClientsWsusSoftNow() {
+  function installSelectedClientsWindowsUpdatesNow() {
     const names = Array.from(state.selectedClients);
     if (names.length === 0) return;
-    const button = byId('clientsBulkInstallButton');
-    const statusEl = byId('clientsBulkInstallStatus');
+    const button = byId('clientsBulkInstallWindowsUpdatesButton');
+    const statusEl = byId('clientsBulkInstallWindowsUpdatesStatus');
     button.disabled = true;
     if (statusEl) statusEl.textContent = 'Requesting...';
     let succeeded = 0;
     Promise.all(names.map(name =>
-      fetch(`/api/v1/clients/check-now?computerName=${encodeURIComponent(name)}`, { method: 'POST' })
+      fetch(`/api/v1/clients/install-windows-updates-now?computerName=${encodeURIComponent(name)}`, { method: 'POST' })
+        .then(res => { if (res.ok) succeeded += 1; })
+        .catch(() => {})
+    )).then(() => {
+      if (statusEl) statusEl.textContent = `Requested for ${succeeded} of ${names.length} machine(s).`;
+      button.disabled = false;
+    });
+  }
+
+  // Bulk sibling of the per-row "Install third-party software now" button -
+  // fires the same POST /api/v1/clients/install-third-party-software-now
+  // once per selected computer. Same Promise.all/success-counting shape as
+  // installSelectedClientsWindowsUpdatesNow just above.
+  function installSelectedClientsThirdPartySoftwareNow() {
+    const names = Array.from(state.selectedClients);
+    if (names.length === 0) return;
+    const button = byId('clientsBulkInstallThirdPartySoftwareButton');
+    const statusEl = byId('clientsBulkInstallThirdPartySoftwareStatus');
+    button.disabled = true;
+    if (statusEl) statusEl.textContent = 'Requesting...';
+    let succeeded = 0;
+    Promise.all(names.map(name =>
+      fetch(`/api/v1/clients/install-third-party-software-now?computerName=${encodeURIComponent(name)}`, { method: 'POST' })
         .then(res => { if (res.ok) succeeded += 1; })
         .catch(() => {})
     )).then(() => {
@@ -5435,8 +5462,8 @@
 
   // Bulk sibling of the per-row "Rescan WSUS now" button - fires the same
   // POST /api/v1/windows-updates/rescan-now once per selected computer.
-  // Same Promise.all/success-counting shape as installSelectedClientsWsusSoftNow
-  // just above.
+  // Same Promise.all/success-counting shape as
+  // installSelectedClientsWindowsUpdatesNow above.
   function rescanSelectedClientsWsusNow() {
     const names = Array.from(state.selectedClients);
     if (names.length === 0) return;
@@ -6261,7 +6288,8 @@
   byId('installLoadAdAllButton').addEventListener('click', () => loadTargetsFromAd(false));
   byId('installLoadAdMissingButton').addEventListener('click', () => loadTargetsFromAd(true));
   byId('exportClientsBtn').addEventListener('click', exportClients);
-  byId('clientsBulkInstallButton').addEventListener('click', installSelectedClientsWsusSoftNow);
+  byId('clientsBulkInstallWindowsUpdatesButton').addEventListener('click', installSelectedClientsWindowsUpdatesNow);
+  byId('clientsBulkInstallThirdPartySoftwareButton').addEventListener('click', installSelectedClientsThirdPartySoftwareNow);
   byId('clientsBulkRescanWsusButton').addEventListener('click', rescanSelectedClientsWsusNow);
   byId('clientsSelectAll').addEventListener('change', () => {
     // Only ever toggles the CURRENTLY RENDERED page's rows, same scope
@@ -6478,12 +6506,12 @@
       return;
     }
 
-    const installWsusSoftBtn = e.target.closest('[data-install-wsus-soft-now]');
-    if (installWsusSoftBtn) {
-      const computerName = installWsusSoftBtn.dataset.installWsusSoftNow;
-      const statusEl = document.querySelector(`[data-install-wsus-soft-now-status="${computerName}"]`);
-      installWsusSoftBtn.disabled = true;
-      fetch(`/api/v1/clients/check-now?computerName=${encodeURIComponent(computerName)}`, { method: 'POST' })
+    const installWindowsUpdatesBtn = e.target.closest('[data-install-windows-updates-now]');
+    if (installWindowsUpdatesBtn) {
+      const computerName = installWindowsUpdatesBtn.dataset.installWindowsUpdatesNow;
+      const statusEl = document.querySelector(`[data-install-windows-updates-now-status="${computerName}"]`);
+      installWindowsUpdatesBtn.disabled = true;
+      fetch(`/api/v1/clients/install-windows-updates-now?computerName=${encodeURIComponent(computerName)}`, { method: 'POST' })
         .then(res => {
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           if (statusEl) statusEl.textContent = 'Install requested - will run on this client\'s next contact.';
@@ -6492,7 +6520,26 @@
           if (statusEl) statusEl.textContent = 'Request failed - try again.';
         })
         .finally(() => {
-          installWsusSoftBtn.disabled = false;
+          installWindowsUpdatesBtn.disabled = false;
+        });
+      return;
+    }
+
+    const installThirdPartySoftwareBtn = e.target.closest('[data-install-third-party-software-now]');
+    if (installThirdPartySoftwareBtn) {
+      const computerName = installThirdPartySoftwareBtn.dataset.installThirdPartySoftwareNow;
+      const statusEl = document.querySelector(`[data-install-third-party-software-now-status="${computerName}"]`);
+      installThirdPartySoftwareBtn.disabled = true;
+      fetch(`/api/v1/clients/install-third-party-software-now?computerName=${encodeURIComponent(computerName)}`, { method: 'POST' })
+        .then(res => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          if (statusEl) statusEl.textContent = 'Install requested - will run on this client\'s next contact.';
+        })
+        .catch(() => {
+          if (statusEl) statusEl.textContent = 'Request failed - try again.';
+        })
+        .finally(() => {
+          installThirdPartySoftwareBtn.disabled = false;
         });
       return;
     }
