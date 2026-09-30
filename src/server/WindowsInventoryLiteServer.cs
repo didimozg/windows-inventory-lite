@@ -849,7 +849,12 @@ namespace WindowsInventoryLite
                 }
                 if (options.WindowsUpdateCheckIntervalHours == 6)
                 {
-                    string windowsUpdateCheckIntervalText = GetConfigString(config, "WindowsUpdateCheckIntervalHours");
+                    // Falls back to the legacy pre-split
+                    // WindowsDefaultSoftwareCheckIntervalHours key so an
+                    // existing deployment's customized interval survives
+                    // the upgrade instead of reverting to the hardcoded
+                    // default.
+                    string windowsUpdateCheckIntervalText = GetConfigStringWithLegacyFallback(config, "WindowsUpdateCheckIntervalHours", "WindowsDefaultSoftwareCheckIntervalHours");
                     int windowsUpdateCheckIntervalFromConfig;
                     if (!String.IsNullOrEmpty(windowsUpdateCheckIntervalText) && Int32.TryParse(windowsUpdateCheckIntervalText, out windowsUpdateCheckIntervalFromConfig) && windowsUpdateCheckIntervalFromConfig >= 1 && windowsUpdateCheckIntervalFromConfig <= 24)
                     {
@@ -858,6 +863,11 @@ namespace WindowsInventoryLite
                 }
                 if (options.ThirdPartySoftwareCheckIntervalHours == 6)
                 {
+                    // No legacy fallback here: thirdPartySoftware did not
+                    // exist as its own pipeline before this split, so
+                    // there is no prior admin-configured value to migrate
+                    // - a fresh split correctly starts at the hardcoded
+                    // default.
                     string thirdPartySoftwareCheckIntervalText = GetConfigString(config, "ThirdPartySoftwareCheckIntervalHours");
                     int thirdPartySoftwareCheckIntervalFromConfig;
                     if (!String.IsNullOrEmpty(thirdPartySoftwareCheckIntervalText) && Int32.TryParse(thirdPartySoftwareCheckIntervalText, out thirdPartySoftwareCheckIntervalFromConfig) && thirdPartySoftwareCheckIntervalFromConfig >= 1 && thirdPartySoftwareCheckIntervalFromConfig <= 24)
@@ -1077,14 +1087,24 @@ namespace WindowsInventoryLite
                 {
                     options.LinuxUpdateScheduleLastRunUtc = GetConfigString(config, "LinuxUpdateScheduleLastRunUtc") ?? "";
                 }
+                // The four WindowsUpdateInstallWindow* fields each fall
+                // back to their old pre-split shared SoftwareInstallWindow*
+                // key: before this split, one shared install window gated
+                // both windowsUpdate and thirdPartySoftware installs
+                // together, so an admin's existing configured window is
+                // what was actually protecting windowsUpdate installs and
+                // is inherited by the windowsUpdate side specifically on
+                // upgrade. ThirdPartySoftwareInstallWindow* below has no
+                // such fallback - it is a genuinely new setting with no
+                // prior configured value to migrate.
                 if (!options.WindowsUpdateInstallWindowEnabled)
                 {
-                    string windowsUpdateInstallWindowEnabledText = GetConfigString(config, "WindowsUpdateInstallWindowEnabled");
+                    string windowsUpdateInstallWindowEnabledText = GetConfigStringWithLegacyFallback(config, "WindowsUpdateInstallWindowEnabled", "SoftwareInstallWindowEnabled");
                     options.WindowsUpdateInstallWindowEnabled = String.Equals(windowsUpdateInstallWindowEnabledText, "true", StringComparison.OrdinalIgnoreCase);
                 }
                 if (options.WindowsUpdateInstallWindowStartUtc == "02:00")
                 {
-                    string windowsUpdateInstallWindowStartUtcText = GetConfigString(config, "WindowsUpdateInstallWindowStartUtc");
+                    string windowsUpdateInstallWindowStartUtcText = GetConfigStringWithLegacyFallback(config, "WindowsUpdateInstallWindowStartUtc", "SoftwareInstallWindowStartUtc");
                     if (!String.IsNullOrEmpty(windowsUpdateInstallWindowStartUtcText))
                     {
                         options.WindowsUpdateInstallWindowStartUtc = windowsUpdateInstallWindowStartUtcText;
@@ -1092,7 +1112,7 @@ namespace WindowsInventoryLite
                 }
                 if (options.WindowsUpdateInstallWindowEndUtc == "04:00")
                 {
-                    string windowsUpdateInstallWindowEndUtcText = GetConfigString(config, "WindowsUpdateInstallWindowEndUtc");
+                    string windowsUpdateInstallWindowEndUtcText = GetConfigStringWithLegacyFallback(config, "WindowsUpdateInstallWindowEndUtc", "SoftwareInstallWindowEndUtc");
                     if (!String.IsNullOrEmpty(windowsUpdateInstallWindowEndUtcText))
                     {
                         options.WindowsUpdateInstallWindowEndUtc = windowsUpdateInstallWindowEndUtcText;
@@ -1100,13 +1120,17 @@ namespace WindowsInventoryLite
                 }
                 if (options.WindowsUpdateInstallWindowJitterMinutes == 30)
                 {
-                    string windowsUpdateInstallWindowJitterMinutesText = GetConfigString(config, "WindowsUpdateInstallWindowJitterMinutes");
+                    string windowsUpdateInstallWindowJitterMinutesText = GetConfigStringWithLegacyFallback(config, "WindowsUpdateInstallWindowJitterMinutes", "SoftwareInstallWindowJitterMinutes");
                     int windowsUpdateInstallWindowJitterMinutesFromConfig;
                     if (!String.IsNullOrEmpty(windowsUpdateInstallWindowJitterMinutesText) && Int32.TryParse(windowsUpdateInstallWindowJitterMinutesText, out windowsUpdateInstallWindowJitterMinutesFromConfig) && windowsUpdateInstallWindowJitterMinutesFromConfig >= 0 && windowsUpdateInstallWindowJitterMinutesFromConfig <= 1440)
                     {
                         options.WindowsUpdateInstallWindowJitterMinutes = windowsUpdateInstallWindowJitterMinutesFromConfig;
                     }
                 }
+                // No legacy fallback for thirdPartySoftware - it did not
+                // exist as its own pipeline before this split, so a fresh
+                // split correctly starts at the hardcoded default (window
+                // disabled).
                 if (!options.ThirdPartySoftwareInstallWindowEnabled)
                 {
                     string thirdPartySoftwareInstallWindowEnabledText = GetConfigString(config, "ThirdPartySoftwareInstallWindowEnabled");
@@ -1260,6 +1284,22 @@ namespace WindowsInventoryLite
             }
             string value = Convert.ToString(config[key]);
             return String.IsNullOrEmpty(value) ? null : value;
+        }
+
+        // Reads `key`, falling back to `legacyKey` only when `key` is
+        // absent - used by LoadConfigFile for settings that were split
+        // from a single pre-existing key (WindowsUpdateCheckIntervalHours/
+        // WindowsUpdateInstallWindow* from their old combined
+        // WindowsDefaultSoftwareCheckIntervalHours/SoftwareInstallWindow*
+        // names) so an existing deployment's customized value survives the
+        // upgrade instead of silently reverting to the hardcoded default.
+        // A config file that already has the new key - e.g. because it was
+        // already saved once through ConfigureServerSettings after
+        // upgrading - takes precedence over the legacy one.
+        private static string GetConfigStringWithLegacyFallback(Dictionary<string, object> config, string key, string legacyKey)
+        {
+            string value = GetConfigString(config, key);
+            return String.IsNullOrEmpty(value) ? GetConfigString(config, legacyKey) : value;
         }
 
         // Migration for upgrades from before AdDescriptionSyncEnabled
@@ -16465,6 +16505,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ResolveRequireIngestionToken uses the explicit config value when present", TestResolveRequireIngestionTokenUsesExplicitConfigValue);
             allPassed &= SelfTestCheck(output, "ResolveRequireIngestionToken migrates from whether a token is configured when the config key is absent", TestResolveRequireIngestionTokenMigratesFromTokenPresenceWhenUnset);
             allPassed &= SelfTestCheck(output, "Parse defaults RequireIngestionToken from CLI --token presence when no config file exists", TestParseDefaultsRequireIngestionTokenFromCliTokenWhenNoConfigFile);
+            allPassed &= SelfTestCheck(output, "Parse falls back to the legacy WindowsDefaultSoftwareCheckIntervalHours/SoftwareInstallWindow* keys for windowsUpdate, leaving thirdPartySoftware at its hardcoded defaults", TestParseFallsBackToLegacySoftwareCheckIntervalAndInstallWindowKeysForWindowsUpdateOnly);
+            allPassed &= SelfTestCheck(output, "Parse prefers the new WindowsUpdateCheckIntervalHours/WindowsUpdateInstallWindow* keys over the legacy ones when both are present", TestParsePrefersNewSoftwareCheckIntervalAndInstallWindowKeysOverLegacyOnes);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected requires a matching token when enforcement is on", TestIsIngestionTokenRejectedRequiresMatchWhenEnforced);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected always accepts when enforcement is off, regardless of the supplied token", TestIsIngestionTokenRejectedAlwaysAcceptsWhenNotEnforced);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected fails closed when enforcement is on but no token is configured", TestIsIngestionTokenRejectedFailsClosedWhenEnforcedButNoTokenConfigured);
@@ -16677,6 +16719,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "TriggerInstallThirdPartySoftwareNow rejects a request with no computerName", TestTriggerInstallThirdPartySoftwareNowRejectsMissingComputerName);
             allPassed &= SelfTestCheck(output, "SendWindowsUpdateJobs only returns windowsUpdate catalog entries (never thirdPartySoftware) and unconditionally clears its own forceImmediateWindowsUpdateCheck flag", TestSendWindowsUpdateJobsOnlyReturnsWindowsUpdateEntriesAndClearsItsOwnFlag);
             allPassed &= SelfTestCheck(output, "TriggerInstallThirdPartySoftwareNow sets forceImmediateThirdPartySoftwareCheck without touching forceImmediateWindowsUpdateCheck for the same computer", TestInstallThirdPartySoftwareNowFlagIsIndependentOfWindowsUpdateFlag);
+            allPassed &= SelfTestCheck(output, "SendWindowsUpdateJobs clears only its own forceImmediateWindowsUpdateCheck flag, leaving forceImmediateThirdPartySoftwareCheck untouched", TestSendWindowsUpdateJobsClearsOnlyItsOwnForceFlagNotThirdPartySoftwares);
+            allPassed &= SelfTestCheck(output, "SendThirdPartySoftwareJobs clears only its own forceImmediateThirdPartySoftwareCheck flag, leaving forceImmediateWindowsUpdateCheck untouched", TestSendThirdPartySoftwareJobsClearsOnlyItsOwnForceFlagNotWindowsUpdates);
             allPassed &= SelfTestCheck(output, "SendWindowsUpdateJobs/SendThirdPartySoftwareJobs gate on their own independent install window settings", TestWindowsUpdateAndThirdPartySoftwareInstallWindowsGateIndependently);
             allPassed &= SelfTestCheck(output, "A routine POST /api/v1/windows-inventory report does not erase wsusMissingUpdates/wsusScannedCabHash/wsusScanAt/wuServiceUnavailable written by an earlier wsus-scan-results report", TestReceiveInventoryPreservesWsusFieldsFromPreviousReport);
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate accepts targetMode=missingKb with a kbId and persists both fields", TestCreateWindowsUpdateAcceptsMissingKbTargetMode);
@@ -22501,6 +22545,96 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return "expected RequireIngestionToken to default to true when --token is supplied and no config file exists, got false";
             }
             return null;
+        }
+
+        // Important #2 (split-jobs final review fix): an existing
+        // deployment's config.json only has the pre-split legacy keys.
+        // Proves LoadConfigFile's fallback migrates the windowsUpdate side
+        // from them, while thirdPartySoftware - which never had a legacy
+        // equivalent - stays at its own hardcoded defaults.
+        private static string TestParseFallsBackToLegacySoftwareCheckIntervalAndInstallWindowKeysForWindowsUpdateOnly()
+        {
+            string configPath = Path.Combine(Path.GetTempPath(), "wil-selftest-legacy-software-config-" + Guid.NewGuid().ToString("N") + ".json");
+            try
+            {
+                string json = "{"
+                    + "\"WindowsDefaultSoftwareCheckIntervalHours\":\"9\","
+                    + "\"SoftwareInstallWindowEnabled\":\"true\","
+                    + "\"SoftwareInstallWindowStartUtc\":\"22:00\","
+                    + "\"SoftwareInstallWindowEndUtc\":\"05:00\","
+                    + "\"SoftwareInstallWindowJitterMinutes\":\"20\""
+                    + "}";
+                File.WriteAllText(configPath, json, new UTF8Encoding(false));
+
+                ServerOptions options = ServerOptions.Parse(new string[] { "--config", configPath });
+
+                if (options.WindowsUpdateCheckIntervalHours != 9)
+                {
+                    return "expected WindowsUpdateCheckIntervalHours to fall back to the legacy WindowsDefaultSoftwareCheckIntervalHours value (9), got " + options.WindowsUpdateCheckIntervalHours;
+                }
+                if (!options.WindowsUpdateInstallWindowEnabled || options.WindowsUpdateInstallWindowStartUtc != "22:00" || options.WindowsUpdateInstallWindowEndUtc != "05:00" || options.WindowsUpdateInstallWindowJitterMinutes != 20)
+                {
+                    return "expected WindowsUpdateInstallWindow* to fall back to the legacy SoftwareInstallWindow* values, got enabled=" + options.WindowsUpdateInstallWindowEnabled + " start=" + options.WindowsUpdateInstallWindowStartUtc + " end=" + options.WindowsUpdateInstallWindowEndUtc + " jitter=" + options.WindowsUpdateInstallWindowJitterMinutes;
+                }
+                if (options.ThirdPartySoftwareCheckIntervalHours != 6)
+                {
+                    return "expected ThirdPartySoftwareCheckIntervalHours to stay at its hardcoded default (6) since it has no legacy equivalent, got " + options.ThirdPartySoftwareCheckIntervalHours;
+                }
+                if (options.ThirdPartySoftwareInstallWindowEnabled || options.ThirdPartySoftwareInstallWindowStartUtc != "02:00" || options.ThirdPartySoftwareInstallWindowEndUtc != "04:00" || options.ThirdPartySoftwareInstallWindowJitterMinutes != 30)
+                {
+                    return "expected ThirdPartySoftwareInstallWindow* to stay at its hardcoded defaults since it has no legacy equivalent, got enabled=" + options.ThirdPartySoftwareInstallWindowEnabled + " start=" + options.ThirdPartySoftwareInstallWindowStartUtc + " end=" + options.ThirdPartySoftwareInstallWindowEndUtc + " jitter=" + options.ThirdPartySoftwareInstallWindowJitterMinutes;
+                }
+                return null;
+            }
+            finally
+            {
+                try { File.Delete(configPath); } catch { }
+            }
+        }
+
+        // Companion to the fallback test above: a config file that has
+        // already been re-saved once through ConfigureServerSettings after
+        // upgrading has BOTH the new and legacy keys - the new key must
+        // win in that case.
+        private static string TestParsePrefersNewSoftwareCheckIntervalAndInstallWindowKeysOverLegacyOnes()
+        {
+            string configPath = Path.Combine(Path.GetTempPath(), "wil-selftest-new-over-legacy-software-config-" + Guid.NewGuid().ToString("N") + ".json");
+            try
+            {
+                string json = "{"
+                    + "\"WindowsUpdateCheckIntervalHours\":\"3\","
+                    + "\"WindowsDefaultSoftwareCheckIntervalHours\":\"9\","
+                    + "\"WindowsUpdateInstallWindowEnabled\":\"false\","
+                    + "\"WindowsUpdateInstallWindowStartUtc\":\"01:00\","
+                    + "\"WindowsUpdateInstallWindowEndUtc\":\"03:00\","
+                    + "\"WindowsUpdateInstallWindowJitterMinutes\":\"10\","
+                    + "\"SoftwareInstallWindowEnabled\":\"true\","
+                    + "\"SoftwareInstallWindowStartUtc\":\"22:00\","
+                    + "\"SoftwareInstallWindowEndUtc\":\"05:00\","
+                    + "\"SoftwareInstallWindowJitterMinutes\":\"20\""
+                    + "}";
+                File.WriteAllText(configPath, json, new UTF8Encoding(false));
+
+                ServerOptions options = ServerOptions.Parse(new string[] { "--config", configPath });
+
+                if (options.WindowsUpdateCheckIntervalHours != 3)
+                {
+                    return "expected WindowsUpdateCheckIntervalHours to prefer the new key (3) over the legacy one (9), got " + options.WindowsUpdateCheckIntervalHours;
+                }
+                if (options.WindowsUpdateInstallWindowEnabled)
+                {
+                    return "expected WindowsUpdateInstallWindowEnabled to prefer the new key (false) over the legacy one (true), got true";
+                }
+                if (options.WindowsUpdateInstallWindowStartUtc != "01:00" || options.WindowsUpdateInstallWindowEndUtc != "03:00" || options.WindowsUpdateInstallWindowJitterMinutes != 10)
+                {
+                    return "expected WindowsUpdateInstallWindow* to prefer the new key values over the legacy ones, got start=" + options.WindowsUpdateInstallWindowStartUtc + " end=" + options.WindowsUpdateInstallWindowEndUtc + " jitter=" + options.WindowsUpdateInstallWindowJitterMinutes;
+                }
+                return null;
+            }
+            finally
+            {
+                try { File.Delete(configPath); } catch { }
+            }
         }
 
         private static string TestIsIngestionTokenRejectedRequiresMatchWhenEnforced()
@@ -29903,6 +30037,147 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (ack.IndexOf("\"forceImmediateWindowsUpdateCheck\":false", StringComparison.Ordinal) < 0)
                 {
                     return "expected forceImmediateWindowsUpdateCheck to remain false - the two flags must be fully independent, got: " + ack;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // Minor #4 (split-jobs final review fix): TestSendWindowsUpdateJobsOnlyReturnsWindowsUpdateEntriesAndClearsItsOwnFlag
+        // above only proves SendWindowsUpdateJobs clears its OWN flag - it
+        // never sets the thirdPartySoftware flag in the first place, so it
+        // cannot catch a bug where SendWindowsUpdateJobs clears BOTH flags.
+        // This test sets both force-check flags for the same computer
+        // first, then proves SendWindowsUpdateJobs clears only its own.
+        private static string TestSendWindowsUpdateJobsClearsOnlyItsOwnForceFlagNotThirdPartySoftwares()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-wujobs-flag-isolation-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                InventoryServer server = new InventoryServer(options);
+                File.WriteAllText(Path.Combine(dataPath, "PC-FLAG-ISO-1.json"), "{\"computerName\":\"PC-FLAG-ISO-1\"}", new UTF8Encoding(false));
+
+                RequestContext triggerWuRequest = new RequestContext();
+                triggerWuRequest.Method = "POST";
+                triggerWuRequest.Path = "/api/v1/clients/install-windows-updates-now?computerName=PC-FLAG-ISO-1";
+                triggerWuRequest.Headers = new Dictionary<string, string>();
+                using (MemoryStream triggerWuStream = new MemoryStream())
+                {
+                    server.TriggerInstallWindowsUpdatesNow(triggerWuStream, triggerWuRequest);
+                }
+
+                RequestContext triggerTpRequest = new RequestContext();
+                triggerTpRequest.Method = "POST";
+                triggerTpRequest.Path = "/api/v1/clients/install-third-party-software-now?computerName=PC-FLAG-ISO-1";
+                triggerTpRequest.Headers = new Dictionary<string, string>();
+                using (MemoryStream triggerTpStream = new MemoryStream())
+                {
+                    server.TriggerInstallThirdPartySoftwareNow(triggerTpStream, triggerTpRequest);
+                }
+
+                RequestContext jobsRequest = new RequestContext();
+                jobsRequest.Method = "GET";
+                jobsRequest.Path = "/api/v1/client/windows-update-jobs?computerName=PC-FLAG-ISO-1";
+                jobsRequest.Headers = new Dictionary<string, string>();
+                jobsRequest.Headers["x-inventory-token"] = "test-token";
+                using (MemoryStream jobsStream = new MemoryStream())
+                {
+                    server.SendWindowsUpdateJobs(jobsStream, jobsRequest);
+                }
+
+                RequestContext inventoryRequest = new RequestContext();
+                inventoryRequest.Method = "POST";
+                inventoryRequest.Path = "/api/v1/inventory";
+                inventoryRequest.Body = "{\"computerName\":\"PC-FLAG-ISO-1\"}";
+                inventoryRequest.Headers = new Dictionary<string, string>();
+                string ack;
+                using (MemoryStream inventoryStream = new MemoryStream())
+                {
+                    server.ReceiveInventory(inventoryStream, inventoryRequest);
+                    ack = Encoding.UTF8.GetString(inventoryStream.ToArray());
+                }
+                if (ack.IndexOf("\"forceImmediateWindowsUpdateCheck\":false", StringComparison.Ordinal) < 0)
+                {
+                    return "expected SendWindowsUpdateJobs to clear its own forceImmediateWindowsUpdateCheck flag, got: " + ack;
+                }
+                if (ack.IndexOf("\"forceImmediateThirdPartySoftwareCheck\":true", StringComparison.Ordinal) < 0)
+                {
+                    return "expected SendWindowsUpdateJobs to leave the unrelated forceImmediateThirdPartySoftwareCheck flag untouched (still true), got: " + ack;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // Symmetric counterpart of the test above, for the other pipeline.
+        private static string TestSendThirdPartySoftwareJobsClearsOnlyItsOwnForceFlagNotWindowsUpdates()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-tpjobs-flag-isolation-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                InventoryServer server = new InventoryServer(options);
+                File.WriteAllText(Path.Combine(dataPath, "PC-FLAG-ISO-2.json"), "{\"computerName\":\"PC-FLAG-ISO-2\"}", new UTF8Encoding(false));
+
+                RequestContext triggerWuRequest = new RequestContext();
+                triggerWuRequest.Method = "POST";
+                triggerWuRequest.Path = "/api/v1/clients/install-windows-updates-now?computerName=PC-FLAG-ISO-2";
+                triggerWuRequest.Headers = new Dictionary<string, string>();
+                using (MemoryStream triggerWuStream = new MemoryStream())
+                {
+                    server.TriggerInstallWindowsUpdatesNow(triggerWuStream, triggerWuRequest);
+                }
+
+                RequestContext triggerTpRequest = new RequestContext();
+                triggerTpRequest.Method = "POST";
+                triggerTpRequest.Path = "/api/v1/clients/install-third-party-software-now?computerName=PC-FLAG-ISO-2";
+                triggerTpRequest.Headers = new Dictionary<string, string>();
+                using (MemoryStream triggerTpStream = new MemoryStream())
+                {
+                    server.TriggerInstallThirdPartySoftwareNow(triggerTpStream, triggerTpRequest);
+                }
+
+                RequestContext jobsRequest = new RequestContext();
+                jobsRequest.Method = "GET";
+                jobsRequest.Path = "/api/v1/client/third-party-software-jobs?computerName=PC-FLAG-ISO-2";
+                jobsRequest.Headers = new Dictionary<string, string>();
+                jobsRequest.Headers["x-inventory-token"] = "test-token";
+                using (MemoryStream jobsStream = new MemoryStream())
+                {
+                    server.SendThirdPartySoftwareJobs(jobsStream, jobsRequest);
+                }
+
+                RequestContext inventoryRequest = new RequestContext();
+                inventoryRequest.Method = "POST";
+                inventoryRequest.Path = "/api/v1/inventory";
+                inventoryRequest.Body = "{\"computerName\":\"PC-FLAG-ISO-2\"}";
+                inventoryRequest.Headers = new Dictionary<string, string>();
+                string ack;
+                using (MemoryStream inventoryStream = new MemoryStream())
+                {
+                    server.ReceiveInventory(inventoryStream, inventoryRequest);
+                    ack = Encoding.UTF8.GetString(inventoryStream.ToArray());
+                }
+                if (ack.IndexOf("\"forceImmediateThirdPartySoftwareCheck\":false", StringComparison.Ordinal) < 0)
+                {
+                    return "expected SendThirdPartySoftwareJobs to clear its own forceImmediateThirdPartySoftwareCheck flag, got: " + ack;
+                }
+                if (ack.IndexOf("\"forceImmediateWindowsUpdateCheck\":true", StringComparison.Ordinal) < 0)
+                {
+                    return "expected SendThirdPartySoftwareJobs to leave the unrelated forceImmediateWindowsUpdateCheck flag untouched (still true), got: " + ack;
                 }
                 return null;
             }

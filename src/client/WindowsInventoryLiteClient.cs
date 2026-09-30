@@ -147,6 +147,29 @@ namespace WindowsInventoryLite
             private Timer windowsUpdateCheckTimer;
             private Timer thirdPartySoftwareCheckTimer;
 
+            // Shared across both pipelines so the windowsUpdate and
+            // thirdPartySoftware SoftwareJobRunner.CheckAndRun() bodies
+            // never execute at the same time, even though their timers,
+            // schedules, and reentrancy guards (windowsUpdateCheckRunning/
+            // thirdPartySoftwareCheckRunning) are otherwise fully
+            // independent. Without this, two CheckAndRun() calls could
+            // overlap: each loads the shared success-cache file into its
+            // own in-memory set and overwrites the whole file on save, so
+            // whichever finishes first has its recorded successes silently
+            // lost when the other one saves afterward - and two installers
+            // (e.g. a Windows-update KB and a third-party MSI) could run
+            // at the same time with no coordination, where previously only
+            // one job ever ran at a time system-wide. A plain lock is used
+            // deliberately even though it can block a Timer callback
+            // thread for as long as the other pipeline's install is still
+            // running (up to InstallProcessTimeoutMilliseconds = 30
+            // minutes): these timers already tolerate arbitrarily-delayed
+            // callbacks (see the reentrancy guards), so blocking here is
+            // the correct, simple behavior rather than a bug. Uncontended
+            // in the common case where only one pipeline is checking at a
+            // time.
+            private static readonly object softwareJobCheckAndRunLock = new object();
+
             public InventoryService(ClientOptions options)
             {
                 this.options = options;
@@ -329,7 +352,10 @@ namespace WindowsInventoryLite
                 try
                 {
                     SoftwareJobRunner runner = new SoftwareJobRunner(options, true);
-                    runner.CheckAndRun();
+                    lock (softwareJobCheckAndRunLock)
+                    {
+                        runner.CheckAndRun();
+                    }
                     DebugLogger.Log(options, "Server", "Windows-update check cycle completed.");
                 }
                 catch (Exception ex)
@@ -359,7 +385,10 @@ namespace WindowsInventoryLite
                 try
                 {
                     SoftwareJobRunner runner = new SoftwareJobRunner(options, false);
-                    runner.CheckAndRun();
+                    lock (softwareJobCheckAndRunLock)
+                    {
+                        runner.CheckAndRun();
+                    }
                     DebugLogger.Log(options, "Server", "Third-party-software check cycle completed.");
                 }
                 catch (Exception ex)
@@ -1037,10 +1066,11 @@ namespace WindowsInventoryLite
                     // pipelines' intervals - Install-Client.ps1 and the
                     // other deployment scripts only expose a single
                     // -SoftwareCheckIntervalHours parameter. The server can
-                    // later adjust the windowsUpdate side independently via
-                    // ApplyConfigFromServer/learned state (see its own
-                    // comment for why thirdPartySoftware has no such
-                    // live-push channel yet).
+                    // later adjust each pipeline's interval independently
+                    // via ApplyConfigFromServer/learned state - both
+                    // windowsUpdateCheckIntervalHours and
+                    // thirdPartySoftwareCheckIntervalHours have their own
+                    // live-push channel.
                     int parsedSoftwareInterval;
                     if (Int32.TryParse(args[++i], out parsedSoftwareInterval) && parsedSoftwareInterval >= 1 && parsedSoftwareInterval <= 24)
                     {
