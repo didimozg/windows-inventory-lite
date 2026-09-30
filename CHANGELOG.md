@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.80.0] - Rescan WSUS on multiple machines at once; renamed "Check now"
+
+### Added
+
+- **"Rescan WSUS on selected"**: the Clients table's bulk-select bar (added for "Check now" below) now also offers a bulk WSUS rescan trigger, reusing the same multi-select checkboxes and the existing per-machine `rescan-now` endpoint - one POST per selected machine, same summary-count reporting as the "Install" bulk action.
+
+### Changed
+
+- **The "Check now" button (per-row and bulk) is renamed to "Install WSUS/soft now"** ("Install WSUS/soft on selected" for the bulk form) - the original name undersold what it does: it doesn't just check, it runs any pending install job (WSUS/KB or third-party software) immediately. No behavior change, no API change - only the dashboard-facing label and its internal identifiers.
+
 ## [0.79.0] - "Check now": trigger a software-job check on a client's next contact
 
 ### Added

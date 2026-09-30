@@ -56,14 +56,15 @@
     wsusMissingSummary: [],
     thirdPartySoftware: [], editingThirdPartySoftwareId: null,
     revealedLicenseKeys: {},
-    // Rows checked in the Clients table for the bulk "Check selected now"
-    // action, keyed by client.computerName - same raw value data-check-now/
+    // Rows checked in the Clients table for the bulk "Install WSUS/soft on
+    // selected" and "Rescan WSUS on selected" actions, keyed by
+    // client.computerName - same raw value data-install-wsus-soft-now/
     // data-delete-client already key on, not safeId()'s DOM-safe hash used
     // elsewhere on the row purely for expand/collapse wiring. Windows-only:
     // the checkbox itself only renders for Windows rows (see checkboxCell in
-    // renderClientsTable), mirroring the per-row "Check now" button (Task 3)
-    // - forceImmediateSoftwareCheck is only ever read/cleared by the
-    // Windows-facing ReceiveInventory/SendClientSoftwareJobs handlers on the
+    // renderClientsTable), mirroring the per-row "Install WSUS/soft now"
+    // button (Task 3) - forceImmediateSoftwareCheck is only ever read/cleared
+    // by the Windows-facing ReceiveInventory/SendClientSoftwareJobs handlers on the
     // server, never by ReceiveLinuxInventory, so a Linux hostname must never
     // end up in this Set. Unlike selectedUpdates below, there is no
     // cross-page "select all matching" here - the header checkbox only ever
@@ -5161,17 +5162,21 @@
     const rows = pageItems.map(client => {
       const isWindows = clientPlatformLabel(client) === 'Windows';
       // Real identifier (not safeId()'s DOM-safe hash just below) - the
-      // same raw value data-check-now/data-delete-client already key on,
-      // and what POST /api/v1/clients/check-now?computerName= expects.
+      // same raw value data-install-wsus-soft-now/data-delete-client already
+      // key on, and what POST /api/v1/clients/check-now?computerName=
+      // expects (the API route itself keeps its original "check-now" name -
+      // only the user-facing "Install WSUS/soft now" label and the
+      // dashboard-side identifiers built around it were renamed).
       const rowKey = isWindows ? client.computerName : client.hostname;
       const clientId = safeId(rowKey || '');
-      // Windows-only, same gating as the per-row "Check now" button inside
-      // nestedTable below: the bulk action this checkbox feeds into POSTs
-      // check-now, which only has a real effect through the Windows-facing
-      // ReceiveInventory/SendClientSoftwareJobs handlers - ReceiveLinuxInventory
-      // never reads forceImmediateSoftwareCheck at all. A Linux row gets an
-      // empty cell instead of a non-functional checkbox that would silently
-      // "succeed" and leave the flag stuck server-side forever.
+      // Windows-only, same gating as the per-row "Install WSUS/soft now"
+      // button inside nestedTable below: the bulk action this checkbox feeds
+      // into POSTs check-now, which only has a real effect through the
+      // Windows-facing ReceiveInventory/SendClientSoftwareJobs handlers -
+      // ReceiveLinuxInventory never reads forceImmediateSoftwareCheck at
+      // all. A Linux row gets an empty cell instead of a non-functional
+      // checkbox that would silently "succeed" and leave the flag stuck
+      // server-side forever.
       const checkboxCell = isWindows
         ? `<td><input type="checkbox" class="client-select-checkbox" data-client-select="${escapeHtml(rowKey)}"${state.selectedClients.has(rowKey) ? ' checked' : ''}></td>`
         : '<td></td>';
@@ -5240,7 +5245,7 @@
       const sortedClientSoftware = applySort(clientSoftware, item => clientSoftwareSortValue(item, clientSoftwareSortKey), clientSoftwareSortDir);
 
       const nestedTable = isWindows
-        ? `<h2>${escapeHtml(client.computerName)} software <button type="button" class="export-button rescan-wsus-now-button" data-rescan-wsus-now="${escapeHtml(client.computerName)}">Rescan WSUS now</button><span class="rescan-wsus-now-status" data-rescan-wsus-now-status="${escapeHtml(client.computerName)}"></span> <button type="button" class="export-button check-now-button" data-check-now="${escapeHtml(client.computerName)}">Check now</button><span class="check-now-status" data-check-now-status="${escapeHtml(client.computerName)}"></span></h2>
+        ? `<h2>${escapeHtml(client.computerName)} software <button type="button" class="export-button rescan-wsus-now-button" data-rescan-wsus-now="${escapeHtml(client.computerName)}">Rescan WSUS now</button><span class="rescan-wsus-now-status" data-rescan-wsus-now-status="${escapeHtml(client.computerName)}"></span> <button type="button" class="export-button install-wsus-soft-now-button" data-install-wsus-soft-now="${escapeHtml(client.computerName)}">Install WSUS/soft now</button><span class="install-wsus-soft-now-status" data-install-wsus-soft-now-status="${escapeHtml(client.computerName)}"></span></h2>
             <table class="nested-table">
               <thead><tr>
                 <th data-sort-table="clientSoftware" data-sort-key="name" class="sortable">Name</th>
@@ -5388,22 +5393,44 @@
   }
 
   // Fires the same per-machine POST /api/v1/clients/check-now the per-row
-  // "Check now" button (Task 3, see the delegated [data-check-now] handler
-  // below) already uses, once per selected computer, and reports how many
-  // of the selection actually succeeded. Promise.all (not allSettled) is
-  // fine here - a network failure is already caught inline and a non-ok
-  // response is already treated as "didn't count" without the promise ever
-  // rejecting.
-  function checkSelectedClientsNow() {
+  // "Install WSUS/soft now" button (Task 3, see the delegated
+  // [data-install-wsus-soft-now] handler below) already uses, once per
+  // selected computer, and reports how many of the selection actually
+  // succeeded. Promise.all (not allSettled) is fine here - a network
+  // failure is already caught inline and a non-ok response is already
+  // treated as "didn't count" without the promise ever rejecting.
+  function installSelectedClientsWsusSoftNow() {
     const names = Array.from(state.selectedClients);
     if (names.length === 0) return;
-    const button = byId('clientsBulkActionButton');
-    const statusEl = byId('clientsBulkActionStatus');
+    const button = byId('clientsBulkInstallButton');
+    const statusEl = byId('clientsBulkInstallStatus');
     button.disabled = true;
     if (statusEl) statusEl.textContent = 'Requesting...';
     let succeeded = 0;
     Promise.all(names.map(name =>
       fetch(`/api/v1/clients/check-now?computerName=${encodeURIComponent(name)}`, { method: 'POST' })
+        .then(res => { if (res.ok) succeeded += 1; })
+        .catch(() => {})
+    )).then(() => {
+      if (statusEl) statusEl.textContent = `Requested for ${succeeded} of ${names.length} machine(s).`;
+      button.disabled = false;
+    });
+  }
+
+  // Bulk sibling of the per-row "Rescan WSUS now" button - fires the same
+  // POST /api/v1/windows-updates/rescan-now once per selected computer.
+  // Same Promise.all/success-counting shape as installSelectedClientsWsusSoftNow
+  // just above.
+  function rescanSelectedClientsWsusNow() {
+    const names = Array.from(state.selectedClients);
+    if (names.length === 0) return;
+    const button = byId('clientsBulkRescanWsusButton');
+    const statusEl = byId('clientsBulkRescanWsusStatus');
+    button.disabled = true;
+    if (statusEl) statusEl.textContent = 'Requesting...';
+    let succeeded = 0;
+    Promise.all(names.map(name =>
+      fetch(`/api/v1/windows-updates/rescan-now?computerName=${encodeURIComponent(name)}`, { method: 'POST' })
         .then(res => { if (res.ok) succeeded += 1; })
         .catch(() => {})
     )).then(() => {
@@ -6218,7 +6245,8 @@
   byId('installLoadAdAllButton').addEventListener('click', () => loadTargetsFromAd(false));
   byId('installLoadAdMissingButton').addEventListener('click', () => loadTargetsFromAd(true));
   byId('exportClientsBtn').addEventListener('click', exportClients);
-  byId('clientsBulkActionButton').addEventListener('click', checkSelectedClientsNow);
+  byId('clientsBulkInstallButton').addEventListener('click', installSelectedClientsWsusSoftNow);
+  byId('clientsBulkRescanWsusButton').addEventListener('click', rescanSelectedClientsWsusNow);
   byId('clientsSelectAll').addEventListener('change', () => {
     // Only ever toggles the CURRENTLY RENDERED page's rows, same scope
     // updatesSelectAll's own handler below documents - there is no
@@ -6434,21 +6462,21 @@
       return;
     }
 
-    const checkNowBtn = e.target.closest('[data-check-now]');
-    if (checkNowBtn) {
-      const computerName = checkNowBtn.dataset.checkNow;
-      const statusEl = document.querySelector(`[data-check-now-status="${computerName}"]`);
-      checkNowBtn.disabled = true;
+    const installWsusSoftBtn = e.target.closest('[data-install-wsus-soft-now]');
+    if (installWsusSoftBtn) {
+      const computerName = installWsusSoftBtn.dataset.installWsusSoftNow;
+      const statusEl = document.querySelector(`[data-install-wsus-soft-now-status="${computerName}"]`);
+      installWsusSoftBtn.disabled = true;
       fetch(`/api/v1/clients/check-now?computerName=${encodeURIComponent(computerName)}`, { method: 'POST' })
         .then(res => {
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          if (statusEl) statusEl.textContent = 'Check requested - will run on this client\'s next contact.';
+          if (statusEl) statusEl.textContent = 'Install requested - will run on this client\'s next contact.';
         })
         .catch(() => {
           if (statusEl) statusEl.textContent = 'Request failed - try again.';
         })
         .finally(() => {
-          checkNowBtn.disabled = false;
+          installWsusSoftBtn.disabled = false;
         });
       return;
     }
