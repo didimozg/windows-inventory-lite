@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.81.0";
+        internal const string ProductVersion = "0.81.1";
 
         private static int Main(string[] args)
         {

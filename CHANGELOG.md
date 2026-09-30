@@ -6,6 +6,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.81.1] - Fix a cross-pipeline install race found in final review
+
+### Fixed
+
+- **The windowsUpdate and thirdPartySoftware check cycles could run at the same time**, since splitting them into independent timers (0.81.0/client 0.12.0) gave each its own reentrancy guard but nothing serialized the two against each other. Concretely this meant two installers could run concurrently on the same machine with no coordination, and each cycle's job-success cache save could silently clobber the other's - a job that had just succeeded could lose its "already installed" record and get harmlessly but needlessly reinstalled on the next cycle. Both pipelines' full check-and-run body now runs under one shared lock; each keeps its own independent schedule/settings, only execution is serialized.
+- **An existing deployment's configured software check interval or install window silently reverted to the default on upgrade to 0.81.0/0.12.0**, because the config-file loader only read the new split key names. The windowsUpdate side now falls back to the old pre-split keys when the new ones are absent, so an already-configured nighttime-only install window (for example) keeps working across the upgrade instead of quietly turning off.
+- Corrected the 0.81.0 CHANGELOG entry below: the old-client migration impact is worse than originally stated (see its updated wording), and the settings-migration note now reflects the fallback above.
+- Documentation: `docs/parameters-reference.md` and `docs/threat-model.md` updated to the real current settings keys and endpoint names; `docs/api-reference.md`'s route count and a dangling cross-reference corrected.
+
+### Notes
+
+- Found during the plan's own final whole-branch review (`docs/superpowers/plans/2026-09-30-split-software-job-types.md`), after all 6 tasks had already passed individual review - neither gap was visible from any single task's own diff.
+
+## [Windows client 0.12.1] - Fix a cross-pipeline install race found in final review
+
+### Fixed
+
+- Same fix as server 0.81.1 above: the windowsUpdate and thirdPartySoftware check cycles now serialize against each other instead of being able to run concurrently, closing a job-success-cache race and preventing two installers from running at once.
+
 ## [0.81.0] - Independent windowsUpdate/thirdPartySoftware check-in, install windows, and force-install-now
 
 ### Added
