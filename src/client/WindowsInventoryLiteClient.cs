@@ -144,7 +144,8 @@ namespace WindowsInventoryLite
         {
             private readonly ClientOptions options;
             private Timer timer;
-            private Timer softwareCheckTimer;
+            private Timer windowsUpdateCheckTimer;
+            private Timer thirdPartySoftwareCheckTimer;
 
             public InventoryService(ClientOptions options)
             {
@@ -170,17 +171,30 @@ namespace WindowsInventoryLite
                             options.IntervalHours = learnedInterval;
                         }
                     }
-                    if (learnedConfig.ContainsKey("softwareCheckIntervalHours"))
+                    if (learnedConfig.ContainsKey("windowsUpdateCheckIntervalHours"))
                     {
-                        int learnedSoftwareInterval;
-                        if (Int32.TryParse(Convert.ToString(learnedConfig["softwareCheckIntervalHours"]), out learnedSoftwareInterval) && learnedSoftwareInterval >= 1 && learnedSoftwareInterval <= 24)
+                        int learnedWindowsUpdateInterval;
+                        if (Int32.TryParse(Convert.ToString(learnedConfig["windowsUpdateCheckIntervalHours"]), out learnedWindowsUpdateInterval) && learnedWindowsUpdateInterval >= 1 && learnedWindowsUpdateInterval <= 24)
                         {
-                            options.SoftwareCheckIntervalHours = learnedSoftwareInterval;
+                            options.WindowsUpdateCheckIntervalHours = learnedWindowsUpdateInterval;
+                        }
+                    }
+                    if (learnedConfig.ContainsKey("thirdPartySoftwareCheckIntervalHours"))
+                    {
+                        int learnedThirdPartySoftwareInterval;
+                        if (Int32.TryParse(Convert.ToString(learnedConfig["thirdPartySoftwareCheckIntervalHours"]), out learnedThirdPartySoftwareInterval) && learnedThirdPartySoftwareInterval >= 1 && learnedThirdPartySoftwareInterval <= 24)
+                        {
+                            options.ThirdPartySoftwareCheckIntervalHours = learnedThirdPartySoftwareInterval;
                         }
                     }
                 }
                 timer = new Timer(Collect, null, TimeSpan.Zero, TimeSpan.FromHours(options.IntervalHours));
-                softwareCheckTimer = new Timer(CheckSoftwareJobs, null, TimeSpan.FromMinutes(2), TimeSpan.FromHours(options.SoftwareCheckIntervalHours));
+                // The thirdPartySoftware timer's initial due-time is offset
+                // by an extra minute purely so the two independent pipelines'
+                // first-ever ticks on service start don't race each other
+                // needlessly.
+                windowsUpdateCheckTimer = new Timer(CheckWindowsUpdateJobs, null, TimeSpan.FromMinutes(2), TimeSpan.FromHours(options.WindowsUpdateCheckIntervalHours));
+                thirdPartySoftwareCheckTimer = new Timer(CheckThirdPartySoftwareJobs, null, TimeSpan.FromMinutes(3), TimeSpan.FromHours(options.ThirdPartySoftwareCheckIntervalHours));
             }
 
             protected override void OnStop()
@@ -190,13 +204,19 @@ namespace WindowsInventoryLite
                     timer.Dispose();
                     timer = null;
                 }
-                if (softwareCheckTimer != null)
+                if (windowsUpdateCheckTimer != null)
                 {
-                    softwareCheckTimer.Dispose();
-                    softwareCheckTimer = null;
+                    windowsUpdateCheckTimer.Dispose();
+                    windowsUpdateCheckTimer = null;
+                }
+                if (thirdPartySoftwareCheckTimer != null)
+                {
+                    thirdPartySoftwareCheckTimer.Dispose();
+                    thirdPartySoftwareCheckTimer = null;
                 }
                 // Disposing the timers above only stops FUTURE ticks - an
-                // already-running Collect()/CheckSoftwareJobs() callback
+                // already-running Collect()/CheckWindowsUpdateJobs()/
+                // CheckThirdPartySoftwareJobs() callback
                 // (the latter can legitimately be mid-install, up to
                 // InstallProcessTimeoutMilliseconds = 30 minutes) keeps
                 // running in the background after this method returns. If
@@ -211,7 +231,8 @@ namespace WindowsInventoryLite
                 // middle of an actual install.
                 DateTime waitUntil = DateTime.UtcNow.AddSeconds(25);
                 while ((Interlocked.CompareExchange(ref collectRunning, 0, 0) != 0 ||
-                        Interlocked.CompareExchange(ref softwareCheckRunning, 0, 0) != 0) &&
+                        Interlocked.CompareExchange(ref windowsUpdateCheckRunning, 0, 0) != 0 ||
+                        Interlocked.CompareExchange(ref thirdPartySoftwareCheckRunning, 0, 0) != 0) &&
                        DateTime.UtcNow < waitUntil)
                 {
                     Thread.Sleep(250);
@@ -222,7 +243,7 @@ namespace WindowsInventoryLite
 
             private void Collect(object state)
             {
-                // Same reentrancy guard as softwareCheckRunning below - a
+                // Same reentrancy guard as windowsUpdateCheckRunning/thirdPartySoftwareCheckRunning below - a
                 // System.Threading.Timer fires on schedule regardless of
                 // whether the previous callback finished, and a slow/hung
                 // WMI provider (no timeout is set on these queries) could
@@ -242,22 +263,32 @@ namespace WindowsInventoryLite
                     // detected here and rescheduled immediately, instead of
                     // waiting for this timer to next re-arm on its own.
                     int previousIntervalHours = options.IntervalHours;
-                    int previousSoftwareCheckIntervalHours = options.SoftwareCheckIntervalHours;
+                    int previousWindowsUpdateCheckIntervalHours = options.WindowsUpdateCheckIntervalHours;
+                    int previousThirdPartySoftwareCheckIntervalHours = options.ThirdPartySoftwareCheckIntervalHours;
                     InventoryCollector collector = new InventoryCollector(options);
-                    bool forceImmediateSoftwareCheck = collector.CollectAndSave();
+                    ForceImmediateCheckFlags forceImmediateCheckFlags = collector.CollectAndSave();
                     if (options.IntervalHours != previousIntervalHours && timer != null)
                     {
                         timer.Change(TimeSpan.FromHours(options.IntervalHours), TimeSpan.FromHours(options.IntervalHours));
                     }
-                    if (options.SoftwareCheckIntervalHours != previousSoftwareCheckIntervalHours && softwareCheckTimer != null)
+                    if (options.WindowsUpdateCheckIntervalHours != previousWindowsUpdateCheckIntervalHours && windowsUpdateCheckTimer != null)
                     {
-                        softwareCheckTimer.Change(TimeSpan.FromHours(options.SoftwareCheckIntervalHours), TimeSpan.FromHours(options.SoftwareCheckIntervalHours));
+                        windowsUpdateCheckTimer.Change(TimeSpan.FromHours(options.WindowsUpdateCheckIntervalHours), TimeSpan.FromHours(options.WindowsUpdateCheckIntervalHours));
+                    }
+                    if (options.ThirdPartySoftwareCheckIntervalHours != previousThirdPartySoftwareCheckIntervalHours && thirdPartySoftwareCheckTimer != null)
+                    {
+                        thirdPartySoftwareCheckTimer.Change(TimeSpan.FromHours(options.ThirdPartySoftwareCheckIntervalHours), TimeSpan.FromHours(options.ThirdPartySoftwareCheckIntervalHours));
                     }
                     DebugLogger.Log(options, "Server", "Collection cycle completed successfully.");
-                    if (forceImmediateSoftwareCheck)
+                    if (forceImmediateCheckFlags.WindowsUpdate)
                     {
-                        DebugLogger.Log(options, "Server", "Server requested an immediate software-job check - running it now instead of waiting for the next scheduled interval.");
-                        CheckSoftwareJobs(null);
+                        DebugLogger.Log(options, "Server", "Server requested an immediate Windows-update check - running it now instead of waiting for the next scheduled interval.");
+                        CheckWindowsUpdateJobs(null);
+                    }
+                    if (forceImmediateCheckFlags.ThirdPartySoftware)
+                    {
+                        DebugLogger.Log(options, "Server", "Server requested an immediate third-party-software check - running it now instead of waiting for the next scheduled interval.");
+                        CheckThirdPartySoftwareJobs(null);
                     }
                 }
                 catch (Exception ex)
@@ -286,20 +317,20 @@ namespace WindowsInventoryLite
                 }
             }
 
-            private int softwareCheckRunning;
+            private int windowsUpdateCheckRunning;
 
-            private void CheckSoftwareJobs(object state)
+            private void CheckWindowsUpdateJobs(object state)
             {
-                if (Interlocked.CompareExchange(ref softwareCheckRunning, 1, 0) != 0)
+                if (Interlocked.CompareExchange(ref windowsUpdateCheckRunning, 1, 0) != 0)
                 {
-                    DebugLogger.Log(options, "Server", "Software job check cycle skipped - a previous cycle is still running.");
+                    DebugLogger.Log(options, "Server", "Windows-update check cycle skipped - a previous cycle is still running.");
                     return;
                 }
                 try
                 {
-                    SoftwareJobRunner runner = new SoftwareJobRunner(options);
+                    SoftwareJobRunner runner = new SoftwareJobRunner(options, true);
                     runner.CheckAndRun();
-                    DebugLogger.Log(options, "Server", "Software job check cycle completed.");
+                    DebugLogger.Log(options, "Server", "Windows-update check cycle completed.");
                 }
                 catch (Exception ex)
                 {
@@ -312,17 +343,49 @@ namespace WindowsInventoryLite
                 }
                 finally
                 {
-                    Interlocked.Exchange(ref softwareCheckRunning, 0);
+                    Interlocked.Exchange(ref windowsUpdateCheckRunning, 0);
+                }
+            }
+
+            private int thirdPartySoftwareCheckRunning;
+
+            private void CheckThirdPartySoftwareJobs(object state)
+            {
+                if (Interlocked.CompareExchange(ref thirdPartySoftwareCheckRunning, 1, 0) != 0)
+                {
+                    DebugLogger.Log(options, "Server", "Third-party-software check cycle skipped - a previous cycle is still running.");
+                    return;
+                }
+                try
+                {
+                    SoftwareJobRunner runner = new SoftwareJobRunner(options, false);
+                    runner.CheckAndRun();
+                    DebugLogger.Log(options, "Server", "Third-party-software check cycle completed.");
+                }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        System.Diagnostics.EventLog.WriteEntry(Program.ServiceName, ex.ToString(), System.Diagnostics.EventLogEntryType.Warning);
+                    }
+                    catch { }
+                    DebugLogger.Log(options, "Error", ex.ToString());
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref thirdPartySoftwareCheckRunning, 0);
                 }
             }
 
             private sealed class SoftwareJobRunner
             {
                 private readonly ClientOptions options;
+                private readonly bool isWindowsUpdatePipeline;
 
-                public SoftwareJobRunner(ClientOptions options)
+                public SoftwareJobRunner(ClientOptions options, bool isWindowsUpdatePipeline)
                 {
                     this.options = options;
+                    this.isWindowsUpdatePipeline = isWindowsUpdatePipeline;
                 }
 
                 public void CheckAndRun()
@@ -343,37 +406,42 @@ namespace WindowsInventoryLite
                     // job is queued, so this check runs unconditionally here
                     // - before the jobs-empty early return below - rather
                     // than being folded into the job-processing path further
-                    // down.
-                    string wsusCabHash = jobsResponse == null ? "" : (InventoryCollector.GetString(jobsResponse, "wsusCabHash") ?? "");
-                    int wsusScanMaxAgeDays = jobsResponse != null && jobsResponse.ContainsKey("wsusScanMaxAgeDays") ? Convert.ToInt32(jobsResponse["wsusScanMaxAgeDays"]) : 7;
-                    bool forceWsusRescan = jobsResponse != null && jobsResponse.ContainsKey("forceWsusRescan") && Convert.ToBoolean(jobsResponse["forceWsusRescan"]);
-                    InventoryCollector wsusStateCollector = new InventoryCollector(options);
-                    Dictionary<string, object> learnedWsusState = wsusStateCollector.LoadLearnedState();
-                    string lastScannedWsusHash = learnedWsusState.ContainsKey("wsusScannedCabHash") ? Convert.ToString(learnedWsusState["wsusScannedCabHash"]) : "";
-                    DateTime? lastScanAtUtc = null;
-                    if (learnedWsusState.ContainsKey("wsusLastScanAtUtc"))
+                    // down. WSUS scanning is a Windows-Update-only concept,
+                    // so none of this runs for the thirdPartySoftware
+                    // instance of this runner.
+                    if (isWindowsUpdatePipeline)
                     {
-                        DateTime parsed;
-                        if (DateTime.TryParse(Convert.ToString(learnedWsusState["wsusLastScanAtUtc"]), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out parsed))
+                        string wsusCabHash = jobsResponse == null ? "" : (InventoryCollector.GetString(jobsResponse, "wsusCabHash") ?? "");
+                        int wsusScanMaxAgeDays = jobsResponse != null && jobsResponse.ContainsKey("wsusScanMaxAgeDays") ? Convert.ToInt32(jobsResponse["wsusScanMaxAgeDays"]) : 7;
+                        bool forceWsusRescan = jobsResponse != null && jobsResponse.ContainsKey("forceWsusRescan") && Convert.ToBoolean(jobsResponse["forceWsusRescan"]);
+                        InventoryCollector wsusStateCollector = new InventoryCollector(options);
+                        Dictionary<string, object> learnedWsusState = wsusStateCollector.LoadLearnedState();
+                        string lastScannedWsusHash = learnedWsusState.ContainsKey("wsusScannedCabHash") ? Convert.ToString(learnedWsusState["wsusScannedCabHash"]) : "";
+                        DateTime? lastScanAtUtc = null;
+                        if (learnedWsusState.ContainsKey("wsusLastScanAtUtc"))
                         {
-                            lastScanAtUtc = parsed;
+                            DateTime parsed;
+                            if (DateTime.TryParse(Convert.ToString(learnedWsusState["wsusLastScanAtUtc"]), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out parsed))
+                            {
+                                lastScanAtUtc = parsed;
+                            }
                         }
-                    }
-                    bool wsusScannedAndReported = InventoryCollector.MaybeRunWsusScanCore(
-                        wsusCabHash,
-                        lastScannedWsusHash,
-                        lastScanAtUtc,
-                        wsusScanMaxAgeDays,
-                        forceWsusRescan,
-                        WsusScanner.IsWuauservRunning,
-                        WsusScanner.ScanForMissingUpdates,
-                        (hash, destPath) => InventoryCollector.DownloadAndVerifyWsusCab(options.ServerUrl, options.Token, hash, destPath, InventoryCollector.HttpGetBytes),
-                        (hash, available, missing) => InventoryCollector.PostWsusScanResults(options.ServerUrl, options.Token, Environment.MachineName, hash, available, missing, InventoryCollector.PostJson));
-                    if (wsusScannedAndReported)
-                    {
-                        learnedWsusState["wsusScannedCabHash"] = wsusCabHash;
-                        learnedWsusState["wsusLastScanAtUtc"] = DateTime.UtcNow.ToString("o");
-                        wsusStateCollector.SaveLearnedState(learnedWsusState);
+                        bool wsusScannedAndReported = InventoryCollector.MaybeRunWsusScanCore(
+                            wsusCabHash,
+                            lastScannedWsusHash,
+                            lastScanAtUtc,
+                            wsusScanMaxAgeDays,
+                            forceWsusRescan,
+                            WsusScanner.IsWuauservRunning,
+                            WsusScanner.ScanForMissingUpdates,
+                            (hash, destPath) => InventoryCollector.DownloadAndVerifyWsusCab(options.ServerUrl, options.Token, hash, destPath, InventoryCollector.HttpGetBytes),
+                            (hash, available, missing) => InventoryCollector.PostWsusScanResults(options.ServerUrl, options.Token, Environment.MachineName, hash, available, missing, InventoryCollector.PostJson));
+                        if (wsusScannedAndReported)
+                        {
+                            learnedWsusState["wsusScannedCabHash"] = wsusCabHash;
+                            learnedWsusState["wsusLastScanAtUtc"] = DateTime.UtcNow.ToString("o");
+                            wsusStateCollector.SaveLearnedState(learnedWsusState);
+                        }
                     }
 
                     ArrayList jobs = jobsResponse != null && jobsResponse.ContainsKey("jobs") ? jobsResponse["jobs"] as ArrayList : null;
@@ -764,7 +832,8 @@ namespace WindowsInventoryLite
                 {
                     try
                     {
-                        return InventoryCollector.HttpGet(InventoryCollector.ToSoftwareJobsUrl(options.ServerUrl), options.Token);
+                        string url = isWindowsUpdatePipeline ? InventoryCollector.ToWindowsUpdateJobsUrl(options.ServerUrl) : InventoryCollector.ToThirdPartySoftwareJobsUrl(options.ServerUrl);
+                        return InventoryCollector.HttpGet(url, options.Token);
                     }
                     catch
                     {
@@ -862,6 +931,16 @@ namespace WindowsInventoryLite
         }
     }
 
+    // Plain-data return shape for ApplyInventoryAckResponse/CollectAndSave -
+    // this client still targets .NET 3.5 (dual net35/net40 build), where
+    // System.Tuple does not exist, so a small named class stands in for
+    // what would otherwise be a two-element tuple.
+    internal sealed class ForceImmediateCheckFlags
+    {
+        internal bool WindowsUpdate;
+        internal bool ThirdPartySoftware;
+    }
+
     internal sealed class ClientOptions
     {
         public string ServerSharePath;
@@ -869,7 +948,8 @@ namespace WindowsInventoryLite
         public string Token;
         public string OutputPath;
         public int IntervalHours;
-        public int SoftwareCheckIntervalHours;
+        public int WindowsUpdateCheckIntervalHours;
+        public int ThirdPartySoftwareCheckIntervalHours;
         public bool RunOnce;
         public bool SkipSoftware;
         public bool ShowVersion;
@@ -896,7 +976,8 @@ namespace WindowsInventoryLite
         {
             ClientOptions options = new ClientOptions();
             options.IntervalHours = 6;
-            options.SoftwareCheckIntervalHours = 6;
+            options.WindowsUpdateCheckIntervalHours = 6;
+            options.ThirdPartySoftwareCheckIntervalHours = 6;
             options.OutputPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "WindowsInventoryLite");
 
             for (int i = 0; i < args.Length; i++)
@@ -952,10 +1033,19 @@ namespace WindowsInventoryLite
                 }
                 else if (key == "--software-check-interval-hours" && i + 1 < args.Length)
                 {
+                    // One install-time flag still seeds both independent
+                    // pipelines' intervals - Install-Client.ps1 and the
+                    // other deployment scripts only expose a single
+                    // -SoftwareCheckIntervalHours parameter. The server can
+                    // later adjust the windowsUpdate side independently via
+                    // ApplyConfigFromServer/learned state (see its own
+                    // comment for why thirdPartySoftware has no such
+                    // live-push channel yet).
                     int parsedSoftwareInterval;
                     if (Int32.TryParse(args[++i], out parsedSoftwareInterval) && parsedSoftwareInterval >= 1 && parsedSoftwareInterval <= 24)
                     {
-                        options.SoftwareCheckIntervalHours = parsedSoftwareInterval;
+                        options.WindowsUpdateCheckIntervalHours = parsedSoftwareInterval;
+                        options.ThirdPartySoftwareCheckIntervalHours = parsedSoftwareInterval;
                     }
                 }
                 else if (key == "--debug-log-enabled")
@@ -1050,7 +1140,7 @@ namespace WindowsInventoryLite
             this.options = options;
         }
 
-        public bool CollectAndSave()
+        public ForceImmediateCheckFlags CollectAndSave()
         {
             Dictionary<string, object> inventory = Collect();
             JavaScriptSerializer serializer = new JavaScriptSerializer();
@@ -1076,18 +1166,18 @@ namespace WindowsInventoryLite
                 }
             }
 
-            bool forceImmediateSoftwareCheck = false;
+            ForceImmediateCheckFlags forceImmediateCheckFlags = new ForceImmediateCheckFlags();
             if (!String.IsNullOrEmpty(options.ServerUrl))
             {
                 string responseBody = PostJson(options.ServerUrl, json, options.Token);
-                forceImmediateSoftwareCheck = ApplyInventoryAckResponse(responseBody);
+                forceImmediateCheckFlags = ApplyInventoryAckResponse(responseBody);
                 if (options.RunOnce)
                 {
                     Console.WriteLine("Inventory posted: " + options.ServerUrl);
                 }
             }
 
-            return forceImmediateSoftwareCheck;
+            return forceImmediateCheckFlags;
         }
 
         private Dictionary<string, object> Collect()
@@ -1845,11 +1935,11 @@ namespace WindowsInventoryLite
         // missing or corrupt cache file is a normal "nothing learned yet"
         // state, never an error - LoadLearnedState() returns an empty
         // dictionary rather than throwing or returning null.
-        private bool ApplyInventoryAckResponse(string responseBody)
+        private ForceImmediateCheckFlags ApplyInventoryAckResponse(string responseBody)
         {
             if (String.IsNullOrEmpty(responseBody))
             {
-                return false;
+                return new ForceImmediateCheckFlags();
             }
 
             try
@@ -1858,7 +1948,7 @@ namespace WindowsInventoryLite
                 Dictionary<string, object> response = serializer.Deserialize<Dictionary<string, object>>(responseBody);
                 if (response == null)
                 {
-                    return false;
+                    return new ForceImmediateCheckFlags();
                 }
                 Dictionary<string, object> learned = LoadLearnedState();
                 bool learnedChanged = false;
@@ -1886,13 +1976,16 @@ namespace WindowsInventoryLite
                     SaveLearnedState(learned);
                 }
 
-                return response.ContainsKey("forceImmediateSoftwareCheck") && Convert.ToBoolean(response["forceImmediateSoftwareCheck"]);
+                ForceImmediateCheckFlags flags = new ForceImmediateCheckFlags();
+                flags.WindowsUpdate = response.ContainsKey("forceImmediateWindowsUpdateCheck") && Convert.ToBoolean(response["forceImmediateWindowsUpdateCheck"]);
+                flags.ThirdPartySoftware = response.ContainsKey("forceImmediateThirdPartySoftwareCheck") && Convert.ToBoolean(response["forceImmediateThirdPartySoftwareCheck"]);
+                return flags;
             }
             catch
             {
                 // A malformed/unparseable response must never fail a
                 // report the server has already accepted.
-                return false;
+                return new ForceImmediateCheckFlags();
             }
         }
 
@@ -1926,7 +2019,7 @@ namespace WindowsInventoryLite
         // internal rather than private: InventoryService.OnStart() (a
         // different top-level-sibling class, not nested inside this one)
         // needs to call this before creating its own timer/
-        // softwareCheckTimer fields, the same cross-class reason PostJson
+        // windowsUpdateCheckTimer/thirdPartySoftwareCheckTimer fields, the same cross-class reason PostJson
         // just above is internal instead of private.
         internal Dictionary<string, object> LoadLearnedState()
         {
@@ -2006,13 +2099,22 @@ namespace WindowsInventoryLite
                 }
             }
 
+            // The ack's "config" object currently carries this interval
+            // under its pre-split wire name and only ever reflects the
+            // server's WindowsUpdateCheckIntervalHours value (see
+            // ReceiveInventory's configResponse on the server side) - there
+            // is no equivalent live-push field for
+            // ThirdPartySoftwareCheckIntervalHours yet. Learned under the
+            // new split key name regardless, so OnStart's own lookup (which
+            // now checks "windowsUpdateCheckIntervalHours") finds it after a
+            // restart.
             if (config.ContainsKey("softwareCheckIntervalHours"))
             {
-                int parsedSoftwareInterval;
-                if (Int32.TryParse(Convert.ToString(config["softwareCheckIntervalHours"]), out parsedSoftwareInterval) && parsedSoftwareInterval >= 1 && parsedSoftwareInterval <= 24 && parsedSoftwareInterval != options.SoftwareCheckIntervalHours)
+                int parsedWindowsUpdateInterval;
+                if (Int32.TryParse(Convert.ToString(config["softwareCheckIntervalHours"]), out parsedWindowsUpdateInterval) && parsedWindowsUpdateInterval >= 1 && parsedWindowsUpdateInterval <= 24 && parsedWindowsUpdateInterval != options.WindowsUpdateCheckIntervalHours)
                 {
-                    options.SoftwareCheckIntervalHours = parsedSoftwareInterval;
-                    learned["softwareCheckIntervalHours"] = parsedSoftwareInterval;
+                    options.WindowsUpdateCheckIntervalHours = parsedWindowsUpdateInterval;
+                    learned["windowsUpdateCheckIntervalHours"] = parsedWindowsUpdateInterval;
                     changed = true;
                 }
             }
@@ -2568,8 +2670,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "SaveLearnedState/LoadLearnedState round-trip a dictionary with mixed value types", TestSaveLearnedStateRoundTripsMixedValueTypes);
             allPassed &= SelfTestCheck(output, "SaveLearnedState/LoadLearnedState round-trip the wsusLastScanAtUtc key", TestSaveLearnedStatePersistsWsusLastScanAtUtcKey);
             allPassed &= SelfTestCheck(output, "ApplyInventoryAckResponse does not lose a previously-learned field when a later ack only carries a different one", TestApplyInventoryAckResponsePreservesUnrelatedLearnedFields);
-            allPassed &= SelfTestCheck(output, "ApplyInventoryAckResponse returns true when forceImmediateSoftwareCheck is set", TestApplyInventoryAckResponseReturnsTrueWhenForceImmediateSoftwareCheckIsSet);
-            allPassed &= SelfTestCheck(output, "ApplyInventoryAckResponse returns false when forceImmediateSoftwareCheck is absent, false, or the response is malformed", TestApplyInventoryAckResponseReturnsFalseWhenForceImmediateSoftwareCheckIsAbsentOrFalse);
+            allPassed &= SelfTestCheck(output, "ApplyInventoryAckResponse returns independent WindowsUpdate/ThirdPartySoftware flags for each ack shape", TestApplyInventoryAckResponseReturnsIndependentFlagsForEachType);
             allPassed &= SelfTestCheck(output, "ApplyConfigFromServer ignores an out-of-range interval and applies an in-range one", TestApplyConfigFromServerValidatesIntervalRange);
             allPassed &= SelfTestCheck(output, "LoadLicenseKeySourcesCache parses a source written via ApplyInventoryAckResponse", TestLoadLicenseKeySourcesCacheParsesEntryWrittenThroughAckResponse);
             allPassed &= SelfTestCheck(output, "WsusScanner.ShouldRescan returns true when hashes differ or the client has never scanned, false when they match", TestWsusScannerShouldRescanCompares);
@@ -3496,33 +3597,33 @@ namespace WindowsInventoryLite
             }
         }
 
-        private static string TestApplyInventoryAckResponseReturnsTrueWhenForceImmediateSoftwareCheckIsSet()
+        private static string TestApplyInventoryAckResponseReturnsIndependentFlagsForEachType()
         {
             ClientOptions options = new ClientOptions();
             InventoryCollector collector = new InventoryCollector(options);
-            bool result = collector.ApplyInventoryAckResponse("{\"status\":\"ok\",\"forceImmediateSoftwareCheck\":true}");
-            if (!result)
-            {
-                return "expected true when the ack response sets forceImmediateSoftwareCheck:true";
-            }
-            return null;
-        }
 
-        private static string TestApplyInventoryAckResponseReturnsFalseWhenForceImmediateSoftwareCheckIsAbsentOrFalse()
-        {
-            ClientOptions options = new ClientOptions();
-            InventoryCollector collector = new InventoryCollector(options);
-            if (collector.ApplyInventoryAckResponse("{\"status\":\"ok\"}"))
+            ForceImmediateCheckFlags bothTrue = collector.ApplyInventoryAckResponse("{\"status\":\"ok\",\"forceImmediateWindowsUpdateCheck\":true,\"forceImmediateThirdPartySoftwareCheck\":true}");
+            if (!bothTrue.WindowsUpdate || !bothTrue.ThirdPartySoftware)
             {
-                return "expected false when forceImmediateSoftwareCheck is absent from the ack response";
+                return "expected both flags true when the ack sets both";
             }
-            if (collector.ApplyInventoryAckResponse("{\"status\":\"ok\",\"forceImmediateSoftwareCheck\":false}"))
+
+            ForceImmediateCheckFlags onlyWindowsUpdate = collector.ApplyInventoryAckResponse("{\"status\":\"ok\",\"forceImmediateWindowsUpdateCheck\":true,\"forceImmediateThirdPartySoftwareCheck\":false}");
+            if (!onlyWindowsUpdate.WindowsUpdate || onlyWindowsUpdate.ThirdPartySoftware)
             {
-                return "expected false when forceImmediateSoftwareCheck is explicitly false";
+                return "expected only WindowsUpdate true when the ack sets only that one - flags must be independent";
             }
-            if (collector.ApplyInventoryAckResponse("not valid json"))
+
+            ForceImmediateCheckFlags neither = collector.ApplyInventoryAckResponse("{\"status\":\"ok\"}");
+            if (neither.WindowsUpdate || neither.ThirdPartySoftware)
             {
-                return "expected false for a malformed ack response (must never throw or report true)";
+                return "expected both false when the ack has neither field";
+            }
+
+            ForceImmediateCheckFlags malformed = collector.ApplyInventoryAckResponse("not valid json");
+            if (malformed.WindowsUpdate || malformed.ThirdPartySoftware)
+            {
+                return "expected both false for a malformed ack response (must never throw)";
             }
             return null;
         }
@@ -4102,9 +4203,14 @@ namespace WindowsInventoryLite
             return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/software-repository-connection");
         }
 
-        internal static string ToSoftwareJobsUrl(string serverUrl)
+        internal static string ToWindowsUpdateJobsUrl(string serverUrl)
         {
-            return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/software-jobs?computerName=" + Uri.EscapeDataString(Environment.MachineName));
+            return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/windows-update-jobs?computerName=" + Uri.EscapeDataString(Environment.MachineName));
+        }
+
+        internal static string ToThirdPartySoftwareJobsUrl(string serverUrl)
+        {
+            return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/third-party-software-jobs?computerName=" + Uri.EscapeDataString(Environment.MachineName));
         }
 
         internal static string ToClientPackageUpdateDownloadUrl(string serverUrl, string target)
