@@ -3079,9 +3079,14 @@
     });
   }
 
-  function updateSoftwareInstallWindowFieldVisibility() {
-    const enabled = byId('softwareInstallWindowEnabled').checked;
-    byId('softwareInstallWindowFields').classList.toggle('hidden', !enabled);
+  function updateWindowsUpdateInstallWindowFieldVisibility() {
+    const enabled = byId('windowsUpdateInstallWindowEnabled').checked;
+    byId('windowsUpdateInstallWindowFields').classList.toggle('hidden', !enabled);
+  }
+
+  function updateThirdPartySoftwareInstallWindowFieldVisibility() {
+    const enabled = byId('thirdPartySoftwareInstallWindowEnabled').checked;
+    byId('thirdPartySoftwareInstallWindowFields').classList.toggle('hidden', !enabled);
   }
 
   function updateAdSyncIntervalField() {
@@ -3228,13 +3233,19 @@
         byId('generalAdComputerImportOUs').value = data.adComputerImportOUs || '';
         updateAdIdentityFields();
         byId('windowsDefaultIntervalHours').value = data.windowsDefaultIntervalHours || 6;
-        byId('windowsDefaultSoftwareCheckIntervalHours').value = data.windowsDefaultSoftwareCheckIntervalHours || 6;
+        byId('windowsUpdateCheckIntervalHours').value = data.windowsUpdateCheckIntervalHours || 6;
+        byId('thirdPartySoftwareCheckIntervalHours').value = data.thirdPartySoftwareCheckIntervalHours || 6;
         byId('windowsEnableClientSelfUpdate').checked = !!data.enableWindowsClientSelfUpdate;
-        byId('softwareInstallWindowEnabled').checked = !!data.softwareInstallWindowEnabled;
-        byId('softwareInstallWindowStartUtc').value = data.softwareInstallWindowStartUtc || '02:00';
-        byId('softwareInstallWindowEndUtc').value = data.softwareInstallWindowEndUtc || '04:00';
-        byId('softwareInstallWindowJitterMinutes').value = data.softwareInstallWindowJitterMinutes != null ? data.softwareInstallWindowJitterMinutes : 30;
-        updateSoftwareInstallWindowFieldVisibility();
+        byId('windowsUpdateInstallWindowEnabled').checked = !!data.windowsUpdateInstallWindowEnabled;
+        byId('windowsUpdateInstallWindowStartUtc').value = data.windowsUpdateInstallWindowStartUtc || '02:00';
+        byId('windowsUpdateInstallWindowEndUtc').value = data.windowsUpdateInstallWindowEndUtc || '04:00';
+        byId('windowsUpdateInstallWindowJitterMinutes').value = data.windowsUpdateInstallWindowJitterMinutes != null ? data.windowsUpdateInstallWindowJitterMinutes : 30;
+        byId('thirdPartySoftwareInstallWindowEnabled').checked = !!data.thirdPartySoftwareInstallWindowEnabled;
+        byId('thirdPartySoftwareInstallWindowStartUtc').value = data.thirdPartySoftwareInstallWindowStartUtc || '02:00';
+        byId('thirdPartySoftwareInstallWindowEndUtc').value = data.thirdPartySoftwareInstallWindowEndUtc || '04:00';
+        byId('thirdPartySoftwareInstallWindowJitterMinutes').value = data.thirdPartySoftwareInstallWindowJitterMinutes != null ? data.thirdPartySoftwareInstallWindowJitterMinutes : 30;
+        updateWindowsUpdateInstallWindowFieldVisibility();
+        updateThirdPartySoftwareInstallWindowFieldVisibility();
       })
       .catch(error => {
         showSavedMessage(byId('windowsSettingsMessage'), `Settings unavailable: ${error.message}`, true);
@@ -3401,12 +3412,17 @@
         adPassword: byId('generalAdPassword').value,
         adComputerImportOUs: byId('generalAdComputerImportOUs').value,
         windowsDefaultIntervalHours: Number.parseInt(byId('windowsDefaultIntervalHours').value, 10) || 6,
-        windowsDefaultSoftwareCheckIntervalHours: Number.parseInt(byId('windowsDefaultSoftwareCheckIntervalHours').value, 10) || 6,
+        windowsUpdateCheckIntervalHours: Number.parseInt(byId('windowsUpdateCheckIntervalHours').value, 10) || 6,
+        thirdPartySoftwareCheckIntervalHours: Number.parseInt(byId('thirdPartySoftwareCheckIntervalHours').value, 10) || 6,
         enableWindowsClientSelfUpdate: byId('windowsEnableClientSelfUpdate').checked,
-        softwareInstallWindowEnabled: byId('softwareInstallWindowEnabled').checked,
-        softwareInstallWindowStartUtc: byId('softwareInstallWindowStartUtc').value,
-        softwareInstallWindowEndUtc: byId('softwareInstallWindowEndUtc').value,
-        softwareInstallWindowJitterMinutes: Number.parseInt(byId('softwareInstallWindowJitterMinutes').value, 10) || 0
+        windowsUpdateInstallWindowEnabled: byId('windowsUpdateInstallWindowEnabled').checked,
+        windowsUpdateInstallWindowStartUtc: byId('windowsUpdateInstallWindowStartUtc').value,
+        windowsUpdateInstallWindowEndUtc: byId('windowsUpdateInstallWindowEndUtc').value,
+        windowsUpdateInstallWindowJitterMinutes: Number.parseInt(byId('windowsUpdateInstallWindowJitterMinutes').value, 10) || 0,
+        thirdPartySoftwareInstallWindowEnabled: byId('thirdPartySoftwareInstallWindowEnabled').checked,
+        thirdPartySoftwareInstallWindowStartUtc: byId('thirdPartySoftwareInstallWindowStartUtc').value,
+        thirdPartySoftwareInstallWindowEndUtc: byId('thirdPartySoftwareInstallWindowEndUtc').value,
+        thirdPartySoftwareInstallWindowJitterMinutes: Number.parseInt(byId('thirdPartySoftwareInstallWindowJitterMinutes').value, 10) || 0
       })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, data })))
@@ -6675,7 +6691,8 @@
   byId('windowsSettingsSaveButton').addEventListener('click', saveWindowsSettings);
   byId('linuxSettingsSaveButton').addEventListener('click', saveLinuxSettings);
   byId('generalAdUseServiceIdentity').addEventListener('change', updateAdIdentityFields);
-  byId('softwareInstallWindowEnabled').addEventListener('change', updateSoftwareInstallWindowFieldVisibility);
+  byId('windowsUpdateInstallWindowEnabled').addEventListener('change', updateWindowsUpdateInstallWindowFieldVisibility);
+  byId('thirdPartySoftwareInstallWindowEnabled').addEventListener('change', updateThirdPartySoftwareInstallWindowFieldVisibility);
   byId('generalAdSyncMode').addEventListener('change', updateAdSyncIntervalField);
   byId('updatesScheduleMode').addEventListener('change', updateScheduleFieldVisibility);
   byId('updatesScheduleSaveButton').addEventListener('click', saveClientUpdateSchedule);

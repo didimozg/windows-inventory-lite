@@ -353,30 +353,56 @@
                 <input id="windowsDefaultIntervalHours" type="number" min="1" max="24" value="6">
               </label>
               <label class="pkg-token-field">
-                Software check interval (hours)
-                <input id="windowsDefaultSoftwareCheckIntervalHours" type="number" min="1" max="24" value="6">
+                Windows updates check interval (hours)
+                <input id="windowsUpdateCheckIntervalHours" type="number" min="1" max="24" value="6">
+              </label>
+              <label class="pkg-token-field">
+                Third-party software check interval (hours)
+                <input id="thirdPartySoftwareCheckIntervalHours" type="number" min="1" max="24" value="6">
               </label>
             </div>
           </div>
           <div class="settings-block">
-            <h3 class="settings-block-title">Software install window</h3>
-            <p class="cert-hint">Restricts when clients are allowed to actually install pending Windows Updates/software catalog jobs - does not change how often they check in. Times are UTC. Off by default (installs run as soon as a job is assigned, same as before this setting existed). The spread-out period gradually ramps up admission from 0% right when the window opens to 100% once that many minutes have passed, so a fleet whose clients happen to check in around the same moment doesn't all start installing at once. Make the window at least as wide as the software check interval below (or shorter than the interval and clients will poll on a fixed schedule from their own service start - a narrower window can miss a machine's actual poll times entirely, deferring its jobs until its next poll happens to land inside the window).</p>
+            <h3 class="settings-block-title">Windows updates install window</h3>
+            <p class="cert-hint">Restricts when clients are allowed to actually install pending Windows Update/KB catalog jobs - does not change how often they check in. Times are UTC. Off by default (installs run as soon as a job is assigned, same as before this setting existed). The spread-out period gradually ramps up admission from 0% right when the window opens to 100% once that many minutes have passed, so a fleet whose clients happen to check in around the same moment doesn't all start installing at once. Make the window at least as wide as the check interval above (or shorter than the interval and clients will poll on a fixed schedule from their own service start - a narrower window can miss a machine's actual poll times entirely, deferring its jobs until its next poll happens to land inside the window).</p>
             <label class="check-label software-install-window-toggle-field">
-              <input id="softwareInstallWindowEnabled" type="checkbox">
+              <input id="windowsUpdateInstallWindowEnabled" type="checkbox">
               Restrict installs to a time window
             </label>
-            <div id="softwareInstallWindowFields" class="pkg-grid windows-defaults-grid hidden">
+            <div id="windowsUpdateInstallWindowFields" class="pkg-grid windows-defaults-grid hidden">
               <label class="pkg-token-field">
                 Window start (UTC)
-                <input id="softwareInstallWindowStartUtc" type="time" value="02:00">
+                <input id="windowsUpdateInstallWindowStartUtc" type="time" value="02:00">
               </label>
               <label class="pkg-token-field">
                 Window end (UTC)
-                <input id="softwareInstallWindowEndUtc" type="time" value="04:00">
+                <input id="windowsUpdateInstallWindowEndUtc" type="time" value="04:00">
               </label>
               <label class="pkg-token-field">
                 Spread-out period (minutes)
-                <input id="softwareInstallWindowJitterMinutes" type="number" min="0" max="1440" value="30">
+                <input id="windowsUpdateInstallWindowJitterMinutes" type="number" min="0" max="1440" value="30">
+              </label>
+            </div>
+          </div>
+          <div class="settings-block">
+            <h3 class="settings-block-title">Third-party software install window</h3>
+            <p class="cert-hint">Same as the Windows updates install window above, applied independently to third-party software catalog jobs.</p>
+            <label class="check-label software-install-window-toggle-field">
+              <input id="thirdPartySoftwareInstallWindowEnabled" type="checkbox">
+              Restrict installs to a time window
+            </label>
+            <div id="thirdPartySoftwareInstallWindowFields" class="pkg-grid windows-defaults-grid hidden">
+              <label class="pkg-token-field">
+                Window start (UTC)
+                <input id="thirdPartySoftwareInstallWindowStartUtc" type="time" value="02:00">
+              </label>
+              <label class="pkg-token-field">
+                Window end (UTC)
+                <input id="thirdPartySoftwareInstallWindowEndUtc" type="time" value="04:00">
+              </label>
+              <label class="pkg-token-field">
+                Spread-out period (minutes)
+                <input id="thirdPartySoftwareInstallWindowJitterMinutes" type="number" min="0" max="1440" value="30">
               </label>
             </div>
           </div>
