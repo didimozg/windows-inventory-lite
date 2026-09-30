@@ -56,6 +56,16 @@
     wsusMissingSummary: [],
     thirdPartySoftware: [], editingThirdPartySoftwareId: null,
     revealedLicenseKeys: {},
+    // Rows checked in the Clients table for the bulk "Check selected now"
+    // action, keyed by the row's own real identifier (client.computerName /
+    // client.hostname - same raw value data-check-now/data-delete-client
+    // already key on), not safeId()'s DOM-safe hash used elsewhere on the
+    // row purely for expand/collapse wiring. Unlike selectedUpdates below,
+    // there is no cross-page "select all matching" here - the header
+    // checkbox only ever toggles the currently rendered page's rows, so a
+    // plain persistent Set (surviving sort/filter/page changes, cleared per
+    // key in deleteClient/deleteLinuxClient) is all this needs.
+    selectedClients: new Set(),
     sort: {
       // 'name', not 'computerName': the Clients table is cross-platform
       // now, and its Computer column shows clientDisplayName() - Windows'
@@ -482,6 +492,10 @@
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         state.linuxClients = state.linuxClients.filter(client => client.hostname !== hostname);
+        // Otherwise a deleted machine stays "selected" forever - the bulk
+        // bar's count would include it, and "Check selected now" would
+        // POST for a computer name that no longer exists.
+        state.selectedClients.delete(hostname);
         // Every view that reads state.linuxClients has to be redrawn, not just the
         // Linux Clients table. Since the Dashboard/Hardware merge, the combined
         // tiles and the merged Hardware section both read getAllClients(), and
@@ -1061,6 +1075,8 @@
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         state.clients = state.clients.filter(client => client.computerName !== computerName);
+        // Same reasoning as deleteLinuxClient's own cleanup above.
+        state.selectedClients.delete(computerName);
         byId('generatedAt').textContent = `Updated: ${formatDateTime(new Date().toISOString())}`;
         render();
       })
@@ -5136,7 +5152,14 @@
 
     const rows = pageItems.map(client => {
       const isWindows = clientPlatformLabel(client) === 'Windows';
-      const clientId = safeId((isWindows ? client.computerName : client.hostname) || '');
+      // Real identifier (not safeId()'s DOM-safe hash just below) - the
+      // same raw value data-check-now/data-delete-client already key on,
+      // and what POST /api/v1/clients/check-now?computerName= expects.
+      const rowKey = isWindows ? client.computerName : client.hostname;
+      const clientId = safeId(rowKey || '');
+      // Platform-agnostic: both Windows and Linux rows get a select
+      // checkbox, keyed by the row's own rowKey above.
+      const checkboxCell = `<td><input type="checkbox" class="client-select-checkbox" data-client-select="${escapeHtml(rowKey)}"${state.selectedClients.has(rowKey) ? ' checked' : ''}></td>`;
       const stale = isStale(client);
       const awaitingReport = !!client.lastInstalledAtUtc;
       const staleClass = stale ? ' stale' : '';
@@ -5267,6 +5290,7 @@
         : `data-delete-linux-client="${escapeHtml(client.hostname)}"`;
 
       return `<tr class="${staleClass}">
+        ${checkboxCell}
         <td><button class="link-button" type="button" ${expandAttr}>${escapeHtml(clientDisplayName(client))}</button> <small class="platform-tag">${escapeHtml(clientPlatformLabel(client))}</small>${usbBadge}${staleBadge}${domainHtml}${ipAddressesHtml ? `<small class="mono">${ipAddressesHtml}</small>` : ''}</td>
         <td>${escapeHtml(client.clientVersion)}${client.tokenIssue ? ` <span class="usb-badge" title="A recent request from this client's last known address ${client.tokenIssue === 'missing' ? 'had no ingestion token' : 'had a wrong ingestion token'}">${client.tokenIssue === 'missing' ? 'TOKEN MISSING' : 'TOKEN MISMATCH'}</span>` : ''}${client.wuServiceUnavailable ? ' <span class="usb-badge" title="The Windows Update service (wuauserv) was not running the last time this client tried to scan for missing updates">WU SERVICE UNAVAILABLE</span>' : ''}</td>
         <td>${osCell}</td>
@@ -5278,7 +5302,7 @@
         <td><button class="danger-button-ghost" type="button" ${deleteAttr}>Delete</button></td>
       </tr>
       <tr class="details-row ${detailsHidden}" ${detailsAttr}>
-        <td colspan="9">
+        <td colspan="10">
           <div class="details">
             <div class="hw-summary">
               <div><strong>CPU</strong><span>${cpuText}</span></div>
@@ -5292,7 +5316,7 @@
       </tr>`;
     });
 
-    byId('inventoryBody').innerHTML = rows.join('') || '<tr><td colspan="9" class="empty">No matching inventory records.</td></tr>';
+    byId('inventoryBody').innerHTML = rows.join('') || '<tr><td colspan="10" class="empty">No matching inventory records.</td></tr>';
     // The clientSoftware <th> elements above are rebuilt from scratch on
     // every call (they live inside inventoryBody's innerHTML, unlike the
     // Clients/Software/Hardware/Licenses <thead>s, which are static in
@@ -5310,6 +5334,63 @@
       }
     }
     renderPager('clientsPager', 'clients', page, totalPages, () => renderFilteredClientsTable());
+    updateClientsSelectAllUi();
+    updateClientsBulkActionBar();
+  }
+
+  // Reflects state.selectedClients onto the Clients table's header "select
+  // all" checkbox: checked when every currently rendered row is selected,
+  // indeterminate when some (but not all) are. Reads the live checkboxes
+  // (not pageItems, which is local to renderClientsTable) so this also
+  // stays correct after a single row's own checkbox change, mirroring
+  // updateUpdatesSelectAllUi's "state, not a captured array" approach -
+  // minus that function's cross-page "select all matching" hint, which this
+  // simpler feature has no equivalent of (see state.selectedClients' doc
+  // comment).
+  function updateClientsSelectAllUi() {
+    const selectAllCheckbox = byId('clientsSelectAll');
+    if (!selectAllCheckbox) return;
+    const pageKeys = Array.from(document.querySelectorAll('.client-select-checkbox')).map(cb => cb.dataset.clientSelect);
+    const selectedCount = pageKeys.filter(key => state.selectedClients.has(key)).length;
+    selectAllCheckbox.checked = pageKeys.length > 0 && selectedCount === pageKeys.length;
+    selectAllCheckbox.indeterminate = selectedCount > 0 && selectedCount < pageKeys.length;
+  }
+
+  // Shows/hides the Clients table's bulk action bar and keeps its live
+  // count in sync with state.selectedClients - the single source of truth,
+  // not a DOM count, so a selection made before a filter/page change is
+  // still reflected once that change hides the checkbox that set it.
+  function updateClientsBulkActionBar() {
+    const bar = byId('clientsBulkActionBar');
+    if (!bar) return;
+    bar.classList.toggle('hidden', state.selectedClients.size === 0);
+    const countEl = byId('clientsBulkActionCount');
+    if (countEl) countEl.textContent = `${state.selectedClients.size} selected`;
+  }
+
+  // Fires the same per-machine POST /api/v1/clients/check-now the per-row
+  // "Check now" button (Task 3, see the delegated [data-check-now] handler
+  // below) already uses, once per selected computer, and reports how many
+  // of the selection actually succeeded. Promise.all (not allSettled) is
+  // fine here - a network failure is already caught inline and a non-ok
+  // response is already treated as "didn't count" without the promise ever
+  // rejecting.
+  function checkSelectedClientsNow() {
+    const names = Array.from(state.selectedClients);
+    if (names.length === 0) return;
+    const button = byId('clientsBulkActionButton');
+    const statusEl = byId('clientsBulkActionStatus');
+    button.disabled = true;
+    if (statusEl) statusEl.textContent = 'Requesting...';
+    let succeeded = 0;
+    Promise.all(names.map(name =>
+      fetch(`/api/v1/clients/check-now?computerName=${encodeURIComponent(name)}`, { method: 'POST' })
+        .then(res => { if (res.ok) succeeded += 1; })
+        .catch(() => {})
+    )).then(() => {
+      if (statusEl) statusEl.textContent = `Requested for ${succeeded} of ${names.length} machine(s).`;
+      button.disabled = false;
+    });
   }
 
   // Applies the .os-filter's current Clients selection before delegating to
@@ -6118,6 +6199,24 @@
   byId('installLoadAdAllButton').addEventListener('click', () => loadTargetsFromAd(false));
   byId('installLoadAdMissingButton').addEventListener('click', () => loadTargetsFromAd(true));
   byId('exportClientsBtn').addEventListener('click', exportClients);
+  byId('clientsBulkActionButton').addEventListener('click', checkSelectedClientsNow);
+  byId('clientsSelectAll').addEventListener('change', () => {
+    // Only ever toggles the CURRENTLY RENDERED page's rows, same scope
+    // updatesSelectAll's own handler below documents - there is no
+    // cross-page "select all matching" for this simpler feature.
+    const checked = byId('clientsSelectAll').checked;
+    document.querySelectorAll('.client-select-checkbox').forEach(checkbox => {
+      checkbox.checked = checked;
+      const key = checkbox.dataset.clientSelect;
+      if (checked) {
+        state.selectedClients.add(key);
+      } else {
+        state.selectedClients.delete(key);
+      }
+    });
+    updateClientsSelectAllUi();
+    updateClientsBulkActionBar();
+  });
   byId('exportSoftwareBtn').addEventListener('click', exportSoftware);
   byId('exportCpuBtn').addEventListener('click', exportHardwareCpu);
   byId('exportDiskBtn').addEventListener('click', exportHardwareDisk);
@@ -6501,6 +6600,16 @@
       }
       updateUpdatesSelectAllUi();
       updateUpdatesSelectionState();
+    }
+    if (event.target.classList.contains('client-select-checkbox')) {
+      const key = event.target.dataset.clientSelect;
+      if (event.target.checked) {
+        state.selectedClients.add(key);
+      } else {
+        state.selectedClients.delete(key);
+      }
+      updateClientsSelectAllUi();
+      updateClientsBulkActionBar();
     }
   });
   byId('pkgSaveButton').addEventListener('click', savePackageConfig);

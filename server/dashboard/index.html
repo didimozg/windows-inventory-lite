@@ -1362,10 +1362,16 @@
           <div class="view-toolbar">
             <button id="exportClientsBtn" class="export-button" type="button">Export CSV</button>
           </div>
+          <div id="clientsBulkActionBar" class="bulk-action-bar hidden">
+            <span id="clientsBulkActionCount"></span>
+            <button id="clientsBulkActionButton" class="primary-button" type="button">Check selected now</button>
+            <span id="clientsBulkActionStatus" class="check-now-status"></span>
+          </div>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
+                  <th><input id="clientsSelectAll" type="checkbox" title="Select all"></th>
                   <th data-sort-table="clients" data-sort-key="name" class="sortable">Computer</th>
                   <th data-sort-table="clients" data-sort-key="clientVersion" class="sortable">Client</th>
                   <th data-sort-table="clients" data-sort-key="os" class="sortable">OS</th>

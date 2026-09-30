@@ -1619,6 +1619,30 @@ th.sort-desc::after {
   vertical-align: middle;
 }
 
+/* Clients table bulk-select bar (Task 4) - hidden via the shared .hidden
+   utility until state.selectedClients has at least one entry
+   (updateClientsBulkActionBar). Sits between .view-toolbar and .table-wrap;
+   needs its own margin-bottom for the same reason .view-toolbar has one -
+   .table-wrap itself contributes no top margin (see the .table-wrap +
+   .install-panel comment above), so without this the bar would sit flush
+   against the table whenever it's visible. */
+.bulk-action-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: 8px;
+}
+
+/* .check-now-status's own margin-left assumes it sits inline right after a
+   button with no layout gap of its own (the per-row Check now case above).
+   Inside this bar's flex row, .bulk-action-bar's gap already spaces every
+   child evenly, so the unscoped margin-left would double up the gap before
+   this specific status span - override it back to 0 here rather than reuse
+   a differently-spaced class as-is. */
+.bulk-action-bar .check-now-status {
+  margin-left: 0;
+}
+
 .pager {
   display: flex;
   align-items: center;
