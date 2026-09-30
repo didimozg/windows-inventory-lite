@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.78.1] - Scheduled/manual WSUS cab downloads no longer risk crashing the whole server
+
+### Fixed
+
+- **`PerformWsusCabDownload` (the scheduled and manual "Download now" cab-fetch path) ran with no exception guard on its ThreadPool worker thread.** An unhandled exception there - e.g. a transient file lock while recording the download-log entry - would, by default .NET Framework behavior, terminate the entire server process instead of just failing that one download attempt. The identical per-KB download path already got this guard during the automatic-KB-download feature's own review; this closes the same gap on the older, cab-download code path it was deliberately left out of at the time. Found and flagged during that earlier review, not from an observed crash.
+
 ## [0.78.0] - WSUS missing-KB scan freshness
 
 ### Added

@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.78.0";
+        internal const string ProductVersion = "0.78.1";
 
         private static int Main(string[] args)
         {
@@ -11120,22 +11120,40 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // cab-status card's last-attempt summary.
         private void PerformWsusCabDownload(string source)
         {
-            WsusCabDownloadResult result = PerformWsusCabDownloadCore(DownloadWsusCabBytesFromMicrosoft, WriteWsusCabBytes);
-
-            WsusDownloadLogEntry entry = new WsusDownloadLogEntry();
-            entry.TimestampUtc = DateTime.UtcNow;
-            entry.Source = source;
-            entry.Kind = "cab";
-            entry.Success = result.Success;
-            entry.ErrorCategory = result.ErrorCategory ?? "";
-            entry.ErrorMessage = result.ErrorMessage ?? "";
-            entry.Sha256Hash = result.Sha256Hash ?? "";
-            entry.SizeBytes = result.SizeBytes;
-            RecordWsusDownloadAttempt(entry);
-
-            if (!result.Success)
+            // Whole body wrapped defensively: this runs on a ThreadPool
+            // worker thread (see TriggerWsusCabDownloadNow below, and the
+            // scheduled-download tick) with no surrounding dispatch
+            // try/catch and no AppDomain.UnhandledException handler
+            // anywhere in this process. Unlike the HTTP-request-handler
+            // path, an exception that escapes here - e.g. from
+            // RecordWsusDownloadAttempt hitting a transient file lock -
+            // would otherwise go unhandled on the worker thread and, by
+            // default .NET Framework behavior, terminate the entire server
+            // process rather than just failing this one download. Mirrors
+            // the identical guard already applied to PerformWsusKbDownload.
+            try
             {
-                DebugLogger.Log(options, "Error", "WSUS cab download (" + source + ") failed: [" + result.ErrorCategory + "] " + result.ErrorMessage);
+                WsusCabDownloadResult result = PerformWsusCabDownloadCore(DownloadWsusCabBytesFromMicrosoft, WriteWsusCabBytes);
+
+                WsusDownloadLogEntry entry = new WsusDownloadLogEntry();
+                entry.TimestampUtc = DateTime.UtcNow;
+                entry.Source = source;
+                entry.Kind = "cab";
+                entry.Success = result.Success;
+                entry.ErrorCategory = result.ErrorCategory ?? "";
+                entry.ErrorMessage = result.ErrorMessage ?? "";
+                entry.Sha256Hash = result.Sha256Hash ?? "";
+                entry.SizeBytes = result.SizeBytes;
+                RecordWsusDownloadAttempt(entry);
+
+                if (!result.Success)
+                {
+                    DebugLogger.Log(options, "Error", "WSUS cab download (" + source + ") failed: [" + result.ErrorCategory + "] " + result.ErrorMessage);
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Error", "WSUS cab download (" + source + ") threw an unhandled exception: " + ex);
             }
         }
 
