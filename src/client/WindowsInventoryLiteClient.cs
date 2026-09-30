@@ -244,7 +244,7 @@ namespace WindowsInventoryLite
                     int previousIntervalHours = options.IntervalHours;
                     int previousSoftwareCheckIntervalHours = options.SoftwareCheckIntervalHours;
                     InventoryCollector collector = new InventoryCollector(options);
-                    collector.CollectAndSave();
+                    bool forceImmediateSoftwareCheck = collector.CollectAndSave();
                     if (options.IntervalHours != previousIntervalHours && timer != null)
                     {
                         timer.Change(TimeSpan.FromHours(options.IntervalHours), TimeSpan.FromHours(options.IntervalHours));
@@ -254,6 +254,11 @@ namespace WindowsInventoryLite
                         softwareCheckTimer.Change(TimeSpan.FromHours(options.SoftwareCheckIntervalHours), TimeSpan.FromHours(options.SoftwareCheckIntervalHours));
                     }
                     DebugLogger.Log(options, "Server", "Collection cycle completed successfully.");
+                    if (forceImmediateSoftwareCheck)
+                    {
+                        DebugLogger.Log(options, "Server", "Server requested an immediate software-job check - running it now instead of waiting for the next scheduled interval.");
+                        CheckSoftwareJobs(null);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -1045,7 +1050,7 @@ namespace WindowsInventoryLite
             this.options = options;
         }
 
-        public void CollectAndSave()
+        public bool CollectAndSave()
         {
             Dictionary<string, object> inventory = Collect();
             JavaScriptSerializer serializer = new JavaScriptSerializer();
@@ -1071,15 +1076,18 @@ namespace WindowsInventoryLite
                 }
             }
 
+            bool forceImmediateSoftwareCheck = false;
             if (!String.IsNullOrEmpty(options.ServerUrl))
             {
                 string responseBody = PostJson(options.ServerUrl, json, options.Token);
-                ApplyInventoryAckResponse(responseBody);
+                forceImmediateSoftwareCheck = ApplyInventoryAckResponse(responseBody);
                 if (options.RunOnce)
                 {
                     Console.WriteLine("Inventory posted: " + options.ServerUrl);
                 }
             }
+
+            return forceImmediateSoftwareCheck;
         }
 
         private Dictionary<string, object> Collect()
@@ -1837,11 +1845,11 @@ namespace WindowsInventoryLite
         // missing or corrupt cache file is a normal "nothing learned yet"
         // state, never an error - LoadLearnedState() returns an empty
         // dictionary rather than throwing or returning null.
-        private void ApplyInventoryAckResponse(string responseBody)
+        private bool ApplyInventoryAckResponse(string responseBody)
         {
             if (String.IsNullOrEmpty(responseBody))
             {
-                return;
+                return false;
             }
 
             try
@@ -1850,7 +1858,7 @@ namespace WindowsInventoryLite
                 Dictionary<string, object> response = serializer.Deserialize<Dictionary<string, object>>(responseBody);
                 if (response == null)
                 {
-                    return;
+                    return false;
                 }
                 Dictionary<string, object> learned = LoadLearnedState();
                 bool learnedChanged = false;
@@ -1877,11 +1885,14 @@ namespace WindowsInventoryLite
                 {
                     SaveLearnedState(learned);
                 }
+
+                return response.ContainsKey("forceImmediateSoftwareCheck") && Convert.ToBoolean(response["forceImmediateSoftwareCheck"]);
             }
             catch
             {
                 // A malformed/unparseable response must never fail a
                 // report the server has already accepted.
+                return false;
             }
         }
 
@@ -2557,6 +2568,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "SaveLearnedState/LoadLearnedState round-trip a dictionary with mixed value types", TestSaveLearnedStateRoundTripsMixedValueTypes);
             allPassed &= SelfTestCheck(output, "SaveLearnedState/LoadLearnedState round-trip the wsusLastScanAtUtc key", TestSaveLearnedStatePersistsWsusLastScanAtUtcKey);
             allPassed &= SelfTestCheck(output, "ApplyInventoryAckResponse does not lose a previously-learned field when a later ack only carries a different one", TestApplyInventoryAckResponsePreservesUnrelatedLearnedFields);
+            allPassed &= SelfTestCheck(output, "ApplyInventoryAckResponse returns true when forceImmediateSoftwareCheck is set", TestApplyInventoryAckResponseReturnsTrueWhenForceImmediateSoftwareCheckIsSet);
+            allPassed &= SelfTestCheck(output, "ApplyInventoryAckResponse returns false when forceImmediateSoftwareCheck is absent, false, or the response is malformed", TestApplyInventoryAckResponseReturnsFalseWhenForceImmediateSoftwareCheckIsAbsentOrFalse);
             allPassed &= SelfTestCheck(output, "ApplyConfigFromServer ignores an out-of-range interval and applies an in-range one", TestApplyConfigFromServerValidatesIntervalRange);
             allPassed &= SelfTestCheck(output, "LoadLicenseKeySourcesCache parses a source written via ApplyInventoryAckResponse", TestLoadLicenseKeySourcesCacheParsesEntryWrittenThroughAckResponse);
             allPassed &= SelfTestCheck(output, "WsusScanner.ShouldRescan returns true when hashes differ or the client has never scanned, false when they match", TestWsusScannerShouldRescanCompares);
@@ -3481,6 +3494,37 @@ namespace WindowsInventoryLite
             {
                 try { Directory.Delete(tempDir, true); } catch { }
             }
+        }
+
+        private static string TestApplyInventoryAckResponseReturnsTrueWhenForceImmediateSoftwareCheckIsSet()
+        {
+            ClientOptions options = new ClientOptions();
+            InventoryCollector collector = new InventoryCollector(options);
+            bool result = collector.ApplyInventoryAckResponse("{\"status\":\"ok\",\"forceImmediateSoftwareCheck\":true}");
+            if (!result)
+            {
+                return "expected true when the ack response sets forceImmediateSoftwareCheck:true";
+            }
+            return null;
+        }
+
+        private static string TestApplyInventoryAckResponseReturnsFalseWhenForceImmediateSoftwareCheckIsAbsentOrFalse()
+        {
+            ClientOptions options = new ClientOptions();
+            InventoryCollector collector = new InventoryCollector(options);
+            if (collector.ApplyInventoryAckResponse("{\"status\":\"ok\"}"))
+            {
+                return "expected false when forceImmediateSoftwareCheck is absent from the ack response";
+            }
+            if (collector.ApplyInventoryAckResponse("{\"status\":\"ok\",\"forceImmediateSoftwareCheck\":false}"))
+            {
+                return "expected false when forceImmediateSoftwareCheck is explicitly false";
+            }
+            if (collector.ApplyInventoryAckResponse("not valid json"))
+            {
+                return "expected false for a malformed ack response (must never throw or report true)";
+            }
+            return null;
         }
 
         private static string TestApplyConfigFromServerValidatesIntervalRange()
