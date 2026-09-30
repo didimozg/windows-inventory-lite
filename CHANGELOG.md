@@ -6,6 +6,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.79.0] - "Check now": trigger a software-job check on a client's next contact
+
+### Added
+
+- **An admin can force a Windows client to check for pending software jobs (KB/third-party installs) on its very next server contact**, instead of waiting up to `SoftwareCheckIntervalHours` (default 6h). Modeled on the WSUS "Rescan now" feature shipped earlier the same day - an ephemeral per-computer flag, delivered via the client's much more frequent hourly inventory-report ack this time (not the software-jobs response itself), since the whole point is to make the client poll sooner than its own interval would.
+- **A "Check now" button** next to the existing "Rescan WSUS now" button on a Windows client's expanded row (Clients page).
+- **Multi-select on the Clients table**: a checkbox column (Windows rows only - the underlying mechanism has no effect for Linux clients, which have no separate software-job poll to accelerate), a "select all" header checkbox scoped to the currently visible page, and a "Check selected now" bulk action reporting how many of the selected machines were successfully requested.
+
+### Notes
+
+- Design: `docs/superpowers/specs/2026-09-30-check-now-design.md`.
+- Both this feature's per-row button and the existing WSUS one share a known, not-yet-fixed discoverability problem (tucked inside a client's expanded row) - tracked separately in `docs/backlog.md` for a future joint placement redesign.
+
+## [Windows client 0.11.0] - Runs a forced software-job check when the server requests one
+
+### Added
+
+- **The client now runs an out-of-cycle software-job check immediately if the server's inventory-report ack requests one**, instead of only checking on its own `SoftwareCheckIntervalHours` cadence.
+
 ## [0.78.3] - "Already in Catalog" indicator on Missing updates
 
 ### Added
