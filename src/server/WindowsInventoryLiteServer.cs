@@ -1356,6 +1356,8 @@ namespace WindowsInventoryLite
         // windowsUpdatesLock - this set is unrelated to either.
         private readonly object forceWsusRescanLock = new object();
         private readonly HashSet<string> forceWsusRescanComputers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly object forceImmediateSoftwareCheckLock = new object();
+        private readonly HashSet<string> forceImmediateSoftwareCheckComputers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly object reportFileLock = new object();
         // server-config.json holds the DPAPI-encrypted secrets (AdPassword/
         // WebPassword/Token/ClientUpdatePassword) and is now written by more
@@ -2638,6 +2640,10 @@ namespace WindowsInventoryLite
                     {
                         TriggerWsusRescanNow(stream, request);
                     }
+                    else if (request.Method == "POST" && request.Path.StartsWith("/api/v1/clients/check-now", StringComparison.OrdinalIgnoreCase))
+                    {
+                        TriggerCheckNow(stream, request);
+                    }
                     else if (request.Method == "POST" && request.Path.StartsWith("/api/v1/windows-updates/", StringComparison.OrdinalIgnoreCase) && request.Path.EndsWith("/download-now", StringComparison.OrdinalIgnoreCase))
                     {
                         // EndsWith("/download-now") (with the leading slash)
@@ -3018,6 +3024,12 @@ namespace WindowsInventoryLite
             configResponse["intervalHours"] = options.WindowsDefaultIntervalHours;
             configResponse["softwareCheckIntervalHours"] = options.WindowsDefaultSoftwareCheckIntervalHours;
             ackResponse["config"] = configResponse;
+            bool forceImmediateSoftwareCheck;
+            lock (forceImmediateSoftwareCheckLock)
+            {
+                forceImmediateSoftwareCheck = forceImmediateSoftwareCheckComputers.Contains(computerName);
+            }
+            ackResponse["forceImmediateSoftwareCheck"] = forceImmediateSoftwareCheck;
             // The basic report-acceptance gate above deliberately honors the
             // admin-toggleable RequireIngestionToken (fake inventory
             // submission is accepted as low-sensitivity risk when no token
@@ -3172,6 +3184,10 @@ namespace WindowsInventoryLite
                 forceWsusRescan = forceWsusRescanComputers.Contains(computerName);
             }
             response["forceWsusRescan"] = forceWsusRescan;
+            lock (forceImmediateSoftwareCheckLock)
+            {
+                forceImmediateSoftwareCheckComputers.Remove(computerName);
+            }
             SendJson(stream, serializer.Serialize(response));
         }
 
@@ -11426,6 +11442,51 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             SendJson(stream, serializer.Serialize(result));
         }
 
+        // Set by an admin (dashboard "Check now" action, per-row or bulk),
+        // consumed by ReceiveInventory's ack response - NOT this same
+        // request/response, since the whole point is to make the client
+        // poll GET /api/v1/client/software-jobs sooner than its own
+        // SoftwareCheckIntervalHours cadence would; that response is the
+        // one the client isn't due to ask for yet. Cleared unconditionally
+        // by SendClientSoftwareJobs the moment that poll actually happens,
+        // whatever triggered it - the forced ACTION here is "the client
+        // checked," not "a job inside that check succeeded," so there is
+        // no separate later confirmation step to wait for (contrast with
+        // forceWsusRescanComputers, cleared only once a real scan result
+        // arrives).
+        private void TriggerCheckNow(Stream stream, RequestContext request)
+        {
+            string computerName = null;
+            int queryStart = request.Path.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                string query = request.Path.Substring(queryStart + 1);
+                foreach (string pair in query.Split('&'))
+                {
+                    int equalsIndex = pair.IndexOf('=');
+                    if (equalsIndex > 0 && pair.Substring(0, equalsIndex) == "computerName")
+                    {
+                        computerName = Uri.UnescapeDataString(pair.Substring(equalsIndex + 1));
+                    }
+                }
+            }
+            if (String.IsNullOrEmpty(computerName))
+            {
+                SendText(stream, "{\"error\":\"computerName is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            lock (forceImmediateSoftwareCheckLock)
+            {
+                forceImmediateSoftwareCheckComputers.Add(computerName);
+            }
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["status"] = "requested";
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
         private string GetCertificateHistoryDirectory()
         {
             return Path.Combine(options.DataPath, "_certificates");
@@ -16356,6 +16417,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results with wuServiceAvailable=false still writes wuServiceUnavailable=true and an empty missing-updates list", TestReceiveWsusScanResultsRecordsServiceUnavailableFlag);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results is a no-op for an unknown computer with no stored report", TestReceiveWsusScanResultsIsNoOpForUnknownComputer);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results clears a pending forceWsusRescan flag for that computer once a real report arrives", TestReceiveWsusScanResultsClearsForceWsusRescanFlag);
+            allPassed &= SelfTestCheck(output, "TriggerCheckNow sets the flag, reflected true only for the named computer's next inventory ack", TestTriggerCheckNowSetsFlagOnlyForNamedComputer);
+            allPassed &= SelfTestCheck(output, "SendClientSoftwareJobs unconditionally clears a pending forceImmediateSoftwareCheck flag for that computer", TestSendClientSoftwareJobsClearsForceImmediateCheckFlagUnconditionally);
+            allPassed &= SelfTestCheck(output, "TriggerCheckNow rejects a request with no computerName", TestTriggerCheckNowRejectsMissingComputerName);
             allPassed &= SelfTestCheck(output, "A routine POST /api/v1/windows-inventory report does not erase wsusMissingUpdates/wsusScannedCabHash/wsusScanAt/wuServiceUnavailable written by an earlier wsus-scan-results report", TestReceiveInventoryPreservesWsusFieldsFromPreviousReport);
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate accepts targetMode=missingKb with a kbId and persists both fields", TestCreateWindowsUpdateAcceptsMissingKbTargetMode);
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate rejects targetMode=missingKb with no kbId", TestCreateWindowsUpdateRejectsMissingKbTargetModeWithoutKbId);
@@ -29109,6 +29173,160 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 try { Directory.Delete(dataPath, true); } catch { }
             }
+        }
+
+        private static string TestTriggerCheckNowSetsFlagOnlyForNamedComputer()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-checkNow-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext triggerRequest = new RequestContext();
+                triggerRequest.Method = "POST";
+                triggerRequest.Path = "/api/v1/clients/check-now?computerName=PC-CHECKNOW-1";
+                triggerRequest.Headers = new Dictionary<string, string>();
+                using (MemoryStream triggerStream = new MemoryStream())
+                {
+                    server.TriggerCheckNow(triggerStream, triggerRequest);
+                    string triggerResponse = Encoding.UTF8.GetString(triggerStream.ToArray());
+                    if (triggerResponse.IndexOf("\"status\":\"requested\"", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected {\"status\":\"requested\"} from the trigger endpoint, got: " + triggerResponse;
+                    }
+                }
+
+                Dictionary<string, object> report1 = new Dictionary<string, object>();
+                report1["computerName"] = "PC-CHECKNOW-1";
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                File.WriteAllText(Path.Combine(dataPath, "PC-CHECKNOW-1.json"), serializer.Serialize(report1), new UTF8Encoding(false));
+                Dictionary<string, object> report2 = new Dictionary<string, object>();
+                report2["computerName"] = "PC-CHECKNOW-2";
+                File.WriteAllText(Path.Combine(dataPath, "PC-CHECKNOW-2.json"), serializer.Serialize(report2), new UTF8Encoding(false));
+
+                RequestContext inventoryRequest1 = new RequestContext();
+                inventoryRequest1.Method = "POST";
+                inventoryRequest1.Path = "/api/v1/windows-inventory";
+                inventoryRequest1.Body = "{\"computerName\":\"PC-CHECKNOW-1\"}";
+                inventoryRequest1.Headers = new Dictionary<string, string>();
+                string ack1;
+                using (MemoryStream inventoryStream1 = new MemoryStream())
+                {
+                    server.ReceiveInventory(inventoryStream1, inventoryRequest1);
+                    ack1 = Encoding.UTF8.GetString(inventoryStream1.ToArray());
+                }
+                if (ack1.IndexOf("\"forceImmediateSoftwareCheck\":true", StringComparison.Ordinal) < 0)
+                {
+                    return "expected forceImmediateSoftwareCheck:true in PC-CHECKNOW-1's inventory ack, got: " + ack1;
+                }
+
+                RequestContext inventoryRequest2 = new RequestContext();
+                inventoryRequest2.Method = "POST";
+                inventoryRequest2.Path = "/api/v1/windows-inventory";
+                inventoryRequest2.Body = "{\"computerName\":\"PC-CHECKNOW-2\"}";
+                inventoryRequest2.Headers = new Dictionary<string, string>();
+                string ack2;
+                using (MemoryStream inventoryStream2 = new MemoryStream())
+                {
+                    server.ReceiveInventory(inventoryStream2, inventoryRequest2);
+                    ack2 = Encoding.UTF8.GetString(inventoryStream2.ToArray());
+                }
+                if (ack2.IndexOf("\"forceImmediateSoftwareCheck\":false", StringComparison.Ordinal) < 0)
+                {
+                    return "expected forceImmediateSoftwareCheck:false for the untouched PC-CHECKNOW-2, got: " + ack2;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendClientSoftwareJobsClearsForceImmediateCheckFlagUnconditionally()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-clearcheck-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext triggerRequest = new RequestContext();
+                triggerRequest.Method = "POST";
+                triggerRequest.Path = "/api/v1/clients/check-now?computerName=PC-CHECKNOW-3";
+                triggerRequest.Headers = new Dictionary<string, string>();
+                using (MemoryStream triggerStream = new MemoryStream())
+                {
+                    server.TriggerCheckNow(triggerStream, triggerRequest);
+                }
+
+                RequestContext jobsRequest = new RequestContext();
+                jobsRequest.Method = "GET";
+                jobsRequest.Path = "/api/v1/client/software-jobs?computerName=PC-CHECKNOW-3";
+                jobsRequest.Headers = new Dictionary<string, string>();
+                jobsRequest.Headers["x-inventory-token"] = "test-token";
+                using (MemoryStream jobsStream = new MemoryStream())
+                {
+                    server.SendClientSoftwareJobs(jobsStream, jobsRequest);
+                }
+
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                report["computerName"] = "PC-CHECKNOW-3";
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                File.WriteAllText(Path.Combine(dataPath, "PC-CHECKNOW-3.json"), serializer.Serialize(report), new UTF8Encoding(false));
+
+                RequestContext inventoryRequest = new RequestContext();
+                inventoryRequest.Method = "POST";
+                inventoryRequest.Path = "/api/v1/windows-inventory";
+                inventoryRequest.Body = "{\"computerName\":\"PC-CHECKNOW-3\"}";
+                inventoryRequest.Headers = new Dictionary<string, string>();
+                string ack;
+                using (MemoryStream inventoryStream = new MemoryStream())
+                {
+                    server.ReceiveInventory(inventoryStream, inventoryRequest);
+                    ack = Encoding.UTF8.GetString(inventoryStream.ToArray());
+                }
+                if (ack.IndexOf("\"forceImmediateSoftwareCheck\":false", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the flag to already be cleared by the earlier SendClientSoftwareJobs call, got: " + ack;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestTriggerCheckNowRejectsMissingComputerName()
+        {
+            ServerOptions options = new ServerOptions();
+            options.Token = "test-token";
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext triggerRequest = new RequestContext();
+            triggerRequest.Method = "POST";
+            triggerRequest.Path = "/api/v1/clients/check-now";
+            triggerRequest.Headers = new Dictionary<string, string>();
+            string response;
+            using (MemoryStream triggerStream = new MemoryStream())
+            {
+                server.TriggerCheckNow(triggerStream, triggerRequest);
+                response = Encoding.UTF8.GetString(triggerStream.ToArray());
+            }
+
+            if (response.IndexOf("computerName is required", StringComparison.Ordinal) < 0)
+            {
+                return "expected a computerName-required error, got: " + response;
+            }
+            return null;
         }
 
         private static string TestReceiveWsusScanResultsRecordsServiceUnavailableFlag()
