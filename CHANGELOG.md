@@ -6,6 +6,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.81.0] - Independent windowsUpdate/thirdPartySoftware check-in, install windows, and force-install-now
+
+### Added
+
+- **Windows-update and third-party-software catalog jobs now run on fully independent pipelines** instead of sharing one check interval, one install window, and one force-trigger. Each catalog type gets its own check-interval setting (`Windows updates check interval` / `Third-party software check interval`, Settings > Windows), its own install-window block (`Windows updates install window` / `Third-party software install window`, same defaults as before: off, 02:00-04:00 UTC, 30-minute spread), and its own force-install-now action - both per-row ("Install Windows updates now" / "Install third-party software now") and bulk ("...on selected") on the Clients page, alongside the unchanged "Rescan WSUS now"/"on selected" buttons.
+- New endpoints: `GET /api/v1/client/windows-update-jobs`, `GET /api/v1/client/third-party-software-jobs`, `POST /api/v1/clients/install-windows-updates-now`, `POST /api/v1/clients/install-third-party-software-now`.
+
+### Changed
+
+- **Breaking API change**: the combined `GET /api/v1/client/software-jobs` and `POST /api/v1/clients/check-now` endpoints are removed outright, replaced by the four endpoints above - no compatibility shim. A client older than 0.12.0 (this release's paired client version) stops receiving software jobs until it self-updates.
+- **Settings migration note**: `WindowsDefaultSoftwareCheckIntervalHours` and the single `SoftwareInstallWindow*` group are renamed/split into per-catalog fields. An existing deployment's persisted config file still has the old keys under their old names, which are no longer read - both new settings groups silently revert to their defaults (6h check interval, install window off) on first load after upgrading, until an admin re-applies them via Settings > Windows.
+- The inventory-report ack now carries `forceImmediateWindowsUpdateCheck`/`forceImmediateThirdPartySoftwareCheck` (replacing the single `forceImmediateSoftwareCheck`) and `windowsUpdateCheckIntervalHours`/`thirdPartySoftwareCheckIntervalHours` (replacing the single `softwareCheckIntervalHours`) in its `config` object.
+
+### Notes
+
+- Design: `docs/superpowers/specs/2026-09-30-split-software-job-types-design.md`. Plan: `docs/superpowers/plans/2026-09-30-split-software-job-types.md`.
+- The one-time WinRM-push install command still seeds both new check-interval settings from a single `-SoftwareCheckIntervalHours` value at install time - only the ongoing, already-running-client configuration (Settings > Windows, or a learned value pushed from the server) is independent per catalog. Splitting the install-time value too would require its own follow-up touching the deployment scripts, not part of this change.
+
+## [Windows client 0.12.0] - Runs independent windowsUpdate/thirdPartySoftware check cycles
+
+### Added
+
+- **The client now polls, times, and force-checks windowsUpdate and thirdPartySoftware catalog jobs on two fully independent cycles** (separate timers, separate intervals, separate force-check flags from the server) instead of one shared cycle covering both. The WSUS-scan-freshness check (cab hash/`forceWsusRescan`) stays attached to the windowsUpdate cycle only, unchanged.
+
 ## [0.80.0] - Rescan WSUS on multiple machines at once; renamed "Check now"
 
 ### Added
