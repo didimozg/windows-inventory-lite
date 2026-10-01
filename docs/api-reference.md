@@ -634,7 +634,7 @@ Runs a scan synchronously and returns the same shape as the status endpoint. Tak
 
 ### GET /api/v1/software-repository/attempt-history
 
-Returns `{"attempts": [...]}`, each `{timestampUtc, computerName, catalogType, entryId, success, exitCode, errorMessage}`, oldest first. `catalogType` is `windowsUpdate` or `thirdPartySoftware`. Capped at 5000 entries and 90 days, pruned on write.
+Returns `{"attempts": [...]}`, each `{timestampUtc, computerName, catalogType, entryId, success, exitCode, errorMessage, diagnosticHint}`, oldest first. `catalogType` is `windowsUpdate` or `thirdPartySoftware`. `diagnosticHint` (nullable string, added in 0.82.0) is set only when this attempt's failure matches the "stuck single-instance install lock" signature - the immediately preceding attempt for the same computer+entry was killed by the 30-minute install timeout, and this one failed quickly with a different exit code. Capped at 5000 entries and 90 days, pruned on write.
 
 ### DELETE /api/v1/software-repository/attempt-history
 

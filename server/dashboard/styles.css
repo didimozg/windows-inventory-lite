@@ -34,6 +34,9 @@
   --usb-border: #e6c84a;
   --usb-text: #7a5800;
   --usb-row-bg: #fff8e8;
+  --stuck-lock-bg: #fff1c2;
+  --stuck-lock-border: #e6c84a;
+  --stuck-lock-text: #7a5800;
   --hw-summary-bg: #f3f7fb;
   --sortable-hover-bg: #dce8f2;
   --success-bg: #f0f8ef;
@@ -120,6 +123,9 @@
     --usb-border: #8a742a;
     --usb-text: #f0d878;
     --usb-row-bg: #332a10;
+    --stuck-lock-bg: #4a3f12;
+    --stuck-lock-border: #8a742a;
+    --stuck-lock-text: #f0d878;
     --hw-summary-bg: #1a4272;
     --sortable-hover-bg: #24333d;
     --success-bg: #16321a;
@@ -162,6 +168,9 @@
   --usb-border: #8a742a;
   --usb-text: #f0d878;
   --usb-row-bg: #332a10;
+  --stuck-lock-bg: #4a3f12;
+  --stuck-lock-border: #8a742a;
+  --stuck-lock-text: #f0d878;
   --hw-summary-bg: #1a4272;
   --sortable-hover-bg: #24333d;
   --success-bg: #16321a;
@@ -1345,6 +1354,20 @@ pre {
   background: var(--usb-bg);
   border: 1px solid var(--usb-border);
   color: var(--usb-text);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.stuck-lock-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--stuck-lock-bg);
+  border: 1px solid var(--stuck-lock-border);
+  color: var(--stuck-lock-text);
   font-size: var(--font-size-xs);
   font-weight: 700;
   vertical-align: middle;
