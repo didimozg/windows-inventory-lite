@@ -602,6 +602,16 @@ namespace WindowsInventoryLite
                 // entry asked for.
                 private const int InstallProcessTimeoutMilliseconds = 30 * 60 * 1000;
 
+                // Best-effort grace period after requesting a graceful close
+                // (CloseMainWindow) and before falling back to a hard Kill().
+                // Only matters for the minority of installers that actually
+                // have a window - most /quiet-style installs never create
+                // one, so CloseMainWindow() returns false immediately and
+                // this constant is never waited on. See
+                // docs/superpowers/specs/2026-09-30-stuck-install-lock-
+                // diagnostics-design.md.
+                private const int GracefulShutdownGraceMilliseconds = 15 * 1000;
+
                 private Dictionary<string, object> RunOneJob(Dictionary<string, object> job, string repositoryPath, string repositoryUsername, string repositoryPassword)
                 {
                     string id = InventoryCollector.GetString(job, "id");
@@ -728,15 +738,46 @@ namespace WindowsInventoryLite
 
                         using (Process process = Process.Start(psi))
                         {
-                            if (!process.WaitForExit(InstallProcessTimeoutMilliseconds))
+                            bool exited = process.WaitForExit(InstallProcessTimeoutMilliseconds);
+                            if (!exited)
                             {
-                                try { process.Kill(); } catch { }
-                                try { process.WaitForExit(5000); } catch { }
-                                resultEntry["success"] = false;
-                                resultEntry["exitCode"] = -1;
-                                resultEntry["errorMessage"] = "installer did not exit within " + (InstallProcessTimeoutMilliseconds / 60000) + " minutes and was terminated";
+                                // Most /quiet-style installs never create a
+                                // window at all, so CloseMainWindow() returns
+                                // false immediately here and this falls
+                                // straight through to the existing Kill()
+                                // behavior below - no behavior change for
+                                // the common case. For the minority that DO
+                                // have a real window (typically one hung
+                                // waiting on input in a session no
+                                // interactive user can ever see), this gives
+                                // it a chance to exit and release its own
+                                // single-instance lock, instead of
+                                // guaranteeing that lock gets orphaned by a
+                                // hard kill.
+                                try
+                                {
+                                    if (process.CloseMainWindow())
+                                    {
+                                        exited = process.WaitForExit(GracefulShutdownGraceMilliseconds);
+                                        if (exited)
+                                        {
+                                            DebugLogger.Log(options, "Client", "Installer for job '" + id + "' exited on its own after a graceful close request, avoiding a hard kill.");
+                                        }
+                                    }
+                                }
+                                catch { }
+
+                                if (!exited)
+                                {
+                                    try { process.Kill(); } catch { }
+                                    try { process.WaitForExit(5000); } catch { }
+                                    resultEntry["success"] = false;
+                                    resultEntry["exitCode"] = -1;
+                                    resultEntry["errorMessage"] = "installer did not exit within " + (InstallProcessTimeoutMilliseconds / 60000) + " minutes and was terminated";
+                                }
                             }
-                            else
+
+                            if (exited)
                             {
                                 int exitCode = process.ExitCode;
                                 resultEntry["success"] = exitCode == 0;
