@@ -3799,6 +3799,20 @@ namespace WindowsInventoryLite
                             }
                             attempt.EventLogEntries = boundedEntries;
                         }
+                        // Reads softwareJobAttemptLog under its own short-lived
+                        // lock acquisition (separate from RecordSoftwareJobAttempt's
+                        // own internal lock on the same object, taken right
+                        // after this one is released) - two attempts for the
+                        // exact same (computerName, entryId) pair arriving
+                        // within the same instant could theoretically both
+                        // miss seeing each other, but that's an accepted,
+                        // harmless edge case (worst case: a hint simply
+                        // doesn't get set that one time), not worth a wider
+                        // lock for.
+                        lock (softwareJobAttemptLogLock)
+                        {
+                            attempt.DiagnosticHint = DetectStuckInstallLockHint(softwareJobAttemptLog, attempt);
+                        }
                         RecordSoftwareJobAttempt(attempt);
                         if (reportedSuccess)
                         {
@@ -7303,6 +7317,12 @@ namespace WindowsInventoryLite
                         }
                         entry.ExitCode = raw.ContainsKey("exitCode") ? Convert.ToInt32(raw["exitCode"]) : -1;
                         entry.ErrorMessage = GetStringValue(raw, "errorMessage");
+                        // Same ContainsKey-gated pattern as AttemptId above -
+                        // GetStringValue on its own returns "" (not null) for
+                        // a missing key, which would turn a legacy line with
+                        // no diagnosticHint key into an empty-string hint
+                        // instead of "no hint was ever computed for this".
+                        entry.DiagnosticHint = raw.ContainsKey("diagnosticHint") ? GetStringValue(raw, "diagnosticHint") : null;
                         if (raw.ContainsKey("eventLogEntries") && raw["eventLogEntries"] != null)
                         {
                             List<Dictionary<string, object>> loadedEntries = new List<Dictionary<string, object>>();
@@ -9789,6 +9809,16 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             // error - never required for a "success"/"failed" record to be
             // valid. Each entry: {source, eventId, timeCreatedUtc, message}.
             public List<Dictionary<string, object>> EventLogEntries;
+            // Set only when this attempt's failure matches the "orphaned
+            // single-instance lock" signature: the immediately preceding
+            // attempt for the same (ComputerName, EntryId) pair was killed
+            // by the 30-minute watchdog, and this attempt also failed but
+            // exited quickly with a different code. Null in every other
+            // case - computed once, at record time, by
+            // DetectStuckInstallLockHint, never re-derived later. See
+            // docs/superpowers/specs/2026-09-30-stuck-install-lock-
+            // diagnostics-design.md.
+            public string DiagnosticHint;
 
             public bool Success
             {
@@ -9809,8 +9839,59 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 result["exitCode"] = ExitCode;
                 result["errorMessage"] = ErrorMessage;
                 result["eventLogEntries"] = EventLogEntries;
+                result["diagnosticHint"] = DiagnosticHint;
                 return result;
             }
+        }
+
+        // Detects the "orphaned single-instance install lock" signature: the
+        // immediately preceding attempt for the same (ComputerName, EntryId)
+        // pair was killed by the 30-minute watchdog, and this attempt also
+        // failed but exited quickly with a DIFFERENT code (not another
+        // timeout-kill, which just means it's still hanging). A generic
+        // signature match - deliberately not tied to any specific
+        // installer's own "already running" exit code. See
+        // docs/superpowers/specs/2026-09-30-stuck-install-lock-diagnostics-
+        // design.md.
+        private static string DetectStuckInstallLockHint(List<SoftwareJobAttempt> log, SoftwareJobAttempt current)
+        {
+            if (current.Status != "failed")
+            {
+                return null;
+            }
+
+            SoftwareJobAttempt previous = null;
+            foreach (SoftwareJobAttempt candidate in log)
+            {
+                if (!String.Equals(candidate.ComputerName, current.ComputerName, StringComparison.OrdinalIgnoreCase)
+                    || !String.Equals(candidate.EntryId, current.EntryId, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                if (candidate.TimestampUtc >= current.TimestampUtc)
+                {
+                    continue;
+                }
+                if (previous == null || candidate.TimestampUtc > previous.TimestampUtc)
+                {
+                    previous = candidate;
+                }
+            }
+
+            if (previous == null || previous.Status != "failed")
+            {
+                return null;
+            }
+            if (previous.ErrorMessage == null || previous.ErrorMessage.IndexOf("did not exit within", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                return null;
+            }
+            if (current.ExitCode == -1)
+            {
+                return null;
+            }
+
+            return "The previous attempt on this machine for this entry was killed after not exiting within the timeout. This attempt failed quickly with a different exit code, which often means the earlier kill left behind a single-instance install lock the installer itself won't release. Rebooting the target machine has resolved this in the one real case seen so far.";
         }
 
         private sealed class InstallJob
@@ -16681,6 +16762,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository reports failure when SoftwareRepositoryPath is not configured", TestScanSoftwareRepositoryReportsMissingConfiguration);
             allPassed &= SelfTestCheck(output, "SoftwareJobAttempt.ToDictionary includes attemptId/status, and the computed success flag tracks status", TestSoftwareJobAttemptToDictionaryIncludesNewFields);
             allPassed &= SelfTestCheck(output, "LoadSoftwareJobAttemptLogFromDisk defaults status from a legacy entry's success field, attemptId to null", TestLoadSoftwareJobAttemptLogFromDiskDefaultsStatusFromLegacySuccessField);
+            allPassed &= SelfTestCheck(output, "DetectStuckInstallLockHint returns a hint when the previous attempt for the same (computer, entry) pair was timeout-killed and this attempt failed quickly with a different exit code", TestDetectStuckInstallLockHintMatchesTimeoutThenFastFailSignature);
+            allPassed &= SelfTestCheck(output, "DetectStuckInstallLockHint returns no hint when the current attempt is itself another timeout-kill, not a fast failure", TestDetectStuckInstallLockHintIgnoresRepeatedTimeout);
+            allPassed &= SelfTestCheck(output, "DetectStuckInstallLockHint returns no hint when the previous failure was not a timeout-kill", TestDetectStuckInstallLockHintIgnoresNonTimeoutPreviousFailure);
+            allPassed &= SelfTestCheck(output, "DetectStuckInstallLockHint returns no hint when there is no previous attempt at all for this (computer, entry) pair", TestDetectStuckInstallLockHintIgnoresWhenNoPreviousAttempt);
+            allPassed &= SelfTestCheck(output, "DetectStuckInstallLockHint ignores timeout-killed attempts belonging to a different entryId or computerName", TestDetectStuckInstallLockHintIgnoresDifferentEntryOrComputer);
+            allPassed &= SelfTestCheck(output, "SoftwareJobAttempt.ToDictionary includes diagnosticHint", TestSoftwareJobAttemptToDictionaryIncludesDiagnosticHint);
+            allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobResults sets DiagnosticHint on a fast-failing attempt that follows a timeout-killed attempt for the same (computer, entry) pair", TestReceiveSoftwareJobResultsSetsDiagnosticHintOnStuckLockSignature);
+            allPassed &= SelfTestCheck(output, "LoadSoftwareJobAttemptLogFromDisk loads a persisted diagnosticHint when present, defaults it to null for a legacy line that has none", TestLoadSoftwareJobAttemptLogFromDiskLoadsDiagnosticHintWhenPresentDefaultsNullOtherwise);
             allPassed &= SelfTestCheck(output, "ExtractKbFromFilename matches real Microsoft Update Catalog naming, rejects Cyrillic-labelled names and names with no KB pattern", TestExtractKbFromFilenameMatchesRealMicrosoftNamingPattern);
             allPassed &= SelfTestCheck(output, "FindDuplicateKbIds returns only KBs appearing 2+ times, ignoring null/empty", TestFindDuplicateKbIdsIgnoresNullsAndSingleOccurrences);
             allPassed &= SelfTestCheck(output, "DetectKbForCandidate uses the filename fallback for a .exe candidate, no content-extraction attempt", TestDetectKbForCandidateUsesFilenameFallbackForExeNoContentAttempt);
@@ -27417,6 +27506,264 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (history[0]["attemptId"] != null)
                 {
                     return "expected a legacy entry with no attemptId key to load as null, got: " + history[0]["attemptId"];
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestDetectStuckInstallLockHintMatchesTimeoutThenFastFailSignature()
+        {
+            List<SoftwareJobAttempt> log = new List<SoftwareJobAttempt>();
+            SoftwareJobAttempt previous = new SoftwareJobAttempt();
+            previous.ComputerName = "PC-1";
+            previous.EntryId = "kb-1";
+            previous.TimestampUtc = new DateTime(2026, 9, 30, 10, 0, 0, DateTimeKind.Utc);
+            previous.Status = "failed";
+            previous.ExitCode = -1;
+            previous.ErrorMessage = "installer did not exit within 30 minutes and was terminated";
+            log.Add(previous);
+
+            SoftwareJobAttempt current = new SoftwareJobAttempt();
+            current.ComputerName = "PC-1";
+            current.EntryId = "kb-1";
+            current.TimestampUtc = new DateTime(2026, 9, 30, 16, 0, 0, DateTimeKind.Utc);
+            current.Status = "failed";
+            current.ExitCode = 5100;
+
+            string hint = InventoryServer.DetectStuckInstallLockHint(log, current);
+            if (String.IsNullOrEmpty(hint))
+            {
+                return "expected a non-empty diagnostic hint for the timeout-then-fast-fail signature";
+            }
+            return null;
+        }
+
+        private static string TestDetectStuckInstallLockHintIgnoresRepeatedTimeout()
+        {
+            List<SoftwareJobAttempt> log = new List<SoftwareJobAttempt>();
+            SoftwareJobAttempt previous = new SoftwareJobAttempt();
+            previous.ComputerName = "PC-1";
+            previous.EntryId = "kb-1";
+            previous.TimestampUtc = new DateTime(2026, 9, 30, 10, 0, 0, DateTimeKind.Utc);
+            previous.Status = "failed";
+            previous.ExitCode = -1;
+            previous.ErrorMessage = "installer did not exit within 30 minutes and was terminated";
+            log.Add(previous);
+
+            SoftwareJobAttempt current = new SoftwareJobAttempt();
+            current.ComputerName = "PC-1";
+            current.EntryId = "kb-1";
+            current.TimestampUtc = new DateTime(2026, 9, 30, 16, 0, 0, DateTimeKind.Utc);
+            current.Status = "failed";
+            current.ExitCode = -1;
+            current.ErrorMessage = "installer did not exit within 30 minutes and was terminated";
+
+            string hint = InventoryServer.DetectStuckInstallLockHint(log, current);
+            if (!String.IsNullOrEmpty(hint))
+            {
+                return "expected no hint when the current attempt is ANOTHER timeout-kill (still just hanging, not an orphaned lock), got: " + hint;
+            }
+            return null;
+        }
+
+        private static string TestDetectStuckInstallLockHintIgnoresNonTimeoutPreviousFailure()
+        {
+            List<SoftwareJobAttempt> log = new List<SoftwareJobAttempt>();
+            SoftwareJobAttempt previous = new SoftwareJobAttempt();
+            previous.ComputerName = "PC-1";
+            previous.EntryId = "kb-1";
+            previous.TimestampUtc = new DateTime(2026, 9, 30, 10, 0, 0, DateTimeKind.Utc);
+            previous.Status = "failed";
+            previous.ExitCode = 1603;
+            previous.ErrorMessage = "installer exited with code 1603";
+            log.Add(previous);
+
+            SoftwareJobAttempt current = new SoftwareJobAttempt();
+            current.ComputerName = "PC-1";
+            current.EntryId = "kb-1";
+            current.TimestampUtc = new DateTime(2026, 9, 30, 16, 0, 0, DateTimeKind.Utc);
+            current.Status = "failed";
+            current.ExitCode = 5100;
+
+            string hint = InventoryServer.DetectStuckInstallLockHint(log, current);
+            if (!String.IsNullOrEmpty(hint))
+            {
+                return "expected no hint when the previous failure was NOT a timeout-kill, got: " + hint;
+            }
+            return null;
+        }
+
+        private static string TestDetectStuckInstallLockHintIgnoresWhenNoPreviousAttempt()
+        {
+            List<SoftwareJobAttempt> log = new List<SoftwareJobAttempt>();
+            SoftwareJobAttempt current = new SoftwareJobAttempt();
+            current.ComputerName = "PC-1";
+            current.EntryId = "kb-1";
+            current.TimestampUtc = new DateTime(2026, 9, 30, 16, 0, 0, DateTimeKind.Utc);
+            current.Status = "failed";
+            current.ExitCode = 5100;
+
+            string hint = InventoryServer.DetectStuckInstallLockHint(log, current);
+            if (!String.IsNullOrEmpty(hint))
+            {
+                return "expected no hint when there is no previous attempt at all for this pair, got: " + hint;
+            }
+            return null;
+        }
+
+        private static string TestDetectStuckInstallLockHintIgnoresDifferentEntryOrComputer()
+        {
+            List<SoftwareJobAttempt> log = new List<SoftwareJobAttempt>();
+            SoftwareJobAttempt previousDifferentEntry = new SoftwareJobAttempt();
+            previousDifferentEntry.ComputerName = "PC-1";
+            previousDifferentEntry.EntryId = "kb-OTHER";
+            previousDifferentEntry.TimestampUtc = new DateTime(2026, 9, 30, 10, 0, 0, DateTimeKind.Utc);
+            previousDifferentEntry.Status = "failed";
+            previousDifferentEntry.ExitCode = -1;
+            previousDifferentEntry.ErrorMessage = "installer did not exit within 30 minutes and was terminated";
+            log.Add(previousDifferentEntry);
+
+            SoftwareJobAttempt previousDifferentComputer = new SoftwareJobAttempt();
+            previousDifferentComputer.ComputerName = "PC-OTHER";
+            previousDifferentComputer.EntryId = "kb-1";
+            previousDifferentComputer.TimestampUtc = new DateTime(2026, 9, 30, 11, 0, 0, DateTimeKind.Utc);
+            previousDifferentComputer.Status = "failed";
+            previousDifferentComputer.ExitCode = -1;
+            previousDifferentComputer.ErrorMessage = "installer did not exit within 30 minutes and was terminated";
+            log.Add(previousDifferentComputer);
+
+            SoftwareJobAttempt current = new SoftwareJobAttempt();
+            current.ComputerName = "PC-1";
+            current.EntryId = "kb-1";
+            current.TimestampUtc = new DateTime(2026, 9, 30, 16, 0, 0, DateTimeKind.Utc);
+            current.Status = "failed";
+            current.ExitCode = 5100;
+
+            string hint = InventoryServer.DetectStuckInstallLockHint(log, current);
+            if (!String.IsNullOrEmpty(hint))
+            {
+                return "expected no hint when the only matching-timestamp entries are for a different entryId/computerName, got: " + hint;
+            }
+            return null;
+        }
+
+        private static string TestSoftwareJobAttemptToDictionaryIncludesDiagnosticHint()
+        {
+            SoftwareJobAttempt attempt = new SoftwareJobAttempt();
+            attempt.TimestampUtc = DateTime.UtcNow;
+            attempt.ComputerName = "PC-1";
+            attempt.CatalogType = "windowsUpdate";
+            attempt.EntryId = "kb-1";
+            attempt.EntryName = "Test KB";
+            attempt.Status = "failed";
+            attempt.ExitCode = 5100;
+            attempt.DiagnosticHint = "a test hint";
+
+            Dictionary<string, object> dict = attempt.ToDictionary();
+            if (!dict.ContainsKey("diagnosticHint") || (string)dict["diagnosticHint"] != "a test hint")
+            {
+                return "expected ToDictionary to include diagnosticHint='a test hint', got: " + (dict.ContainsKey("diagnosticHint") ? dict["diagnosticHint"] : "(missing)");
+            }
+            return null;
+        }
+
+        private static string TestReceiveSoftwareJobResultsSetsDiagnosticHintOnStuckLockSignature()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-stucklock-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                options.SoftwareJobAttemptLogRetentionDays = 90;
+                options.SoftwareJobAttemptLogMaxEntries = 5000;
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext firstRequest = new RequestContext();
+                firstRequest.Method = "POST";
+                firstRequest.Path = "/api/v1/software-repository/job-results";
+                firstRequest.Headers = new Dictionary<string, string>();
+                firstRequest.Headers["x-inventory-token"] = "test-token";
+                firstRequest.Body = "{\"computerName\":\"PC-1\",\"results\":[{\"catalogType\":\"windowsUpdate\",\"id\":\"kb-1\",\"success\":false,\"exitCode\":-1,\"errorMessage\":\"installer did not exit within 30 minutes and was terminated\"}]}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveSoftwareJobResults(stream, firstRequest);
+                }
+
+                RequestContext secondRequest = new RequestContext();
+                secondRequest.Method = "POST";
+                secondRequest.Path = "/api/v1/software-repository/job-results";
+                secondRequest.Headers = new Dictionary<string, string>();
+                secondRequest.Headers["x-inventory-token"] = "test-token";
+                secondRequest.Body = "{\"computerName\":\"PC-1\",\"results\":[{\"catalogType\":\"windowsUpdate\",\"id\":\"kb-1\",\"success\":false,\"exitCode\":5100,\"errorMessage\":\"installer exited with code 5100\"}]}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveSoftwareJobResults(stream, secondRequest);
+                }
+
+                if (server.softwareJobAttemptLog.Count != 2)
+                {
+                    return "expected exactly two recorded attempts, got " + server.softwareJobAttemptLog.Count;
+                }
+                if (String.IsNullOrEmpty(server.softwareJobAttemptLog[1].DiagnosticHint))
+                {
+                    return "expected the second (fast-fail-after-timeout) attempt to have a non-empty DiagnosticHint";
+                }
+                if (!String.IsNullOrEmpty(server.softwareJobAttemptLog[0].DiagnosticHint))
+                {
+                    return "expected the FIRST (timeout-kill) attempt itself to have no hint - it has no earlier attempt to compare against";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestLoadSoftwareJobAttemptLogFromDiskLoadsDiagnosticHintWhenPresentDefaultsNullOtherwise()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-stucklock-load-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                // Not defaulted by `new ServerOptions()` - Start() creates this
+                // directory unconditionally and throws on a null path (see
+                // TestLoadSoftwareJobAttemptLogFromDiskDefaultsStatusFromLegacySuccessField
+                // just above, which sets the same two fields for the same reason).
+                options.LinuxDataPath = Path.Combine(dataPath, "linux-clients");
+                options.ContentPath = Path.Combine(dataPath, "content");
+                options.SoftwareJobAttemptLogRetentionDays = 90;
+                options.SoftwareJobAttemptLogMaxEntries = 5000;
+                string logDir = Path.Combine(dataPath, "_logs");
+                Directory.CreateDirectory(logDir);
+                string logPath = Path.Combine(logDir, "software-job-attempts.jsonl");
+                string withoutHint = "{\"timestampUtc\":\"2026-09-30T09:00:00Z\",\"computerName\":\"PC-1\",\"catalogType\":\"windowsUpdate\",\"entryId\":\"kb-1\",\"entryName\":\"Test KB\",\"status\":\"failed\",\"exitCode\":-1,\"errorMessage\":\"installer did not exit within 30 minutes and was terminated\"}";
+                string withHint = "{\"timestampUtc\":\"2026-09-30T10:00:00Z\",\"computerName\":\"PC-1\",\"catalogType\":\"windowsUpdate\",\"entryId\":\"kb-1\",\"entryName\":\"Test KB\",\"status\":\"failed\",\"exitCode\":5100,\"errorMessage\":\"installer exited with code 5100\",\"diagnosticHint\":\"a persisted hint\"}";
+                File.WriteAllText(logPath, withoutHint + Environment.NewLine + withHint + Environment.NewLine, new UTF8Encoding(false));
+
+                // LoadSoftwareJobAttemptLogFromDisk only runs from Start(), not
+                // from the constructor - the constructor just stores options.
+                InventoryServer server = new InventoryServer(options);
+                server.Start();
+                if (server.softwareJobAttemptLog.Count != 2)
+                {
+                    return "expected both persisted lines to load, got " + server.softwareJobAttemptLog.Count;
+                }
+                if (server.softwareJobAttemptLog[0].DiagnosticHint != null)
+                {
+                    return "expected a legacy line with no diagnosticHint key to load as null, got: " + server.softwareJobAttemptLog[0].DiagnosticHint;
+                }
+                if (server.softwareJobAttemptLog[1].DiagnosticHint != "a persisted hint")
+                {
+                    return "expected the second line's diagnosticHint to load unchanged, got: " + server.softwareJobAttemptLog[1].DiagnosticHint;
                 }
                 return null;
             }
