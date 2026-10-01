@@ -9872,6 +9872,18 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 {
                     continue;
                 }
+                // ReceiveSoftwareJobStart records a "running" entry for
+                // EVERY attempt, including this current one's own - it
+                // always sits immediately before the matching
+                // success/failed record in this log, with an earlier
+                // timestamp. A "running" entry is never itself a completed
+                // outcome, so it can never legitimately be "the previous
+                // attempt that was killed" - skip it and keep looking
+                // further back for the real previous completed attempt.
+                if (candidate.Status == "running")
+                {
+                    continue;
+                }
                 if (previous == null || candidate.TimestampUtc > previous.TimestampUtc)
                 {
                     previous = candidate;
@@ -16767,6 +16779,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "DetectStuckInstallLockHint returns no hint when the previous failure was not a timeout-kill", TestDetectStuckInstallLockHintIgnoresNonTimeoutPreviousFailure);
             allPassed &= SelfTestCheck(output, "DetectStuckInstallLockHint returns no hint when there is no previous attempt at all for this (computer, entry) pair", TestDetectStuckInstallLockHintIgnoresWhenNoPreviousAttempt);
             allPassed &= SelfTestCheck(output, "DetectStuckInstallLockHint ignores timeout-killed attempts belonging to a different entryId or computerName", TestDetectStuckInstallLockHintIgnoresDifferentEntryOrComputer);
+            allPassed &= SelfTestCheck(output, "DetectStuckInstallLockHint skips the current attempt's own 'running' record and finds the earlier completed failure behind it", TestDetectStuckInstallLockHintSkipsRunningRecordAndFindsEarlierCompletedAttempt);
             allPassed &= SelfTestCheck(output, "SoftwareJobAttempt.ToDictionary includes diagnosticHint", TestSoftwareJobAttemptToDictionaryIncludesDiagnosticHint);
             allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobResults sets DiagnosticHint on a fast-failing attempt that follows a timeout-killed attempt for the same (computer, entry) pair", TestReceiveSoftwareJobResultsSetsDiagnosticHintOnStuckLockSignature);
             allPassed &= SelfTestCheck(output, "LoadSoftwareJobAttemptLogFromDisk loads a persisted diagnosticHint when present, defaults it to null for a legacy line that has none", TestLoadSoftwareJobAttemptLogFromDiskLoadsDiagnosticHintWhenPresentDefaultsNullOtherwise);
@@ -27651,6 +27664,46 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return null;
         }
 
+        private static string TestDetectStuckInstallLockHintSkipsRunningRecordAndFindsEarlierCompletedAttempt()
+        {
+            // ReceiveSoftwareJobStart always records a "running" entry
+            // immediately before every attempt's own result, including the
+            // CURRENT attempt being evaluated here. A real previous failure
+            // that happened before that still needs to be found - the scan
+            // must skip the "running" entry rather than stopping at it.
+            List<SoftwareJobAttempt> log = new List<SoftwareJobAttempt>();
+            SoftwareJobAttempt earlierFailure = new SoftwareJobAttempt();
+            earlierFailure.ComputerName = "PC-1";
+            earlierFailure.EntryId = "kb-1";
+            earlierFailure.TimestampUtc = new DateTime(2026, 9, 30, 10, 0, 0, DateTimeKind.Utc);
+            earlierFailure.Status = "failed";
+            earlierFailure.ExitCode = -1;
+            earlierFailure.ErrorMessage = "installer did not exit within 30 minutes and was terminated";
+            log.Add(earlierFailure);
+
+            SoftwareJobAttempt currentAttemptsOwnRunningRecord = new SoftwareJobAttempt();
+            currentAttemptsOwnRunningRecord.ComputerName = "PC-1";
+            currentAttemptsOwnRunningRecord.EntryId = "kb-1";
+            currentAttemptsOwnRunningRecord.TimestampUtc = new DateTime(2026, 9, 30, 15, 59, 0, DateTimeKind.Utc);
+            currentAttemptsOwnRunningRecord.Status = "running";
+            currentAttemptsOwnRunningRecord.ExitCode = -1;
+            log.Add(currentAttemptsOwnRunningRecord);
+
+            SoftwareJobAttempt current = new SoftwareJobAttempt();
+            current.ComputerName = "PC-1";
+            current.EntryId = "kb-1";
+            current.TimestampUtc = new DateTime(2026, 9, 30, 16, 0, 0, DateTimeKind.Utc);
+            current.Status = "failed";
+            current.ExitCode = 5100;
+
+            string hint = InventoryServer.DetectStuckInstallLockHint(log, current);
+            if (String.IsNullOrEmpty(hint))
+            {
+                return "expected the scan to skip the intervening 'running' record and still find the earlier timeout-killed failure, got no hint";
+            }
+            return null;
+        }
+
         private static string TestSoftwareJobAttemptToDictionaryIncludesDiagnosticHint()
         {
             SoftwareJobAttempt attempt = new SoftwareJobAttempt();
@@ -27684,39 +27737,71 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 options.SoftwareJobAttemptLogMaxEntries = 5000;
                 InventoryServer server = new InventoryServer(options);
 
-                RequestContext firstRequest = new RequestContext();
-                firstRequest.Method = "POST";
-                firstRequest.Path = "/api/v1/software-repository/job-results";
-                firstRequest.Headers = new Dictionary<string, string>();
-                firstRequest.Headers["x-inventory-token"] = "test-token";
-                firstRequest.Body = "{\"computerName\":\"PC-1\",\"results\":[{\"catalogType\":\"windowsUpdate\",\"id\":\"kb-1\",\"success\":false,\"exitCode\":-1,\"errorMessage\":\"installer did not exit within 30 minutes and was terminated\"}]}";
+                // Reproduces the REAL two-call flow: the client always posts
+                // a "running" start record (ReportJobStart) before a job
+                // runs, then the actual outcome separately. Both land in
+                // the same softwareJobAttemptLog - a test that only calls
+                // ReceiveSoftwareJobResults never exercises this and would
+                // have missed the real bug where the "running" record (not
+                // the genuinely previous completed attempt) was found by
+                // the scan.
+                RequestContext firstStartRequest = new RequestContext();
+                firstStartRequest.Method = "POST";
+                firstStartRequest.Path = "/api/v1/client/software-jobs/start";
+                firstStartRequest.Headers = new Dictionary<string, string>();
+                firstStartRequest.Headers["x-inventory-token"] = "test-token";
+                firstStartRequest.Body = "{\"computerName\":\"PC-1\",\"catalogType\":\"windowsUpdate\",\"id\":\"kb-1\",\"attemptId\":\"attempt-1\"}";
                 using (MemoryStream stream = new MemoryStream())
                 {
-                    server.ReceiveSoftwareJobResults(stream, firstRequest);
+                    server.ReceiveSoftwareJobStart(stream, firstStartRequest);
                 }
 
-                RequestContext secondRequest = new RequestContext();
-                secondRequest.Method = "POST";
-                secondRequest.Path = "/api/v1/software-repository/job-results";
-                secondRequest.Headers = new Dictionary<string, string>();
-                secondRequest.Headers["x-inventory-token"] = "test-token";
-                secondRequest.Body = "{\"computerName\":\"PC-1\",\"results\":[{\"catalogType\":\"windowsUpdate\",\"id\":\"kb-1\",\"success\":false,\"exitCode\":5100,\"errorMessage\":\"installer exited with code 5100\"}]}";
+                RequestContext firstResultRequest = new RequestContext();
+                firstResultRequest.Method = "POST";
+                firstResultRequest.Path = "/api/v1/software-repository/job-results";
+                firstResultRequest.Headers = new Dictionary<string, string>();
+                firstResultRequest.Headers["x-inventory-token"] = "test-token";
+                firstResultRequest.Body = "{\"computerName\":\"PC-1\",\"results\":[{\"catalogType\":\"windowsUpdate\",\"id\":\"kb-1\",\"attemptId\":\"attempt-1\",\"success\":false,\"exitCode\":-1,\"errorMessage\":\"installer did not exit within 30 minutes and was terminated\"}]}";
                 using (MemoryStream stream = new MemoryStream())
                 {
-                    server.ReceiveSoftwareJobResults(stream, secondRequest);
+                    server.ReceiveSoftwareJobResults(stream, firstResultRequest);
                 }
 
-                if (server.softwareJobAttemptLog.Count != 2)
+                RequestContext secondStartRequest = new RequestContext();
+                secondStartRequest.Method = "POST";
+                secondStartRequest.Path = "/api/v1/client/software-jobs/start";
+                secondStartRequest.Headers = new Dictionary<string, string>();
+                secondStartRequest.Headers["x-inventory-token"] = "test-token";
+                secondStartRequest.Body = "{\"computerName\":\"PC-1\",\"catalogType\":\"windowsUpdate\",\"id\":\"kb-1\",\"attemptId\":\"attempt-2\"}";
+                using (MemoryStream stream = new MemoryStream())
                 {
-                    return "expected exactly two recorded attempts, got " + server.softwareJobAttemptLog.Count;
+                    server.ReceiveSoftwareJobStart(stream, secondStartRequest);
                 }
-                if (String.IsNullOrEmpty(server.softwareJobAttemptLog[1].DiagnosticHint))
+
+                RequestContext secondResultRequest = new RequestContext();
+                secondResultRequest.Method = "POST";
+                secondResultRequest.Path = "/api/v1/software-repository/job-results";
+                secondResultRequest.Headers = new Dictionary<string, string>();
+                secondResultRequest.Headers["x-inventory-token"] = "test-token";
+                secondResultRequest.Body = "{\"computerName\":\"PC-1\",\"results\":[{\"catalogType\":\"windowsUpdate\",\"id\":\"kb-1\",\"attemptId\":\"attempt-2\",\"success\":false,\"exitCode\":5100,\"errorMessage\":\"installer exited with code 5100\"}]}";
+                using (MemoryStream stream = new MemoryStream())
                 {
-                    return "expected the second (fast-fail-after-timeout) attempt to have a non-empty DiagnosticHint";
+                    server.ReceiveSoftwareJobResults(stream, secondResultRequest);
                 }
-                if (!String.IsNullOrEmpty(server.softwareJobAttemptLog[0].DiagnosticHint))
+
+                if (server.softwareJobAttemptLog.Count != 4)
                 {
-                    return "expected the FIRST (timeout-kill) attempt itself to have no hint - it has no earlier attempt to compare against";
+                    return "expected exactly four recorded log entries (2 running + 2 results), got " + server.softwareJobAttemptLog.Count;
+                }
+                SoftwareJobAttempt firstResult = server.softwareJobAttemptLog[1];
+                SoftwareJobAttempt secondResult = server.softwareJobAttemptLog[3];
+                if (String.IsNullOrEmpty(secondResult.DiagnosticHint))
+                {
+                    return "expected the second (fast-fail-after-timeout) result to have a non-empty DiagnosticHint even with an intervening 'running' record from its own start call";
+                }
+                if (!String.IsNullOrEmpty(firstResult.DiagnosticHint))
+                {
+                    return "expected the FIRST (timeout-kill) result itself to have no hint - it has no earlier completed attempt to compare against";
                 }
                 return null;
             }
