@@ -761,7 +761,7 @@ namespace WindowsInventoryLite
                                         exited = process.WaitForExit(GracefulShutdownGraceMilliseconds);
                                         if (exited)
                                         {
-                                            DebugLogger.Log(options, "Client", "Installer for job '" + id + "' exited on its own after a graceful close request, avoiding a hard kill.");
+                                            DebugLogger.Log(options, "Job", "Installer for job '" + id + "' exited on its own after a graceful close request, avoiding a hard kill.");
                                         }
                                     }
                                 }
