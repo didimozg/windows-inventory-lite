@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.82.2] - Dashboard cleanup; hardened self-test cleanup against transient flakes
+
+### Fixed
+
+- **Removed the redundant explanatory hint paragraph** above the WinRM credential-source dropdown on Deploy > Client updates - its content duplicated the dropdown's own option labels and the saved-account hint already shown below it.
+- **A self-test (`TestLinuxKnownHostsRoundTrip`) occasionally failed on an unguarded temp-directory cleanup** (an antivirus scanner or a not-yet-released file handle briefly holding a file inside the directory being deleted) - test-only, no production behavior change. Found and fixed the same gap in 12 other self-test cleanup blocks that had it too, not just the one that had actually been observed to flake.
+
 ## [0.82.1] - Stuck-lock hint now covers the whole repeated-failure chain, not just the first one
 
 ### Fixed
