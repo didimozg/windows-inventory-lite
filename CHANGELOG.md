@@ -6,6 +6,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.82.0] - Detect a stuck single-instance install lock
+
+### Added
+
+- **Software job history now flags a failure that looks like a stuck single-instance install lock**, surfaced as a "⚠ possible stuck lock" badge next to the error message. Found via a real incident: an installer killed by the 30-minute install timeout can leave its own single-instance lock orphaned, so every later attempt against that same catalog entry on that same machine fails immediately instead of actually installing. The hint is a generic signature match - the immediately preceding attempt for the same (computer, catalog entry) pair was killed by the timeout, and this attempt also failed but exited quickly with a different code - not a lookup of what any specific exit code means, so it works for any installer that hits this pattern, not just the one that surfaced it. New `diagnosticHint` field on each attempt returned by `GET /api/v1/software-repository/attempt-history`, independent of the installer's own `errorMessage`.
+- **The Windows client now tries a graceful close (`CloseMainWindow`) before the hard kill** when an installer hits the 30-minute timeout, waiting up to 15 more seconds. Most `/quiet`-style installs never create a window and are unaffected; for the minority that do (typically one hung on a dialog no one can ever see, in a service session), this gives it a chance to exit and release its own lock on the way out instead of guaranteeing it gets orphaned.
+
+### Notes
+
+- Design: `docs/superpowers/specs/2026-09-30-stuck-install-lock-diagnostics-design.md`. Plan: `docs/superpowers/plans/2026-09-30-stuck-install-lock-diagnostics.md`.
+- A real plan-writing gap caught during task review, worth remembering: the detection algorithm as originally specified never actually fired against real traffic, because the client always posts a separate "running" record before every attempt's result, and that record - not the genuinely previous completed attempt - was always what the scan found first. Fixed before merge by skipping "running" candidates and continuing the scan backward; the regression test was rewritten to go through the real two-endpoint client flow (job-start, then job-result) instead of only the result endpoint, which is what let the bug through the first review pass.
+- Does not build the separate, already-logged backlog idea for a general installer-exit-code lookup table - this hint is a generic signature match, unrelated to that idea.
+
+## [Windows client 0.13.0] - Tries a graceful close before killing a timed-out installer, and a stuck-lock diagnostic hint
+
+### Added
+
+- Same as server 0.82.0 above: tries `CloseMainWindow()` with a 15-second grace period before the existing hard `Kill()` on a timed-out install, best-effort and unaffected on the common `/quiet`-install case. The stuck-lock detection itself is entirely server-side (no other client-visible change).
+
 ## [0.81.1] - Fix a cross-pipeline install race found in final review
 
 ### Fixed
