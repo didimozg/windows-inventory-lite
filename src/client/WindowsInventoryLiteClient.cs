@@ -711,6 +711,7 @@ namespace WindowsInventoryLite
                         // own designed content - fails with "not a valid
                         // application for this OS platform" on every attempt.
                         string extension = Path.GetExtension(relativePath);
+                        resultEntry["installerFormat"] = String.IsNullOrEmpty(extension) ? null : extension.TrimStart('.').ToLowerInvariant();
                         ProcessStartInfo psi = new ProcessStartInfo();
                         if (String.Equals(extension, ".msi", StringComparison.OrdinalIgnoreCase))
                         {
