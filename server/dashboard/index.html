@@ -134,6 +134,10 @@
               </label>
             </div>
             <p class="cert-hint">Clients always report USB storage regardless of this setting - it only controls whether the Dashboard and Clients table surface it.</p>
+            <div class="pkg-buttons">
+              <button id="inventorySettingsSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="inventorySettingsMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Network</h2>
@@ -148,6 +152,10 @@
               </label>
             </div>
             <p class="cert-hint">Disabling HTTP is only possible while HTTPS is enabled and working - otherwise the dashboard would become unreachable. Changing the port or disabling HTTP disconnects this browser session; you'll need to reload the dashboard at the new address.</p>
+            <div class="pkg-buttons">
+              <button id="networkSettingsSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="networkSettingsMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">HTTPS</h2>
@@ -173,6 +181,10 @@
               </label>
             </div>
             <p class="cert-hint">HSTS tells browsers to only ever use HTTPS for this server, for the max-age duration - only sent on responses actually served over HTTPS. Off by default: a browser that has cached this can lock itself out of the dashboard for the full max-age if HTTPS is later disabled (e.g. during a certificate emergency). Start with a short max-age and only enable once HTTPS is stable.</p>
+            <div class="pkg-buttons">
+              <button id="httpsSettingsSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="httpsSettingsMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Outbound proxy</h2>
@@ -218,6 +230,7 @@
             </label>
             <p class="cert-hint">How long the previous token keeps being accepted after Regenerate, so an already-installed client has time to learn the new one over its own next report. 0 = cut over immediately (the old behavior).</p>
             <div class="pkg-buttons">
+              <button id="ingestionTokenSaveButton" class="primary-button" type="button">Save</button>
               <button id="ingestionTokenRegenerateButton" class="danger-button" type="button">Regenerate</button>
             </div>
             <div id="ingestionTokenMessage" class="pkg-message hidden"></div>
@@ -249,6 +262,10 @@
               </label>
             </div>
             <p class="cert-hint">How long each Logging tab's history (Installs / Ingestion / Software) is kept before being cleaned up automatically.</p>
+            <div class="pkg-buttons">
+              <button id="logRetentionSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="logRetentionMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Diagnostics</h2>
@@ -269,11 +286,11 @@
               </label>
             </div>
             <p class="cert-hint">Writes a plain-text log of AD lookups, inventory-report traffic, and server errors to <code id="generalDebugLogPath" class="mono">-</code>. Off by default; only meant to be left on for the duration of a troubleshooting session. Oldest lines are dropped automatically once either cap above is exceeded.</p>
+            <div class="pkg-buttons">
+              <button id="diagnosticsSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="diagnosticsMessage" class="pkg-message hidden"></div>
           </div>
-          <div class="pkg-buttons">
-            <button id="generalSaveButton" class="primary-button" type="button">Save</button>
-          </div>
-          <div id="generalMessage" class="pkg-message hidden"></div>
         </section>
 
         <section id="generalStatusView" class="dashboard-card card-glow hidden" aria-label="Connection status">

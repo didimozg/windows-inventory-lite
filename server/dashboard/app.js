@@ -3211,7 +3211,7 @@
         renderConnectionStatus(data);
       })
       .catch(error => {
-        showSavedMessage(byId('generalMessage'), `Settings unavailable: ${error.message}`, true);
+        showSavedMessage(byId('inventorySettingsMessage'), `Settings unavailable: ${error.message}`, true);
       });
   }
 
@@ -3306,29 +3306,41 @@
     setStatusDot('statusCertDot', 'statusCertDetail', certOn, certDetail);
   }
 
-  function saveServerSettings(acknowledgeRisks, confirmedDisruption, acknowledgeIngestionTokenRisk) {
+  function saveInventorySettings() {
     const staleHours = Number.parseInt(byId('generalStaleHours').value, 10) || 48;
     const showUsbStorageIndicator = byId('generalShowUsbStorageIndicator').checked;
-    const ingestionRejectionLogRetentionDays = Number.parseInt(byId('generalIngestionRejectionLogRetentionDays').value, 10) || 30;
-    const ingestionRejectionLogMaxEntries = Number.parseInt(byId('generalIngestionRejectionLogMaxEntries').value, 10) || 5000;
-    const installLogRetentionDays = Number.parseInt(byId('generalInstallLogRetentionDays').value, 10) || 30;
-    const softwareJobAttemptLogRetentionDays = Number.parseInt(byId('generalSoftwareJobAttemptLogRetentionDays').value, 10) || 90;
-    const softwareJobAttemptLogMaxEntries = Number.parseInt(byId('generalSoftwareJobAttemptLogMaxEntries').value, 10) || 5000;
+
+    byId('inventorySettingsSaveButton').disabled = true;
+    byId('inventorySettingsMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ staleHours, showUsbStorageIndicator })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        state.staleHours = data.staleHours || 48;
+        state.showUsbStorageIndicator = data.showUsbStorageIndicator !== false;
+        renderDashboardTiles();
+        showSavedMessage(byId('inventorySettingsMessage'), 'Settings saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('inventorySettingsMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('inventorySettingsSaveButton').disabled = false;
+      });
+  }
+
+  function saveNetworkSettings(confirmedDisruption) {
     const port = Number.parseInt(byId('generalPort').value, 10) || 8080;
     const enableHttp = byId('generalEnableHttp').checked;
-    const httpsPort = Number.parseInt(byId('generalHttpsPort').value, 10) || 8443;
-    const useHttps = byId('generalUseHttps').checked;
-    const hstsEnabled = byId('generalHstsEnabled').checked;
-    const hstsMaxAgeHours = Number.parseInt(byId('generalHstsMaxAgeHours').value, 10) || 24;
-    const requireIngestionToken = byId('generalRequireIngestionToken').checked;
-    const tokenOverlapHours = Number.parseInt(byId('generalTokenOverlapHours').value, 10) || 24;
-    const debugLogRetentionDays = Number.parseInt(byId('generalDebugLogRetentionDays').value, 10) || 7;
-    const debugLogMaxSizeMb = Number.parseFloat(byId('generalDebugLogMaxSizeMb').value) || 10;
 
     // Only the HTTP port and the Enable HTTP switch can actually move this
-    // browser's own connection out from under it - staleHours/httpsPort/
-    // useHttps changes don't affect whatever port this page is currently
-    // talking to, so they don't need the same warning.
+    // browser's own connection out from under it.
     const networkChanged = port !== state.generalLoadedPort || enableHttp !== state.generalLoadedEnableHttp;
     if (networkChanged && !confirmedDisruption) {
       const confirmed = window.confirm(
@@ -3337,6 +3349,77 @@
       );
       if (!confirmed) return;
     }
+
+    byId('networkSettingsSaveButton').disabled = true;
+    byId('networkSettingsMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ port, enableHttp })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        state.generalLoadedPort = data.port || 8080;
+        state.generalLoadedEnableHttp = data.enableHttp !== false;
+        renderConnectionStatus(data);
+        showSavedMessage(byId('networkSettingsMessage'), 'Settings saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('networkSettingsMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('networkSettingsSaveButton').disabled = false;
+      });
+  }
+
+  function saveHttpsSettings(acknowledgeRisks) {
+    const httpsPort = Number.parseInt(byId('generalHttpsPort').value, 10) || 8443;
+    const useHttps = byId('generalUseHttps').checked;
+    const hstsEnabled = byId('generalHstsEnabled').checked;
+    const hstsMaxAgeHours = Number.parseInt(byId('generalHstsMaxAgeHours').value, 10) || 24;
+
+    byId('httpsSettingsSaveButton').disabled = true;
+    byId('httpsSettingsMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ httpsPort, useHttps, hstsEnabled, hstsMaxAgeHours, acknowledgeRisks: !!acknowledgeRisks })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
+      .then(({ ok, status, data }) => {
+        if (!ok) {
+          if (status === 409 && (data.risks || []).length) {
+            const confirmed = window.confirm(
+              `${data.error}\n\n${data.risks.join('\n')}\n\nEnable HTTPS anyway?`
+            );
+            if (confirmed) {
+              saveHttpsSettings(true);
+              return;
+            }
+            byId('generalUseHttps').checked = false;
+            throw new Error('HTTPS was not enabled.');
+          }
+          throw new Error(data.error || 'Save failed');
+        }
+        renderConnectionStatus(data);
+        showSavedMessage(byId('httpsSettingsMessage'), 'Settings saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('httpsSettingsMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('httpsSettingsSaveButton').disabled = false;
+      });
+  }
+
+  function saveIngestionTokenSettings(acknowledgeIngestionTokenRisk) {
+    const requireIngestionToken = byId('generalRequireIngestionToken').checked;
+    const tokenOverlapHours = Number.parseInt(byId('generalTokenOverlapHours').value, 10) || 24;
 
     const disablingIngestionToken = state.generalLoadedRequireIngestionToken && !requireIngestionToken;
     if (disablingIngestionToken && !acknowledgeIngestionTokenRisk) {
@@ -3350,49 +3433,82 @@
       acknowledgeIngestionTokenRisk = true;
     }
 
-    byId('generalSaveButton').disabled = true;
-    byId('generalMessage').className = 'pkg-message hidden';
+    byId('ingestionTokenSaveButton').disabled = true;
+    byId('ingestionTokenMessage').className = 'pkg-message hidden';
 
     fetch('/api/v1/server/settings', {
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        staleHours, showUsbStorageIndicator, installLogRetentionDays, port, enableHttp, httpsPort, useHttps, hstsEnabled, hstsMaxAgeHours, ingestionRejectionLogRetentionDays, ingestionRejectionLogMaxEntries, softwareJobAttemptLogRetentionDays, softwareJobAttemptLogMaxEntries, requireIngestionToken, tokenOverlapHours, debugLogRetentionDays, debugLogMaxSizeMb,
-        acknowledgeRisks: !!acknowledgeRisks, acknowledgeIngestionTokenRisk: !!acknowledgeIngestionTokenRisk,
-        debugLogEnabled: byId('generalDebugLogEnabled').checked
-      })
+      body: JSON.stringify({ requireIngestionToken, tokenOverlapHours, acknowledgeIngestionTokenRisk: !!acknowledgeIngestionTokenRisk })
     })
-      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
-      .then(({ ok, status, data }) => {
-        if (!ok) {
-          if (status === 409 && (data.risks || []).length) {
-            const confirmed = window.confirm(
-              `${data.error}\n\n${data.risks.join('\n')}\n\nEnable HTTPS anyway?`
-            );
-            if (confirmed) {
-              saveServerSettings(true, true);
-              return;
-            }
-            byId('generalUseHttps').checked = false;
-            throw new Error('HTTPS was not enabled.');
-          }
-          throw new Error(data.error || 'Save failed');
-        }
-        state.staleHours = data.staleHours || 48;
-        state.showUsbStorageIndicator = data.showUsbStorageIndicator !== false;
-        state.generalLoadedPort = data.port || 8080;
-        state.generalLoadedEnableHttp = data.enableHttp !== false;
-        renderDashboardTiles();
-        renderConnectionStatus(data);
-        showSavedMessage(byId('generalMessage'), 'Settings saved.', false);
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        showSavedMessage(byId('ingestionTokenMessage'), 'Settings saved.', false);
         loadIngestionTokenStatus();
       })
       .catch(error => {
-        showSavedMessage(byId('generalMessage'), `Save failed: ${error.message}`, true);
+        showSavedMessage(byId('ingestionTokenMessage'), `Save failed: ${error.message}`, true);
       })
       .finally(() => {
-        byId('generalSaveButton').disabled = false;
+        byId('ingestionTokenSaveButton').disabled = false;
+      });
+  }
+
+  function saveLogRetentionSettings() {
+    const ingestionRejectionLogRetentionDays = Number.parseInt(byId('generalIngestionRejectionLogRetentionDays').value, 10) || 30;
+    const ingestionRejectionLogMaxEntries = Number.parseInt(byId('generalIngestionRejectionLogMaxEntries').value, 10) || 5000;
+    const installLogRetentionDays = Number.parseInt(byId('generalInstallLogRetentionDays').value, 10) || 30;
+    const softwareJobAttemptLogRetentionDays = Number.parseInt(byId('generalSoftwareJobAttemptLogRetentionDays').value, 10) || 90;
+    const softwareJobAttemptLogMaxEntries = Number.parseInt(byId('generalSoftwareJobAttemptLogMaxEntries').value, 10) || 5000;
+
+    byId('logRetentionSaveButton').disabled = true;
+    byId('logRetentionMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ installLogRetentionDays, ingestionRejectionLogRetentionDays, ingestionRejectionLogMaxEntries, softwareJobAttemptLogRetentionDays, softwareJobAttemptLogMaxEntries })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        showSavedMessage(byId('logRetentionMessage'), 'Settings saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('logRetentionMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('logRetentionSaveButton').disabled = false;
+      });
+  }
+
+  function saveDiagnosticsSettings() {
+    const debugLogEnabled = byId('generalDebugLogEnabled').checked;
+    const debugLogRetentionDays = Number.parseInt(byId('generalDebugLogRetentionDays').value, 10) || 7;
+    const debugLogMaxSizeMb = Number.parseFloat(byId('generalDebugLogMaxSizeMb').value) || 10;
+
+    byId('diagnosticsSaveButton').disabled = true;
+    byId('diagnosticsMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ debugLogEnabled, debugLogRetentionDays, debugLogMaxSizeMb })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        showSavedMessage(byId('diagnosticsMessage'), 'Settings saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('diagnosticsMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('diagnosticsSaveButton').disabled = false;
       });
   }
 
@@ -6734,7 +6850,12 @@
   byId('pkgDownloadButton').addEventListener('click', () => {
     window.location.href = '/api/v1/client-package/download';
   });
-  byId('generalSaveButton').addEventListener('click', () => saveServerSettings(false));
+  byId('inventorySettingsSaveButton').addEventListener('click', saveInventorySettings);
+  byId('networkSettingsSaveButton').addEventListener('click', () => saveNetworkSettings(false));
+  byId('httpsSettingsSaveButton').addEventListener('click', () => saveHttpsSettings(false));
+  byId('ingestionTokenSaveButton').addEventListener('click', () => saveIngestionTokenSettings(false));
+  byId('logRetentionSaveButton').addEventListener('click', saveLogRetentionSettings);
+  byId('diagnosticsSaveButton').addEventListener('click', saveDiagnosticsSettings);
   byId('windowsSettingsSaveButton').addEventListener('click', saveWindowsSettings);
   byId('linuxSettingsSaveButton').addEventListener('click', saveLinuxSettings);
   byId('generalAdUseServiceIdentity').addEventListener('change', updateAdIdentityFields);
