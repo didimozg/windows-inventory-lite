@@ -3775,6 +3775,7 @@ namespace WindowsInventoryLite
                         }
                         attempt.ErrorMessage = errorMessage;
                         attempt.AttemptId = resultEntry.ContainsKey("attemptId") ? GetStringValue(resultEntry, "attemptId") : null;
+                        attempt.InstallerFormat = resultEntry.ContainsKey("installerFormat") ? GetStringValue(resultEntry, "installerFormat") : null;
                         if (resultEntry.ContainsKey("eventLogEntries") && resultEntry["eventLogEntries"] is ArrayList)
                         {
                             List<Dictionary<string, object>> boundedEntries = new List<Dictionary<string, object>>();
@@ -3931,7 +3932,9 @@ namespace WindowsInventoryLite
             {
                 foreach (SoftwareJobAttempt attempt in softwareJobAttemptLog)
                 {
-                    history.Add(attempt.ToDictionary());
+                    Dictionary<string, object> entry = attempt.ToDictionary();
+                    entry["exitCodeMeaning"] = LookupInstallerExitCodeMeaning(attempt.InstallerFormat, attempt.ExitCode);
+                    history.Add(entry);
                 }
             }
 
@@ -7323,6 +7326,7 @@ namespace WindowsInventoryLite
                         // no diagnosticHint key into an empty-string hint
                         // instead of "no hint was ever computed for this".
                         entry.DiagnosticHint = raw.ContainsKey("diagnosticHint") ? GetStringValue(raw, "diagnosticHint") : null;
+                        entry.InstallerFormat = raw.ContainsKey("installerFormat") ? GetStringValue(raw, "installerFormat") : null;
                         if (raw.ContainsKey("eventLogEntries") && raw["eventLogEntries"] != null)
                         {
                             List<Dictionary<string, object>> loadedEntries = new List<Dictionary<string, object>>();
@@ -9819,6 +9823,17 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             // docs/superpowers/specs/2026-09-30-stuck-install-lock-
             // diagnostics-design.md.
             public string DiagnosticHint;
+            // The installer's packaging format - the lowercased file
+            // extension of the catalog entry's relativePath, without the
+            // leading dot (e.g. "msi", "msu", "cab", "exe"), as reported
+            // by the client (RunOneJob already computes this to decide
+            // which host process to launch - it just didn't report it
+            // back before this field existed). Used to key the exit-code
+            // meaning lookup (see LookupInstallerExitCodeMeaning below) -
+            // the same numeric code means different things for different
+            // installer families. Null for any attempt recorded before
+            // this field existed.
+            public string InstallerFormat;
 
             public bool Success
             {
@@ -9840,8 +9855,60 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 result["errorMessage"] = ErrorMessage;
                 result["eventLogEntries"] = EventLogEntries;
                 result["diagnosticHint"] = DiagnosticHint;
+                result["installerFormat"] = InstallerFormat;
                 return result;
             }
+        }
+
+        // Deliberately small and NOT exhaustive: a wrong "known meaning"
+        // is worse than none, so this only ever contains codes verified
+        // against an authoritative source - the Windows Installer SDK's
+        // own standard code reference for msi; a real, investigated
+        // incident for msu (see docs/superpowers/specs/2026-10-05-
+        // installer-exit-code-lookup-design.md). "exe" is intentionally
+        // not seeded at all - every .exe bootstrapper has its own
+        // private code vocabulary (e.g. 5100 is one specific VS2010-era
+        // bootstrapper's StopBlock code, not a general .exe convention).
+        // "cab" starts empty - nothing confirmed yet.
+        private static readonly Dictionary<string, Dictionary<int, string>> KnownInstallerExitCodeMeanings = new Dictionary<string, Dictionary<int, string>>(StringComparer.OrdinalIgnoreCase)
+        {
+            {
+                "msi", new Dictionary<int, string>
+                {
+                    { 1603, "ERROR_INSTALL_FAILURE - fatal error during installation." },
+                    { 1618, "ERROR_INSTALL_ALREADY_RUNNING - another installation is already in progress on this machine." },
+                    { 1619, "ERROR_INSTALL_PACKAGE_OPEN_FAILED - this installation package could not be opened." },
+                    { 1620, "ERROR_INSTALL_PACKAGE_INVALID - this installation package could not be opened (verify it isn't corrupted)." },
+                    { 1622, "ERROR_INSTALL_LOG_FAILURE - error opening the installation log file." },
+                    { 1633, "ERROR_INSTALL_PLATFORM_UNSUPPORTED - this installation package is not supported on this platform/architecture." },
+                    { 3010, "ERROR_SUCCESS_REBOOT_REQUIRED - the install actually succeeded; a reboot is required to finish. Shows up as \"Failed\" here only because this is a nonzero exit code, not because the install itself failed." },
+                }
+            },
+            {
+                "msu", new Dictionary<int, string>
+                {
+                    { 2359302, "WU_E_NOT_APPLICABLE (0x80240006) - the update does not apply to this computer (already installed, superseded, or a build/architecture mismatch)." },
+                }
+            },
+        };
+
+        // Returns the known meaning of an exit code for a given
+        // installer format, or null if nothing is known - callers fall
+        // back to the existing bare "installer exited with code N" text
+        // in that case.
+        private static string LookupInstallerExitCodeMeaning(string installerFormat, int exitCode)
+        {
+            if (String.IsNullOrEmpty(installerFormat))
+            {
+                return null;
+            }
+            Dictionary<int, string> meaningsForFormat;
+            if (!KnownInstallerExitCodeMeanings.TryGetValue(installerFormat, out meaningsForFormat))
+            {
+                return null;
+            }
+            string meaning;
+            return meaningsForFormat.TryGetValue(exitCode, out meaning) ? meaning : null;
         }
 
         // Detects the "orphaned single-instance install lock" signature: the
@@ -16795,6 +16862,16 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "SoftwareJobAttempt.ToDictionary includes diagnosticHint", TestSoftwareJobAttemptToDictionaryIncludesDiagnosticHint);
             allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobResults sets DiagnosticHint on a fast-failing attempt that follows a timeout-killed attempt for the same (computer, entry) pair", TestReceiveSoftwareJobResultsSetsDiagnosticHintOnStuckLockSignature);
             allPassed &= SelfTestCheck(output, "LoadSoftwareJobAttemptLogFromDisk loads a persisted diagnosticHint when present, defaults it to null for a legacy line that has none", TestLoadSoftwareJobAttemptLogFromDiskLoadsDiagnosticHintWhenPresentDefaultsNullOtherwise);
+            allPassed &= SelfTestCheck(output, "LookupInstallerExitCodeMeaning returns the known meaning for a verified msi exit code", TestLookupInstallerExitCodeMeaningReturnsKnownMsiCode);
+            allPassed &= SelfTestCheck(output, "LookupInstallerExitCodeMeaning returns the known meaning for a verified msu exit code", TestLookupInstallerExitCodeMeaningReturnsKnownMsuCode);
+            allPassed &= SelfTestCheck(output, "LookupInstallerExitCodeMeaning returns null for an exit code with no known meaning", TestLookupInstallerExitCodeMeaningReturnsNullForUnseededCode);
+            allPassed &= SelfTestCheck(output, "LookupInstallerExitCodeMeaning is keyed per installer format, not one flat global dictionary", TestLookupInstallerExitCodeMeaningIsKeyedByFormatNotGlobal);
+            allPassed &= SelfTestCheck(output, "LookupInstallerExitCodeMeaning returns null for a null or empty installerFormat", TestLookupInstallerExitCodeMeaningHandlesNullOrEmptyFormat);
+            allPassed &= SelfTestCheck(output, "SoftwareJobAttempt.ToDictionary includes installerFormat, never includes exitCodeMeaning", TestSoftwareJobAttemptToDictionaryIncludesInstallerFormat);
+            allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobResults persists the reported installerFormat onto the recorded attempt", TestReceiveSoftwareJobResultsPersistsInstallerFormat);
+            allPassed &= SelfTestCheck(output, "SendSoftwareJobAttemptHistory computes exitCodeMeaning at serve time for a matching installerFormat/exitCode pair", TestSendSoftwareJobAttemptHistoryIncludesExitCodeMeaningForMatchingAttempt);
+            allPassed &= SelfTestCheck(output, "LoadSoftwareJobAttemptLogFromDisk loads a persisted installerFormat when present, defaults it to null for a legacy line that has none", TestLoadSoftwareJobAttemptLogFromDiskLoadsInstallerFormatWhenPresentDefaultsNullOtherwise);
+            allPassed &= SelfTestCheck(output, "RecordSoftwareJobAttempt never persists exitCodeMeaning into the on-disk JSONL log", TestRecordSoftwareJobAttemptNeverPersistsExitCodeMeaning);
             allPassed &= SelfTestCheck(output, "ExtractKbFromFilename matches real Microsoft Update Catalog naming, rejects Cyrillic-labelled names and names with no KB pattern", TestExtractKbFromFilenameMatchesRealMicrosoftNamingPattern);
             allPassed &= SelfTestCheck(output, "FindDuplicateKbIds returns only KBs appearing 2+ times, ignoring null/empty", TestFindDuplicateKbIdsIgnoresNullsAndSingleOccurrences);
             allPassed &= SelfTestCheck(output, "DetectKbForCandidate uses the filename fallback for a .exe candidate, no content-extraction attempt", TestDetectKbForCandidateUsesFilenameFallbackForExeNoContentAttempt);
@@ -27949,6 +28026,259 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (server.softwareJobAttemptLog[1].DiagnosticHint != "a persisted hint")
                 {
                     return "expected the second line's diagnosticHint to load unchanged, got: " + server.softwareJobAttemptLog[1].DiagnosticHint;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestLookupInstallerExitCodeMeaningReturnsKnownMsiCode()
+        {
+            string meaning = InventoryServer.LookupInstallerExitCodeMeaning("msi", 1603);
+            if (String.IsNullOrEmpty(meaning) || meaning.IndexOf("ERROR_INSTALL_FAILURE", StringComparison.Ordinal) < 0)
+            {
+                return "expected a known meaning for msi exit code 1603, got: " + meaning;
+            }
+            return null;
+        }
+
+        private static string TestLookupInstallerExitCodeMeaningReturnsKnownMsuCode()
+        {
+            string meaning = InventoryServer.LookupInstallerExitCodeMeaning("msu", 2359302);
+            if (String.IsNullOrEmpty(meaning) || meaning.IndexOf("WU_E_NOT_APPLICABLE", StringComparison.Ordinal) < 0)
+            {
+                return "expected a known meaning for msu exit code 2359302, got: " + meaning;
+            }
+            return null;
+        }
+
+        private static string TestLookupInstallerExitCodeMeaningReturnsNullForUnseededCode()
+        {
+            string meaning = InventoryServer.LookupInstallerExitCodeMeaning("msi", 999999);
+            if (!String.IsNullOrEmpty(meaning))
+            {
+                return "expected null for an exit code with no known meaning, got: " + meaning;
+            }
+            return null;
+        }
+
+        private static string TestLookupInstallerExitCodeMeaningIsKeyedByFormatNotGlobal()
+        {
+            // 3010 is a real, known msi code - looking it up under "msu" (the
+            // wrong format) must NOT return the msi meaning. Proves the table
+            // is genuinely per-format, not one flat global dictionary.
+            string meaning = InventoryServer.LookupInstallerExitCodeMeaning("msu", 3010);
+            if (!String.IsNullOrEmpty(meaning))
+            {
+                return "expected null when a known msi code is looked up under the wrong format (msu), got: " + meaning;
+            }
+            return null;
+        }
+
+        private static string TestLookupInstallerExitCodeMeaningHandlesNullOrEmptyFormat()
+        {
+            if (!String.IsNullOrEmpty(InventoryServer.LookupInstallerExitCodeMeaning(null, 1603)))
+            {
+                return "expected null for a null installerFormat";
+            }
+            if (!String.IsNullOrEmpty(InventoryServer.LookupInstallerExitCodeMeaning("", 1603)))
+            {
+                return "expected null for an empty installerFormat";
+            }
+            return null;
+        }
+
+        private static string TestSoftwareJobAttemptToDictionaryIncludesInstallerFormat()
+        {
+            SoftwareJobAttempt attempt = new SoftwareJobAttempt();
+            attempt.TimestampUtc = DateTime.UtcNow;
+            attempt.ComputerName = "PC-1";
+            attempt.CatalogType = "windowsUpdate";
+            attempt.EntryId = "kb-1";
+            attempt.Status = "failed";
+            attempt.ExitCode = 1603;
+            attempt.InstallerFormat = "msi";
+
+            Dictionary<string, object> dict = attempt.ToDictionary();
+            if (!dict.ContainsKey("installerFormat") || (string)dict["installerFormat"] != "msi")
+            {
+                return "expected ToDictionary to include installerFormat='msi', got: " + (dict.ContainsKey("installerFormat") ? dict["installerFormat"] : "(missing)");
+            }
+            if (dict.ContainsKey("exitCodeMeaning"))
+            {
+                return "expected ToDictionary itself to NOT include exitCodeMeaning - that must only ever be added by SendSoftwareJobAttemptHistory's own response-building loop, never baked into the persisted/base dictionary";
+            }
+            return null;
+        }
+
+        private static string TestReceiveSoftwareJobResultsPersistsInstallerFormat()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-exitcodes-results-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                options.SoftwareJobAttemptLogRetentionDays = 90;
+                options.SoftwareJobAttemptLogMaxEntries = 5000;
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/software-repository/job-results";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "test-token";
+                request.Body = "{\"computerName\":\"PC-1\",\"results\":[{\"catalogType\":\"windowsUpdate\",\"id\":\"kb-1\",\"installerFormat\":\"msi\",\"success\":false,\"exitCode\":1603,\"errorMessage\":\"installer exited with code 1603\"}]}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveSoftwareJobResults(stream, request);
+                }
+
+                if (server.softwareJobAttemptLog.Count != 1)
+                {
+                    return "expected exactly one recorded attempt, got " + server.softwareJobAttemptLog.Count;
+                }
+                if (server.softwareJobAttemptLog[0].InstallerFormat != "msi")
+                {
+                    return "expected the recorded attempt's InstallerFormat to be 'msi', got: " + server.softwareJobAttemptLog[0].InstallerFormat;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendSoftwareJobAttemptHistoryIncludesExitCodeMeaningForMatchingAttempt()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-exitcodes-history-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                options.SoftwareJobAttemptLogRetentionDays = 90;
+                options.SoftwareJobAttemptLogMaxEntries = 5000;
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext resultsRequest = new RequestContext();
+                resultsRequest.Method = "POST";
+                resultsRequest.Path = "/api/v1/software-repository/job-results";
+                resultsRequest.Headers = new Dictionary<string, string>();
+                resultsRequest.Headers["x-inventory-token"] = "test-token";
+                resultsRequest.Body = "{\"computerName\":\"PC-1\",\"results\":[{\"catalogType\":\"windowsUpdate\",\"id\":\"kb-1\",\"installerFormat\":\"msi\",\"success\":false,\"exitCode\":1603,\"errorMessage\":\"installer exited with code 1603\"}]}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveSoftwareJobResults(stream, resultsRequest);
+                }
+
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                string historyText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareJobAttemptHistory(stream);
+                    historyText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+                Dictionary<string, object> response = serializer.Deserialize<Dictionary<string, object>>(ExtractHttpResponseBodyText(historyText));
+                ArrayList attempts = (ArrayList)response["attempts"];
+                if (attempts.Count != 1)
+                {
+                    return "expected exactly one attempt in the response, got " + attempts.Count;
+                }
+                Dictionary<string, object> recorded = (Dictionary<string, object>)attempts[0];
+                if (!recorded.ContainsKey("exitCodeMeaning") || recorded["exitCodeMeaning"] == null || ((string)recorded["exitCodeMeaning"]).IndexOf("ERROR_INSTALL_FAILURE", StringComparison.Ordinal) < 0)
+                {
+                    return "expected exitCodeMeaning to be present and describe ERROR_INSTALL_FAILURE, got: " + (recorded.ContainsKey("exitCodeMeaning") ? recorded["exitCodeMeaning"] : "(missing)");
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestLoadSoftwareJobAttemptLogFromDiskLoadsInstallerFormatWhenPresentDefaultsNullOtherwise()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-exitcodes-load-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.LinuxDataPath = Path.Combine(dataPath, "linux-clients");
+                options.ContentPath = Path.Combine(dataPath, "content");
+                options.Token = "test-token";
+                options.SoftwareJobAttemptLogRetentionDays = 90;
+                options.SoftwareJobAttemptLogMaxEntries = 5000;
+                string logDir = Path.Combine(dataPath, "_logs");
+                Directory.CreateDirectory(logDir);
+                string logPath = Path.Combine(logDir, "software-job-attempts.jsonl");
+                string withoutFormat = "{\"timestampUtc\":\"2026-10-05T09:00:00Z\",\"computerName\":\"PC-1\",\"catalogType\":\"windowsUpdate\",\"entryId\":\"kb-1\",\"status\":\"failed\",\"exitCode\":1,\"errorMessage\":\"installer exited with code 1\"}";
+                string withFormat = "{\"timestampUtc\":\"2026-10-05T10:00:00Z\",\"computerName\":\"PC-1\",\"catalogType\":\"windowsUpdate\",\"entryId\":\"kb-1\",\"status\":\"failed\",\"exitCode\":1603,\"errorMessage\":\"installer exited with code 1603\",\"installerFormat\":\"msi\"}";
+                File.WriteAllText(logPath, withoutFormat + Environment.NewLine + withFormat + Environment.NewLine, new UTF8Encoding(false));
+
+                InventoryServer server = new InventoryServer(options);
+                server.Start();
+                if (server.softwareJobAttemptLog.Count != 2)
+                {
+                    return "expected both persisted lines to load, got " + server.softwareJobAttemptLog.Count;
+                }
+                if (server.softwareJobAttemptLog[0].InstallerFormat != null)
+                {
+                    return "expected a legacy line with no installerFormat key to load as null, got: " + server.softwareJobAttemptLog[0].InstallerFormat;
+                }
+                if (server.softwareJobAttemptLog[1].InstallerFormat != "msi")
+                {
+                    return "expected the second line's installerFormat to load unchanged, got: " + server.softwareJobAttemptLog[1].InstallerFormat;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestRecordSoftwareJobAttemptNeverPersistsExitCodeMeaning()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-exitcodes-neverpersist-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "test-token";
+                options.SoftwareJobAttemptLogRetentionDays = 90;
+                options.SoftwareJobAttemptLogMaxEntries = 5000;
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/software-repository/job-results";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "test-token";
+                request.Body = "{\"computerName\":\"PC-1\",\"results\":[{\"catalogType\":\"windowsUpdate\",\"id\":\"kb-1\",\"installerFormat\":\"msi\",\"success\":false,\"exitCode\":1603,\"errorMessage\":\"installer exited with code 1603\"}]}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveSoftwareJobResults(stream, request);
+                }
+
+                string logPath = Path.Combine(dataPath, "_logs", "software-job-attempts.jsonl");
+                string[] lines = File.ReadAllLines(logPath);
+                if (lines.Length != 1)
+                {
+                    return "expected exactly one persisted line, got " + lines.Length;
+                }
+                if (lines[0].IndexOf("exitCodeMeaning", StringComparison.Ordinal) >= 0)
+                {
+                    return "expected the persisted JSONL line to NEVER contain exitCodeMeaning - it must only be added by SendSoftwareJobAttemptHistory's response loop, not baked into storage, got: " + lines[0];
                 }
                 return null;
             }
