@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.82.0";
+        internal const string ProductVersion = "0.82.1";
 
         private static int Main(string[] args)
         {
@@ -9894,16 +9894,26 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 return null;
             }
-            if (previous.ErrorMessage == null || previous.ErrorMessage.IndexOf("did not exit within", StringComparison.OrdinalIgnoreCase) < 0)
-            {
-                return null;
-            }
             if (current.ExitCode == -1)
             {
                 return null;
             }
 
-            return "The previous attempt on this machine for this entry was killed after not exiting within the timeout. This attempt failed quickly with a different exit code, which often means the earlier kill left behind a single-instance install lock the installer itself won't release. Rebooting the target machine has resolved this in the one real case seen so far.";
+            bool previousWasTimeoutKill = previous.ErrorMessage != null && previous.ErrorMessage.IndexOf("did not exit within", StringComparison.OrdinalIgnoreCase) >= 0;
+            // Once a lock is orphaned, every later attempt against this
+            // same (computer, entry) pair fails the same way until the
+            // machine is rebooted - not just the one attempt right after
+            // the kill. Carry the hint forward as long as the exit code
+            // keeps matching the already-hinted previous attempt, so an
+            // admin looking at a machine that's been stuck for days sees
+            // every affected row, not just the first.
+            bool previousAlreadyHinted = !String.IsNullOrEmpty(previous.DiagnosticHint) && previous.ExitCode == current.ExitCode;
+            if (!previousWasTimeoutKill && !previousAlreadyHinted)
+            {
+                return null;
+            }
+
+            return "This attempt failed with the same exit code as a prior attempt caused by a stuck single-instance install lock (the client's own 30-minute timeout-kill can orphan one). This often means the lock is still in place. Rebooting the target machine has resolved this in the one real case seen so far.";
         }
 
         private sealed class InstallJob
@@ -16780,6 +16790,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "DetectStuckInstallLockHint returns no hint when there is no previous attempt at all for this (computer, entry) pair", TestDetectStuckInstallLockHintIgnoresWhenNoPreviousAttempt);
             allPassed &= SelfTestCheck(output, "DetectStuckInstallLockHint ignores timeout-killed attempts belonging to a different entryId or computerName", TestDetectStuckInstallLockHintIgnoresDifferentEntryOrComputer);
             allPassed &= SelfTestCheck(output, "DetectStuckInstallLockHint skips the current attempt's own 'running' record and finds the earlier completed failure behind it", TestDetectStuckInstallLockHintSkipsRunningRecordAndFindsEarlierCompletedAttempt);
+            allPassed &= SelfTestCheck(output, "DetectStuckInstallLockHint carries the hint forward through a repeated same-exit-code failure chain, not just the first attempt after the kill", TestDetectStuckInstallLockHintCarriesForwardThroughARepeatedFailureChain);
+            allPassed &= SelfTestCheck(output, "DetectStuckInstallLockHint does not carry the hint forward once the exit code genuinely changes", TestDetectStuckInstallLockHintDoesNotCarryForwardAcrossADifferentExitCode);
             allPassed &= SelfTestCheck(output, "SoftwareJobAttempt.ToDictionary includes diagnosticHint", TestSoftwareJobAttemptToDictionaryIncludesDiagnosticHint);
             allPassed &= SelfTestCheck(output, "ReceiveSoftwareJobResults sets DiagnosticHint on a fast-failing attempt that follows a timeout-killed attempt for the same (computer, entry) pair", TestReceiveSoftwareJobResultsSetsDiagnosticHintOnStuckLockSignature);
             allPassed &= SelfTestCheck(output, "LoadSoftwareJobAttemptLogFromDisk loads a persisted diagnosticHint when present, defaults it to null for a legacy line that has none", TestLoadSoftwareJobAttemptLogFromDiskLoadsDiagnosticHintWhenPresentDefaultsNullOtherwise);
@@ -27700,6 +27712,94 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (String.IsNullOrEmpty(hint))
             {
                 return "expected the scan to skip the intervening 'running' record and still find the earlier timeout-killed failure, got no hint";
+            }
+            return null;
+        }
+
+        private static string TestDetectStuckInstallLockHintCarriesForwardThroughARepeatedFailureChain()
+        {
+            // An orphaned lock keeps failing the SAME way on every attempt
+            // until a reboot - not just the one right after the kill. The
+            // second (and any later) same-exit-code failure in the chain
+            // must also get the hint, even though its own immediately
+            // preceding attempt was itself a fast-fail, not the original
+            // timeout-kill.
+            List<SoftwareJobAttempt> log = new List<SoftwareJobAttempt>();
+            SoftwareJobAttempt timeoutKill = new SoftwareJobAttempt();
+            timeoutKill.ComputerName = "PC-1";
+            timeoutKill.EntryId = "kb-1";
+            timeoutKill.TimestampUtc = new DateTime(2026, 9, 30, 10, 0, 0, DateTimeKind.Utc);
+            timeoutKill.Status = "failed";
+            timeoutKill.ExitCode = -1;
+            timeoutKill.ErrorMessage = "installer did not exit within 30 minutes and was terminated";
+            log.Add(timeoutKill);
+
+            SoftwareJobAttempt firstFastFail = new SoftwareJobAttempt();
+            firstFastFail.ComputerName = "PC-1";
+            firstFastFail.EntryId = "kb-1";
+            firstFastFail.TimestampUtc = new DateTime(2026, 9, 30, 16, 0, 0, DateTimeKind.Utc);
+            firstFastFail.Status = "failed";
+            firstFastFail.ExitCode = 5100;
+            firstFastFail.ErrorMessage = "installer exited with code 5100";
+            firstFastFail.DiagnosticHint = InventoryServer.DetectStuckInstallLockHint(log, firstFastFail);
+            if (String.IsNullOrEmpty(firstFastFail.DiagnosticHint))
+            {
+                return "expected the first fast-fail right after the timeout-kill to get a hint (setup assumption failed)";
+            }
+            log.Add(firstFastFail);
+
+            SoftwareJobAttempt secondFastFail = new SoftwareJobAttempt();
+            secondFastFail.ComputerName = "PC-1";
+            secondFastFail.EntryId = "kb-1";
+            secondFastFail.TimestampUtc = new DateTime(2026, 9, 30, 22, 0, 0, DateTimeKind.Utc);
+            secondFastFail.Status = "failed";
+            secondFastFail.ExitCode = 5100;
+
+            string hint = InventoryServer.DetectStuckInstallLockHint(log, secondFastFail);
+            if (String.IsNullOrEmpty(hint))
+            {
+                return "expected the SECOND fast-fail in the chain to also get a hint, carried forward from the first hinted attempt, got no hint";
+            }
+            return null;
+        }
+
+        private static string TestDetectStuckInstallLockHintDoesNotCarryForwardAcrossADifferentExitCode()
+        {
+            // If the failure shape genuinely changes (e.g. an admin edits
+            // the catalog entry's arguments and now hits a real, unrelated
+            // MSI error), the chain must not keep propagating the old hint.
+            List<SoftwareJobAttempt> log = new List<SoftwareJobAttempt>();
+            SoftwareJobAttempt timeoutKill = new SoftwareJobAttempt();
+            timeoutKill.ComputerName = "PC-1";
+            timeoutKill.EntryId = "kb-1";
+            timeoutKill.TimestampUtc = new DateTime(2026, 9, 30, 10, 0, 0, DateTimeKind.Utc);
+            timeoutKill.Status = "failed";
+            timeoutKill.ExitCode = -1;
+            timeoutKill.ErrorMessage = "installer did not exit within 30 minutes and was terminated";
+            log.Add(timeoutKill);
+
+            SoftwareJobAttempt firstFastFail = new SoftwareJobAttempt();
+            firstFastFail.ComputerName = "PC-1";
+            firstFastFail.EntryId = "kb-1";
+            firstFastFail.TimestampUtc = new DateTime(2026, 9, 30, 16, 0, 0, DateTimeKind.Utc);
+            firstFastFail.Status = "failed";
+            firstFastFail.ExitCode = 5100;
+            firstFastFail.ErrorMessage = "installer exited with code 5100";
+            firstFastFail.DiagnosticHint = InventoryServer.DetectStuckInstallLockHint(log, firstFastFail);
+            log.Add(firstFastFail);
+
+            SoftwareJobAttempt differentFailure = new SoftwareJobAttempt();
+            differentFailure.ComputerName = "PC-1";
+            differentFailure.EntryId = "kb-1";
+            differentFailure.TimestampUtc = new DateTime(2026, 9, 30, 22, 0, 0, DateTimeKind.Utc);
+            differentFailure.Status = "failed";
+            differentFailure.ExitCode = 1603;
+            differentFailure.ErrorMessage = "installer exited with code 1603";
+
+            string hint = InventoryServer.DetectStuckInstallLockHint(log, differentFailure);
+            if (!String.IsNullOrEmpty(hint))
+            {
+                return "expected no hint when the exit code genuinely changes from the previously-hinted attempt, got: " + hint;
             }
             return null;
         }

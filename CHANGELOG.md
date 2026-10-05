@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.82.1] - Stuck-lock hint now covers the whole repeated-failure chain, not just the first one
+
+### Fixed
+
+- **The stuck-lock hint (0.82.0) only ever flagged the FIRST fast failure right after a timeout-kill** - every later attempt against the same orphaned lock (which keeps failing the same way until the machine is rebooted) showed no hint at all, since its own immediately preceding attempt was itself a fast-fail rather than the original timeout-kill. The hint now carries forward through the whole chain as long as the exit code keeps matching the already-hinted previous attempt, so an admin looking at a machine that's been stuck for days sees every affected row, not just the one right after the original kill. Stops propagating the moment the exit code genuinely changes (e.g. an admin edits the catalog entry and now hits a real, unrelated error), so it never over-fires on an unrelated failure.
+- Softened the hint's own wording - it no longer claims the attempt "failed quickly" (the detection never actually measured duration, only that the exit code wasn't -1 again; a long-running attempt that happens to fail with a non-timeout code could have triggered a misleading claim there).
+
+### Notes
+
+- Found during this feature's own final whole-branch review, immediately after 0.82.0 shipped - neither gap was visible from any single task's own diff, since both only show up when thinking through the full repeated-failure scenario the feature was built for.
+
 ## [0.82.0] - Detect a stuck single-instance install lock
 
 ### Added
@@ -19,7 +30,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - A real plan-writing gap caught during task review, worth remembering: the detection algorithm as originally specified never actually fired against real traffic, because the client always posts a separate "running" record before every attempt's result, and that record - not the genuinely previous completed attempt - was always what the scan found first. Fixed before merge by skipping "running" candidates and continuing the scan backward; the regression test was rewritten to go through the real two-endpoint client flow (job-start, then job-result) instead of only the result endpoint, which is what let the bug through the first review pass.
 - Does not build the separate, already-logged backlog idea for a general installer-exit-code lookup table - this hint is a generic signature match, unrelated to that idea.
 
-## [Windows client 0.13.0] - Tries a graceful close before killing a timed-out installer, and a stuck-lock diagnostic hint
+## [Windows client 0.13.0] - Tries a graceful close before killing a timed-out installer
 
 ### Added
 
