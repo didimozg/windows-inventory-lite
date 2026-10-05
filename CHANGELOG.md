@@ -6,6 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.83.0] - Known-meaning lookup for common installer exit codes
+
+### Added
+
+- **Software job history now shows a short explanatory tooltip (ℹ) next to a failed attempt's error message**, when the exit code matches a known meaning for that installer's packaging format - e.g. MSI standard codes like `1603`/`1618`/`3010`, or the one verified MSU/WUA code seen in this fleet. New `installerFormat` field (the lowercased file extension reported by the client, e.g. `msi`/`msu`/`cab`/`exe`) and `exitCodeMeaning` field on each attempt returned by `GET /api/v1/software-repository/attempt-history`. `exitCodeMeaning` is computed fresh on every read from a small, deliberately non-exhaustive, format-keyed lookup table - never persisted, so correcting or expanding the table's wording later instantly applies to already-recorded history too. Falls back to today's bare "installer exited with code N" for anything not in the table. Independent of the stuck-lock hint (0.82.0/0.82.1) - the two badges can appear together on the same row.
+
+### Notes
+
+- Design: `docs/superpowers/specs/2026-10-05-installer-exit-code-lookup-design.md`. Plan: `docs/superpowers/plans/2026-10-05-installer-exit-code-lookup.md`.
+- Closes the backlog idea "small lookup table for common installer/exit codes in job-history error messages" (2026-09-30).
+
+## [Windows client 0.14.0] - Reports the installer's packaging format
+
+### Added
+
+- The client now reports `installerFormat` (the catalog entry's file extension, lowercased, no leading dot) alongside each job result, feeding the new server-side exit-code lookup above. Purely additive reporting - no change to how any installer is actually run.
+
 ## [0.82.2] - Dashboard cleanup; hardened self-test cleanup against transient flakes
 
 ### Fixed
