@@ -19053,7 +19053,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
             finally
             {
-                Directory.Delete(options.ContentPath, true);
+                try { Directory.Delete(options.ContentPath, true); } catch { }
             }
 
             return null;
@@ -21571,7 +21571,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
             finally
             {
-                Directory.Delete(dataPath, true);
+                try { Directory.Delete(dataPath, true); } catch { }
             }
         }
 
@@ -21609,7 +21609,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
             finally
             {
-                Directory.Delete(dataPath, true);
+                try { Directory.Delete(dataPath, true); } catch { }
             }
         }
 
@@ -21634,7 +21634,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
             finally
             {
-                Directory.Delete(dataPath, true);
+                try { Directory.Delete(dataPath, true); } catch { }
             }
         }
 
@@ -24836,7 +24836,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
             finally
             {
-                Directory.Delete(tempDataPath, true);
+                try { Directory.Delete(tempDataPath, true); } catch { }
             }
         }
 
@@ -25377,7 +25377,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
             finally
             {
-                Directory.Delete(scratchDir, true);
+                try { Directory.Delete(scratchDir, true); } catch { }
             }
         }
 
@@ -25684,7 +25684,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
             finally
             {
-                Directory.Delete(dataPath, true);
+                try { Directory.Delete(dataPath, true); } catch { }
             }
         }
 
@@ -26799,7 +26799,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
             finally
             {
-                Directory.Delete(tempDir, true);
+                try { Directory.Delete(tempDir, true); } catch { }
             }
         }
 
@@ -27274,7 +27274,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
             finally
             {
-                Directory.Delete(tempDir, true);
+                try { Directory.Delete(tempDir, true); } catch { }
             }
         }
 
@@ -27312,7 +27312,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
             finally
             {
-                Directory.Delete(tempDir, true);
+                try { Directory.Delete(tempDir, true); } catch { }
             }
         }
 
@@ -27352,7 +27352,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
             finally
             {
-                Directory.Delete(tempDir, true);
+                try { Directory.Delete(tempDir, true); } catch { }
             }
         }
 
@@ -28732,7 +28732,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
             finally
             {
-                Directory.Delete(tempDir, true);
+                try { Directory.Delete(tempDir, true); } catch { }
             }
         }
 
@@ -28774,7 +28774,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
             finally
             {
-                Directory.Delete(tempDir, true);
+                try { Directory.Delete(tempDir, true); } catch { }
             }
         }
 
