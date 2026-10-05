@@ -4731,7 +4731,7 @@
             <td>${escapeHtml(a.entryName || a.entryId)}</td>
             <td>${softwareJobHistoryResultText(a)}</td>
             <td>${a.status === 'running' ? '' : escapeHtml(String(a.exitCode))}</td>
-            <td>${escapeHtmlOrEmpty(a.errorMessage)}${a.diagnosticHint ? ` <span class="stuck-lock-badge" title="${escapeHtml(a.diagnosticHint)}">⚠ possible stuck lock</span>` : ''}</td>
+            <td>${escapeHtmlOrEmpty(a.errorMessage)}${a.exitCodeMeaning ? ` <span class="exit-code-meaning-note" title="${escapeHtml(a.exitCodeMeaning)}">ℹ</span>` : ''}${a.diagnosticHint ? ` <span class="stuck-lock-badge" title="${escapeHtml(a.diagnosticHint)}">⚠ possible stuck lock</span>` : ''}</td>
             <td>${toggleCell}</td>
           </tr>${detailRow}`;
         }).join('') || '<tr><td colspan="8" class="empty">No attempts recorded yet.</td></tr>';

@@ -1360,6 +1360,12 @@ pre {
   white-space: nowrap;
 }
 
+.exit-code-meaning-note {
+  color: var(--muted);
+  cursor: help;
+  margin-left: 4px;
+}
+
 .stuck-lock-badge {
   display: inline-block;
   margin-left: 6px;
