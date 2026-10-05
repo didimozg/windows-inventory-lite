@@ -1946,7 +1946,6 @@ th.sort-desc::after {
    gap, all four read as belonging to the wrong section. */
 #certificateView > .pkg-buttons,
 #linuxSettingsView > .pkg-buttons,
-#windowsSettingsView > .pkg-buttons,
 #debugLogView > .pkg-buttons {
   margin-bottom: 16px;
 }

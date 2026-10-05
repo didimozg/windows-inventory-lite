@@ -360,6 +360,10 @@
               </label>
             </div>
             <p class="cert-hint">"Configure AD User" makes the domain/credentials below available to Client actions, Client updates, and AD Computer Import. "Sync Description from AD" additionally writes each computer's Active Directory description into its inventory record, read-only in the Clients table while it's on. Turn it off to edit Description manually instead - re-enabling it later overwrites any manual edits on the next sync. Reading the description attribute is allowed to any authenticated domain user by default AD ACLs, so the service account identity usually needs no special AD delegation.</p>
+            <div class="pkg-buttons">
+              <button id="adSettingsSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="adSettingsMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block">
             <h3 class="settings-block-title">Install defaults</h3>
@@ -378,6 +382,10 @@
                 <input id="thirdPartySoftwareCheckIntervalHours" type="number" min="1" max="24" value="6">
               </label>
             </div>
+            <div class="pkg-buttons">
+              <button id="windowsInstallDefaultsSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="windowsInstallDefaultsMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block">
             <h3 class="settings-block-title">Windows updates install window</h3>
@@ -400,6 +408,10 @@
                 <input id="windowsUpdateInstallWindowJitterMinutes" type="number" min="0" max="1440" value="30">
               </label>
             </div>
+            <div class="pkg-buttons">
+              <button id="windowsUpdateInstallWindowSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="windowsUpdateInstallWindowMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block">
             <h3 class="settings-block-title">Third-party software install window</h3>
@@ -422,6 +434,10 @@
                 <input id="thirdPartySoftwareInstallWindowJitterMinutes" type="number" min="0" max="1440" value="30">
               </label>
             </div>
+            <div class="pkg-buttons">
+              <button id="thirdPartySoftwareInstallWindowSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="thirdPartySoftwareInstallWindowMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block">
             <h3 class="settings-block-title">Client self-update</h3>
@@ -430,11 +446,11 @@
               Enable client self-update
             </label>
             <p class="cert-hint">When on, an already-installed Windows client that reports an out-of-date version downloads the current build and applies it itself (stopping and restarting its own service via a one-time scheduled task) - no WinRM push required. Off by default. See docs/self-update-av-exclusions.md before enabling on a fleet with strict antivirus policy.</p>
+            <div class="pkg-buttons">
+              <button id="windowsSelfUpdateSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="windowsSelfUpdateMessage" class="pkg-message hidden"></div>
           </div>
-          <div class="pkg-buttons">
-            <button id="windowsSettingsSaveButton" class="primary-button" type="button">Save</button>
-          </div>
-          <div id="windowsSettingsMessage" class="pkg-message hidden"></div>
           <div class="settings-block">
             <h2 class="settings-block-title">Windows Client update credentials</h2>
             <p class="cert-hint">Used by Windows Client actions/updates pushes when "Global" WinRM credential source is selected on those pages. Leave password blank to keep the currently saved value.</p>

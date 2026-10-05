@@ -3251,7 +3251,7 @@
         updateThirdPartySoftwareInstallWindowFieldVisibility();
       })
       .catch(error => {
-        showSavedMessage(byId('windowsSettingsMessage'), `Settings unavailable: ${error.message}`, true);
+        showSavedMessage(byId('adSettingsMessage'), `Settings unavailable: ${error.message}`, true);
       });
   }
 
@@ -3512,9 +3512,9 @@
       });
   }
 
-  function saveWindowsSettings() {
-    byId('windowsSettingsSaveButton').disabled = true;
-    byId('windowsSettingsMessage').className = 'pkg-message hidden';
+  function saveAdSettings() {
+    byId('adSettingsSaveButton').disabled = true;
+    byId('adSettingsMessage').className = 'pkg-message hidden';
 
     fetch('/api/v1/server/settings', {
       method: 'POST',
@@ -3529,15 +3529,88 @@
         adUseServiceIdentity: byId('generalAdUseServiceIdentity').checked,
         adUsername: byId('generalAdUsername').value.trim(),
         adPassword: byId('generalAdPassword').value,
-        adComputerImportOUs: byId('generalAdComputerImportOUs').value,
+        adComputerImportOUs: byId('generalAdComputerImportOUs').value
+      })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        state.adDescriptionSyncEnabled = byId('generalAdDescriptionSyncEnabled').checked;
+        byId('generalAdPassword').value = '';
+        showSavedMessage(byId('adSettingsMessage'), 'Settings saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('adSettingsMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('adSettingsSaveButton').disabled = false;
+      });
+  }
+
+  function saveWindowsInstallDefaults() {
+    byId('windowsInstallDefaultsSaveButton').disabled = true;
+    byId('windowsInstallDefaultsMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
         windowsDefaultIntervalHours: Number.parseInt(byId('windowsDefaultIntervalHours').value, 10) || 6,
         windowsUpdateCheckIntervalHours: Number.parseInt(byId('windowsUpdateCheckIntervalHours').value, 10) || 6,
-        thirdPartySoftwareCheckIntervalHours: Number.parseInt(byId('thirdPartySoftwareCheckIntervalHours').value, 10) || 6,
-        enableWindowsClientSelfUpdate: byId('windowsEnableClientSelfUpdate').checked,
+        thirdPartySoftwareCheckIntervalHours: Number.parseInt(byId('thirdPartySoftwareCheckIntervalHours').value, 10) || 6
+      })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        showSavedMessage(byId('windowsInstallDefaultsMessage'), 'Settings saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('windowsInstallDefaultsMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('windowsInstallDefaultsSaveButton').disabled = false;
+      });
+  }
+
+  function saveWindowsUpdateInstallWindow() {
+    byId('windowsUpdateInstallWindowSaveButton').disabled = true;
+    byId('windowsUpdateInstallWindowMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
         windowsUpdateInstallWindowEnabled: byId('windowsUpdateInstallWindowEnabled').checked,
         windowsUpdateInstallWindowStartUtc: byId('windowsUpdateInstallWindowStartUtc').value,
         windowsUpdateInstallWindowEndUtc: byId('windowsUpdateInstallWindowEndUtc').value,
-        windowsUpdateInstallWindowJitterMinutes: Number.parseInt(byId('windowsUpdateInstallWindowJitterMinutes').value, 10) || 0,
+        windowsUpdateInstallWindowJitterMinutes: Number.parseInt(byId('windowsUpdateInstallWindowJitterMinutes').value, 10) || 0
+      })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        showSavedMessage(byId('windowsUpdateInstallWindowMessage'), 'Settings saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('windowsUpdateInstallWindowMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('windowsUpdateInstallWindowSaveButton').disabled = false;
+      });
+  }
+
+  function saveThirdPartySoftwareInstallWindow() {
+    byId('thirdPartySoftwareInstallWindowSaveButton').disabled = true;
+    byId('thirdPartySoftwareInstallWindowMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
         thirdPartySoftwareInstallWindowEnabled: byId('thirdPartySoftwareInstallWindowEnabled').checked,
         thirdPartySoftwareInstallWindowStartUtc: byId('thirdPartySoftwareInstallWindowStartUtc').value,
         thirdPartySoftwareInstallWindowEndUtc: byId('thirdPartySoftwareInstallWindowEndUtc').value,
@@ -3547,15 +3620,36 @@
       .then(response => response.json().then(data => ({ ok: response.ok, data })))
       .then(({ ok, data }) => {
         if (!ok) throw new Error(data.error || 'Save failed');
-        state.adDescriptionSyncEnabled = byId('generalAdDescriptionSyncEnabled').checked;
-        byId('generalAdPassword').value = '';
-        showSavedMessage(byId('windowsSettingsMessage'), 'Settings saved.', false);
+        showSavedMessage(byId('thirdPartySoftwareInstallWindowMessage'), 'Settings saved.', false);
       })
       .catch(error => {
-        showSavedMessage(byId('windowsSettingsMessage'), `Save failed: ${error.message}`, true);
+        showSavedMessage(byId('thirdPartySoftwareInstallWindowMessage'), `Save failed: ${error.message}`, true);
       })
       .finally(() => {
-        byId('windowsSettingsSaveButton').disabled = false;
+        byId('thirdPartySoftwareInstallWindowSaveButton').disabled = false;
+      });
+  }
+
+  function saveWindowsSelfUpdate() {
+    byId('windowsSelfUpdateSaveButton').disabled = true;
+    byId('windowsSelfUpdateMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enableWindowsClientSelfUpdate: byId('windowsEnableClientSelfUpdate').checked })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        showSavedMessage(byId('windowsSelfUpdateMessage'), 'Settings saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('windowsSelfUpdateMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('windowsSelfUpdateSaveButton').disabled = false;
       });
   }
 
@@ -6856,7 +6950,11 @@
   byId('ingestionTokenSaveButton').addEventListener('click', () => saveIngestionTokenSettings(false));
   byId('logRetentionSaveButton').addEventListener('click', saveLogRetentionSettings);
   byId('diagnosticsSaveButton').addEventListener('click', saveDiagnosticsSettings);
-  byId('windowsSettingsSaveButton').addEventListener('click', saveWindowsSettings);
+  byId('adSettingsSaveButton').addEventListener('click', saveAdSettings);
+  byId('windowsInstallDefaultsSaveButton').addEventListener('click', saveWindowsInstallDefaults);
+  byId('windowsUpdateInstallWindowSaveButton').addEventListener('click', saveWindowsUpdateInstallWindow);
+  byId('thirdPartySoftwareInstallWindowSaveButton').addEventListener('click', saveThirdPartySoftwareInstallWindow);
+  byId('windowsSelfUpdateSaveButton').addEventListener('click', saveWindowsSelfUpdate);
   byId('linuxSettingsSaveButton').addEventListener('click', saveLinuxSettings);
   byId('generalAdUseServiceIdentity').addEventListener('change', updateAdIdentityFields);
   byId('windowsUpdateInstallWindowEnabled').addEventListener('change', updateWindowsUpdateInstallWindowFieldVisibility);
