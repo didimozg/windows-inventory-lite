@@ -6,6 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.84.0] - Settings page reorganized into Server/Security/Credentials/Windows/Linux
+
+### Changed
+
+- **The Settings area's 5 sub-tabs were regrouped from Server/Windows/Linux/Certificate/Admin password into Server/Security/Credentials/Windows/Linux.** Certificate, Admin password, and Login lockout now live together under a new "Security" tab. Windows Client update credentials (WinRM), Software repository, WSUS offline scan file, Linux Client update credentials (SSH), and the SSH key block - all previously scattered inside the platform-organized Windows/Linux tabs despite being about how the server reaches clients, not client behavior - now live together under a new "Credentials" tab. Windows and Linux keep only their platform-specific settings (AD, install defaults, install windows, self-update, targeting). Old bookmarked hashes (`#certificate`, `#admin`, etc.) still resolve to the new Security tab.
+- **Every settings block now has its own Save button**, replacing the 3 shared buttons that previously each covered several unrelated blocks at once (one combined Server-tab save spanning Inventory/Network/HTTPS/Ingestion-Token/Log-retention/Diagnostics, one spanning all of Windows' AD/install-defaults/install-windows/self-update, one spanning all of Linux' targeting/install-defaults/self-update). 14 new independent Save buttons in total. The three risk-confirmation dialogs that used to guard the combined Server save (network-disruption, HTTPS certificate risk, ingestion-token disable) now each live on their own single-purpose button. Purely a dashboard change - the `/api/v1/server/settings` endpoint already applied partial updates per posted key, so no server-side behavior changed.
+
+### Notes
+
+- Design: `docs/superpowers/specs/2026-10-05-settings-page-redesign-design.md`. Plan + full execution ledger: `docs/superpowers/plans/2026-10-05-settings-page-redesign.md` / `.superpowers/sdd/progress.md`'s `wil-settingsredesign-` prefixed entries.
+- Phase 1 of the larger "dashboard-wide navigation/IA pass" backlog item.
+
 ## [0.83.0] - Known-meaning lookup for common installer exit codes
 
 ### Added
