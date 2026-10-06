@@ -192,14 +192,17 @@
     });
   }
 
-  // Returns { view, subview }. Deploy and Settings are consolidated
-  // destinations (see docs/superpowers/specs/2026-08-12-dashboard-ui-redesign-design.md,
-  // decisions 6-7) - every hash that used to point at one of the 5 old
-  // Installation pages or 3 old Settings pages now resolves to 'deploy' or
-  // 'settings' plus a subview. Old hashes are kept as aliases (matching this
-  // function's existing #linux-hardware precedent) so bookmarks/links still
-  // land correctly; deploy-*/settings-* are the new canonical hashes setView
-  // itself produces going forward.
+  // Returns { view, subview }. Settings remains a consolidated destination
+  // (see docs/superpowers/specs/2026-08-12-dashboard-ui-redesign-design.md,
+  // decision 7) - every hash that used to point at one of the 3 old
+  // Settings pages now resolves to 'settings' plus a subview. The old
+  // Deploy destination was later split into 3 standalone views
+  // (clientActions/softwarePush/agentUpdates, none carrying a subview) once
+  // its Actions/Updates/Package sections moved out of a shared top-level
+  // button into the Fleet/Software dropdowns. Old hashes are kept as
+  // aliases (matching this function's existing #linux-hardware precedent)
+  // so bookmarks/links still land correctly; settings-*/fleet-*/software-*
+  // are the new canonical hashes setView itself produces going forward.
   function getInitialViewState() {
     const hash = window.location.hash.replace(/^#/, '').toLowerCase();
     if (hash === 'clients') return { view: 'clients', subview: null };
@@ -221,9 +224,9 @@
     // #certificate below) - old bookmarks land on Clients, unfiltered.
     if (hash === 'linux-clients' || hash === 'linux') return { view: 'clients', subview: null };
     if (hash === 'linux-services') return { view: 'linuxServices', subview: null };
-    if (hash === 'deploy' || hash === 'deploy-actions' || hash === 'client-actions' || hash === 'actions' || hash === 'install' || hash === 'linux-client-actions') return { view: 'deploy', subview: 'actions' };
-    if (hash === 'deploy-updates' || hash === 'client-updates' || hash === 'updates' || hash === 'linux-client-updates') return { view: 'deploy', subview: 'updates' };
-    if (hash === 'deploy-package' || hash === 'client-package' || hash === 'package') return { view: 'deploy', subview: 'package' };
+    if (hash === 'fleet-actions' || hash === 'deploy' || hash === 'deploy-actions' || hash === 'client-actions' || hash === 'actions' || hash === 'install' || hash === 'linux-client-actions') return { view: 'clientActions', subview: null };
+    if (hash === 'software-push' || hash === 'deploy-updates' || hash === 'client-updates' || hash === 'updates' || hash === 'linux-client-updates') return { view: 'softwarePush', subview: null };
+    if (hash === 'fleet-agent-updates' || hash === 'deploy-package' || hash === 'client-package' || hash === 'package') return { view: 'agentUpdates', subview: null };
     // Old #settings/#settings-general/#general hashes land on Server (the
     // new first tab) rather than disappearing - same backward-compat
     // convention as every other retired hash in this function.
@@ -235,12 +238,16 @@
     return { view: 'dashboard', subview: null };
   }
 
-  // View -> canonical hash. Deploy/Settings map through their subview;
-  // linuxServices keeps its existing multi-word hash; everything else's
-  // hash equals its view name unchanged (the merged Clients page falls
-  // through to the default and produces 'clients').
+  // View -> canonical hash. Settings maps through its subview; the former
+  // Deploy views (clientActions/agentUpdates/softwarePush) carry no
+  // subview and each map to their own fixed hash; linuxServices keeps its
+  // existing multi-word hash; everything else's hash equals its view name
+  // unchanged (the merged Clients page falls through to the default and
+  // produces 'clients').
   function computeHashForView(view, subview) {
-    if (view === 'deploy') return subview === 'updates' ? 'deploy-updates' : subview === 'package' ? 'deploy-package' : 'deploy-actions';
+    if (view === 'clientActions') return 'fleet-actions';
+    if (view === 'agentUpdates') return 'fleet-agent-updates';
+    if (view === 'softwarePush') return 'software-push';
     if (view === 'settings') {
       if (subview === 'security') return 'settings-security';
       if (subview === 'credentials') return 'settings-credentials';
@@ -253,13 +260,6 @@
     if (view === 'logging') return subview === 'installs' ? 'logging-installs' : subview === 'software' ? 'softwarejobhistory' : subview === 'debug' ? 'logging-debug' : subview === 'wsusdownloads' ? 'logging-wsusdownloads' : 'logging';
     if (view === 'linuxServices') return 'linux-services';
     return view;
-  }
-
-  function loadDeploySubviewData(subview) {
-    if (subview === 'actions') { loadInstallPreferredSubnet(); }
-    if (subview === 'updates') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); }
-    if (subview === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
-    if (subview === 'updates') { loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
   }
 
   function loadLoggingSubviewData(subview) {
@@ -301,7 +301,9 @@
       return;
     }
     render();
-    if (view === 'deploy') loadDeploySubviewData(state.subview);
+    if (view === 'clientActions') { loadInstallPreferredSubnet(); }
+    if (view === 'softwarePush') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
+    if (view === 'agentUpdates') { loadPackageStatus(); loadLinuxPackageStatus(); }
     if (view === 'settings') loadSettingsSubviewData(state.subview);
     if (view === 'licenses') loadLicensesSubviewData(state.subview);
     if (view === 'windowsUpdates') loadWindowsUpdatesSubviewData(state.subview);
@@ -322,14 +324,7 @@
   }
 
   function renderSubtabStrips() {
-    byId('deploySubtabs').classList.toggle('hidden', state.view !== 'deploy');
     byId('settingsSubtabs').classList.toggle('hidden', state.view !== 'settings');
-    byId('deploySubtabActions').classList.toggle('active', state.view === 'deploy' && state.subview === 'actions');
-    byId('deploySubtabActions').setAttribute('aria-selected', String(state.view === 'deploy' && state.subview === 'actions'));
-    byId('deploySubtabUpdates').classList.toggle('active', state.view === 'deploy' && state.subview === 'updates');
-    byId('deploySubtabUpdates').setAttribute('aria-selected', String(state.view === 'deploy' && state.subview === 'updates'));
-    byId('deploySubtabPackage').classList.toggle('active', state.view === 'deploy' && state.subview === 'package');
-    byId('deploySubtabPackage').setAttribute('aria-selected', String(state.view === 'deploy' && state.subview === 'package'));
     byId('settingsSubtabServer').classList.toggle('active', state.view === 'settings' && state.subview === 'server');
     byId('settingsSubtabServer').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'server'));
     byId('settingsSubtabWindows').classList.toggle('active', state.view === 'settings' && state.subview === 'windows');
@@ -1375,7 +1370,8 @@
         }
         // After any timer-clearing above, so a job's own completion is
         // reflected in the same tick it happens on.
-        updateLoggingBadge();
+        updateFleetActionsBadge();
+        updateSoftwarePushBadge();
       })
       .catch(error => {
         if (jobId === state.installHistorySelectedJobId) {
@@ -1384,14 +1380,29 @@
       });
   }
 
-  // Counts currently-active poll timers (0-3: install/uninstall, Windows
-  // update push, Linux update push) - the only visible indicator that a
-  // job is running once its own trigger button stopped showing inline
-  // progress (see startClientActionJob/startMergedUpdatesPush). Matches
-  // the existing updatesBadge/linuxUpdatesBadge look (.nav-badge).
-  function updateLoggingBadge() {
-    const count = [state.installPollTimer, state.updatePollTimer, state.linuxUpdatesPollTimer].filter(Boolean).length;
-    const badge = byId('loggingBadge');
+  // Counts the currently-active install/uninstall poll timer (0 or 1) -
+  // the only visible indicator that a Fleet > Actions job is running once
+  // its own trigger button stopped showing inline progress (see
+  // startClientActionJob). Matches the existing updatesBadge/
+  // linuxUpdatesBadge look (.nav-badge).
+  function updateFleetActionsBadge() {
+    const badge = byId('fleetActionsBadge');
+    if (state.installPollTimer) {
+      badge.textContent = '1';
+      badge.classList.remove('hidden');
+    } else {
+      badge.classList.add('hidden');
+    }
+  }
+
+  // Counts currently-active Windows/Linux update-push poll timers (0-2) -
+  // the only visible indicator that a Software > Push & Schedule job is
+  // running once its own trigger button stopped showing inline progress
+  // (see startMergedUpdatesPush). Matches the existing updatesBadge/
+  // linuxUpdatesBadge look (.nav-badge).
+  function updateSoftwarePushBadge() {
+    const count = [state.updatePollTimer, state.linuxUpdatesPollTimer].filter(Boolean).length;
+    const badge = byId('softwarePushBadge');
     if (count > 0) {
       badge.textContent = String(count);
       badge.classList.remove('hidden');
@@ -1497,7 +1508,8 @@
         if (state.installPollTimer) window.clearInterval(state.installPollTimer);
         pollInstallJob(state.installJobId);
         state.installPollTimer = window.setInterval(() => pollInstallJob(state.installJobId), 3000);
-        updateLoggingBadge();
+        updateFleetActionsBadge();
+        updateSoftwarePushBadge();
       })
       .catch(error => {
         byId('installHistoryJobDetail').textContent = `Trust and retry failed: ${error.message}`;
@@ -1846,7 +1858,8 @@
         if (state.installPollTimer) window.clearInterval(state.installPollTimer);
         pollInstallJob(state.installJobId);
         state.installPollTimer = window.setInterval(() => pollInstallJob(state.installJobId), 3000);
-        updateLoggingBadge();
+        updateFleetActionsBadge();
+        updateSoftwarePushBadge();
       })
       .catch(error => {
         window.alert(`Failed to start ${action} job: ${error.message}`);
@@ -1918,10 +1931,10 @@
     const statusParts = [];
     statusParts.push(windowsAvailable
       ? `Windows package: ${formatAvailableVersion(windowsData)} (${windowsData.outdatedCount} outdated)`
-      : 'No Windows client package uploaded yet - build or deploy one on Deploy > Package.');
+      : 'No Windows client package uploaded yet - build or deploy one on Fleet > Agent updates.');
     statusParts.push(linuxAvailable
       ? `Linux package: v${escapeHtml(linuxData.currentVersion)} (${linuxData.outdatedCount} outdated)`
-      : 'No Linux client package uploaded yet - build one on Deploy > Package.');
+      : 'No Linux client package uploaded yet - build one on Fleet > Agent updates.');
     byId('updatesPackageStatus').textContent = statusParts.join('. ') + '.';
 
     const entries = []
@@ -2124,7 +2137,8 @@
         state.installHistorySelectedJobId = state.updateJobId;
         pollInstallJob(state.updateJobId, () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows'));
         state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows')), 3000);
-        updateLoggingBadge();
+        updateFleetActionsBadge();
+        updateSoftwarePushBadge();
       }
     }
   }
@@ -2567,7 +2581,8 @@
           if (state.updatePollTimer) window.clearInterval(state.updatePollTimer);
           pollInstallJob(state.updateJobId, () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows'));
           state.updatePollTimer = window.setInterval(() => pollInstallJob(state.updateJobId, () => loadClientUpdates(), 'updatePollTimer', job => pruneCompletedUpdateTargets(job, 'windows')), 3000);
-          updateLoggingBadge();
+          updateFleetActionsBadge();
+          updateSoftwarePushBadge();
         })
         .catch(error => {
           window.alert(`Failed to start update job: ${error.message}`);
@@ -2595,7 +2610,8 @@
           if (state.linuxUpdatesPollTimer) window.clearInterval(state.linuxUpdatesPollTimer);
           pollInstallJob(state.linuxUpdatesJobId, () => loadLinuxClientUpdates(), 'linuxUpdatesPollTimer', job => pruneCompletedUpdateTargets(job, 'linux'));
           state.linuxUpdatesPollTimer = window.setInterval(() => pollInstallJob(state.linuxUpdatesJobId, () => loadLinuxClientUpdates(), 'linuxUpdatesPollTimer', job => pruneCompletedUpdateTargets(job, 'linux')), 3000);
-          updateLoggingBadge();
+          updateFleetActionsBadge();
+          updateSoftwarePushBadge();
         })
         .catch(error => {
           window.alert(`Failed to start update job: ${error.message}`);
@@ -3798,7 +3814,7 @@
   // successful generation, so this sets the message classes directly.
   function regenerateIngestionToken() {
     const warningText = state.generalLoadedRequireIngestionToken !== false
-      ? 'Regenerate the ingestion token? Every already-installed client will stop reporting until it is reconfigured with the new token - and any not-yet-deployed GPO package still has the OLD token baked in, so it must be rebuilt from Deploy > Package, not just redeployed. This cannot be undone.'
+      ? 'Regenerate the ingestion token? Every already-installed client will stop reporting until it is reconfigured with the new token - and any not-yet-deployed GPO package still has the OLD token baked in, so it must be rebuilt from Fleet > Agent updates, not just redeployed. This cannot be undone.'
       : "Regenerate the ingestion token? Already-installed clients are unaffected right now since 'Require ingestion token' is off - but any package rebuilt after this uses the new value, and turning enforcement back on later will require every client to have this value. Continue?";
     const confirmed = window.confirm(warningText);
     if (!confirmed) return;
@@ -6172,12 +6188,13 @@
     byId('debugLogView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'debug'));
     byId('wsusDownloadLogView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'wsusdownloads'));
     byId('linuxServicesView').classList.toggle('hidden', state.view !== 'linuxServices');
-    // Deploy: Actions shows both platforms' sections together (stacked, own
-    // headings), Updates and Package are each already cross-platform on one
-    // merged section (no stacking needed).
-    byId('installView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
-    byId('updatesView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'updates'));
-    byId('packageView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'package'));
+    // The former Deploy sections, now standalone views: Fleet > Actions
+    // shows both platforms' sections together (stacked, own headings);
+    // Software > Push & Schedule and Fleet > Agent updates are each
+    // already cross-platform on one merged section (no stacking needed).
+    byId('installView').classList.toggle('hidden', state.view !== 'clientActions');
+    byId('updatesView').classList.toggle('hidden', state.view !== 'softwarePush');
+    byId('packageView').classList.toggle('hidden', state.view !== 'agentUpdates');
     // Settings: one subview is visible at a time, but Server and Security
     // each render as two sibling sections sharing the same subview key
     // (serverSettingsView+generalStatusView; certificateView+adminPasswordView).
@@ -6197,9 +6214,11 @@
     byId('thirdPartySoftwareTab').classList.toggle('active', state.view === 'thirdPartySoftware');
     byId('loggingTab').classList.toggle('active', state.view === 'logging');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
-    byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware'].includes(state.view));
-    byId('softwareDropdownButton').classList.toggle('active', ['windowsUpdates', 'thirdPartySoftware'].includes(state.view));
-    byId('deployTab').classList.toggle('active', state.view === 'deploy');
+    byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'clientActions', 'agentUpdates'].includes(state.view));
+    byId('softwareDropdownButton').classList.toggle('active', ['windowsUpdates', 'thirdPartySoftware', 'softwarePush'].includes(state.view));
+    byId('actionsTab').classList.toggle('active', state.view === 'clientActions');
+    byId('agentUpdatesTab').classList.toggle('active', state.view === 'agentUpdates');
+    byId('softwarePushTab').classList.toggle('active', state.view === 'softwarePush');
     byId('settingsTab').classList.toggle('active', state.view === 'settings');
     const isInventoryView = inventoryViews.includes(state.view);
     const isLinuxInventoryView = linuxInventoryViews.includes(state.view);
@@ -6505,7 +6524,9 @@
   window.addEventListener('hashchange', () => {
     Object.assign(state, getInitialViewState());
     render();
-    if (state.view === 'deploy') loadDeploySubviewData(state.subview);
+    if (state.view === 'clientActions') { loadInstallPreferredSubnet(); }
+    if (state.view === 'softwarePush') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
+    if (state.view === 'agentUpdates') { loadPackageStatus(); loadLinuxPackageStatus(); }
     if (state.view === 'settings') loadSettingsSubviewData(state.subview);
     if (state.view === 'licenses') loadLicensesSubviewData(state.subview);
     if (state.view === 'windowsUpdates') loadWindowsUpdatesSubviewData(state.subview);
@@ -6835,9 +6856,9 @@
       }
     }
   });
-  byId('deploySubtabActions').addEventListener('click', () => setView('deploy', 'actions'));
-  byId('deploySubtabUpdates').addEventListener('click', () => setView('deploy', 'updates'));
-  byId('deploySubtabPackage').addEventListener('click', () => setView('deploy', 'package'));
+  byId('actionsTab').addEventListener('click', () => setView('clientActions'));
+  byId('agentUpdatesTab').addEventListener('click', () => setView('agentUpdates'));
+  byId('softwarePushTab').addEventListener('click', () => setView('softwarePush'));
   byId('settingsSubtabServer').addEventListener('click', () => setView('settings', 'server'));
   byId('settingsSubtabSecurity').addEventListener('click', () => setView('settings', 'security'));
   byId('settingsSubtabCredentials').addEventListener('click', () => setView('settings', 'credentials'));
@@ -6861,7 +6882,6 @@
   byId('windowsUpdatesCatalogSearch').addEventListener('input', renderWindowsUpdates);
   byId('installHistoryClearButton').addEventListener('click', clearInstallHistory);
   byId('softwareJobHistoryClearButton').addEventListener('click', clearSoftwareJobHistory);
-  byId('deployTab').addEventListener('click', () => setView('deploy', 'actions'));
   byId('settingsTab').addEventListener('click', () => setView('settings', 'server'));
 
   function toggleDropdown(buttonId, menuId, forceClosed) {
@@ -7067,7 +7087,9 @@
   byId('logoutButton').addEventListener('click', handleLogout);
   byId('logoutReloadButton').addEventListener('click', () => window.location.reload());
   updateThemeToggle();
-  if (state.view === 'deploy') loadDeploySubviewData(state.subview);
+  if (state.view === 'clientActions') { loadInstallPreferredSubnet(); }
+  if (state.view === 'softwarePush') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
+  if (state.view === 'agentUpdates') { loadPackageStatus(); loadLinuxPackageStatus(); }
   if (state.view === 'settings') loadSettingsSubviewData(state.subview);
   if (state.view === 'licenses') loadLicensesSubviewData(state.subview);
   if (state.view === 'windowsUpdates') loadWindowsUpdatesSubviewData(state.subview);

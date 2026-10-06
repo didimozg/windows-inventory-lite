@@ -29,25 +29,27 @@
       </div>
       <button id="dashboardTab" class="topnav-item active" type="button">Dashboard</button>
       <div class="topnav-dropdown">
-        <button id="fleetDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Fleet <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
+        <button id="fleetDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Fleet <span id="fleetActionsBadge" class="nav-badge hidden">0</span><svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
         <div id="fleetDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
           <button id="clientsTab" class="topnav-dropdown-item" type="button" role="menuitem">Clients</button>
           <button id="softwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Software (Windows)</button>
           <button id="linuxServicesTab" class="topnav-dropdown-item" type="button" role="menuitem">Services (Linux)</button>
           <button id="hardwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Hardware</button>
+          <button id="actionsTab" class="topnav-dropdown-item" type="button" role="menuitem">Actions</button>
+          <button id="agentUpdatesTab" class="topnav-dropdown-item" type="button" role="menuitem">Agent updates</button>
         </div>
       </div>
       <div class="topnav-dropdown">
-        <button id="softwareDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Software <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
+        <button id="softwareDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Software <span id="updatesBadge" class="nav-badge hidden">0</span><span id="linuxUpdatesBadge" class="nav-badge hidden">0</span><span id="softwarePushBadge" class="nav-badge hidden">0</span><svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
         <div id="softwareDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
           <button id="windowsUpdatesTab" class="topnav-dropdown-item" type="button" role="menuitem">Windows updates</button>
           <button id="thirdPartySoftwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Third-party software</button>
+          <button id="softwarePushTab" class="topnav-dropdown-item" type="button" role="menuitem">Push &amp; Schedule</button>
         </div>
       </div>
-      <button id="deployTab" class="topnav-item" type="button">Install <span id="updatesBadge" class="nav-badge hidden">0</span><span id="linuxUpdatesBadge" class="nav-badge hidden">0</span></button>
       <button id="licensesTab" class="topnav-item" type="button">Licenses</button>
       <button id="settingsTab" class="topnav-item" type="button">Settings</button>
-      <button id="loggingTab" class="topnav-item" type="button">Logging <span id="loggingBadge" class="nav-badge hidden">0</span></button>
+      <button id="loggingTab" class="topnav-item" type="button">Logging</button>
       <div class="topnav-spacer"></div>
       <span id="generatedAt" class="nav-status-text hidden">Waiting for inventory data.</span>
       <span id="serverVersionBadge" class="nav-status-text">Server: unknown</span>
@@ -471,7 +473,7 @@
           </div>
           <div class="settings-block">
             <h3 class="settings-block-title">Install defaults</h3>
-            <p class="cert-hint">Used by a Linux client install request that doesn't specify its own interval, status interval, or install path. Deploy &gt; Actions' Linux form currently always sends its own values, so these apply only to requests that omit them (e.g. a future automated install flow).</p>
+            <p class="cert-hint">Used by a Linux client install request that doesn't specify its own interval, status interval, or install path. Fleet &gt; Actions' Linux form currently always sends its own values, so these apply only to requests that omit them (e.g. a future automated install flow).</p>
             <div class="pkg-grid linux-defaults-grid">
               <label class="pkg-token-field">
                 Interval (hours)
@@ -1146,12 +1148,6 @@
           </div>
           <div id="linuxServicesPager" class="pager"></div>
         </section>
-
-        <div id="deploySubtabs" class="subtab-strip hidden" role="tablist" aria-label="Deploy sections">
-          <button id="deploySubtabActions" class="subtab-item" role="tab" type="button">Actions</button>
-          <button id="deploySubtabUpdates" class="subtab-item" role="tab" type="button">Updates</button>
-          <button id="deploySubtabPackage" class="subtab-item" role="tab" type="button">Package</button>
-        </div>
 
         <section id="packageView" class="install-panel card-glow hidden" aria-label="Client package">
           <div class="settings-block">
