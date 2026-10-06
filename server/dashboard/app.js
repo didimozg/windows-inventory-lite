@@ -6220,7 +6220,8 @@
     byId('thirdPartySoftwareTab').classList.toggle('active', state.view === 'thirdPartySoftware');
     byId('loggingTab').classList.toggle('active', state.view === 'logging');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
-    byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'clientActions', 'agentUpdates'].includes(state.view));
+    byId('inventoryDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'licenses'].includes(state.view));
+    byId('fleetDropdownButton').classList.toggle('active', ['clientActions', 'agentUpdates'].includes(state.view));
     byId('softwareDropdownButton').classList.toggle('active', ['windowsUpdates', 'thirdPartySoftware', 'softwareHistory'].includes(state.view));
     byId('softwareHistoryTab').classList.toggle('active', state.view === 'softwareHistory');
     byId('actionsTab').classList.toggle('active', state.view === 'clientActions');
@@ -6937,6 +6938,11 @@
     items[nextIndex].focus();
   }
 
+  byId('inventoryDropdownButton').addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleDropdown('inventoryDropdownButton', 'inventoryDropdownMenu');
+  });
+  byId('inventoryDropdownMenu').addEventListener('keydown', handleDropdownKeydown);
   byId('fleetDropdownButton').addEventListener('click', (event) => {
     event.stopPropagation();
     toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu');
@@ -6959,6 +6965,7 @@
     });
   });
   document.addEventListener('click', () => {
+    toggleDropdown('inventoryDropdownButton', 'inventoryDropdownMenu', true);
     toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu', true);
     toggleDropdown('softwareDropdownButton', 'softwareDropdownMenu', true);
   });

@@ -29,12 +29,18 @@
       </div>
       <button id="dashboardTab" class="topnav-item active" type="button">Dashboard</button>
       <div class="topnav-dropdown">
-        <button id="fleetDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Fleet <span id="fleetActionsBadge" class="nav-badge hidden">0</span><svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
-        <div id="fleetDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
+        <button id="inventoryDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Inventory <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
+        <div id="inventoryDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
           <button id="clientsTab" class="topnav-dropdown-item" type="button" role="menuitem">Clients</button>
+          <button id="hardwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Hardware</button>
           <button id="softwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Software (Windows)</button>
           <button id="linuxServicesTab" class="topnav-dropdown-item" type="button" role="menuitem">Services (Linux)</button>
-          <button id="hardwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Hardware</button>
+          <button id="licensesTab" class="topnav-dropdown-item" type="button" role="menuitem">Licenses</button>
+        </div>
+      </div>
+      <div class="topnav-dropdown">
+        <button id="fleetDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Fleet <span id="fleetActionsBadge" class="nav-badge hidden">0</span><svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
+        <div id="fleetDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
           <button id="actionsTab" class="topnav-dropdown-item" type="button" role="menuitem">Actions</button>
           <button id="agentUpdatesTab" class="topnav-dropdown-item" type="button" role="menuitem">Agent updates</button>
         </div>
@@ -48,7 +54,6 @@
           <button id="softwareHistoryTab" class="topnav-dropdown-item" type="button" role="menuitem">History</button>
         </div>
       </div>
-      <button id="licensesTab" class="topnav-item" type="button">Licenses</button>
       <button id="settingsTab" class="topnav-item" type="button">Settings</button>
       <button id="loggingTab" class="topnav-item" type="button">Logging</button>
       <div class="topnav-spacer"></div>
