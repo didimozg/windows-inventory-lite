@@ -124,7 +124,7 @@
         </div>
 
         <section id="serverSettingsView" class="install-panel card-glow hidden" aria-label="Server settings">
-          <div class="settings-block">
+          <div class="settings-block settings-card">
             <h2 class="settings-block-title">Inventory</h2>
             <div class="pkg-grid general-grid">
               <label class="pkg-token-field">
@@ -144,7 +144,7 @@
             </div>
             <div id="inventorySettingsMessage" class="pkg-message hidden"></div>
           </div>
-          <div class="settings-block">
+          <div class="settings-block settings-card">
             <h2 class="settings-block-title">Network</h2>
             <div class="pkg-grid general-grid">
               <label class="pkg-token-field">
@@ -157,13 +157,6 @@
               </label>
             </div>
             <p class="cert-hint">Disabling HTTP is only possible while HTTPS is enabled and working - otherwise the dashboard would become unreachable. Changing the port or disabling HTTP disconnects this browser session; you'll need to reload the dashboard at the new address.</p>
-            <div class="pkg-buttons">
-              <button id="networkSettingsSaveButton" class="primary-button" type="button">Save</button>
-            </div>
-            <div id="networkSettingsMessage" class="pkg-message hidden"></div>
-          </div>
-          <div class="settings-block">
-            <h2 class="settings-block-title">HTTPS</h2>
             <div class="pkg-grid general-grid">
               <label class="pkg-token-field">
                 HTTPS port
@@ -187,11 +180,11 @@
             </div>
             <p class="cert-hint">HSTS tells browsers to only ever use HTTPS for this server, for the max-age duration - only sent on responses actually served over HTTPS. Off by default: a browser that has cached this can lock itself out of the dashboard for the full max-age if HTTPS is later disabled (e.g. during a certificate emergency). Start with a short max-age and only enable once HTTPS is stable.</p>
             <div class="pkg-buttons">
-              <button id="httpsSettingsSaveButton" class="primary-button" type="button">Save</button>
+              <button id="networkSettingsSaveButton" class="primary-button" type="button">Save</button>
             </div>
-            <div id="httpsSettingsMessage" class="pkg-message hidden"></div>
+            <div id="networkSettingsMessage" class="pkg-message hidden"></div>
           </div>
-          <div class="settings-block">
+          <div class="settings-block settings-card">
             <h2 class="settings-block-title">Outbound proxy</h2>
             <p class="cert-hint">Used by server-initiated outbound downloads (currently: the WSUS cab downloader - see Settings &gt; Credentials for its schedule/status). Leave the host blank to connect directly with no proxy.</p>
             <div class="pkg-grid client-update-grid outbound-proxy-grid">
@@ -218,7 +211,7 @@
             </div>
             <div id="outboundProxyMessage" class="pkg-message hidden"></div>
           </div>
-          <div class="settings-block">
+          <div class="settings-block settings-card">
             <h2 class="settings-block-title">Ingestion Token</h2>
             <p id="ingestionTokenStatusText" class="pkg-status">Loading status...</p>
             <label class="token-value-field">
@@ -240,8 +233,8 @@
             </div>
             <div id="ingestionTokenMessage" class="pkg-message hidden"></div>
           </div>
-          <div class="settings-block">
-            <h2 class="settings-block-title">Log retention</h2>
+          <div class="settings-block settings-card">
+            <h2 class="settings-block-title">Log retention &amp; Diagnostics</h2>
             <div class="pkg-grid general-grid log-retention-grid">
               <label class="pkg-token-field">
                 Client action log retention (days)
@@ -267,13 +260,6 @@
               </label>
             </div>
             <p class="cert-hint">How long each of these logs is kept before being cleaned up automatically (Installs and Software under History &amp; Logs &gt; Task History, Ingestion under History &amp; Logs &gt; System Logs).</p>
-            <div class="pkg-buttons">
-              <button id="logRetentionSaveButton" class="primary-button" type="button">Save</button>
-            </div>
-            <div id="logRetentionMessage" class="pkg-message hidden"></div>
-          </div>
-          <div class="settings-block">
-            <h2 class="settings-block-title">Diagnostics</h2>
             <div class="pkg-grid general-grid">
               <label class="check-label">
                 <input id="generalDebugLogEnabled" type="checkbox">
@@ -292,9 +278,9 @@
             </div>
             <p class="cert-hint">Writes a plain-text log of AD lookups, inventory-report traffic, and server errors to <code id="generalDebugLogPath" class="mono">-</code>. Off by default; only meant to be left on for the duration of a troubleshooting session. Oldest lines are dropped automatically once either cap above is exceeded.</p>
             <div class="pkg-buttons">
-              <button id="diagnosticsSaveButton" class="primary-button" type="button">Save</button>
+              <button id="logRetentionSaveButton" class="primary-button" type="button">Save</button>
             </div>
-            <div id="diagnosticsMessage" class="pkg-message hidden"></div>
+            <div id="logRetentionMessage" class="pkg-message hidden"></div>
           </div>
         </section>
 

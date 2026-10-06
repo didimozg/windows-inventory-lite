@@ -3372,9 +3372,13 @@
       });
   }
 
-  function saveNetworkSettings(confirmedDisruption) {
+  function saveNetworkSettings(confirmedDisruption, acknowledgeRisks) {
     const port = Number.parseInt(byId('generalPort').value, 10) || 8080;
     const enableHttp = byId('generalEnableHttp').checked;
+    const httpsPort = Number.parseInt(byId('generalHttpsPort').value, 10) || 8443;
+    const useHttps = byId('generalUseHttps').checked;
+    const hstsEnabled = byId('generalHstsEnabled').checked;
+    const hstsMaxAgeHours = Number.parseInt(byId('generalHstsMaxAgeHours').value, 10) || 24;
 
     // Only the HTTP port and the Enable HTTP switch can actually move this
     // browser's own connection out from under it.
@@ -3385,6 +3389,7 @@
           + 'You will need to reload the dashboard at the new address afterward. Continue?'
       );
       if (!confirmed) return;
+      confirmedDisruption = true;
     }
 
     byId('networkSettingsSaveButton').disabled = true;
@@ -3394,11 +3399,24 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ port, enableHttp })
+      body: JSON.stringify({ port, enableHttp, httpsPort, useHttps, hstsEnabled, hstsMaxAgeHours, acknowledgeRisks: !!acknowledgeRisks })
     })
-      .then(response => response.json().then(data => ({ ok: response.ok, data })))
-      .then(({ ok, data }) => {
-        if (!ok) throw new Error(data.error || 'Save failed');
+      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
+      .then(({ ok, status, data }) => {
+        if (!ok) {
+          if (status === 409 && (data.risks || []).length) {
+            const confirmed = window.confirm(
+              `${data.error}\n\n${data.risks.join('\n')}\n\nEnable HTTPS anyway?`
+            );
+            if (confirmed) {
+              saveNetworkSettings(true, true);
+              return;
+            }
+            byId('generalUseHttps').checked = false;
+            throw new Error('HTTPS was not enabled.');
+          }
+          throw new Error(data.error || 'Save failed');
+        }
         state.generalLoadedPort = data.port || 8080;
         state.generalLoadedEnableHttp = data.enableHttp !== false;
         renderConnectionStatus(data);
@@ -3409,48 +3427,6 @@
       })
       .finally(() => {
         byId('networkSettingsSaveButton').disabled = false;
-      });
-  }
-
-  function saveHttpsSettings(acknowledgeRisks) {
-    const httpsPort = Number.parseInt(byId('generalHttpsPort').value, 10) || 8443;
-    const useHttps = byId('generalUseHttps').checked;
-    const hstsEnabled = byId('generalHstsEnabled').checked;
-    const hstsMaxAgeHours = Number.parseInt(byId('generalHstsMaxAgeHours').value, 10) || 24;
-
-    byId('httpsSettingsSaveButton').disabled = true;
-    byId('httpsSettingsMessage').className = 'pkg-message hidden';
-
-    fetch('/api/v1/server/settings', {
-      method: 'POST',
-      cache: 'no-store',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ httpsPort, useHttps, hstsEnabled, hstsMaxAgeHours, acknowledgeRisks: !!acknowledgeRisks })
-    })
-      .then(response => response.json().then(data => ({ ok: response.ok, status: response.status, data })))
-      .then(({ ok, status, data }) => {
-        if (!ok) {
-          if (status === 409 && (data.risks || []).length) {
-            const confirmed = window.confirm(
-              `${data.error}\n\n${data.risks.join('\n')}\n\nEnable HTTPS anyway?`
-            );
-            if (confirmed) {
-              saveHttpsSettings(true);
-              return;
-            }
-            byId('generalUseHttps').checked = false;
-            throw new Error('HTTPS was not enabled.');
-          }
-          throw new Error(data.error || 'Save failed');
-        }
-        renderConnectionStatus(data);
-        showSavedMessage(byId('httpsSettingsMessage'), 'Settings saved.', false);
-      })
-      .catch(error => {
-        showSavedMessage(byId('httpsSettingsMessage'), `Save failed: ${error.message}`, true);
-      })
-      .finally(() => {
-        byId('httpsSettingsSaveButton').disabled = false;
       });
   }
 
@@ -3499,6 +3475,9 @@
     const installLogRetentionDays = Number.parseInt(byId('generalInstallLogRetentionDays').value, 10) || 30;
     const softwareJobAttemptLogRetentionDays = Number.parseInt(byId('generalSoftwareJobAttemptLogRetentionDays').value, 10) || 90;
     const softwareJobAttemptLogMaxEntries = Number.parseInt(byId('generalSoftwareJobAttemptLogMaxEntries').value, 10) || 5000;
+    const debugLogEnabled = byId('generalDebugLogEnabled').checked;
+    const debugLogRetentionDays = Number.parseInt(byId('generalDebugLogRetentionDays').value, 10) || 7;
+    const debugLogMaxSizeMb = Number.parseFloat(byId('generalDebugLogMaxSizeMb').value) || 10;
 
     byId('logRetentionSaveButton').disabled = true;
     byId('logRetentionMessage').className = 'pkg-message hidden';
@@ -3507,7 +3486,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ installLogRetentionDays, ingestionRejectionLogRetentionDays, ingestionRejectionLogMaxEntries, softwareJobAttemptLogRetentionDays, softwareJobAttemptLogMaxEntries })
+      body: JSON.stringify({ installLogRetentionDays, ingestionRejectionLogRetentionDays, ingestionRejectionLogMaxEntries, softwareJobAttemptLogRetentionDays, softwareJobAttemptLogMaxEntries, debugLogEnabled, debugLogRetentionDays, debugLogMaxSizeMb })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, data })))
       .then(({ ok, data }) => {
@@ -3519,33 +3498,6 @@
       })
       .finally(() => {
         byId('logRetentionSaveButton').disabled = false;
-      });
-  }
-
-  function saveDiagnosticsSettings() {
-    const debugLogEnabled = byId('generalDebugLogEnabled').checked;
-    const debugLogRetentionDays = Number.parseInt(byId('generalDebugLogRetentionDays').value, 10) || 7;
-    const debugLogMaxSizeMb = Number.parseFloat(byId('generalDebugLogMaxSizeMb').value) || 10;
-
-    byId('diagnosticsSaveButton').disabled = true;
-    byId('diagnosticsMessage').className = 'pkg-message hidden';
-
-    fetch('/api/v1/server/settings', {
-      method: 'POST',
-      cache: 'no-store',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ debugLogEnabled, debugLogRetentionDays, debugLogMaxSizeMb })
-    })
-      .then(response => response.json().then(data => ({ ok: response.ok, data })))
-      .then(({ ok, data }) => {
-        if (!ok) throw new Error(data.error || 'Save failed');
-        showSavedMessage(byId('diagnosticsMessage'), 'Settings saved.', false);
-      })
-      .catch(error => {
-        showSavedMessage(byId('diagnosticsMessage'), `Save failed: ${error.message}`, true);
-      })
-      .finally(() => {
-        byId('diagnosticsSaveButton').disabled = false;
       });
   }
 
@@ -7034,11 +6986,9 @@
     window.location.href = '/api/v1/client-package/download';
   });
   byId('inventorySettingsSaveButton').addEventListener('click', saveInventorySettings);
-  byId('networkSettingsSaveButton').addEventListener('click', () => saveNetworkSettings(false));
-  byId('httpsSettingsSaveButton').addEventListener('click', () => saveHttpsSettings(false));
+  byId('networkSettingsSaveButton').addEventListener('click', () => saveNetworkSettings(false, false));
   byId('ingestionTokenSaveButton').addEventListener('click', () => saveIngestionTokenSettings(false));
   byId('logRetentionSaveButton').addEventListener('click', saveLogRetentionSettings);
-  byId('diagnosticsSaveButton').addEventListener('click', saveDiagnosticsSettings);
   byId('adSettingsSaveButton').addEventListener('click', saveAdSettings);
   byId('windowsInstallDefaultsSaveButton').addEventListener('click', saveWindowsInstallDefaults);
   byId('windowsUpdateInstallWindowSaveButton').addEventListener('click', saveWindowsUpdateInstallWindow);
