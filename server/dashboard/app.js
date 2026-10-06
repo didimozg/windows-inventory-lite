@@ -6028,7 +6028,7 @@
     const rows = [];
     clients.forEach(client => {
       (client.licenses || []).forEach((item, index) => {
-        rows.push({ computer: client.computerName, product: item.product, source: item.source, index });
+        rows.push({ computer: client.computerName, product: item.product, source: item.source, isKms: !!item.isKms, sharedWith: item.sharedWith || [], index });
       });
     });
     return rows;
@@ -6060,12 +6060,19 @@
     const { items: pageItems, page, totalPages } = paginate(sorted, state.page.licensesKeys, state.pageSize.licensesKeys);
     state.page.licensesKeys = page;
 
-    const tableRows = pageItems.map(row => `<tr>
+    const tableRows = pageItems.map(row => {
+      const kmsBadge = row.isKms ? ' <span class="usb-badge" title="This key matches a known Microsoft Generic Volume License Key (GVLK), not a unique retail/MAK key">KMS</span>' : '';
+      const otherComputers = row.sharedWith.filter(name => name !== row.computer);
+      const sharedNote = otherComputers.length
+        ? ` <small title="${escapeHtml(otherComputers.join(', '))}">+${otherComputers.length} more</small>`
+        : '';
+      return `<tr>
         <td>${escapeHtml(row.computer)}</td>
-        <td>${escapeHtml(row.product)}</td>
-        <td class="mono">${escapeHtml(row.source)}</td>
+        <td>${escapeHtml(row.product)}${kmsBadge}</td>
+        <td class="mono">${escapeHtml(row.source)}${sharedNote}</td>
         <td><button class="link-button" type="button" data-reveal-license-key data-client-id="${escapeHtml(row.computer)}" data-license-key-index="${row.index}">•••••• (show)</button></td>
-      </tr>`);
+      </tr>`;
+    });
 
     byId('licensesKeysBody').innerHTML = tableRows.join('') || (state.clientsLoadFailed
       ? '<tr><td colspan="4" class="empty">License keys are not available: the fleet inventory failed to load.</td></tr>'
