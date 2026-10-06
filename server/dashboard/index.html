@@ -485,8 +485,7 @@
         </section>
 
         <section id="linuxSettingsView" class="install-panel card-glow hidden" aria-label="Linux client settings">
-          <div class="updates-top-row">
-          <div class="settings-block">
+          <div class="settings-block settings-card">
             <h3 class="settings-block-title">Linux client targeting</h3>
             <p class="cert-hint">When a Linux host reports several network interfaces, Client updates/actions picks the first IPv4 address it sees by default - not necessarily the one reachable from this server (e.g. a dedicated storage/cluster network reported ahead of the real LAN address). Set a preferred subnet to make that address win instead, regardless of its position in the report. Leave blank to keep the plain first-address behavior.</p>
             <div class="pkg-grid client-update-grid">
@@ -500,7 +499,7 @@
             </div>
             <div id="linuxTargetingMessage" class="pkg-message hidden"></div>
           </div>
-          <div class="settings-block">
+          <div class="settings-block settings-card">
             <h3 class="settings-block-title">Install defaults</h3>
             <p class="cert-hint">Used by a Linux client install request that doesn't specify its own interval, status interval, or install path. Agent Actions &gt; Actions' Linux form currently always sends its own values, so these apply only to requests that omit them (e.g. a future automated install flow).</p>
             <div class="pkg-grid linux-defaults-grid">
@@ -522,8 +521,7 @@
             </div>
             <div id="linuxInstallDefaultsMessage" class="pkg-message hidden"></div>
           </div>
-          </div>
-          <div class="settings-block">
+          <div class="settings-block settings-card">
             <h3 class="settings-block-title">Client self-update</h3>
             <label class="check-label linux-self-update-field">
               <input id="linuxEnableClientSelfUpdate" type="checkbox">
