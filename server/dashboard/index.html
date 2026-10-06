@@ -1209,8 +1209,8 @@
           <div class="settings-block">
             <h3 class="settings-block-title">WinRM credentials</h3>
             <p id="updatesSavedAccountHint" class="cert-hint hidden"></p>
-            <div class="pkg-grid client-update-grid">
-              <label class="pkg-token-field">
+            <div class="pkg-grid client-update-grid credential-manual-grid">
+              <label class="pkg-token-field credential-source-field">
                 WinRM credential source
                 <select id="updatesWinRmAuthMode">
                   <option value="global">Global (saved account, AD fallback)</option>
@@ -1229,22 +1229,24 @@
           </div>
           <div class="settings-block">
             <h3 class="settings-block-title">SSH credentials</h3>
-            <label class="linux-updates-credential-field">
-              SSH credential source
-              <select id="linuxUpdatesAuthMode">
-                <option value="global">Global (saved account, AD fallback)</option>
-                <option value="manual">Manual credentials</option>
-                <option value="key">SSH key</option>
-              </select>
-            </label>
-            <label id="linuxUpdatesCredentialsField" class="linux-updates-credential-field hidden">
-              Linux user
-              <input id="linuxUpdatesUsername" type="text" autocomplete="username" placeholder="root">
-            </label>
-            <label id="linuxUpdatesPasswordField" class="linux-updates-credential-field hidden">
-              Linux password
-              <input id="linuxUpdatesPassword" type="password" autocomplete="current-password">
-            </label>
+            <div class="pkg-grid client-update-grid credential-manual-grid">
+              <label class="pkg-token-field credential-source-field">
+                SSH credential source
+                <select id="linuxUpdatesAuthMode">
+                  <option value="global">Global (saved account, AD fallback)</option>
+                  <option value="manual">Manual credentials</option>
+                  <option value="key">SSH key</option>
+                </select>
+              </label>
+              <label id="linuxUpdatesCredentialsField" class="pkg-token-field hidden">
+                Linux user
+                <input id="linuxUpdatesUsername" type="text" autocomplete="username" placeholder="root">
+              </label>
+              <label id="linuxUpdatesPasswordField" class="pkg-token-field hidden">
+                Linux password
+                <input id="linuxUpdatesPassword" type="password" autocomplete="current-password">
+              </label>
+            </div>
             <label class="check-label linux-updates-trust-field">
               <input id="linuxUpdatesTrustNewHostKeys" type="checkbox">
               Trust new host keys automatically (skip verification)

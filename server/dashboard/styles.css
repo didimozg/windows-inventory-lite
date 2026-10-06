@@ -2092,6 +2092,31 @@ th.sort-desc::after {
   grid-column: 1 / -1;
 }
 
+/* Operations > Agent Actions > Push & Schedule's WinRM/SSH credentials
+   blocks: the credential-source dropdown is a mode selector, not a
+   credential value, so it gets its own full-width row; username and
+   password (when "Manual credentials" reveals them) sit side by side
+   below it in two equal columns instead of either both cramming into
+   one 3-across row (overflowed once already - see the .updates-top-row
+   comment above on why WinRM/SSH were pulled out of a shared row
+   entirely) or stacking one-per-row with mismatched widths (the
+   original complaint this fixes - username and password now share the
+   same minmax(200px, 420px) track, so they're always equal width).
+   Reuses the same 2-column track as .outbound-proxy-grid/
+   .software-repo-grid. margin-bottom replaces the per-field one
+   .linux-updates-credential-field used to supply on its own (SSH's two
+   "Trust new host keys"/"I understand..." checkboxes sit directly below
+   this grid as plain .settings-block children, not inside it, and
+   neither they nor .pkg-grid itself carry their own top-side spacing -
+   see .linux-updates-trust-field's own comment). */
+.credential-manual-grid {
+  grid-template-columns: minmax(200px, 420px) minmax(200px, 420px);
+  margin-bottom: var(--space-md);
+}
+.credential-manual-grid > .credential-source-field {
+  grid-column: 1 / -1;
+}
+
 /* Four short numeric fields (threshold/window/duration/session lifetime) -
    narrower tracks than .client-update-grid's credential-shaped fields,
    matching this block's actual content instead of stretching digits-only

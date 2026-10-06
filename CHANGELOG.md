@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.87.1] - Push & Schedule: WinRM/SSH credential fields unified and aligned
+
+### Fixed
+
+- **Operations > Agent Actions > Push & Schedule's WinRM credentials and SSH credentials blocks now share one layout.** Each block's credential-source dropdown (a mode selector, not a credential value) sits on its own full-width row; when "Manual credentials" reveals the username/password fields, they sit side by side in two equal-width columns instead of WinRM cramming all 3 fields into one row while SSH stacked its fields one per row at mismatched widths. Username and password now always share the same width in both blocks.
+- No field id, label, validation, or Save/schedule behavior changed - purely the grouping/width of already-existing fields. Verified live across Global/Manual/SSH-key credential-source modes and at a narrow (480px) viewport, where the new grid wraps to one column per row with no overflow - the same failure mode a past version of this page's layout hit once already with a wider field set, deliberately avoided here by keeping WinRM and SSH as two separate full-width blocks rather than placing them side by side.
+
+### Notes
+
+- Backlog: `docs/backlog.md`'s "Push & Schedule page: credential-block cleanup" entry closed. The original ask ("two-column, matching Windows schedule's layout") turned out to rest on a wrong premise - Windows schedule is actually a narrow single column, not two-column - and a separate, seemingly contradictory backlog note asked for the opposite (WinRM matching SSH's old stacked layout). Resolved with the user by proposing a third option that satisfies both the literal "two-column" request and the "password width matches username width" request at once, rather than picking one of the two older, conflicting notes blindly.
+
 ## [0.87.0] - Settings: per-block cards, Network/HTTPS and Log retention/Diagnostics merged, WSUS moved into Windows
 
 ### Changed
