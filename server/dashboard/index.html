@@ -41,7 +41,12 @@
       <div class="topnav-dropdown">
         <button id="softwareDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Software <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
         <div id="softwareDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
-          <button id="softwareHistoryTab" class="topnav-dropdown-item" type="button" role="menuitem">History</button>
+        </div>
+      </div>
+      <div class="topnav-dropdown">
+        <button id="historyLogsDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">History &amp; Logs <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
+        <div id="historyLogsDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
+          <button id="taskHistoryTab" class="topnav-dropdown-item" type="button" role="menuitem">Task History</button>
         </div>
       </div>
       <div class="topnav-dropdown">
@@ -266,7 +271,7 @@
                 <input id="generalSoftwareJobAttemptLogMaxEntries" type="number" min="100" max="100000" value="5000">
               </label>
             </div>
-            <p class="cert-hint">How long each of these logs is kept before being cleaned up automatically (Installs and Ingestion under Logging, Software under Software &gt; History).</p>
+            <p class="cert-hint">How long each of these logs is kept before being cleaned up automatically (Installs and Software under History &amp; Logs &gt; Task History, Ingestion under Logging).</p>
             <div class="pkg-buttons">
               <button id="logRetentionSaveButton" class="primary-button" type="button">Save</button>
             </div>
@@ -1092,9 +1097,10 @@
           <pre id="debugLogContent" class="debug-log-content"></pre>
         </section>
 
-        <div id="softwareHistorySubtabs" class="subtab-strip hidden" role="tablist" aria-label="Software history sections">
-          <button id="softwareHistorySubtabInstalls" class="subtab-item" role="tab" type="button">Installs</button>
-          <button id="softwareHistorySubtabWsusDownloads" class="subtab-item" role="tab" type="button">WSUS Downloads</button>
+        <div id="taskHistorySubtabs" class="subtab-strip hidden" role="tablist" aria-label="Task history sections">
+          <button id="taskHistorySubtabSoftware" class="subtab-item" role="tab" type="button">Software Installs</button>
+          <button id="taskHistorySubtabAgentPush" class="subtab-item" role="tab" type="button">Agent Push Jobs</button>
+          <button id="taskHistorySubtabWsusDownloads" class="subtab-item" role="tab" type="button">WSUS Downloads</button>
         </div>
 
         <section id="wsusDownloadLogView" class="hidden" aria-label="WSUS download attempts">
