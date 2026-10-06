@@ -211,9 +211,9 @@
     if (hash === 'licenses') return { view: 'licenses', subview: 'catalog' };
     if (hash === 'licensekeysources') return { view: 'licenses', subview: 'sources' };
     if (hash === 'licenses-keys') return { view: 'licenses', subview: 'keys' };
-    if (hash === 'windowsupdates') return { view: 'windowsUpdates', subview: 'missing' };
-    if (hash === 'windowsupdates-catalog') return { view: 'windowsUpdates', subview: 'catalog' };
-    if (hash === 'thirdpartysoftware') return { view: 'thirdPartySoftware', subview: null };
+    if (hash === 'software-catalog-windows-missing' || hash === 'windowsupdates') return { view: 'softwareCatalog', subview: 'windowsUpdates-missing' };
+    if (hash === 'software-catalog-windows-catalog' || hash === 'windowsupdates-catalog') return { view: 'softwareCatalog', subview: 'windowsUpdates-catalog' };
+    if (hash === 'software-catalog-thirdparty' || hash === 'thirdpartysoftware') return { view: 'softwareCatalog', subview: 'thirdParty' };
     if (hash === 'software-history' || hash === 'softwarejobhistory') return { view: 'softwareHistory', subview: 'installs' };
     if (hash === 'software-history-wsusdownloads' || hash === 'logging-wsusdownloads') return { view: 'softwareHistory', subview: 'wsusDownloads' };
     if (hash === 'logging-installs') return { view: 'logging', subview: 'installs' };
@@ -256,7 +256,7 @@
       return 'settings-server';
     }
     if (view === 'licenses') return subview === 'sources' ? 'licensekeysources' : subview === 'keys' ? 'licenses-keys' : 'licenses';
-    if (view === 'windowsUpdates') return subview === 'catalog' ? 'windowsupdates-catalog' : 'windowsupdates';
+    if (view === 'softwareCatalog') return subview === 'windowsUpdates-catalog' ? 'software-catalog-windows-catalog' : subview === 'thirdParty' ? 'software-catalog-thirdparty' : 'software-catalog-windows-missing';
     if (view === 'logging') return subview === 'installs' ? 'logging-installs' : subview === 'debug' ? 'logging-debug' : 'logging';
     if (view === 'softwareHistory') return subview === 'wsusDownloads' ? 'software-history-wsusdownloads' : 'software-history';
     if (view === 'linuxServices') return 'linux-services';
@@ -279,13 +279,14 @@
     if (subview === 'sources') loadLicenseKeySources();
   }
 
-  function loadWindowsUpdatesSubviewData(subview) {
+  function loadSoftwareCatalogSubviewData(subview) {
     // The Missing-updates row template's "already in catalog" badge
     // (isKbAlreadyInCatalog) cross-references state.windowsUpdates, which
     // otherwise only gets loaded by visiting the Catalog subview - without
     // this, the badge would silently never appear on a fresh page load.
-    if (subview === 'missing') { loadWsusMissingSummary(); loadWindowsUpdates(); }
-    if (subview === 'catalog') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); loadWindowsUpdateAutoCreateSetting(); }
+    if (subview === 'windowsUpdates-missing') { loadWsusMissingSummary(); loadWindowsUpdates(); }
+    if (subview === 'windowsUpdates-catalog') { loadWindowsUpdates(); loadWindowsUpdateDiscovered(); loadWindowsUpdateAutoCreateSetting(); }
+    if (subview === 'thirdParty') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
   }
 
   function loadSettingsSubviewData(subview) {
@@ -310,8 +311,7 @@
     if (view === 'agentUpdates') { loadPackageStatus(); loadLinuxPackageStatus(); }
     if (view === 'settings') loadSettingsSubviewData(state.subview);
     if (view === 'licenses') loadLicensesSubviewData(state.subview);
-    if (view === 'windowsUpdates') loadWindowsUpdatesSubviewData(state.subview);
-    if (view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
+    if (view === 'softwareCatalog') loadSoftwareCatalogSubviewData(state.subview);
     if (view === 'logging') loadLoggingSubviewData(subview);
     if (view === 'softwareHistory') loadSoftwareHistorySubviewData(state.subview);
     // 'clients' and 'hardware' are in this list because both merged views
@@ -347,11 +347,16 @@
     byId('licensesSubtabSources').setAttribute('aria-selected', String(state.view === 'licenses' && state.subview === 'sources'));
     byId('licensesSubtabKeys').classList.toggle('active', state.view === 'licenses' && state.subview === 'keys');
     byId('licensesSubtabKeys').setAttribute('aria-selected', String(state.view === 'licenses' && state.subview === 'keys'));
-    byId('windowsUpdatesSubtabs').classList.toggle('hidden', state.view !== 'windowsUpdates');
-    byId('windowsUpdatesSubtabMissing').classList.toggle('active', state.view === 'windowsUpdates' && state.subview === 'missing');
-    byId('windowsUpdatesSubtabMissing').setAttribute('aria-selected', String(state.view === 'windowsUpdates' && state.subview === 'missing'));
-    byId('windowsUpdatesSubtabCatalog').classList.toggle('active', state.view === 'windowsUpdates' && state.subview === 'catalog');
-    byId('windowsUpdatesSubtabCatalog').setAttribute('aria-selected', String(state.view === 'windowsUpdates' && state.subview === 'catalog'));
+    byId('softwareCatalogSubtabs').classList.toggle('hidden', state.view !== 'softwareCatalog');
+    byId('softwareCatalogSubtabWindowsUpdates').classList.toggle('active', state.view === 'softwareCatalog' && state.subview.indexOf('windowsUpdates') === 0);
+    byId('softwareCatalogSubtabWindowsUpdates').setAttribute('aria-selected', String(state.view === 'softwareCatalog' && state.subview.indexOf('windowsUpdates') === 0));
+    byId('softwareCatalogSubtabThirdParty').classList.toggle('active', state.view === 'softwareCatalog' && state.subview === 'thirdParty');
+    byId('softwareCatalogSubtabThirdParty').setAttribute('aria-selected', String(state.view === 'softwareCatalog' && state.subview === 'thirdParty'));
+    byId('windowsUpdatesSubtabs').classList.toggle('hidden', !(state.view === 'softwareCatalog' && state.subview.indexOf('windowsUpdates') === 0));
+    byId('windowsUpdatesSubtabMissing').classList.toggle('active', state.view === 'softwareCatalog' && state.subview === 'windowsUpdates-missing');
+    byId('windowsUpdatesSubtabMissing').setAttribute('aria-selected', String(state.view === 'softwareCatalog' && state.subview === 'windowsUpdates-missing'));
+    byId('windowsUpdatesSubtabCatalog').classList.toggle('active', state.view === 'softwareCatalog' && state.subview === 'windowsUpdates-catalog');
+    byId('windowsUpdatesSubtabCatalog').setAttribute('aria-selected', String(state.view === 'softwareCatalog' && state.subview === 'windowsUpdates-catalog'));
     byId('loggingSubtabs').classList.toggle('hidden', state.view !== 'logging');
     byId('loggingSubtabIngestion').classList.toggle('active', state.view === 'logging' && state.subview === 'ingestion');
     byId('loggingSubtabIngestion').setAttribute('aria-selected', String(state.view === 'logging' && state.subview === 'ingestion'));
@@ -4459,7 +4464,7 @@
           name: (missingEntry && missingEntry.title) || kbId,
           relativePath: `windows-updates\\${kbId}`
         });
-        setView('windowsUpdates', 'catalog');
+        setView('softwareCatalog', 'windowsUpdates-catalog');
       });
     });
   }
@@ -4475,7 +4480,7 @@
         renderWindowsUpdates();
         // Also refresh Missing updates' "already in catalog" badges - this
         // fetch and loadWsusMissingSummary's are independent and can finish
-        // in either order (loadWindowsUpdatesSubviewData fires both when the
+        // in either order (loadSoftwareCatalogSubviewData fires both when the
         // Missing-updates subview loads), so whichever finishes last must
         // still leave both tables correct.
         renderWsusMissingSummary();
@@ -6185,9 +6190,9 @@
     byId('licensesView').classList.toggle('hidden', !(state.view === 'licenses' && state.subview === 'catalog'));
     byId('licenseKeySourcesView').classList.toggle('hidden', !(state.view === 'licenses' && state.subview === 'sources'));
     byId('licensesKeysView').classList.toggle('hidden', !(state.view === 'licenses' && state.subview === 'keys'));
-    byId('windowsUpdatesMissingView').classList.toggle('hidden', !(state.view === 'windowsUpdates' && state.subview === 'missing'));
-    byId('windowsUpdatesView').classList.toggle('hidden', !(state.view === 'windowsUpdates' && state.subview === 'catalog'));
-    byId('thirdPartySoftwareView').classList.toggle('hidden', state.view !== 'thirdPartySoftware');
+    byId('windowsUpdatesMissingView').classList.toggle('hidden', !(state.view === 'softwareCatalog' && state.subview === 'windowsUpdates-missing'));
+    byId('windowsUpdatesView').classList.toggle('hidden', !(state.view === 'softwareCatalog' && state.subview === 'windowsUpdates-catalog'));
+    byId('thirdPartySoftwareView').classList.toggle('hidden', !(state.view === 'softwareCatalog' && state.subview === 'thirdParty'));
     byId('loggingView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'ingestion'));
     byId('installHistoryView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'installs'));
     byId('softwareJobHistoryView').classList.toggle('hidden', !(state.view === 'softwareHistory' && state.subview === 'installs'));
@@ -6216,13 +6221,13 @@
     byId('softwareTab').classList.toggle('active', state.view === 'software');
     byId('hardwareTab').classList.toggle('active', state.view === 'hardware');
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
-    byId('windowsUpdatesTab').classList.toggle('active', state.view === 'windowsUpdates');
-    byId('thirdPartySoftwareTab').classList.toggle('active', state.view === 'thirdPartySoftware');
+    byId('softwareCatalogTab').classList.toggle('active', state.view === 'softwareCatalog');
+    byId('operationsDropdownButton').classList.toggle('active', ['softwareCatalog'].includes(state.view));
     byId('loggingTab').classList.toggle('active', state.view === 'logging');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
     byId('inventoryDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'licenses'].includes(state.view));
     byId('fleetDropdownButton').classList.toggle('active', ['clientActions', 'agentUpdates'].includes(state.view));
-    byId('softwareDropdownButton').classList.toggle('active', ['windowsUpdates', 'thirdPartySoftware', 'softwareHistory'].includes(state.view));
+    byId('softwareDropdownButton').classList.toggle('active', ['softwareHistory'].includes(state.view));
     byId('softwareHistoryTab').classList.toggle('active', state.view === 'softwareHistory');
     byId('actionsTab').classList.toggle('active', state.view === 'clientActions');
     byId('agentUpdatesTab').classList.toggle('active', state.view === 'agentUpdates');
@@ -6537,8 +6542,7 @@
     if (state.view === 'agentUpdates') { loadPackageStatus(); loadLinuxPackageStatus(); }
     if (state.view === 'settings') loadSettingsSubviewData(state.subview);
     if (state.view === 'licenses') loadLicensesSubviewData(state.subview);
-    if (state.view === 'windowsUpdates') loadWindowsUpdatesSubviewData(state.subview);
-    if (state.view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
+    if (state.view === 'softwareCatalog') loadSoftwareCatalogSubviewData(state.subview);
     if (state.view === 'logging') loadLoggingSubviewData(state.subview);
     if (state.view === 'softwareHistory') loadSoftwareHistorySubviewData(state.subview);
     if (state.view === 'clients' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
@@ -6943,6 +6947,11 @@
     toggleDropdown('inventoryDropdownButton', 'inventoryDropdownMenu');
   });
   byId('inventoryDropdownMenu').addEventListener('keydown', handleDropdownKeydown);
+  byId('operationsDropdownButton').addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleDropdown('operationsDropdownButton', 'operationsDropdownMenu');
+  });
+  byId('operationsDropdownMenu').addEventListener('keydown', handleDropdownKeydown);
   byId('fleetDropdownButton').addEventListener('click', (event) => {
     event.stopPropagation();
     toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu');
@@ -6967,6 +6976,7 @@
   document.addEventListener('click', () => {
     toggleDropdown('inventoryDropdownButton', 'inventoryDropdownMenu', true);
     toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu', true);
+    toggleDropdown('operationsDropdownButton', 'operationsDropdownMenu', true);
     toggleDropdown('softwareDropdownButton', 'softwareDropdownMenu', true);
   });
   byId('windowsCredsSaveButton').addEventListener('click', saveClientUpdateCredentials);
@@ -7053,9 +7063,11 @@
   byId('licenseKeySourceAddButton').addEventListener('click', () => openLicenseKeySourceForm(null));
   byId('licenseKeySourceSaveButton').addEventListener('click', saveLicenseKeySource);
   byId('licenseKeySourceCancelButton').addEventListener('click', closeLicenseKeySourceForm);
-  byId('windowsUpdatesTab').addEventListener('click', () => setView('windowsUpdates', 'missing'));
-  byId('windowsUpdatesSubtabMissing').addEventListener('click', () => setView('windowsUpdates', 'missing'));
-  byId('windowsUpdatesSubtabCatalog').addEventListener('click', () => setView('windowsUpdates', 'catalog'));
+  byId('softwareCatalogTab').addEventListener('click', () => setView('softwareCatalog', 'windowsUpdates-missing'));
+  byId('softwareCatalogSubtabWindowsUpdates').addEventListener('click', () => setView('softwareCatalog', 'windowsUpdates-missing'));
+  byId('softwareCatalogSubtabThirdParty').addEventListener('click', () => setView('softwareCatalog', 'thirdParty'));
+  byId('windowsUpdatesSubtabMissing').addEventListener('click', () => setView('softwareCatalog', 'windowsUpdates-missing'));
+  byId('windowsUpdatesSubtabCatalog').addEventListener('click', () => setView('softwareCatalog', 'windowsUpdates-catalog'));
   byId('windowsUpdateAddButton').addEventListener('click', () => openWindowsUpdateForm(null));
   byId('windowsUpdateSaveButton').addEventListener('click', saveWindowsUpdate);
   byId('windowsUpdateCancelButton').addEventListener('click', closeWindowsUpdateForm);
@@ -7067,7 +7079,6 @@
     byId('windowsUpdateKbIdField').classList.toggle('hidden', mode !== 'missingKb');
     byId('windowsUpdateExcludedComputersField').classList.toggle('hidden', mode !== 'missingKb');
   });
-  byId('thirdPartySoftwareTab').addEventListener('click', () => setView('thirdPartySoftware'));
   byId('thirdPartySoftwareAddButton').addEventListener('click', () => openThirdPartySoftwareForm(null));
   byId('thirdPartySoftwareSaveButton').addEventListener('click', saveThirdPartySoftware);
   byId('thirdPartySoftwareCancelButton').addEventListener('click', closeThirdPartySoftwareForm);
@@ -7108,8 +7119,7 @@
   if (state.view === 'agentUpdates') { loadPackageStatus(); loadLinuxPackageStatus(); }
   if (state.view === 'settings') loadSettingsSubviewData(state.subview);
   if (state.view === 'licenses') loadLicensesSubviewData(state.subview);
-  if (state.view === 'windowsUpdates') loadWindowsUpdatesSubviewData(state.subview);
-  if (state.view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
+  if (state.view === 'softwareCatalog') loadSoftwareCatalogSubviewData(state.subview);
   if (state.view === 'logging') loadLoggingSubviewData(state.subview);
   if (state.view === 'softwareHistory') loadSoftwareHistorySubviewData(state.subview);
   updateInstallFieldVisibility();

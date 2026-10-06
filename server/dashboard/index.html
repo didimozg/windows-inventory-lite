@@ -49,9 +49,13 @@
       <div class="topnav-dropdown">
         <button id="softwareDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Software <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
         <div id="softwareDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
-          <button id="windowsUpdatesTab" class="topnav-dropdown-item" type="button" role="menuitem">Windows updates</button>
-          <button id="thirdPartySoftwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Third-party software</button>
           <button id="softwareHistoryTab" class="topnav-dropdown-item" type="button" role="menuitem">History</button>
+        </div>
+      </div>
+      <div class="topnav-dropdown">
+        <button id="operationsDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Operations <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
+        <div id="operationsDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
+          <button id="softwareCatalogTab" class="topnav-dropdown-item" type="button" role="menuitem">Software Catalog</button>
         </div>
       </div>
       <button id="settingsTab" class="topnav-item" type="button">Settings</button>
@@ -869,6 +873,11 @@
           </div>
           <div id="licensesKeysPager" class="pager"></div>
         </section>
+
+        <div id="softwareCatalogSubtabs" class="subtab-strip hidden" role="tablist" aria-label="Software catalog sections">
+          <button id="softwareCatalogSubtabWindowsUpdates" class="subtab-item" role="tab" type="button">Windows updates</button>
+          <button id="softwareCatalogSubtabThirdParty" class="subtab-item" role="tab" type="button">Third-party software</button>
+        </div>
 
         <div id="windowsUpdatesSubtabs" class="subtab-strip hidden" role="tablist" aria-label="Windows updates sections">
           <button id="windowsUpdatesSubtabMissing" class="subtab-item" role="tab" type="button">Missing updates</button>
