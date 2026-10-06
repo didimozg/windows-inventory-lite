@@ -3105,6 +3105,11 @@ namespace WindowsInventoryLite
                 string plaintextKey = Convert.ToString(license["key"]);
                 bool licenseKeyEncrypted;
                 license["key"] = SecretProtector.Protect(plaintextKey, options, "license key", out licenseKeyEncrypted);
+                string licenseSource = GetStringValue(license, "source");
+                if (licenseSource != null && (licenseSource.StartsWith("Windows activation", StringComparison.OrdinalIgnoreCase) || licenseSource.StartsWith("Office activation", StringComparison.OrdinalIgnoreCase)))
+                {
+                    license["isKms"] = IsKnownGvlk(plaintextKey);
+                }
                 if (!licenseKeyEncrypted)
                 {
                     secretEncryptionDegraded = true;
@@ -9342,6 +9347,71 @@ namespace WindowsInventoryLite
             stream.Write(data, 0, data.Length);
         }
 
+        // One pass over every stored report, independent of the main
+        // per-client loop in LoadClientReports, built specifically to group
+        // identical decrypted Windows/Office activation keys across
+        // machines (primarily useful for KMS/GVLK keys, which are
+        // identical by definition across every machine using them, but
+        // works for any identical detected key) - an admin sees every
+        // machine sharing one at a glance. Only ever looks at entries from
+        // this feature's own two synthetic sources ("Windows activation"/
+        // "Office activation ") - the existing admin-configured "License
+        // key sources" entries are never grouped or compared here.
+        // Group key is product + "\u001f" + decrypted key, matching this
+        // file's own established composite-key separator convention (see
+        // clientSortValue's "os" case).
+        private Dictionary<string, List<string>> BuildSharedActivationKeyGroups()
+        {
+            Dictionary<string, List<string>> groups = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            foreach (string file in Directory.GetFiles(options.DataPath, "*.json"))
+            {
+                try
+                {
+                    Dictionary<string, object> report = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(file, Encoding.UTF8));
+                    if (report == null || !report.ContainsKey("computerName") || !report.ContainsKey("licenses"))
+                    {
+                        continue;
+                    }
+                    string computerName = GetStringValue(report, "computerName");
+                    ArrayList licenses = report["licenses"] as ArrayList;
+                    if (String.IsNullOrEmpty(computerName) || licenses == null)
+                    {
+                        continue;
+                    }
+                    foreach (object licenseItem in licenses)
+                    {
+                        Dictionary<string, object> license = licenseItem as Dictionary<string, object>;
+                        if (license == null) continue;
+                        string source = GetStringValue(license, "source");
+                        if (source == null || !(source.StartsWith("Windows activation", StringComparison.OrdinalIgnoreCase) || source.StartsWith("Office activation", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            continue;
+                        }
+                        if (!license.ContainsKey("key")) continue;
+                        string decryptedKey = SecretProtector.Unprotect(Convert.ToString(license["key"]));
+                        if (String.IsNullOrEmpty(decryptedKey)) continue;
+                        string product = GetStringValue(license, "product") ?? "";
+                        string groupKey = product + "\u001f" + decryptedKey;
+                        List<string> computers;
+                        if (!groups.TryGetValue(groupKey, out computers))
+                        {
+                            computers = new List<string>();
+                            groups[groupKey] = computers;
+                        }
+                        computers.Add(computerName);
+                    }
+                }
+                catch
+                {
+                    // A single unreadable/corrupt report must not abort
+                    // grouping for every other client - same tolerance
+                    // LoadClientReports' own main loop already has.
+                }
+            }
+            return groups;
+        }
+
         internal ArrayList LoadClientReports()
         {
             ArrayList clients = new ArrayList();
@@ -9363,6 +9433,7 @@ namespace WindowsInventoryLite
             // review). Building this map costs O(logEntries) once, and each
             // client's lookup below is then O(1).
             Dictionary<string, IngestionRejectionEntry> newestRejectionByIp = BuildNewestRejectionByIp(rejectionLogSnapshot);
+            Dictionary<string, List<string>> sharedActivationKeyGroups = BuildSharedActivationKeyGroups();
 
             foreach (string file in Directory.GetFiles(options.DataPath, "*.json"))
             {
@@ -9411,6 +9482,22 @@ namespace WindowsInventoryLite
                             Dictionary<string, object> redacted = new Dictionary<string, object>();
                             redacted["product"] = license.ContainsKey("product") ? license["product"] : null;
                             redacted["source"] = license.ContainsKey("source") ? license["source"] : null;
+                            redacted["isKms"] = license.ContainsKey("isKms") && license["isKms"] is bool && (bool)license["isKms"];
+                            string entrySource = GetStringValue(license, "source");
+                            if (entrySource != null && (entrySource.StartsWith("Windows activation", StringComparison.OrdinalIgnoreCase) || entrySource.StartsWith("Office activation", StringComparison.OrdinalIgnoreCase)) && license.ContainsKey("key"))
+                            {
+                                string decryptedKeyForGrouping = SecretProtector.Unprotect(Convert.ToString(license["key"]));
+                                if (!String.IsNullOrEmpty(decryptedKeyForGrouping))
+                                {
+                                    string entryProduct = GetStringValue(license, "product") ?? "";
+                                    string groupKey = entryProduct + "\u001f" + decryptedKeyForGrouping;
+                                    List<string> sharedWith;
+                                    if (sharedActivationKeyGroups.TryGetValue(groupKey, out sharedWith) && sharedWith.Count > 1)
+                                    {
+                                        redacted["sharedWith"] = new ArrayList(sharedWith);
+                                    }
+                                }
+                            }
                             redactedLicenses.Add(redacted);
                         }
                         client["licenses"] = redactedLicenses;
@@ -16963,6 +17050,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ReceiveInventory sets identityIssue when a client's source IP changes from a previous report", TestReceiveInventorySetsIdentityIssueOnIpChange);
             allPassed &= SelfTestCheck(output, "LoadClientReports sets tokenIssue on a client whose IP has a newer rejected attempt", TestLoadClientReportsSetsTokenIssueFromRejectionLog);
             allPassed &= SelfTestCheck(output, "LoadClientReports strips license keys (not just masks them) from the bulk client listing", TestLoadClientReportsRedactsLicenseKeysFromBulkListing);
+            allPassed &= SelfTestCheck(output, "ReceiveInventory marks a license entry whose key matches a known GVLK with isKms=true", TestReceiveInventoryMarksKnownGvlkAsKms);
+            allPassed &= SelfTestCheck(output, "ReceiveInventory does not mark a license entry whose key matches no known GVLK as KMS", TestReceiveInventoryDoesNotMarkUnknownKeyAsKms);
+            allPassed &= SelfTestCheck(output, "LoadClientReports groups an identical decrypted activation key shared across clients and leaves a unique key ungrouped", TestLoadClientReportsGroupsSharedActivationKeyAcrossClients);
             allPassed &= SelfTestCheck(output, "ResolveEffectiveToken falls back to the live server token when the request supplies none", TestResolveEffectiveTokenFallsBackToLiveTokenWhenBlank);
             allPassed &= SelfTestCheck(output, "RequiresIngestionTokenRiskAcknowledgment only fires on an actual on-to-off transition without prior acknowledgment", TestRequiresIngestionTokenRiskAcknowledgmentOnlyWhenTurningEnforcementOff);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
@@ -20878,6 +20968,156 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveInventoryMarksKnownGvlkAsKms()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-gvlkkms-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Headers = new Dictionary<string, string>();
+                // T83GX is the real last 5 characters of the Windows 11/10
+                // Pro GVLK (see Task 1's WindowsGvlkKeys) - simulating what
+                // PartialProductKey would show on a KMS-client-activated
+                // machine.
+                request.Body = "{\"computerName\":\"TEST-KMS-PC\",\"licenses\":[{\"product\":\"Windows 11 Pro\",\"source\":\"Windows activation (partial)\",\"key\":\"T83GX\"}]}";
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveInventory(stream, request);
+                }
+
+                string saved = File.ReadAllText(Path.Combine(options.DataPath, "TEST-KMS-PC.json"), Encoding.UTF8);
+                Dictionary<string, object> report = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(saved);
+                ArrayList licenses = report["licenses"] as ArrayList;
+                Dictionary<string, object> entry = (Dictionary<string, object>)licenses[0];
+                if (!entry.ContainsKey("isKms") || !(bool)entry["isKms"])
+                {
+                    return "expected a license entry whose key matches a known GVLK to be stored with isKms=true";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveInventoryDoesNotMarkUnknownKeyAsKms()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-nongvlkkms-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Headers = new Dictionary<string, string>();
+                request.Body = "{\"computerName\":\"TEST-NONKMS-PC\",\"licenses\":[{\"product\":\"Windows 11 Pro\",\"source\":\"Windows activation (partial)\",\"key\":\"ZZZZZ\"}]}";
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveInventory(stream, request);
+                }
+
+                string saved = File.ReadAllText(Path.Combine(options.DataPath, "TEST-NONKMS-PC.json"), Encoding.UTF8);
+                Dictionary<string, object> report = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(saved);
+                ArrayList licenses = report["licenses"] as ArrayList;
+                Dictionary<string, object> entry = (Dictionary<string, object>)licenses[0];
+                if (entry.ContainsKey("isKms") && (bool)entry["isKms"])
+                {
+                    return "expected a license entry whose key matches no known GVLK to be stored with isKms=false";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestLoadClientReportsGroupsSharedActivationKeyAcrossClients()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-sharedkey-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                bool ignoredSuccess;
+
+                for (int i = 1; i <= 2; i++)
+                {
+                    Dictionary<string, object> report = new Dictionary<string, object>();
+                    report["computerName"] = "SHARED-PC-" + i;
+                    ArrayList licenses = new ArrayList();
+                    Dictionary<string, object> entry = new Dictionary<string, object>();
+                    entry["product"] = "Windows 11 Pro";
+                    entry["source"] = "Windows activation (partial)";
+                    entry["key"] = SecretProtector.Protect("T83GX", options, "license key", out ignoredSuccess);
+                    entry["isKms"] = true;
+                    licenses.Add(entry);
+                    report["licenses"] = licenses;
+                    File.WriteAllText(Path.Combine(options.DataPath, "SHARED-PC-" + i + ".json"), serializer.Serialize(report), Encoding.UTF8);
+                }
+
+                Dictionary<string, object> uniqueReport = new Dictionary<string, object>();
+                uniqueReport["computerName"] = "UNIQUE-PC";
+                ArrayList uniqueLicenses = new ArrayList();
+                Dictionary<string, object> uniqueEntry = new Dictionary<string, object>();
+                uniqueEntry["product"] = "Windows 11 Pro";
+                uniqueEntry["source"] = "Windows activation (partial)";
+                uniqueEntry["key"] = SecretProtector.Protect("QWERT", options, "license key", out ignoredSuccess);
+                uniqueLicenses.Add(uniqueEntry);
+                uniqueReport["licenses"] = uniqueLicenses;
+                File.WriteAllText(Path.Combine(options.DataPath, "UNIQUE-PC.json"), serializer.Serialize(uniqueReport), Encoding.UTF8);
+
+                ArrayList clients = server.LoadClientReports();
+                if (clients.Count != 3)
+                {
+                    return "expected exactly 3 loaded client reports, got " + clients.Count;
+                }
+
+                foreach (object clientObj in clients)
+                {
+                    Dictionary<string, object> client = (Dictionary<string, object>)clientObj;
+                    string computerName = Convert.ToString(client["computerName"]);
+                    ArrayList redactedLicenses = client["licenses"] as ArrayList;
+                    Dictionary<string, object> redactedEntry = (Dictionary<string, object>)redactedLicenses[0];
+
+                    if (computerName == "UNIQUE-PC")
+                    {
+                        if (redactedEntry.ContainsKey("sharedWith"))
+                        {
+                            return "expected UNIQUE-PC's key (shared with no one else) to have no sharedWith field";
+                        }
+                    }
+                    else
+                    {
+                        if (!redactedEntry.ContainsKey("sharedWith"))
+                        {
+                            return "expected " + computerName + "'s entry (shared with SHARED-PC-1/2) to have a sharedWith field";
+                        }
+                        ArrayList sharedWith = (ArrayList)redactedEntry["sharedWith"];
+                        if (sharedWith.Count != 2 || !sharedWith.Contains("SHARED-PC-1") || !sharedWith.Contains("SHARED-PC-2"))
+                        {
+                            return "expected sharedWith to contain both SHARED-PC-1 and SHARED-PC-2, got: " + String.Join(",", sharedWith.ToArray());
+                        }
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
             }
         }
 
