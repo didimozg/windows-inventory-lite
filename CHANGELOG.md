@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.85.0] - Retired the Install nav button; "Software" now means one thing everywhere
+
+### Changed
+
+- **The top-level nav no longer has a separate "Install" button.** Its three sub-tabs moved to where they semantically belong: "Actions" (remote client commands) and "Package" (renamed "Agent updates" - the WIL agent's own self-update) are now in the Fleet dropdown, alongside the rest of "things about machines." "Updates" (renamed "Push & Schedule" - WinRM/SSH credentials-triggers, install schedules, Linux targeting) moved into the Software dropdown, next to the catalogs it actually pushes.
+- **Logging's "Software" and "WSUS Downloads" sub-tabs moved into a new "History" destination inside the Software dropdown**, with their own two-tab strip (Installs / WSUS Downloads). Logging now has only Ingestion/Installs/Debug - all general server/client diagnostics, nothing software-lifecycle-specific left mixed in. "Software" now refers to exactly one thing everywhere it appears in the dashboard: the catalog → push → history lifecycle of third-party software and Windows updates - never installed-inventory (that stays in Fleet) and never an unrelated client action.
+- Every old bookmarked hash for the retired "Install" button and the moved Logging sub-tabs still resolves to its new location.
+- Purely a dashboard routing change - no page's internal content (fields, forms, tables) changed, no server/client behavior changed.
+
+### Notes
+
+- Design: `docs/superpowers/specs/2026-10-06-top-nav-redesign-design.md`. Plan + ledger: `docs/superpowers/plans/2026-10-06-top-nav-redesign.md` / `.superpowers/sdd/progress.md`'s `wil-topnavredesign-` entries.
+- Phase 2 of the dashboard-wide navigation/IA pass (phase 1: the Settings page reorganization, 0.84.0).
+
 ## [0.84.0] - Settings page reorganized into Server/Security/Credentials/Windows/Linux
 
 ### Changed
