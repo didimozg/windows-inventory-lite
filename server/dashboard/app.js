@@ -214,10 +214,10 @@
     if (hash === 'windowsupdates') return { view: 'windowsUpdates', subview: 'missing' };
     if (hash === 'windowsupdates-catalog') return { view: 'windowsUpdates', subview: 'catalog' };
     if (hash === 'thirdpartysoftware') return { view: 'thirdPartySoftware', subview: null };
-    if (hash === 'softwarejobhistory') return { view: 'logging', subview: 'software' };
+    if (hash === 'software-history' || hash === 'softwarejobhistory') return { view: 'softwareHistory', subview: 'installs' };
+    if (hash === 'software-history-wsusdownloads' || hash === 'logging-wsusdownloads') return { view: 'softwareHistory', subview: 'wsusDownloads' };
     if (hash === 'logging-installs') return { view: 'logging', subview: 'installs' };
     if (hash === 'logging-debug') return { view: 'logging', subview: 'debug' };
-    if (hash === 'logging-wsusdownloads') return { view: 'logging', subview: 'wsusdownloads' };
     if (hash === 'logging') return { view: 'logging', subview: 'ingestion' };
     // #linux-clients / #linux are kept as aliases of the merged Clients
     // page (same backward-compat pattern as #linux-hardware above and
@@ -257,7 +257,8 @@
     }
     if (view === 'licenses') return subview === 'sources' ? 'licensekeysources' : subview === 'keys' ? 'licenses-keys' : 'licenses';
     if (view === 'windowsUpdates') return subview === 'catalog' ? 'windowsupdates-catalog' : 'windowsupdates';
-    if (view === 'logging') return subview === 'installs' ? 'logging-installs' : subview === 'software' ? 'softwarejobhistory' : subview === 'debug' ? 'logging-debug' : subview === 'wsusdownloads' ? 'logging-wsusdownloads' : 'logging';
+    if (view === 'logging') return subview === 'installs' ? 'logging-installs' : subview === 'debug' ? 'logging-debug' : 'logging';
+    if (view === 'softwareHistory') return subview === 'wsusDownloads' ? 'software-history-wsusdownloads' : 'software-history';
     if (view === 'linuxServices') return 'linux-services';
     return view;
   }
@@ -265,9 +266,12 @@
   function loadLoggingSubviewData(subview) {
     if (subview === 'ingestion') loadIngestionRejectionLog();
     if (subview === 'installs') loadInstallHistory();
-    if (subview === 'software') loadSoftwareJobHistory();
     if (subview === 'debug') loadDebugLog();
-    if (subview === 'wsusdownloads') loadWsusDownloadLog();
+  }
+
+  function loadSoftwareHistorySubviewData(subview) {
+    if (subview === 'installs') loadSoftwareJobHistory();
+    if (subview === 'wsusDownloads') loadWsusDownloadLog();
   }
 
   function loadLicensesSubviewData(subview) {
@@ -309,6 +313,7 @@
     if (view === 'windowsUpdates') loadWindowsUpdatesSubviewData(state.subview);
     if (view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
     if (view === 'logging') loadLoggingSubviewData(subview);
+    if (view === 'softwareHistory') loadSoftwareHistorySubviewData(state.subview);
     // 'clients' and 'hardware' are in this list because both merged views
     // read Linux data too - opening either tab re-fetches it rather than
     // waiting up to 30s for the next poll tick.
@@ -352,12 +357,13 @@
     byId('loggingSubtabIngestion').setAttribute('aria-selected', String(state.view === 'logging' && state.subview === 'ingestion'));
     byId('loggingSubtabInstalls').classList.toggle('active', state.view === 'logging' && state.subview === 'installs');
     byId('loggingSubtabInstalls').setAttribute('aria-selected', String(state.view === 'logging' && state.subview === 'installs'));
-    byId('loggingSubtabSoftware').classList.toggle('active', state.view === 'logging' && state.subview === 'software');
-    byId('loggingSubtabSoftware').setAttribute('aria-selected', String(state.view === 'logging' && state.subview === 'software'));
     byId('loggingSubtabDebug').classList.toggle('active', state.view === 'logging' && state.subview === 'debug');
     byId('loggingSubtabDebug').setAttribute('aria-selected', String(state.view === 'logging' && state.subview === 'debug'));
-    byId('loggingSubtabWsusDownloads').classList.toggle('active', state.view === 'logging' && state.subview === 'wsusdownloads');
-    byId('loggingSubtabWsusDownloads').setAttribute('aria-selected', String(state.view === 'logging' && state.subview === 'wsusdownloads'));
+    byId('softwareHistorySubtabs').classList.toggle('hidden', state.view !== 'softwareHistory');
+    byId('softwareHistorySubtabInstalls').classList.toggle('active', state.view === 'softwareHistory' && state.subview === 'installs');
+    byId('softwareHistorySubtabInstalls').setAttribute('aria-selected', String(state.view === 'softwareHistory' && state.subview === 'installs'));
+    byId('softwareHistorySubtabWsusDownloads').classList.toggle('active', state.view === 'softwareHistory' && state.subview === 'wsusDownloads');
+    byId('softwareHistorySubtabWsusDownloads').setAttribute('aria-selected', String(state.view === 'softwareHistory' && state.subview === 'wsusDownloads'));
   }
 
   function text(value) {
@@ -6184,9 +6190,9 @@
     byId('thirdPartySoftwareView').classList.toggle('hidden', state.view !== 'thirdPartySoftware');
     byId('loggingView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'ingestion'));
     byId('installHistoryView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'installs'));
-    byId('softwareJobHistoryView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'software'));
+    byId('softwareJobHistoryView').classList.toggle('hidden', !(state.view === 'softwareHistory' && state.subview === 'installs'));
     byId('debugLogView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'debug'));
-    byId('wsusDownloadLogView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'wsusdownloads'));
+    byId('wsusDownloadLogView').classList.toggle('hidden', !(state.view === 'softwareHistory' && state.subview === 'wsusDownloads'));
     byId('linuxServicesView').classList.toggle('hidden', state.view !== 'linuxServices');
     // The former Deploy sections, now standalone views: Fleet > Actions
     // shows both platforms' sections together (stacked, own headings);
@@ -6215,7 +6221,8 @@
     byId('loggingTab').classList.toggle('active', state.view === 'logging');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
     byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'clientActions', 'agentUpdates'].includes(state.view));
-    byId('softwareDropdownButton').classList.toggle('active', ['windowsUpdates', 'thirdPartySoftware', 'softwarePush'].includes(state.view));
+    byId('softwareDropdownButton').classList.toggle('active', ['windowsUpdates', 'thirdPartySoftware', 'softwarePush', 'softwareHistory'].includes(state.view));
+    byId('softwareHistoryTab').classList.toggle('active', state.view === 'softwareHistory');
     byId('actionsTab').classList.toggle('active', state.view === 'clientActions');
     byId('agentUpdatesTab').classList.toggle('active', state.view === 'agentUpdates');
     byId('softwarePushTab').classList.toggle('active', state.view === 'softwarePush');
@@ -6532,6 +6539,7 @@
     if (state.view === 'windowsUpdates') loadWindowsUpdatesSubviewData(state.subview);
     if (state.view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
     if (state.view === 'logging') loadLoggingSubviewData(state.subview);
+    if (state.view === 'softwareHistory') loadSoftwareHistorySubviewData(state.subview);
     if (state.view === 'clients' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
     // See the matching comment in setView - keeps the Software table's
     // License-button matching in sync with state.licenses on every
@@ -6869,9 +6877,10 @@
   byId('licensesSubtabKeys').addEventListener('click', () => setView('licenses', 'keys'));
   byId('loggingSubtabIngestion').addEventListener('click', () => setView('logging', 'ingestion'));
   byId('loggingSubtabInstalls').addEventListener('click', () => setView('logging', 'installs'));
-  byId('loggingSubtabSoftware').addEventListener('click', () => setView('logging', 'software'));
   byId('loggingSubtabDebug').addEventListener('click', () => setView('logging', 'debug'));
-  byId('loggingSubtabWsusDownloads').addEventListener('click', () => setView('logging', 'wsusdownloads'));
+  byId('softwareHistoryTab').addEventListener('click', () => setView('softwareHistory', 'installs'));
+  byId('softwareHistorySubtabInstalls').addEventListener('click', () => setView('softwareHistory', 'installs'));
+  byId('softwareHistorySubtabWsusDownloads').addEventListener('click', () => setView('softwareHistory', 'wsusDownloads'));
   byId('debugLogRefreshButton').addEventListener('click', loadDebugLog);
   byId('ingestionRejectionsClearButton').addEventListener('click', clearIngestionRejectionLog);
   byId('debugLogClearButton').addEventListener('click', clearDebugLog);
@@ -7095,6 +7104,7 @@
   if (state.view === 'windowsUpdates') loadWindowsUpdatesSubviewData(state.subview);
   if (state.view === 'thirdPartySoftware') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
   if (state.view === 'logging') loadLoggingSubviewData(state.subview);
+  if (state.view === 'softwareHistory') loadSoftwareHistorySubviewData(state.subview);
   updateInstallFieldVisibility();
   // Loaded unconditionally so renderClientsTable's empty-state check
   // below (state.licenseKeySources.length > 0) works correctly even when

@@ -45,6 +45,7 @@
           <button id="windowsUpdatesTab" class="topnav-dropdown-item" type="button" role="menuitem">Windows updates</button>
           <button id="thirdPartySoftwareTab" class="topnav-dropdown-item" type="button" role="menuitem">Third-party software</button>
           <button id="softwarePushTab" class="topnav-dropdown-item" type="button" role="menuitem">Push &amp; Schedule</button>
+          <button id="softwareHistoryTab" class="topnav-dropdown-item" type="button" role="menuitem">History</button>
         </div>
       </div>
       <button id="licensesTab" class="topnav-item" type="button">Licenses</button>
@@ -263,7 +264,7 @@
                 <input id="generalSoftwareJobAttemptLogMaxEntries" type="number" min="100" max="100000" value="5000">
               </label>
             </div>
-            <p class="cert-hint">How long each Logging tab's history (Installs / Ingestion / Software) is kept before being cleaned up automatically.</p>
+            <p class="cert-hint">How long each of these logs is kept before being cleaned up automatically (Installs and Ingestion under Logging, Software under Software &gt; History).</p>
             <div class="pkg-buttons">
               <button id="logRetentionSaveButton" class="primary-button" type="button">Save</button>
             </div>
@@ -1048,9 +1049,7 @@
         <div id="loggingSubtabs" class="subtab-strip hidden" role="tablist" aria-label="Logging sections">
           <button id="loggingSubtabIngestion" class="subtab-item" role="tab" type="button">Ingestion</button>
           <button id="loggingSubtabInstalls" class="subtab-item" role="tab" type="button">Installs</button>
-          <button id="loggingSubtabSoftware" class="subtab-item" role="tab" type="button">Software</button>
           <button id="loggingSubtabDebug" class="subtab-item" role="tab" type="button">Debug</button>
-          <button id="loggingSubtabWsusDownloads" class="subtab-item" role="tab" type="button">WSUS Downloads</button>
         </div>
 
         <section id="loggingView" class="hidden" aria-label="Ingestion rejection log">
@@ -1114,6 +1113,11 @@
           <div id="installHistory" class="install-history empty">No saved client action logs.</div>
           <div id="installHistoryJobDetail" class="install-status empty">Select a job above to see its details.</div>
         </section>
+
+        <div id="softwareHistorySubtabs" class="subtab-strip hidden" role="tablist" aria-label="Software history sections">
+          <button id="softwareHistorySubtabInstalls" class="subtab-item" role="tab" type="button">Installs</button>
+          <button id="softwareHistorySubtabWsusDownloads" class="subtab-item" role="tab" type="button">WSUS Downloads</button>
+        </div>
 
         <section id="softwareJobHistoryView" class="hidden" aria-label="Software job attempt history">
           <div class="view-toolbar">
