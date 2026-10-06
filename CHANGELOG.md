@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.85.1] - Follow-up fixes from live review of the nav redesign
+
+### Fixed
+
+- **The Software > History sub-tab strip (Installs / WSUS Downloads) visually disappeared while viewing WSUS Downloads.** Root cause: the sub-tab strip's HTML position was placed between `installHistoryView` and `softwareJobHistoryView`, immediately before the Installs section - but `wsusDownloadLogView` (the WSUS Downloads section) sits earlier in the document, so the strip rendered *after* that section's content instead of above it. The strip's `hidden` toggle itself was always correct (confirmed via its logic); this was purely a DOM-ordering bug, invisible in an accessibility-tree inspection and only caught by looking at the actual rendered page. Moved the strip to sit before both sections so it renders above whichever one is active.
+- **Settings > Security reordered**: the authentication block (Admin password + Login lockout) now comes first, Certificate second - previously the other way around.
+
+### Changed
+
+- **"Push & Schedule" is now its own top-level nav button** (between Fleet and Software), rather than a Software-dropdown item - it's a frequently-used destination on its own, not naturally a sub-item of "Software." Its badges (outdated-client counts, active-push indicator) moved with it.
+
 ## [0.85.0] - Retired the Install nav button; "Software" now means one thing everywhere
 
 ### Changed

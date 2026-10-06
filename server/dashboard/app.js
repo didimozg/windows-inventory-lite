@@ -6221,7 +6221,7 @@
     byId('loggingTab').classList.toggle('active', state.view === 'logging');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
     byId('fleetDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'clientActions', 'agentUpdates'].includes(state.view));
-    byId('softwareDropdownButton').classList.toggle('active', ['windowsUpdates', 'thirdPartySoftware', 'softwarePush', 'softwareHistory'].includes(state.view));
+    byId('softwareDropdownButton').classList.toggle('active', ['windowsUpdates', 'thirdPartySoftware', 'softwareHistory'].includes(state.view));
     byId('softwareHistoryTab').classList.toggle('active', state.view === 'softwareHistory');
     byId('actionsTab').classList.toggle('active', state.view === 'clientActions');
     byId('agentUpdatesTab').classList.toggle('active', state.view === 'agentUpdates');
