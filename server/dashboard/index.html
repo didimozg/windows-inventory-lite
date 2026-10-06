@@ -112,10 +112,10 @@
 
         <div id="settingsSubtabs" class="subtab-strip hidden" role="tablist" aria-label="Settings sections">
           <button id="settingsSubtabServer" class="subtab-item" role="tab" type="button">Server</button>
+          <button id="settingsSubtabSecurity" class="subtab-item" role="tab" type="button">Security</button>
+          <button id="settingsSubtabCredentials" class="subtab-item" role="tab" type="button">Credentials</button>
           <button id="settingsSubtabWindows" class="subtab-item" role="tab" type="button">Windows</button>
           <button id="settingsSubtabLinux" class="subtab-item" role="tab" type="button">Linux</button>
-          <button id="settingsSubtabCertificate" class="subtab-item" role="tab" type="button">Certificate</button>
-          <button id="settingsSubtabAdminPassword" class="subtab-item" role="tab" type="button">Admin password</button>
         </div>
 
         <section id="serverSettingsView" class="install-panel card-glow hidden" aria-label="Server settings">
@@ -451,6 +451,62 @@
             </div>
             <div id="windowsSelfUpdateMessage" class="pkg-message hidden"></div>
           </div>
+        </section>
+
+        <section id="linuxSettingsView" class="install-panel card-glow hidden" aria-label="Linux client settings">
+          <div class="updates-top-row">
+          <div class="settings-block">
+            <h3 class="settings-block-title">Linux client targeting</h3>
+            <p class="cert-hint">When a Linux host reports several network interfaces, Client updates/actions picks the first IPv4 address it sees by default - not necessarily the one reachable from this server (e.g. a dedicated storage/cluster network reported ahead of the real LAN address). Set a preferred subnet to make that address win instead, regardless of its position in the report. Leave blank to keep the plain first-address behavior.</p>
+            <div class="pkg-grid client-update-grid">
+              <label class="pkg-token-field">
+                Preferred subnet (CIDR)
+                <input id="generalPreferredLinuxSubnet" type="text" placeholder="192.168.1.0/24">
+              </label>
+            </div>
+            <div class="pkg-buttons">
+              <button id="linuxTargetingSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="linuxTargetingMessage" class="pkg-message hidden"></div>
+          </div>
+          <div class="settings-block">
+            <h3 class="settings-block-title">Install defaults</h3>
+            <p class="cert-hint">Used by a Linux client install request that doesn't specify its own interval, status interval, or install path. Deploy &gt; Actions' Linux form currently always sends its own values, so these apply only to requests that omit them (e.g. a future automated install flow).</p>
+            <div class="pkg-grid linux-defaults-grid">
+              <label class="pkg-token-field">
+                Interval (hours)
+                <input id="linuxDefaultIntervalHours" type="number" min="1" max="24" value="6">
+              </label>
+              <label class="pkg-token-field">
+                Status check interval (minutes)
+                <input id="linuxDefaultStatusIntervalMinutes" type="number" min="1" max="1440" value="30">
+              </label>
+              <label class="pkg-token-field">
+                Install path
+                <input id="linuxDefaultInstallPath" type="text" value="/opt/windows-inventory-lite">
+              </label>
+            </div>
+            <div class="pkg-buttons">
+              <button id="linuxInstallDefaultsSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="linuxInstallDefaultsMessage" class="pkg-message hidden"></div>
+          </div>
+          </div>
+          <div class="settings-block">
+            <h3 class="settings-block-title">Client self-update</h3>
+            <label class="check-label linux-self-update-field">
+              <input id="linuxEnableClientSelfUpdate" type="checkbox">
+              Enable client self-update
+            </label>
+            <p class="cert-hint">When on, an already-installed Linux client that reports an out-of-date version downloads the current build and swaps its own binary between systemd-timer runs - no SSH push required. Off by default.</p>
+            <div class="pkg-buttons">
+              <button id="linuxSelfUpdateSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="linuxSelfUpdateMessage" class="pkg-message hidden"></div>
+          </div>
+        </section>
+
+        <section id="credentialsView" class="install-panel card-glow hidden" aria-label="Client update credentials">
           <div class="settings-block">
             <h2 class="settings-block-title">Windows Client update credentials</h2>
             <p class="cert-hint">Used by Windows Client actions/updates pushes when "Global" WinRM credential source is selected on those pages. Leave password blank to keep the currently saved value.</p>
@@ -537,59 +593,6 @@
             </div>
             <div id="wsusScheduleMessage" class="pkg-message hidden"></div>
           </div>
-        </section>
-
-        <section id="linuxSettingsView" class="install-panel card-glow hidden" aria-label="Linux client settings">
-          <div class="updates-top-row">
-          <div class="settings-block">
-            <h3 class="settings-block-title">Linux client targeting</h3>
-            <p class="cert-hint">When a Linux host reports several network interfaces, Client updates/actions picks the first IPv4 address it sees by default - not necessarily the one reachable from this server (e.g. a dedicated storage/cluster network reported ahead of the real LAN address). Set a preferred subnet to make that address win instead, regardless of its position in the report. Leave blank to keep the plain first-address behavior.</p>
-            <div class="pkg-grid client-update-grid">
-              <label class="pkg-token-field">
-                Preferred subnet (CIDR)
-                <input id="generalPreferredLinuxSubnet" type="text" placeholder="192.168.1.0/24">
-              </label>
-            </div>
-            <div class="pkg-buttons">
-              <button id="linuxTargetingSaveButton" class="primary-button" type="button">Save</button>
-            </div>
-            <div id="linuxTargetingMessage" class="pkg-message hidden"></div>
-          </div>
-          <div class="settings-block">
-            <h3 class="settings-block-title">Install defaults</h3>
-            <p class="cert-hint">Used by a Linux client install request that doesn't specify its own interval, status interval, or install path. Deploy &gt; Actions' Linux form currently always sends its own values, so these apply only to requests that omit them (e.g. a future automated install flow).</p>
-            <div class="pkg-grid linux-defaults-grid">
-              <label class="pkg-token-field">
-                Interval (hours)
-                <input id="linuxDefaultIntervalHours" type="number" min="1" max="24" value="6">
-              </label>
-              <label class="pkg-token-field">
-                Status check interval (minutes)
-                <input id="linuxDefaultStatusIntervalMinutes" type="number" min="1" max="1440" value="30">
-              </label>
-              <label class="pkg-token-field">
-                Install path
-                <input id="linuxDefaultInstallPath" type="text" value="/opt/windows-inventory-lite">
-              </label>
-            </div>
-            <div class="pkg-buttons">
-              <button id="linuxInstallDefaultsSaveButton" class="primary-button" type="button">Save</button>
-            </div>
-            <div id="linuxInstallDefaultsMessage" class="pkg-message hidden"></div>
-          </div>
-          </div>
-          <div class="settings-block">
-            <h3 class="settings-block-title">Client self-update</h3>
-            <label class="check-label linux-self-update-field">
-              <input id="linuxEnableClientSelfUpdate" type="checkbox">
-              Enable client self-update
-            </label>
-            <p class="cert-hint">When on, an already-installed Linux client that reports an out-of-date version downloads the current build and swaps its own binary between systemd-timer runs - no SSH push required. Off by default.</p>
-            <div class="pkg-buttons">
-              <button id="linuxSelfUpdateSaveButton" class="primary-button" type="button">Save</button>
-            </div>
-            <div id="linuxSelfUpdateMessage" class="pkg-message hidden"></div>
-          </div>
           <div class="settings-block">
             <h2 class="settings-block-title">Linux Client update credentials</h2>
             <p class="cert-hint">Used by Linux Client actions/updates pushes when "Stored Linux credentials" or "SSH key" auth mode is selected on those pages. Leave password blank to keep the currently saved value.</p>
@@ -617,6 +620,8 @@
             <p id="linuxSshToolsStatus" class="cert-hint">Checking plink.exe/pscp.exe status...</p>
             <p class="cert-hint">"Global mode priority" only takes effect when both a password and an SSH key are saved - if only one is configured, that one is always used, same as before this setting existed. On a rejection specific to the primary method (wrong password, refused key), the other is tried automatically for that machine.</p>
             <div id="linuxCredsMessage" class="pkg-message hidden"></div>
+          </div>
+          <div class="settings-block">
             <h2 class="settings-block-title">SSH key</h2>
             <p id="linuxSshKeyStatus" class="pkg-status">Loading SSH key status...</p>
             <div class="pkg-grid pkg-grid-ssh-key">

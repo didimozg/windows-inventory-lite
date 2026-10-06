@@ -230,8 +230,8 @@
     if (hash === 'settings' || hash === 'settings-general' || hash === 'general' || hash === 'settings-server') return { view: 'settings', subview: 'server' };
     if (hash === 'settings-windows') return { view: 'settings', subview: 'windows' };
     if (hash === 'settings-linux') return { view: 'settings', subview: 'linux' };
-    if (hash === 'settings-certificate' || hash === 'certificate') return { view: 'settings', subview: 'certificate' };
-    if (hash === 'settings-admin-password' || hash === 'admin-password' || hash === 'admin') return { view: 'settings', subview: 'adminPassword' };
+    if (hash === 'settings-security' || hash === 'settings-certificate' || hash === 'certificate' || hash === 'settings-admin-password' || hash === 'admin-password' || hash === 'admin') return { view: 'settings', subview: 'security' };
+    if (hash === 'settings-credentials') return { view: 'settings', subview: 'credentials' };
     return { view: 'dashboard', subview: null };
   }
 
@@ -242,8 +242,8 @@
   function computeHashForView(view, subview) {
     if (view === 'deploy') return subview === 'updates' ? 'deploy-updates' : subview === 'package' ? 'deploy-package' : 'deploy-actions';
     if (view === 'settings') {
-      if (subview === 'certificate') return 'settings-certificate';
-      if (subview === 'adminPassword') return 'settings-admin-password';
+      if (subview === 'security') return 'settings-security';
+      if (subview === 'credentials') return 'settings-credentials';
       if (subview === 'windows') return 'settings-windows';
       if (subview === 'linux') return 'settings-linux';
       return 'settings-server';
@@ -286,10 +286,10 @@
 
   function loadSettingsSubviewData(subview) {
     if (subview === 'server') { loadServerSettings(); loadIngestionTokenStatus(); loadOutboundProxySettings(); }
-    if (subview === 'windows') { loadWindowsSettings(); loadClientUpdateCredentials(); loadSoftwareRepositoryCredentials(); loadWsusCabStatus(); loadWsusDownloadSchedule(); }
-    if (subview === 'linux') { loadLinuxSettings(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
-    if (subview === 'certificate') { loadCertificateStatus(); loadCertificateHistory(); }
-    if (subview === 'adminPassword') { loadAdminPasswordStatus(); loadLoginLockoutSettings(); }
+    if (subview === 'windows') { loadWindowsSettings(); }
+    if (subview === 'linux') { loadLinuxSettings(); }
+    if (subview === 'credentials') { loadClientUpdateCredentials(); loadSoftwareRepositoryCredentials(); loadWsusCabStatus(); loadWsusDownloadSchedule(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
+    if (subview === 'security') { loadCertificateStatus(); loadCertificateHistory(); loadAdminPasswordStatus(); loadLoginLockoutSettings(); }
   }
 
   function setView(view, subview) {
@@ -336,10 +336,10 @@
     byId('settingsSubtabWindows').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'windows'));
     byId('settingsSubtabLinux').classList.toggle('active', state.view === 'settings' && state.subview === 'linux');
     byId('settingsSubtabLinux').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'linux'));
-    byId('settingsSubtabCertificate').classList.toggle('active', state.view === 'settings' && state.subview === 'certificate');
-    byId('settingsSubtabCertificate').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'certificate'));
-    byId('settingsSubtabAdminPassword').classList.toggle('active', state.view === 'settings' && state.subview === 'adminPassword');
-    byId('settingsSubtabAdminPassword').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'adminPassword'));
+    byId('settingsSubtabSecurity').classList.toggle('active', state.view === 'settings' && state.subview === 'security');
+    byId('settingsSubtabSecurity').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'security'));
+    byId('settingsSubtabCredentials').classList.toggle('active', state.view === 'settings' && state.subview === 'credentials');
+    byId('settingsSubtabCredentials').setAttribute('aria-selected', String(state.view === 'settings' && state.subview === 'credentials'));
     byId('licensesSubtabs').classList.toggle('hidden', state.view !== 'licenses');
     byId('licensesSubtabCatalog').classList.toggle('active', state.view === 'licenses' && state.subview === 'catalog');
     byId('licensesSubtabCatalog').setAttribute('aria-selected', String(state.view === 'licenses' && state.subview === 'catalog'));
@@ -6183,8 +6183,9 @@
     byId('generalStatusView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'server'));
     byId('windowsSettingsView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'windows'));
     byId('linuxSettingsView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'linux'));
-    byId('certificateView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'certificate'));
-    byId('adminPasswordView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'adminPassword'));
+    byId('credentialsView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'credentials'));
+    byId('certificateView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'security'));
+    byId('adminPasswordView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'security'));
     byId('dashboardTab').classList.toggle('active', state.view === 'dashboard');
     byId('clientsTab').classList.toggle('active', state.view === 'clients');
     byId('softwareTab').classList.toggle('active', state.view === 'software');
@@ -6836,10 +6837,10 @@
   byId('deploySubtabUpdates').addEventListener('click', () => setView('deploy', 'updates'));
   byId('deploySubtabPackage').addEventListener('click', () => setView('deploy', 'package'));
   byId('settingsSubtabServer').addEventListener('click', () => setView('settings', 'server'));
+  byId('settingsSubtabSecurity').addEventListener('click', () => setView('settings', 'security'));
+  byId('settingsSubtabCredentials').addEventListener('click', () => setView('settings', 'credentials'));
   byId('settingsSubtabWindows').addEventListener('click', () => setView('settings', 'windows'));
   byId('settingsSubtabLinux').addEventListener('click', () => setView('settings', 'linux'));
-  byId('settingsSubtabCertificate').addEventListener('click', () => setView('settings', 'certificate'));
-  byId('settingsSubtabAdminPassword').addEventListener('click', () => setView('settings', 'adminPassword'));
   byId('licensesSubtabCatalog').addEventListener('click', () => setView('licenses', 'catalog'));
   byId('licensesSubtabSources').addEventListener('click', () => setView('licenses', 'sources'));
   byId('licensesSubtabKeys').addEventListener('click', () => setView('licenses', 'keys'));
