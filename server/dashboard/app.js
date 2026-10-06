@@ -196,13 +196,14 @@
   // (see docs/superpowers/specs/2026-08-12-dashboard-ui-redesign-design.md,
   // decision 7) - every hash that used to point at one of the 3 old
   // Settings pages now resolves to 'settings' plus a subview. The old
-  // Deploy destination was later split into 3 standalone views
-  // (clientActions/softwarePush/agentUpdates, none carrying a subview) once
-  // its Actions/Updates/Package sections moved out of a shared top-level
-  // button into the Fleet/Software dropdowns. Old hashes are kept as
-  // aliases (matching this function's existing #linux-hardware precedent)
-  // so bookmarks/links still land correctly; settings-*/fleet-*/software-*
-  // are the new canonical hashes setView itself produces going forward.
+  // Deploy destination was later split into 3 standalone views, then
+  // merged back into a single 'agentActions' view with an
+  // actions/push/package subview once its Actions/Push & Schedule/Agent
+  // updates buttons consolidated into the Operations dropdown's Agent
+  // Actions destination. Old hashes are kept as aliases (matching this
+  // function's existing #linux-hardware precedent) so bookmarks/links
+  // still land correctly; settings-*/agent-actions-*/software-* are the
+  // new canonical hashes setView itself produces going forward.
   function getInitialViewState() {
     const hash = window.location.hash.replace(/^#/, '').toLowerCase();
     if (hash === 'clients') return { view: 'clients', subview: null };
@@ -224,9 +225,9 @@
     // #certificate below) - old bookmarks land on Clients, unfiltered.
     if (hash === 'linux-clients' || hash === 'linux') return { view: 'clients', subview: null };
     if (hash === 'linux-services') return { view: 'linuxServices', subview: null };
-    if (hash === 'fleet-actions' || hash === 'deploy' || hash === 'deploy-actions' || hash === 'client-actions' || hash === 'actions' || hash === 'install' || hash === 'linux-client-actions') return { view: 'clientActions', subview: null };
-    if (hash === 'software-push' || hash === 'deploy-updates' || hash === 'client-updates' || hash === 'updates' || hash === 'linux-client-updates') return { view: 'softwarePush', subview: null };
-    if (hash === 'fleet-agent-updates' || hash === 'deploy-package' || hash === 'client-package' || hash === 'package') return { view: 'agentUpdates', subview: null };
+    if (hash === 'agent-actions' || hash === 'fleet-actions' || hash === 'deploy' || hash === 'deploy-actions' || hash === 'client-actions' || hash === 'actions' || hash === 'install' || hash === 'linux-client-actions') return { view: 'agentActions', subview: 'actions' };
+    if (hash === 'agent-actions-push' || hash === 'software-push' || hash === 'deploy-updates' || hash === 'client-updates' || hash === 'updates' || hash === 'linux-client-updates') return { view: 'agentActions', subview: 'push' };
+    if (hash === 'agent-actions-package' || hash === 'fleet-agent-updates' || hash === 'deploy-package' || hash === 'client-package' || hash === 'package') return { view: 'agentActions', subview: 'package' };
     // Old #settings/#settings-general/#general hashes land on Server (the
     // new first tab) rather than disappearing - same backward-compat
     // convention as every other retired hash in this function.
@@ -238,16 +239,13 @@
     return { view: 'dashboard', subview: null };
   }
 
-  // View -> canonical hash. Settings maps through its subview; the former
-  // Deploy views (clientActions/agentUpdates/softwarePush) carry no
-  // subview and each map to their own fixed hash; linuxServices keeps its
-  // existing multi-word hash; everything else's hash equals its view name
-  // unchanged (the merged Clients page falls through to the default and
-  // produces 'clients').
+  // View -> canonical hash. Settings maps through its subview; agentActions
+  // (the former Deploy views) also maps through its subview; linuxServices
+  // keeps its existing multi-word hash; everything else's hash equals its
+  // view name unchanged (the merged Clients page falls through to the
+  // default and produces 'clients').
   function computeHashForView(view, subview) {
-    if (view === 'clientActions') return 'fleet-actions';
-    if (view === 'agentUpdates') return 'fleet-agent-updates';
-    if (view === 'softwarePush') return 'software-push';
+    if (view === 'agentActions') return subview === 'push' ? 'agent-actions-push' : subview === 'package' ? 'agent-actions-package' : 'agent-actions';
     if (view === 'settings') {
       if (subview === 'security') return 'settings-security';
       if (subview === 'credentials') return 'settings-credentials';
@@ -289,6 +287,12 @@
     if (subview === 'thirdParty') { loadThirdPartySoftware(); loadThirdPartySoftwareDiscovered(); }
   }
 
+  function loadAgentActionsSubviewData(subview) {
+    if (subview === 'actions') { loadInstallPreferredSubnet(); }
+    if (subview === 'push') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
+    if (subview === 'package') { loadPackageStatus(); loadLinuxPackageStatus(); }
+  }
+
   function loadSettingsSubviewData(subview) {
     if (subview === 'server') { loadServerSettings(); loadIngestionTokenStatus(); loadOutboundProxySettings(); }
     if (subview === 'windows') { loadWindowsSettings(); }
@@ -306,9 +310,7 @@
       return;
     }
     render();
-    if (view === 'clientActions') { loadInstallPreferredSubnet(); }
-    if (view === 'softwarePush') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
-    if (view === 'agentUpdates') { loadPackageStatus(); loadLinuxPackageStatus(); }
+    if (view === 'agentActions') loadAgentActionsSubviewData(state.subview);
     if (view === 'settings') loadSettingsSubviewData(state.subview);
     if (view === 'licenses') loadLicensesSubviewData(state.subview);
     if (view === 'softwareCatalog') loadSoftwareCatalogSubviewData(state.subview);
@@ -357,6 +359,13 @@
     byId('windowsUpdatesSubtabMissing').setAttribute('aria-selected', String(state.view === 'softwareCatalog' && state.subview === 'windowsUpdates-missing'));
     byId('windowsUpdatesSubtabCatalog').classList.toggle('active', state.view === 'softwareCatalog' && state.subview === 'windowsUpdates-catalog');
     byId('windowsUpdatesSubtabCatalog').setAttribute('aria-selected', String(state.view === 'softwareCatalog' && state.subview === 'windowsUpdates-catalog'));
+    byId('agentActionsSubtabs').classList.toggle('hidden', state.view !== 'agentActions');
+    byId('agentActionsSubtabActions').classList.toggle('active', state.view === 'agentActions' && state.subview === 'actions');
+    byId('agentActionsSubtabActions').setAttribute('aria-selected', String(state.view === 'agentActions' && state.subview === 'actions'));
+    byId('agentActionsSubtabPush').classList.toggle('active', state.view === 'agentActions' && state.subview === 'push');
+    byId('agentActionsSubtabPush').setAttribute('aria-selected', String(state.view === 'agentActions' && state.subview === 'push'));
+    byId('agentActionsSubtabPackage').classList.toggle('active', state.view === 'agentActions' && state.subview === 'package');
+    byId('agentActionsSubtabPackage').setAttribute('aria-selected', String(state.view === 'agentActions' && state.subview === 'package'));
     byId('loggingSubtabs').classList.toggle('hidden', state.view !== 'logging');
     byId('loggingSubtabIngestion').classList.toggle('active', state.view === 'logging' && state.subview === 'ingestion');
     byId('loggingSubtabIngestion').setAttribute('aria-selected', String(state.view === 'logging' && state.subview === 'ingestion'));
@@ -1392,9 +1401,9 @@
   }
 
   // Counts the currently-active install/uninstall poll timer (0 or 1) -
-  // the only visible indicator that a Fleet > Actions job is running once
-  // its own trigger button stopped showing inline progress (see
-  // startClientActionJob). Matches the existing updatesBadge/
+  // the only visible indicator that an Agent Actions > Actions job is
+  // running once its own trigger button stopped showing inline progress
+  // (see startClientActionJob). Matches the existing updatesBadge/
   // linuxUpdatesBadge look (.nav-badge).
   function updateFleetActionsBadge() {
     const badge = byId('fleetActionsBadge');
@@ -1407,8 +1416,8 @@
   }
 
   // Counts currently-active Windows/Linux update-push poll timers (0-2) -
-  // the only visible indicator that a Software > Push & Schedule job is
-  // running once its own trigger button stopped showing inline progress
+  // the only visible indicator that an Agent Actions > Push & Schedule job
+  // is running once its own trigger button stopped showing inline progress
   // (see startMergedUpdatesPush). Matches the existing updatesBadge/
   // linuxUpdatesBadge look (.nav-badge).
   function updateSoftwarePushBadge() {
@@ -1942,10 +1951,10 @@
     const statusParts = [];
     statusParts.push(windowsAvailable
       ? `Windows package: ${formatAvailableVersion(windowsData)} (${windowsData.outdatedCount} outdated)`
-      : 'No Windows client package uploaded yet - build or deploy one on Fleet > Agent updates.');
+      : 'No Windows client package uploaded yet - build or deploy one on Agent Actions > Update Package.');
     statusParts.push(linuxAvailable
       ? `Linux package: v${escapeHtml(linuxData.currentVersion)} (${linuxData.outdatedCount} outdated)`
-      : 'No Linux client package uploaded yet - build one on Fleet > Agent updates.');
+      : 'No Linux client package uploaded yet - build one on Agent Actions > Update Package.');
     byId('updatesPackageStatus').textContent = statusParts.join('. ') + '.';
 
     const entries = []
@@ -3825,7 +3834,7 @@
   // successful generation, so this sets the message classes directly.
   function regenerateIngestionToken() {
     const warningText = state.generalLoadedRequireIngestionToken !== false
-      ? 'Regenerate the ingestion token? Every already-installed client will stop reporting until it is reconfigured with the new token - and any not-yet-deployed GPO package still has the OLD token baked in, so it must be rebuilt from Fleet > Agent updates, not just redeployed. This cannot be undone.'
+      ? 'Regenerate the ingestion token? Every already-installed client will stop reporting until it is reconfigured with the new token - and any not-yet-deployed GPO package still has the OLD token baked in, so it must be rebuilt from Agent Actions > Update Package, not just redeployed. This cannot be undone.'
       : "Regenerate the ingestion token? Already-installed clients are unaffected right now since 'Require ingestion token' is off - but any package rebuilt after this uses the new value, and turning enforcement back on later will require every client to have this value. Continue?";
     const confirmed = window.confirm(warningText);
     if (!confirmed) return;
@@ -6199,13 +6208,13 @@
     byId('debugLogView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'debug'));
     byId('wsusDownloadLogView').classList.toggle('hidden', !(state.view === 'softwareHistory' && state.subview === 'wsusDownloads'));
     byId('linuxServicesView').classList.toggle('hidden', state.view !== 'linuxServices');
-    // The former Deploy sections, now standalone views: Fleet > Actions
-    // shows both platforms' sections together (stacked, own headings);
-    // Software > Push & Schedule and Fleet > Agent updates are each
-    // already cross-platform on one merged section (no stacking needed).
-    byId('installView').classList.toggle('hidden', state.view !== 'clientActions');
-    byId('updatesView').classList.toggle('hidden', state.view !== 'softwarePush');
-    byId('packageView').classList.toggle('hidden', state.view !== 'agentUpdates');
+    // The former Deploy sections, now Operations > Agent Actions' 3
+    // sub-tabs: Actions shows both platforms' sections together (stacked,
+    // own headings); Push & Schedule and Update Package are each already
+    // cross-platform on one merged section (no stacking needed).
+    byId('installView').classList.toggle('hidden', !(state.view === 'agentActions' && state.subview === 'actions'));
+    byId('updatesView').classList.toggle('hidden', !(state.view === 'agentActions' && state.subview === 'push'));
+    byId('packageView').classList.toggle('hidden', !(state.view === 'agentActions' && state.subview === 'package'));
     // Settings: one subview is visible at a time, but Server and Security
     // each render as two sibling sections sharing the same subview key
     // (serverSettingsView+generalStatusView; certificateView+adminPasswordView).
@@ -6222,16 +6231,13 @@
     byId('hardwareTab').classList.toggle('active', state.view === 'hardware');
     byId('licensesTab').classList.toggle('active', state.view === 'licenses');
     byId('softwareCatalogTab').classList.toggle('active', state.view === 'softwareCatalog');
-    byId('operationsDropdownButton').classList.toggle('active', ['softwareCatalog'].includes(state.view));
+    byId('operationsDropdownButton').classList.toggle('active', ['softwareCatalog', 'agentActions'].includes(state.view));
+    byId('agentActionsTab').classList.toggle('active', state.view === 'agentActions');
     byId('loggingTab').classList.toggle('active', state.view === 'logging');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
     byId('inventoryDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'licenses'].includes(state.view));
-    byId('fleetDropdownButton').classList.toggle('active', ['clientActions', 'agentUpdates'].includes(state.view));
     byId('softwareDropdownButton').classList.toggle('active', ['softwareHistory'].includes(state.view));
     byId('softwareHistoryTab').classList.toggle('active', state.view === 'softwareHistory');
-    byId('actionsTab').classList.toggle('active', state.view === 'clientActions');
-    byId('agentUpdatesTab').classList.toggle('active', state.view === 'agentUpdates');
-    byId('softwarePushTab').classList.toggle('active', state.view === 'softwarePush');
     byId('settingsTab').classList.toggle('active', state.view === 'settings');
     const isInventoryView = inventoryViews.includes(state.view);
     const isLinuxInventoryView = linuxInventoryViews.includes(state.view);
@@ -6537,9 +6543,7 @@
   window.addEventListener('hashchange', () => {
     Object.assign(state, getInitialViewState());
     render();
-    if (state.view === 'clientActions') { loadInstallPreferredSubnet(); }
-    if (state.view === 'softwarePush') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
-    if (state.view === 'agentUpdates') { loadPackageStatus(); loadLinuxPackageStatus(); }
+    if (state.view === 'agentActions') loadAgentActionsSubviewData(state.subview);
     if (state.view === 'settings') loadSettingsSubviewData(state.subview);
     if (state.view === 'licenses') loadLicensesSubviewData(state.subview);
     if (state.view === 'softwareCatalog') loadSoftwareCatalogSubviewData(state.subview);
@@ -6869,9 +6873,6 @@
       }
     }
   });
-  byId('actionsTab').addEventListener('click', () => setView('clientActions'));
-  byId('agentUpdatesTab').addEventListener('click', () => setView('agentUpdates'));
-  byId('softwarePushTab').addEventListener('click', () => setView('softwarePush'));
   byId('settingsSubtabServer').addEventListener('click', () => setView('settings', 'server'));
   byId('settingsSubtabSecurity').addEventListener('click', () => setView('settings', 'security'));
   byId('settingsSubtabCredentials').addEventListener('click', () => setView('settings', 'credentials'));
@@ -6919,8 +6920,8 @@
   // Escape closes whichever dropdown menu currently has focus, and returns
   // focus to its trigger button; ArrowDown/ArrowUp move focus between its
   // items, wrapping at each end. Reads from the closest .topnav-dropdown-menu
-  // rather than hardcoding the id, so it works for every dropdown (Fleet,
-  // Software, and any future one) without change.
+  // rather than hardcoding the id, so it works for every dropdown
+  // (Inventory, Operations, Software, and any future one) without change.
   function handleDropdownKeydown(event) {
     if (event.key !== 'Escape' && event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
     const menu = event.target.closest('.topnav-dropdown-menu');
@@ -6952,11 +6953,6 @@
     toggleDropdown('operationsDropdownButton', 'operationsDropdownMenu');
   });
   byId('operationsDropdownMenu').addEventListener('keydown', handleDropdownKeydown);
-  byId('fleetDropdownButton').addEventListener('click', (event) => {
-    event.stopPropagation();
-    toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu');
-  });
-  byId('fleetDropdownMenu').addEventListener('keydown', handleDropdownKeydown);
   byId('softwareDropdownButton').addEventListener('click', (event) => {
     event.stopPropagation();
     toggleDropdown('softwareDropdownButton', 'softwareDropdownMenu');
@@ -6975,7 +6971,6 @@
   });
   document.addEventListener('click', () => {
     toggleDropdown('inventoryDropdownButton', 'inventoryDropdownMenu', true);
-    toggleDropdown('fleetDropdownButton', 'fleetDropdownMenu', true);
     toggleDropdown('operationsDropdownButton', 'operationsDropdownMenu', true);
     toggleDropdown('softwareDropdownButton', 'softwareDropdownMenu', true);
   });
@@ -7068,6 +7063,10 @@
   byId('softwareCatalogSubtabThirdParty').addEventListener('click', () => setView('softwareCatalog', 'thirdParty'));
   byId('windowsUpdatesSubtabMissing').addEventListener('click', () => setView('softwareCatalog', 'windowsUpdates-missing'));
   byId('windowsUpdatesSubtabCatalog').addEventListener('click', () => setView('softwareCatalog', 'windowsUpdates-catalog'));
+  byId('agentActionsTab').addEventListener('click', () => setView('agentActions', 'actions'));
+  byId('agentActionsSubtabActions').addEventListener('click', () => setView('agentActions', 'actions'));
+  byId('agentActionsSubtabPush').addEventListener('click', () => setView('agentActions', 'push'));
+  byId('agentActionsSubtabPackage').addEventListener('click', () => setView('agentActions', 'package'));
   byId('windowsUpdateAddButton').addEventListener('click', () => openWindowsUpdateForm(null));
   byId('windowsUpdateSaveButton').addEventListener('click', saveWindowsUpdate);
   byId('windowsUpdateCancelButton').addEventListener('click', closeWindowsUpdateForm);
@@ -7114,9 +7113,7 @@
   byId('logoutButton').addEventListener('click', handleLogout);
   byId('logoutReloadButton').addEventListener('click', () => window.location.reload());
   updateThemeToggle();
-  if (state.view === 'clientActions') { loadInstallPreferredSubnet(); }
-  if (state.view === 'softwarePush') { loadClientUpdates(); loadClientUpdateCredentials(); loadClientUpdateSchedule(); loadLinuxClientUpdates(); loadLinuxUpdateSchedule(); }
-  if (state.view === 'agentUpdates') { loadPackageStatus(); loadLinuxPackageStatus(); }
+  if (state.view === 'agentActions') loadAgentActionsSubviewData(state.subview);
   if (state.view === 'settings') loadSettingsSubviewData(state.subview);
   if (state.view === 'licenses') loadLicensesSubviewData(state.subview);
   if (state.view === 'softwareCatalog') loadSoftwareCatalogSubviewData(state.subview);

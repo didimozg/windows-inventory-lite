@@ -39,23 +39,16 @@
         </div>
       </div>
       <div class="topnav-dropdown">
-        <button id="fleetDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Fleet <span id="fleetActionsBadge" class="nav-badge hidden">0</span><svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
-        <div id="fleetDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
-          <button id="actionsTab" class="topnav-dropdown-item" type="button" role="menuitem">Actions</button>
-          <button id="agentUpdatesTab" class="topnav-dropdown-item" type="button" role="menuitem">Agent updates</button>
-        </div>
-      </div>
-      <button id="softwarePushTab" class="topnav-item" type="button">Push &amp; Schedule <span id="updatesBadge" class="nav-badge hidden">0</span><span id="linuxUpdatesBadge" class="nav-badge hidden">0</span><span id="softwarePushBadge" class="nav-badge hidden">0</span></button>
-      <div class="topnav-dropdown">
         <button id="softwareDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Software <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
         <div id="softwareDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
           <button id="softwareHistoryTab" class="topnav-dropdown-item" type="button" role="menuitem">History</button>
         </div>
       </div>
       <div class="topnav-dropdown">
-        <button id="operationsDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Operations <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
+        <button id="operationsDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Operations <span id="fleetActionsBadge" class="nav-badge hidden">0</span><span id="updatesBadge" class="nav-badge hidden">0</span><span id="linuxUpdatesBadge" class="nav-badge hidden">0</span><span id="softwarePushBadge" class="nav-badge hidden">0</span><svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
         <div id="operationsDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
           <button id="softwareCatalogTab" class="topnav-dropdown-item" type="button" role="menuitem">Software Catalog</button>
+          <button id="agentActionsTab" class="topnav-dropdown-item" type="button" role="menuitem">Agent Actions</button>
         </div>
       </div>
       <button id="settingsTab" class="topnav-item" type="button">Settings</button>
@@ -483,7 +476,7 @@
           </div>
           <div class="settings-block">
             <h3 class="settings-block-title">Install defaults</h3>
-            <p class="cert-hint">Used by a Linux client install request that doesn't specify its own interval, status interval, or install path. Fleet &gt; Actions' Linux form currently always sends its own values, so these apply only to requests that omit them (e.g. a future automated install flow).</p>
+            <p class="cert-hint">Used by a Linux client install request that doesn't specify its own interval, status interval, or install path. Agent Actions &gt; Actions' Linux form currently always sends its own values, so these apply only to requests that omit them (e.g. a future automated install flow).</p>
             <div class="pkg-grid linux-defaults-grid">
               <label class="pkg-token-field">
                 Interval (hours)
@@ -1166,6 +1159,12 @@
           </div>
           <div id="linuxServicesPager" class="pager"></div>
         </section>
+
+        <div id="agentActionsSubtabs" class="subtab-strip hidden" role="tablist" aria-label="Agent actions sections">
+          <button id="agentActionsSubtabActions" class="subtab-item" role="tab" type="button">Actions</button>
+          <button id="agentActionsSubtabPush" class="subtab-item" role="tab" type="button">Push &amp; Schedule</button>
+          <button id="agentActionsSubtabPackage" class="subtab-item" role="tab" type="button">Update Package</button>
+        </div>
 
         <section id="packageView" class="install-panel card-glow hidden" aria-label="Client package">
           <div class="settings-block">
