@@ -2841,6 +2841,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "MaybeRunWsusScanCore runs when the hash is unchanged but the last scan is older than the configured max age", TestMaybeRunWsusScanCoreRunsWhenStaleByAgeEvenIfHashUnchanged);
             allPassed &= SelfTestCheck(output, "MaybeRunWsusScanCore runs when forced, regardless of hash or age", TestMaybeRunWsusScanCoreRunsWhenForcedEvenIfFreshAndHashUnchanged);
             allPassed &= SelfTestCheck(output, "DecodeDigitalProductIdKey round-trips a synthetic key through the test-only encoder", TestDecodeDigitalProductIdKeyRoundTrip);
+            allPassed &= SelfTestCheck(output, "DecodeDigitalProductIdKey round-trips a synthetic N-key (N not at position 0) through the test-only encoder", TestDecodeDigitalProductIdKeyRoundTripWithN);
             allPassed &= SelfTestCheck(output, "DecodeDigitalProductIdKey returns null for an all-zero (placeholder) DigitalProductId", TestDecodeDigitalProductIdKeyDetectsPlaceholder);
             allPassed &= SelfTestCheck(output, "DecodeDigitalProductIdKey returns null for a too-short DigitalProductId buffer", TestDecodeDigitalProductIdKeyHandlesShortInput);
             return allPassed;
@@ -4110,9 +4111,15 @@ namespace WindowsInventoryLite
             string digits = rawKeyNoDashes;
             if (containsN)
             {
+                // The decoder reconstructs the N position from the FIRST
+                // character of the 24-digit (N-removed) decoded string, then
+                // discards that leading character. To round-trip, the encoder
+                // must supply that same leading digit - base24[nIndex] -
+                // ahead of the remaining 24 non-N digits before running the
+                // multiply-by-24 encoding loop below.
                 int nIndex = digits.IndexOf('N');
-                char reinsertChar = base24[0]; // placeholder removed below is irrelevant to the math; only the 24 non-N digits matter
                 digits = digits.Remove(nIndex, 1);
+                digits = base24[nIndex] + digits;
             }
 
             // Process most-significant digit first (index 0 of the 25-char
@@ -4159,6 +4166,24 @@ namespace WindowsInventoryLite
             return null;
         }
 
+        private static string TestDecodeDigitalProductIdKeyRoundTripWithN()
+        {
+            // Same alphabet-only key shape as the non-N round-trip test above,
+            // but with 'N' spliced into the middle of the 25-char raw key
+            // (index 5, not index 0) so this actually exercises the nIndex
+            // splice/reinsert logic instead of passing by coincidence via the
+            // N-at-position-0 special case.
+            string target = "BCDFG-NHJKM-PQRTV-WXY23-46789";
+            string targetNoDashes = target.Replace("-", "");
+            byte[] blob = EncodeDigitalProductIdKeyForTest(targetNoDashes, true);
+            string decoded = DecodeDigitalProductIdKey(blob);
+            if (decoded != target)
+            {
+                return "expected N-key round-trip decode to reproduce the original key, got '" + decoded + "' expected '" + target + "'";
+            }
+            return null;
+        }
+
         private static string TestDecodeDigitalProductIdKeyDetectsPlaceholder()
         {
             // A real MAK/digital-license machine has nothing meaningful in
@@ -4180,6 +4205,15 @@ namespace WindowsInventoryLite
             if (DecodeDigitalProductIdKey(tooShort) != null)
             {
                 return "expected a too-short DigitalProductId buffer to decode to null, not throw or fabricate a key";
+            }
+
+            // Exact boundary: the minimum valid length is
+            // keyOffset(52) + keyByteCount(15) = 67 bytes. A 66-byte buffer
+            // (one byte short of that) must still decode to null, not throw.
+            byte[] oneByteShort = new byte[66];
+            if (DecodeDigitalProductIdKey(oneByteShort) != null)
+            {
+                return "expected a 66-byte (one byte short of the 67-byte minimum) DigitalProductId buffer to decode to null";
             }
             return null;
         }
