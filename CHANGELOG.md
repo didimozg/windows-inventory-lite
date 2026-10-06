@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.88.0] - Clients table: all status badges consolidated into one Status column
+
+### Changed
+
+- **The Clients table has a new "Status" column**, right after "Computer". Every status badge (USB storage, AWAITING REPORT/STALE, TOKEN MISSING/TOKEN MISMATCH, WU SERVICE UNAVAILABLE) now lives there instead of being scattered across the Computer and Client cells - the Computer cell goes back to just name/platform/domain/IP addresses, and the Client cell to just the version number. A row can show several badges at once (e.g. a stale client with a USB drive and a token mismatch); the column wraps them rather than showing only one.
+- No sort, filter, CSV export, or underlying data behavior changed - sorting by the Client column already keyed off the raw `clientVersion` field, never the badge markup, so moving the badges out had no sort-key impact. Live-verified with a synthetic client carrying all 4 badge types at once, including the row's expand/details panel (now `colspan="11"`, up from 10) and the table's existing horizontal-scroll handling on narrow viewports.
+
+### Notes
+
+- Backlog: `docs/backlog.md`'s "unify the Clients table's status badges into one dedicated column" entry closed. Both scoping risks it flagged turned out to be non-issues once checked against the real code: the version column's sort key never depended on badge markup, and the table has no column-visibility/reorder feature to account for.
+
 ## [0.87.1] - Push & Schedule: WinRM/SSH credential fields unified and aligned
 
 ### Fixed

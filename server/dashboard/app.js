@@ -5454,6 +5454,22 @@
       // agnostic (the Dashboard's USB and Stale tiles already read them off
       // getAllClients()), so these two badges need no platform branch.
       const usbBadge = (state.showUsbStorageIndicator && client.hasUsbStorage) ? ' <span class="usb-badge">USB</span>' : '';
+      const tokenBadge = client.tokenIssue
+        ? ` <span class="usb-badge" title="A recent request from this client's last known address ${client.tokenIssue === 'missing' ? 'had no ingestion token' : 'had a wrong ingestion token'}">${client.tokenIssue === 'missing' ? 'TOKEN MISSING' : 'TOKEN MISMATCH'}</span>`
+        : '';
+      const wuBadge = client.wuServiceUnavailable
+        ? ' <span class="usb-badge" title="The Windows Update service (wuauserv) was not running the last time this client tried to scan for missing updates">WU SERVICE UNAVAILABLE</span>'
+        : '';
+      // Every status indicator for this row lives in one dedicated column
+      // (usbBadge/staleBadge used to sit in the Computer cell, tokenBadge/
+      // wuBadge in the Client cell) - consolidated per a direct user ask,
+      // so an admin has one predictable place to scan regardless of which
+      // underlying field a given indicator is about. A row can show several
+      // at once (e.g. both a token issue and WU unavailable), so this is a
+      // wrapped list, not a single value - .usb-badge's own white-space:
+      // nowrap keeps each individual badge from breaking mid-text while the
+      // cell itself wraps between badges.
+      const statusBadges = `${usbBadge}${staleBadge}${tokenBadge}${wuBadge}`;
       // Windows only, and only when actually reported - piping an absent
       // domain through escapeHtml would print the literal word "Unknown"
       // under every Linux row (same reasoning as hardwareComputerItem).
@@ -5575,8 +5591,9 @@
 
       return `<tr class="${staleClass}">
         ${checkboxCell}
-        <td><button class="link-button" type="button" ${expandAttr}>${escapeHtml(clientDisplayName(client))}</button> <small class="platform-tag">${escapeHtml(clientPlatformLabel(client))}</small>${usbBadge}${staleBadge}${domainHtml}${ipAddressesHtml ? `<small class="mono">${ipAddressesHtml}</small>` : ''}</td>
-        <td>${escapeHtml(client.clientVersion)}${client.tokenIssue ? ` <span class="usb-badge" title="A recent request from this client's last known address ${client.tokenIssue === 'missing' ? 'had no ingestion token' : 'had a wrong ingestion token'}">${client.tokenIssue === 'missing' ? 'TOKEN MISSING' : 'TOKEN MISMATCH'}</span>` : ''}${client.wuServiceUnavailable ? ' <span class="usb-badge" title="The Windows Update service (wuauserv) was not running the last time this client tried to scan for missing updates">WU SERVICE UNAVAILABLE</span>' : ''}</td>
+        <td><button class="link-button" type="button" ${expandAttr}>${escapeHtml(clientDisplayName(client))}</button> <small class="platform-tag">${escapeHtml(clientPlatformLabel(client))}</small>${domainHtml}${ipAddressesHtml ? `<small class="mono">${ipAddressesHtml}</small>` : ''}</td>
+        <td>${statusBadges}</td>
+        <td>${escapeHtml(client.clientVersion)}</td>
         <td>${osCell}</td>
         <td>${officeCell}</td>
         <td>${activationCell}</td>
@@ -5586,7 +5603,7 @@
         <td><button class="danger-button-ghost" type="button" ${deleteAttr}>Delete</button></td>
       </tr>
       <tr class="details-row ${detailsHidden}" ${detailsAttr}>
-        <td colspan="10">
+        <td colspan="11">
           <div class="details">
             <div class="hw-summary">
               <div><strong>CPU</strong><span>${cpuText}</span></div>
@@ -5600,7 +5617,7 @@
       </tr>`;
     });
 
-    byId('inventoryBody').innerHTML = rows.join('') || '<tr><td colspan="10" class="empty">No matching inventory records.</td></tr>';
+    byId('inventoryBody').innerHTML = rows.join('') || '<tr><td colspan="11" class="empty">No matching inventory records.</td></tr>';
     // The clientSoftware <th> elements above are rebuilt from scratch on
     // every call (they live inside inventoryBody's innerHTML, unlike the
     // Clients/Software/Hardware/Licenses <thead>s, which are static in
