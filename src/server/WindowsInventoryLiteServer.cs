@@ -2669,6 +2669,10 @@ namespace WindowsInventoryLite
                         // appended) is unnecessary.
                         SendClientLicenseKeys(stream, request);
                     }
+                    else if (request.Method == "DELETE" && request.Path.IndexOf("/license-keys/", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        DeleteClientLicenseKey(stream, request);
+                    }
                     else if (request.Method == "DELETE" && request.Path.StartsWith("/api/v1/clients/", StringComparison.OrdinalIgnoreCase))
                     {
                         DeleteClient(stream, request);
@@ -4237,6 +4241,79 @@ namespace WindowsInventoryLite
             Dictionary<string, object> response = new Dictionary<string, object>();
             response["licenses"] = licenses;
             SendJson(stream, serializer.Serialize(response));
+        }
+
+        // Removes exactly one entry from a client's stored licenses array by
+        // index, then re-writes the report file. No suppression state is
+        // written anywhere - if the underlying source (registry value, or a
+        // Windows/Office activation) still exists on that machine, the next
+        // report is expected to simply re-populate an equivalent entry. A
+        // concurrent re-collection between page load and this click shares
+        // the same already-accepted race window the reveal-by-index "show"
+        // button already has, not a new risk this introduces.
+        private void DeleteClientLicenseKey(Stream stream, RequestContext request)
+        {
+            const string prefix = "/api/v1/clients/";
+            string rawPath = request.Path;
+            int queryStart = rawPath.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                rawPath = rawPath.Substring(0, queryStart);
+            }
+
+            int lastSlash = rawPath.LastIndexOf('/');
+            string indexSegment = lastSlash >= 0 ? rawPath.Substring(lastSlash + 1) : "";
+            int index;
+            if (!int.TryParse(indexSegment, out index) || index < 0)
+            {
+                SendText(stream, "{\"error\":\"invalid license key index\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            const string suffix = "/license-keys/";
+            int suffixStart = rawPath.IndexOf(suffix, StringComparison.OrdinalIgnoreCase);
+            if (suffixStart < 0 || !rawPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                SendText(stream, "{\"error\":\"client not found\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+            string computerName = Uri.UnescapeDataString(rawPath.Substring(prefix.Length, suffixStart - prefix.Length)).Trim();
+            if (String.IsNullOrEmpty(computerName))
+            {
+                SendText(stream, "{\"error\":\"computer name is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
+            if (!File.Exists(path))
+            {
+                SendText(stream, "{\"error\":\"client not found\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> report;
+            try
+            {
+                report = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"client report could not be read\"}", "application/json; charset=utf-8", 500);
+                return;
+            }
+
+            ArrayList licenses = report != null && report.ContainsKey("licenses") ? report["licenses"] as ArrayList : null;
+            if (licenses == null || index >= licenses.Count)
+            {
+                SendText(stream, "{\"error\":\"license key not found\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+
+            licenses.RemoveAt(index);
+            report["licenses"] = licenses;
+            File.WriteAllText(path, serializer.Serialize(report), Encoding.UTF8);
+            SendJson(stream, "{\"status\":\"deleted\"}");
         }
 
         // Returns true when an AD lookup is due: either there is no
@@ -17135,6 +17212,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "DashboardJs escapes every client-reported field in its table row template, not just normalizes it", TestDashboardJsEscapesClientReportedFieldsInTable);
             allPassed &= SelfTestCheck(output, "ApplyRestrictedConfigAcl grants the current process's own identity, not just Administrators/SYSTEM", TestApplyRestrictedConfigAclGrantsCurrentIdentity);
             allPassed &= SelfTestCheck(output, "GetDecryptedLicenseKeysForClient decrypts stored keys and returns null for an unknown computer", TestGetDecryptedLicenseKeysForClientRoundTripsAndHandlesUnknownComputer);
+            allPassed &= SelfTestCheck(output, "DeleteClientLicenseKey removes only the targeted index, leaving other entries and fields untouched", TestDeleteClientLicenseKeyRemovesOnlyTargetedIndex);
+            allPassed &= SelfTestCheck(output, "DeleteClientLicenseKey returns 404 for an unknown computer", TestDeleteClientLicenseKeyReturns404ForUnknownComputer);
+            allPassed &= SelfTestCheck(output, "DeleteClientLicenseKey returns 404 for an out-of-range index", TestDeleteClientLicenseKeyReturns404ForOutOfRangeIndex);
             allPassed &= SelfTestCheck(output, "SoftwareRepositoryPassword is DPAPI-encrypted at rest", TestSoftwareRepositoryPasswordIsInEncryptedConfigKeys);
             allPassed &= SelfTestCheck(output, "PreviousToken is DPAPI-encrypted at rest", TestPreviousTokenIsInEncryptedConfigKeys);
             allPassed &= SelfTestCheck(output, "SplitDomainUsername handles both DOMAIN\\user and bare-username forms", TestSplitDomainUsernameHandlesBothForms);
@@ -26934,6 +27014,131 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestDeleteClientLicenseKeyRemovesOnlyTargetedIndex()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-deletelicensekey-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                report["computerName"] = "TEST-PC";
+                report["os"] = "Windows 11 Pro";
+                ArrayList licenses = new ArrayList();
+                for (int i = 0; i < 3; i++)
+                {
+                    Dictionary<string, object> entry = new Dictionary<string, object>();
+                    entry["product"] = "Product " + i;
+                    entry["source"] = "Test source " + i;
+                    entry["key"] = "key-" + i;
+                    licenses.Add(entry);
+                }
+                report["licenses"] = licenses;
+                string path = Path.Combine(options.DataPath, "TEST-PC.json");
+                File.WriteAllText(path, serializer.Serialize(report), Encoding.UTF8);
+
+                RequestContext request = new RequestContext();
+                request.Method = "DELETE";
+                request.Path = "/api/v1/clients/TEST-PC/license-keys/1";
+                request.Headers = new Dictionary<string, string>();
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DeleteClientLicenseKey(stream, request);
+                }
+
+                Dictionary<string, object> updated = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                ArrayList updatedLicenses = updated["licenses"] as ArrayList;
+                if (updatedLicenses.Count != 2)
+                {
+                    return "expected exactly 2 remaining license entries after deleting index 1, got " + updatedLicenses.Count;
+                }
+                if (Convert.ToString(((Dictionary<string, object>)updatedLicenses[0])["product"]) != "Product 0" ||
+                    Convert.ToString(((Dictionary<string, object>)updatedLicenses[1])["product"]) != "Product 2")
+                {
+                    return "expected the remaining entries to be 'Product 0' and 'Product 2', in order";
+                }
+                if (Convert.ToString(updated["computerName"]) != "TEST-PC" || Convert.ToString(updated["os"]) != "Windows 11 Pro")
+                {
+                    return "expected other top-level report fields to survive untouched";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestDeleteClientLicenseKeyReturns404ForUnknownComputer()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-deletelicensekey404a-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "DELETE";
+                request.Path = "/api/v1/clients/NO-SUCH-PC/license-keys/0";
+                request.Headers = new Dictionary<string, string>();
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DeleteClientLicenseKey(stream, request);
+                    string response = Encoding.UTF8.GetString(stream.ToArray());
+                    if (response.IndexOf("404", StringComparison.Ordinal) < 0 && response.IndexOf("not found", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 404/not-found response for an unknown computer name, got: " + response;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestDeleteClientLicenseKeyReturns404ForOutOfRangeIndex()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-deletelicensekey404b-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                report["computerName"] = "TEST-PC";
+                report["licenses"] = new ArrayList();
+                File.WriteAllText(Path.Combine(options.DataPath, "TEST-PC.json"), serializer.Serialize(report), Encoding.UTF8);
+
+                RequestContext request = new RequestContext();
+                request.Method = "DELETE";
+                request.Path = "/api/v1/clients/TEST-PC/license-keys/5";
+                request.Headers = new Dictionary<string, string>();
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DeleteClientLicenseKey(stream, request);
+                    string response = Encoding.UTF8.GetString(stream.ToArray());
+                    if (response.IndexOf("404", StringComparison.Ordinal) < 0 && response.IndexOf("not found", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 404/not-found response for an out-of-range index, got: " + response;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
             }
         }
 
