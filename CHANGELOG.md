@@ -6,6 +6,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.90.0] - Automatic Windows/Office activation key detection, KMS marking, shared-key grouping, and a Delete action on collected license keys
+
+### Added
+
+- **Windows and Office activation keys are now detected automatically**, no admin configuration needed, feeding into the existing Licenses > Keys table alongside the admin-configured "License key sources" entries (same table, same encrypt-at-rest/reveal-on-click mechanism - no new storage).
+  - **Windows**: tries, in order, the OEM-firmware-embedded key (`SoftwareLicensingService.OA3xOriginalProductKey`, full key, zero decode risk), then a `DigitalProductId` registry decode (full key, a faithful C# port of the classic base-24 algorithm - includes correctly handling "N"-edition keys and detecting the all-placeholder result a MAK- or digital-license-activated machine produces when no real key was ever entered), then falls back to the last 5 characters (`PartialProductKey`) if neither full-key path yields anything.
+  - **Office**: last 5 characters only (`PartialProductKey`), for Office 2013+/365 - the full key is not recoverable for these versions by design, confirmed directly against Microsoft's own documentation rather than assumed. Office 2010 and earlier (where a full-key decode would be possible) is explicitly out of scope - too rare in a real current fleet to justify the extra work.
+  - **Live-verified on a real Windows 10 Pro machine this session**: real OEM key, real Office partial key, and - via the registry-decode path, confirmed independently against this machine's actual registry bytes - the real, correctly-N-spliced, published Windows 10 Pro GVLK.
+- **KMS marking**: a detected key matching a known Microsoft-published Generic Volume License Key (GVLK) gets a "KMS" badge, computed server-side against an embedded reference table covering every current and recent Windows client/server edition and every Office/Project/Visio LTSC/volume edition, fetched directly from Microsoft's own current documentation.
+- **Shared-key grouping**: when two or more machines report the identical key (compared server-side on the decrypted value, never exposed to do this comparison), every row for that key shows a "+N more" note listing the other machines - primarily useful for KMS/GVLK keys, which are identical by definition across every machine using them, but works for any identical detected key.
+- **A Delete action on every row of the Licenses > Keys table** (both the new auto-detected entries and the existing admin-configured ones) - removes just that one collected entry from the server now. By design, no suppression of future re-collection: if the same source is still detectable on that machine, it is expected and correct for the entry to reappear on its next report.
+
+### Notes
+
+- Closes two `docs/backlog.md` entries: "Automatic license key detection for Windows and Office" and "Delete/Add actions on the Licenses > Keys table" (only "Delete" shipped - "Add", promoting a collected key into the curated Licenses table, is a separate, still-open ask).
+- Windows client version bumped (new report fields - `licenses` entries can now include detected activation keys) alongside the server/dashboard version, per this project's own client-versioning convention.
+- Design: `docs/superpowers/specs/2026-10-06-license-key-detection-design.md`. Plan + ledger: `docs/superpowers/plans/2026-10-06-license-key-detection.md` / `.superpowers/sdd/progress.md`'s `wil-licensekeydetection-` entries.
+- One open question, explicitly not resolved this round: a real `DigitalProductId` that is all-zero AND has the "N"-edition bit set decodes to `"NBBBB-BBBBB-BBBBB-BBBBB-BBBBB"`, which is NOT caught by the current all-placeholder check (that check only catches the non-N all-'B' case) - whether a real MAK- or digital-license-activated Windows 8+ machine actually produces this exact byte pattern was investigated but not confirmed (no such machine was available this session). Revisit if a false-looking "real" key is ever reported from a MAK/digital-license machine in practice.
+
 ## [0.89.0] - Dashboard: new Security card (Critical-KB clients, top clients by missing updates, missing updates by severity)
 
 ### Added
