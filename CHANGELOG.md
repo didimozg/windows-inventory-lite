@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.86.0] - Nav replaced again: Inventory/Operations/History & Logs/Settings
+
+### Changed
+
+- **The top-level nav was fully replaced a second time**, now grouped by what kind of work the admin is doing rather than by software-lifecycle stage: `Dashboard | Inventory▾ | Operations▾ | History & Logs▾ | Settings`.
+  - **Inventory** - Clients, Hardware, Software (Windows), Services (Linux) (all unchanged, just relocated), plus Licenses (moved out of its own standalone top-level button, keeping its own Catalog/Sources/Keys sub-tabs unchanged).
+  - **Operations** - "Software Catalog" (Windows updates and Third-party software, under a new 2-level tab pattern: an outer Windows-updates/Third-party-software switch, with Windows updates keeping its own existing Missing-updates/Catalog sub-tabs nested inside); "Agent Actions" (merges the old Fleet > Actions, the standalone Push & Schedule button, and Fleet > Agent updates into one destination with 3 flat sub-tabs - Actions / Push & Schedule / Update Package - every form unchanged, pure UI regrouping, since Actions and Push & Schedule's push button already shared the same `InstallJob` dispatch mechanism underneath).
+  - **History & Logs** - "Task History" (3 sub-tabs merging Software > History > Installs, Logging > Installs [renamed "Agent Push Jobs"], and Software > History > WSUS Downloads - still 3 independently-sourced tables, just grouped under one destination, no data-model merge); "System Logs" (Ingestion + Debug, Logging's remaining general diagnostics).
+  - Every badge (install-job activity, outdated-client counts) now lives on the Operations dropdown button.
+  - Every hash from every prior nav generation this project has ever had still resolves to its correct new destination - verified end to end.
+- Purely a dashboard routing change - no server/client behavior changed, no page's internal fields/forms/tables changed beyond a handful of stale "Fleet >"/"Logging >"/"Software >" nav-location references in hint text and code comments, corrected to match.
+
+### Notes
+
+- Design: `docs/superpowers/specs/2026-10-06-nav-restructure-v2-design.md`. Plan + ledger: `docs/superpowers/plans/2026-10-06-nav-restructure-v2.md` / `.superpowers/sdd/progress.md`'s `wil-navrestructurev2-` entries.
+- Supersedes the Fleet/Push & Schedule/Software/Logging structure shipped as 0.85.0/0.85.1 earlier today - that structure is retired, not just extended.
+- A data-architecture inventory of every dashboard section (what it shows, where the data comes from, platform scope) was written ahead of this phase to ground the redesign discussion: `docs/dashboard-data-architecture.md` (as-of-0.85.1 snapshot, not a living doc).
+
 ## [0.85.1] - Follow-up fixes from live review of the nav redesign
 
 ### Fixed
