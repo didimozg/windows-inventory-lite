@@ -1277,7 +1277,9 @@ namespace WindowsInventoryLite
             ArrayList installedSoftware = options.SkipSoftware ? new ArrayList() : GetInstalledSoftware();
             result["office"] = GetOfficeVersion(installedSoftware);
             result["activation"] = GetActivation();
-            result["licenses"] = GetLicenseKeys();
+            ArrayList licenseKeys = GetLicenseKeys();
+            licenseKeys.AddRange(GetWindowsAndOfficeActivationKeys());
+            result["licenses"] = licenseKeys;
             result["software"] = installedSoftware;
 
             result["cpu"] = GetCpu();
@@ -1632,6 +1634,135 @@ namespace WindowsInventoryLite
             }
 
             return result;
+        }
+
+        // Separate from GetActivation()/GetActivationState() deliberately -
+        // those two have a narrow, already-tested job (the Clients table's
+        // activated/not-activated checkmarks); this re-runs its own copy of
+        // their WMI query rather than widening their return shape and
+        // risking that existing behavior. One extra cheap WMI call per
+        // report cycle.
+        private ArrayList GetWindowsAndOfficeActivationKeys()
+        {
+            ArrayList result = new ArrayList();
+            string query = "SELECT Name, ApplicationID, LicenseStatus, PartialProductKey FROM SoftwareLicensingProduct WHERE PartialProductKey IS NOT NULL";
+            ArrayList products = QueryList(query, "root\\cimv2");
+
+            Dictionary<string, object> windowsProduct = null;
+            Dictionary<string, object> officeProduct = null;
+            foreach (object item in products)
+            {
+                Dictionary<string, object> product = item as Dictionary<string, object>;
+                if (product == null) continue;
+                string name = GetString(product, "Name");
+                string applicationId = GetString(product, "ApplicationID");
+                object licenseStatus = product.ContainsKey("LicenseStatus") ? product["LicenseStatus"] : null;
+                bool activated = licenseStatus != null && Convert.ToInt32(licenseStatus) == 1;
+                if (!activated) continue;
+
+                bool isWindows = name != null && name.IndexOf("Windows", StringComparison.OrdinalIgnoreCase) >= 0;
+                bool isOffice = (applicationId != null && applicationId.Equals("0ff1ce15-a989-479d-af46-f275c6370663", StringComparison.OrdinalIgnoreCase)) ||
+                                 (name != null && name.IndexOf("Office", StringComparison.OrdinalIgnoreCase) >= 0);
+
+                if (isWindows && windowsProduct == null) windowsProduct = product;
+                else if (isOffice && officeProduct == null) officeProduct = product;
+            }
+
+            if (windowsProduct != null)
+            {
+                string windowsName = GetString(windowsProduct, "Name");
+                string fullKey = null;
+                string source = null;
+
+                try
+                {
+                    string oa3xKey = GetWindowsOa3xOriginalProductKey();
+                    if (!String.IsNullOrEmpty(oa3xKey))
+                    {
+                        fullKey = oa3xKey;
+                        source = "Windows activation (OEM firmware)";
+                    }
+                }
+                catch
+                {
+                    // OA3xOriginalProductKey can throw on a machine with no
+                    // OEM-embedded key at all (not every SKU has the WMI
+                    // method/property) - absence is normal, not an error.
+                }
+
+                if (fullKey == null)
+                {
+                    try
+                    {
+                        byte[] digitalProductId = ReadRegistryBinary(Registry.LocalMachine, @"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "DigitalProductId");
+                        string decoded = DecodeDigitalProductIdKey(digitalProductId);
+                        if (!String.IsNullOrEmpty(decoded))
+                        {
+                            fullKey = decoded;
+                            source = "Windows activation (registry)";
+                        }
+                    }
+                    catch
+                    {
+                        // A missing/unreadable registry value is a normal
+                        // outcome (permissions, non-standard install) - fall
+                        // through to the partial-key fallback below.
+                    }
+                }
+
+                if (fullKey != null)
+                {
+                    Dictionary<string, object> entry = new Dictionary<string, object>();
+                    entry["product"] = windowsName;
+                    entry["source"] = source;
+                    entry["key"] = fullKey;
+                    result.Add(entry);
+                }
+                else
+                {
+                    string partial = GetString(windowsProduct, "PartialProductKey");
+                    if (!String.IsNullOrEmpty(partial))
+                    {
+                        Dictionary<string, object> entry = new Dictionary<string, object>();
+                        entry["product"] = windowsName;
+                        entry["source"] = "Windows activation (partial)";
+                        entry["key"] = partial;
+                        result.Add(entry);
+                    }
+                }
+            }
+
+            if (officeProduct != null)
+            {
+                string partial = GetString(officeProduct, "PartialProductKey");
+                if (!String.IsNullOrEmpty(partial))
+                {
+                    Dictionary<string, object> entry = new Dictionary<string, object>();
+                    entry["product"] = GetString(officeProduct, "Name");
+                    entry["source"] = "Office activation (partial)";
+                    entry["key"] = partial;
+                    result.Add(entry);
+                }
+            }
+
+            return result;
+        }
+
+        private static string GetWindowsOa3xOriginalProductKey()
+        {
+            ArrayList rows = QueryList("SELECT OA3xOriginalProductKey FROM SoftwareLicensingService", "root\\cimv2");
+            if (rows.Count == 0) return null;
+            Dictionary<string, object> row = (Dictionary<string, object>)rows[0];
+            return GetString(row, "OA3xOriginalProductKey");
+        }
+
+        private static byte[] ReadRegistryBinary(RegistryKey root, string subKeyPath, string valueName)
+        {
+            using (RegistryKey key = root.OpenSubKey(subKeyPath))
+            {
+                if (key == null) return null;
+                return key.GetValue(valueName, null) as byte[];
+            }
         }
 
         private Dictionary<string, object> GetActivation()
