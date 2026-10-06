@@ -2187,13 +2187,16 @@ th.sort-desc::after {
   gap: var(--space-lg);
   margin-bottom: 18px;
   padding-bottom: var(--space-lg);
-  /* This wrapper carries the ONLY section divider across all three pages
-     that use it (Windows Client updates, Linux Client updates, and
-     Settings > Linux) - .settings-block below sets border-bottom: none
-     once nested here - so it needs the same --divider-strong contrast fix
-     as .settings-block/.subtab-strip themselves (see the dark-mode
+  /* This wrapper carries the section divider for its one remaining user,
+     Push & Schedule's Windows schedule / Linux schedule / Linux client
+     targeting row - .settings-block below sets border-bottom: none once
+     nested here - so it needs the same --divider-strong contrast fix as
+     .settings-block/.subtab-strip themselves (see the dark-mode
      --divider-strong comment), not the plain --line every other border on
-     the page uses. */
+     the page uses. Settings > Linux used to be a second user of this
+     class; its two blocks were pulled out into standalone full-width
+     .settings-card blocks to fix an asymmetric-height spacing bug (see
+     docs/superpowers/specs/2026-10-06-settings-cards-regroup-design.md). */
   border-bottom: 1px solid var(--divider-strong, var(--line));
 }
 

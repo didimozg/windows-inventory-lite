@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.87.0] - Settings: per-block cards, Network/HTTPS and Log retention/Diagnostics merged, WSUS moved into Windows
+
+### Changed
+
+- **Every Save-button block in Settings > Server/Windows/Linux is now its own full-width card**, matching how "Connection status" already looked, instead of a divider-separated sub-section packed inside one large shared card.
+- **Settings > Server**: "Network" and "HTTPS" merged back into one "Network" block with one Save button (HTTP port/Enable HTTP, HTTPS port/Enable HTTPS, HSTS); "Log retention" and "Diagnostics" merged back into one "Log retention & Diagnostics" block with one Save button. Both merged blocks still POST to the same `/api/v1/server/settings` partial-update endpoint - no server-side change. 7 blocks become 5.
+- **Settings > Windows**: "WSUS offline scan file" moved in from Settings > Credentials, positioned in document order between "Windows updates install window" and "Third-party software install window" - it's a global Windows-updates-adjacent setting, not a per-client credential. The block's fields, Save/Download-now buttons, and their behavior are unchanged; only its tab and load-on-visit wiring moved. Settings > Credentials keeps its other 4 blocks (Windows Client update credentials, Software repository, Linux Client update credentials, SSH key).
+- **Fixed the Settings > Linux spacing bug**: "Linux client targeting" and "Install defaults" used to sit side by side in a `.updates-top-row` two-column flex row; since each has its own Save button and different content heights, `align-items: stretch` left a large empty gap under the shorter column's Save button before the row's shared divider. Fixed by removing the row entirely - both blocks, plus "Client self-update", are now plain full-width stacked cards sized to their own content. `.updates-top-row` itself (shared with Operations > Agent Actions > Push & Schedule's own 3-column row) was left untouched; only Settings > Linux's usage of it was removed.
+- No field label, help text, validation, or default value changed anywhere in this release - purely block grouping and card treatment. No server-side or client-side (`.cs`) behavior changed.
+
+### Notes
+
+- Design: `docs/superpowers/specs/2026-10-06-settings-cards-regroup-design.md`. Plan + ledger: `docs/superpowers/plans/2026-10-06-settings-cards-regroup.md` / `.superpowers/sdd/progress.md`'s `wil-settingscardsregroup-` entries.
+- Before this release shipped, a full live-screenshot sweep of every dashboard section (Dashboard, all 3 top-nav dropdowns, Software Catalog's nested tabs, Agent Actions' 3 sub-tabs including Push & Schedule, Task History, System Logs, all 5 Settings tabs) confirmed no other spacing regression existed beyond the known Settings > Linux bug this release fixes.
+
 ## [0.86.0] - Nav replaced again: Inventory/Operations/History & Logs/Settings
 
 ### Changed
