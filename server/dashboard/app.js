@@ -295,9 +295,9 @@
 
   function loadSettingsSubviewData(subview) {
     if (subview === 'server') { loadServerSettings(); loadIngestionTokenStatus(); loadOutboundProxySettings(); }
-    if (subview === 'windows') { loadWindowsSettings(); }
+    if (subview === 'windows') { loadWindowsSettings(); loadWsusCabStatus(); loadWsusDownloadSchedule(); }
     if (subview === 'linux') { loadLinuxSettings(); }
-    if (subview === 'credentials') { loadClientUpdateCredentials(); loadSoftwareRepositoryCredentials(); loadWsusCabStatus(); loadWsusDownloadSchedule(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
+    if (subview === 'credentials') { loadClientUpdateCredentials(); loadSoftwareRepositoryCredentials(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
     if (subview === 'security') { loadCertificateStatus(); loadCertificateHistory(); loadAdminPasswordStatus(); loadLoginLockoutSettings(); }
   }
 
