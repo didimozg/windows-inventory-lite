@@ -2143,6 +2143,28 @@ th.sort-desc::after {
   border-bottom: 1px solid var(--divider-strong, var(--line));
 }
 
+/* Applied alongside .settings-block (class="settings-block settings-card")
+   on every Save-button block in Settings > Server/Windows/Linux, turning
+   each one into its own card-glow card instead of a divider-separated
+   sub-section of one big shared card - matching how "Connection status"
+   already looks next to Server settings. Deliberately a second class
+   applied explicitly per-block in HTML, not an id-scoped compound
+   selector keyed to the parent section - less fragile if a block is ever
+   added or moved between tabs later. Settings > Security and Settings >
+   Credentials keep the plain .settings-block divider look; out of scope
+   for this change. */
+.settings-card {
+  padding-bottom: var(--space-lg);
+  padding-top: var(--space-lg);
+  padding-left: var(--space-lg);
+  padding-right: var(--space-lg);
+  margin-bottom: var(--space-lg);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-glow);
+  background: var(--panel);
+  border-bottom: none;
+}
+
 /* Authentication/Linux client targeting/Schedule (Linux Client updates), or
    Linux client targeting/Install defaults (Settings > Linux) side by side
    instead of stacked - each is a narrow, max-420px block, so they fit one
