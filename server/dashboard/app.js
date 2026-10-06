@@ -3269,7 +3269,7 @@
         byId('linuxEnableClientSelfUpdate').checked = !!data.enableLinuxClientSelfUpdate;
       })
       .catch(error => {
-        showSavedMessage(byId('linuxSettingsMessage'), `Settings unavailable: ${error.message}`, true);
+        showSavedMessage(byId('linuxTargetingMessage'), `Settings unavailable: ${error.message}`, true);
       });
   }
 
@@ -3653,32 +3653,76 @@
       });
   }
 
-  function saveLinuxSettings() {
-    byId('linuxSettingsSaveButton').disabled = true;
-    byId('linuxSettingsMessage').className = 'pkg-message hidden';
+  function saveLinuxTargeting() {
+    byId('linuxTargetingSaveButton').disabled = true;
+    byId('linuxTargetingMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preferredLinuxSubnet: byId('generalPreferredLinuxSubnet').value.trim() })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        showSavedMessage(byId('linuxTargetingMessage'), 'Settings saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxTargetingMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('linuxTargetingSaveButton').disabled = false;
+      });
+  }
+
+  function saveLinuxInstallDefaults() {
+    byId('linuxInstallDefaultsSaveButton').disabled = true;
+    byId('linuxInstallDefaultsMessage').className = 'pkg-message hidden';
 
     fetch('/api/v1/server/settings', {
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        preferredLinuxSubnet: byId('generalPreferredLinuxSubnet').value.trim(),
         linuxDefaultIntervalHours: Number.parseInt(byId('linuxDefaultIntervalHours').value, 10) || 6,
         linuxDefaultStatusIntervalMinutes: Number.parseInt(byId('linuxDefaultStatusIntervalMinutes').value, 10) || 30,
-        linuxDefaultInstallPath: byId('linuxDefaultInstallPath').value.trim(),
-        enableLinuxClientSelfUpdate: byId('linuxEnableClientSelfUpdate').checked
+        linuxDefaultInstallPath: byId('linuxDefaultInstallPath').value.trim()
       })
     })
       .then(response => response.json().then(data => ({ ok: response.ok, data })))
       .then(({ ok, data }) => {
         if (!ok) throw new Error(data.error || 'Save failed');
-        showSavedMessage(byId('linuxSettingsMessage'), 'Settings saved.', false);
+        showSavedMessage(byId('linuxInstallDefaultsMessage'), 'Settings saved.', false);
       })
       .catch(error => {
-        showSavedMessage(byId('linuxSettingsMessage'), `Save failed: ${error.message}`, true);
+        showSavedMessage(byId('linuxInstallDefaultsMessage'), `Save failed: ${error.message}`, true);
       })
       .finally(() => {
-        byId('linuxSettingsSaveButton').disabled = false;
+        byId('linuxInstallDefaultsSaveButton').disabled = false;
+      });
+  }
+
+  function saveLinuxSelfUpdate() {
+    byId('linuxSelfUpdateSaveButton').disabled = true;
+    byId('linuxSelfUpdateMessage').className = 'pkg-message hidden';
+
+    fetch('/api/v1/server/settings', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enableLinuxClientSelfUpdate: byId('linuxEnableClientSelfUpdate').checked })
+    })
+      .then(response => response.json().then(data => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Save failed');
+        showSavedMessage(byId('linuxSelfUpdateMessage'), 'Settings saved.', false);
+      })
+      .catch(error => {
+        showSavedMessage(byId('linuxSelfUpdateMessage'), `Save failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('linuxSelfUpdateSaveButton').disabled = false;
       });
   }
 
@@ -6955,7 +6999,9 @@
   byId('windowsUpdateInstallWindowSaveButton').addEventListener('click', saveWindowsUpdateInstallWindow);
   byId('thirdPartySoftwareInstallWindowSaveButton').addEventListener('click', saveThirdPartySoftwareInstallWindow);
   byId('windowsSelfUpdateSaveButton').addEventListener('click', saveWindowsSelfUpdate);
-  byId('linuxSettingsSaveButton').addEventListener('click', saveLinuxSettings);
+  byId('linuxTargetingSaveButton').addEventListener('click', saveLinuxTargeting);
+  byId('linuxInstallDefaultsSaveButton').addEventListener('click', saveLinuxInstallDefaults);
+  byId('linuxSelfUpdateSaveButton').addEventListener('click', saveLinuxSelfUpdate);
   byId('generalAdUseServiceIdentity').addEventListener('change', updateAdIdentityFields);
   byId('windowsUpdateInstallWindowEnabled').addEventListener('change', updateWindowsUpdateInstallWindowFieldVisibility);
   byId('thirdPartySoftwareInstallWindowEnabled').addEventListener('change', updateThirdPartySoftwareInstallWindowFieldVisibility);

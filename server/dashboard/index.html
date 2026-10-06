@@ -550,6 +550,10 @@
                 <input id="generalPreferredLinuxSubnet" type="text" placeholder="192.168.1.0/24">
               </label>
             </div>
+            <div class="pkg-buttons">
+              <button id="linuxTargetingSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="linuxTargetingMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block">
             <h3 class="settings-block-title">Install defaults</h3>
@@ -568,6 +572,10 @@
                 <input id="linuxDefaultInstallPath" type="text" value="/opt/windows-inventory-lite">
               </label>
             </div>
+            <div class="pkg-buttons">
+              <button id="linuxInstallDefaultsSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="linuxInstallDefaultsMessage" class="pkg-message hidden"></div>
           </div>
           </div>
           <div class="settings-block">
@@ -577,11 +585,11 @@
               Enable client self-update
             </label>
             <p class="cert-hint">When on, an already-installed Linux client that reports an out-of-date version downloads the current build and swaps its own binary between systemd-timer runs - no SSH push required. Off by default.</p>
+            <div class="pkg-buttons">
+              <button id="linuxSelfUpdateSaveButton" class="primary-button" type="button">Save</button>
+            </div>
+            <div id="linuxSelfUpdateMessage" class="pkg-message hidden"></div>
           </div>
-          <div class="pkg-buttons">
-            <button id="linuxSettingsSaveButton" class="primary-button" type="button">Save</button>
-          </div>
-          <div id="linuxSettingsMessage" class="pkg-message hidden"></div>
           <div class="settings-block">
             <h2 class="settings-block-title">Linux Client update credentials</h2>
             <p class="cert-hint">Used by Linux Client actions/updates pushes when "Stored Linux credentials" or "SSH key" auth mode is selected on those pages. Leave password blank to keep the currently saved value.</p>
