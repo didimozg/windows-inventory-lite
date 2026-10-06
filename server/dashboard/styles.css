@@ -1935,7 +1935,7 @@ th.sort-desc::after {
    so they never need bottom spacing of their own. Two places still have
    a .pkg-buttons block sitting BEFORE the next block instead of at the
    end of its own: the Certificate view's Delete button (before the
-   certificate file field) and Logging > Debug's Refresh button row
+   certificate file field) and History & Logs > System Logs' Debug Refresh button row
    (before the <pre> log content block) - without a gap, both read as
    belonging to the wrong section. Settings > Linux and Settings >
    Windows used to need this override too, for a page-level Save button

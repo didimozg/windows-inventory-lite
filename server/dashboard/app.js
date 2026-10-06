@@ -11,8 +11,8 @@
   const linuxDataViews = ['clients', 'linuxServices', 'dashboard', 'hardware'];
   const state = {
     clients: [], linuxClients: [], ...getInitialViewState(), installJobId: null, installPollTimer: null, installJobs: [],
-    // Which job's per-target detail is currently shown in Logging >
-    // Installs' shared #installHistoryJobDetail panel - up to three jobs
+    // Which job's per-target detail is currently shown in History & Logs >
+    // Task History > Agent Push's shared #installHistoryJobDetail panel - up to three jobs
     // (install/uninstall, Windows update push, Linux update push) can be
     // polling concurrently, but only one is ever rendered at a time. Set
     // by clicking a row in the history table, or automatically when a new
@@ -218,8 +218,8 @@
     if (hash === 'task-history' || hash === 'software-history' || hash === 'softwarejobhistory') return { view: 'taskHistory', subview: 'software' };
     if (hash === 'task-history-agent-push' || hash === 'logging-installs') return { view: 'taskHistory', subview: 'agentPush' };
     if (hash === 'task-history-wsus-downloads' || hash === 'software-history-wsusdownloads' || hash === 'logging-wsusdownloads') return { view: 'taskHistory', subview: 'wsusDownloads' };
-    if (hash === 'logging-debug') return { view: 'logging', subview: 'debug' };
-    if (hash === 'logging') return { view: 'logging', subview: 'ingestion' };
+    if (hash === 'system-logs-debug' || hash === 'logging-debug') return { view: 'systemLogs', subview: 'debug' };
+    if (hash === 'system-logs' || hash === 'logging') return { view: 'systemLogs', subview: 'ingestion' };
     // #linux-clients / #linux are kept as aliases of the merged Clients
     // page (same backward-compat pattern as #linux-hardware above and
     // #certificate below) - old bookmarks land on Clients, unfiltered.
@@ -255,13 +255,13 @@
     }
     if (view === 'licenses') return subview === 'sources' ? 'licensekeysources' : subview === 'keys' ? 'licenses-keys' : 'licenses';
     if (view === 'softwareCatalog') return subview === 'windowsUpdates-catalog' ? 'software-catalog-windows-catalog' : subview === 'thirdParty' ? 'software-catalog-thirdparty' : 'software-catalog-windows-missing';
-    if (view === 'logging') return subview === 'debug' ? 'logging-debug' : 'logging';
+    if (view === 'systemLogs') return subview === 'debug' ? 'system-logs-debug' : 'system-logs';
     if (view === 'taskHistory') return subview === 'agentPush' ? 'task-history-agent-push' : subview === 'wsusDownloads' ? 'task-history-wsus-downloads' : 'task-history';
     if (view === 'linuxServices') return 'linux-services';
     return view;
   }
 
-  function loadLoggingSubviewData(subview) {
+  function loadSystemLogsSubviewData(subview) {
     if (subview === 'ingestion') loadIngestionRejectionLog();
     if (subview === 'debug') loadDebugLog();
   }
@@ -314,7 +314,7 @@
     if (view === 'settings') loadSettingsSubviewData(state.subview);
     if (view === 'licenses') loadLicensesSubviewData(state.subview);
     if (view === 'softwareCatalog') loadSoftwareCatalogSubviewData(state.subview);
-    if (view === 'logging') loadLoggingSubviewData(subview);
+    if (view === 'systemLogs') loadSystemLogsSubviewData(state.subview);
     if (view === 'taskHistory') loadTaskHistorySubviewData(state.subview);
     // 'clients' and 'hardware' are in this list because both merged views
     // read Linux data too - opening either tab re-fetches it rather than
@@ -366,11 +366,11 @@
     byId('agentActionsSubtabPush').setAttribute('aria-selected', String(state.view === 'agentActions' && state.subview === 'push'));
     byId('agentActionsSubtabPackage').classList.toggle('active', state.view === 'agentActions' && state.subview === 'package');
     byId('agentActionsSubtabPackage').setAttribute('aria-selected', String(state.view === 'agentActions' && state.subview === 'package'));
-    byId('loggingSubtabs').classList.toggle('hidden', state.view !== 'logging');
-    byId('loggingSubtabIngestion').classList.toggle('active', state.view === 'logging' && state.subview === 'ingestion');
-    byId('loggingSubtabIngestion').setAttribute('aria-selected', String(state.view === 'logging' && state.subview === 'ingestion'));
-    byId('loggingSubtabDebug').classList.toggle('active', state.view === 'logging' && state.subview === 'debug');
-    byId('loggingSubtabDebug').setAttribute('aria-selected', String(state.view === 'logging' && state.subview === 'debug'));
+    byId('systemLogsSubtabs').classList.toggle('hidden', state.view !== 'systemLogs');
+    byId('systemLogsSubtabIngestion').classList.toggle('active', state.view === 'systemLogs' && state.subview === 'ingestion');
+    byId('systemLogsSubtabIngestion').setAttribute('aria-selected', String(state.view === 'systemLogs' && state.subview === 'ingestion'));
+    byId('systemLogsSubtabDebug').classList.toggle('active', state.view === 'systemLogs' && state.subview === 'debug');
+    byId('systemLogsSubtabDebug').setAttribute('aria-selected', String(state.view === 'systemLogs' && state.subview === 'debug'));
     byId('taskHistorySubtabs').classList.toggle('hidden', state.view !== 'taskHistory');
     byId('taskHistorySubtabSoftware').classList.toggle('active', state.view === 'taskHistory' && state.subview === 'software');
     byId('taskHistorySubtabSoftware').setAttribute('aria-selected', String(state.view === 'taskHistory' && state.subview === 'software'));
@@ -6203,10 +6203,10 @@
     byId('windowsUpdatesMissingView').classList.toggle('hidden', !(state.view === 'softwareCatalog' && state.subview === 'windowsUpdates-missing'));
     byId('windowsUpdatesView').classList.toggle('hidden', !(state.view === 'softwareCatalog' && state.subview === 'windowsUpdates-catalog'));
     byId('thirdPartySoftwareView').classList.toggle('hidden', !(state.view === 'softwareCatalog' && state.subview === 'thirdParty'));
-    byId('loggingView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'ingestion'));
+    byId('loggingView').classList.toggle('hidden', !(state.view === 'systemLogs' && state.subview === 'ingestion'));
     byId('installHistoryView').classList.toggle('hidden', !(state.view === 'taskHistory' && state.subview === 'agentPush'));
     byId('softwareJobHistoryView').classList.toggle('hidden', !(state.view === 'taskHistory' && state.subview === 'software'));
-    byId('debugLogView').classList.toggle('hidden', !(state.view === 'logging' && state.subview === 'debug'));
+    byId('debugLogView').classList.toggle('hidden', !(state.view === 'systemLogs' && state.subview === 'debug'));
     byId('wsusDownloadLogView').classList.toggle('hidden', !(state.view === 'taskHistory' && state.subview === 'wsusDownloads'));
     byId('linuxServicesView').classList.toggle('hidden', state.view !== 'linuxServices');
     // The former Deploy sections, now Operations > Agent Actions' 3
@@ -6234,10 +6234,10 @@
     byId('softwareCatalogTab').classList.toggle('active', state.view === 'softwareCatalog');
     byId('operationsDropdownButton').classList.toggle('active', ['softwareCatalog', 'agentActions'].includes(state.view));
     byId('agentActionsTab').classList.toggle('active', state.view === 'agentActions');
-    byId('loggingTab').classList.toggle('active', state.view === 'logging');
     byId('linuxServicesTab').classList.toggle('active', state.view === 'linuxServices');
     byId('inventoryDropdownButton').classList.toggle('active', ['clients', 'software', 'linuxServices', 'hardware', 'licenses'].includes(state.view));
-    byId('historyLogsDropdownButton').classList.toggle('active', ['taskHistory'].includes(state.view));
+    byId('historyLogsDropdownButton').classList.toggle('active', ['taskHistory', 'systemLogs'].includes(state.view));
+    byId('systemLogsTab').classList.toggle('active', state.view === 'systemLogs');
     byId('taskHistoryTab').classList.toggle('active', state.view === 'taskHistory');
     byId('settingsTab').classList.toggle('active', state.view === 'settings');
     const isInventoryView = inventoryViews.includes(state.view);
@@ -6548,7 +6548,7 @@
     if (state.view === 'settings') loadSettingsSubviewData(state.subview);
     if (state.view === 'licenses') loadLicensesSubviewData(state.subview);
     if (state.view === 'softwareCatalog') loadSoftwareCatalogSubviewData(state.subview);
-    if (state.view === 'logging') loadLoggingSubviewData(state.subview);
+    if (state.view === 'systemLogs') loadSystemLogsSubviewData(state.subview);
     if (state.view === 'taskHistory') loadTaskHistorySubviewData(state.subview);
     if (state.view === 'clients' || state.view === 'linuxServices' || state.view === 'hardware') loadLinuxClients();
     // See the matching comment in setView - keeps the Software table's
@@ -6882,8 +6882,8 @@
   byId('licensesSubtabCatalog').addEventListener('click', () => setView('licenses', 'catalog'));
   byId('licensesSubtabSources').addEventListener('click', () => setView('licenses', 'sources'));
   byId('licensesSubtabKeys').addEventListener('click', () => setView('licenses', 'keys'));
-  byId('loggingSubtabIngestion').addEventListener('click', () => setView('logging', 'ingestion'));
-  byId('loggingSubtabDebug').addEventListener('click', () => setView('logging', 'debug'));
+  byId('systemLogsSubtabIngestion').addEventListener('click', () => setView('systemLogs', 'ingestion'));
+  byId('systemLogsSubtabDebug').addEventListener('click', () => setView('systemLogs', 'debug'));
   byId('taskHistoryTab').addEventListener('click', () => setView('taskHistory', 'software'));
   byId('taskHistorySubtabSoftware').addEventListener('click', () => setView('taskHistory', 'software'));
   byId('taskHistorySubtabAgentPush').addEventListener('click', () => setView('taskHistory', 'agentPush'));
@@ -6954,11 +6954,6 @@
     toggleDropdown('operationsDropdownButton', 'operationsDropdownMenu');
   });
   byId('operationsDropdownMenu').addEventListener('keydown', handleDropdownKeydown);
-  byId('softwareDropdownButton').addEventListener('click', (event) => {
-    event.stopPropagation();
-    toggleDropdown('softwareDropdownButton', 'softwareDropdownMenu');
-  });
-  byId('softwareDropdownMenu').addEventListener('keydown', handleDropdownKeydown);
   byId('historyLogsDropdownButton').addEventListener('click', (event) => {
     event.stopPropagation();
     toggleDropdown('historyLogsDropdownButton', 'historyLogsDropdownMenu');
@@ -6978,7 +6973,6 @@
   document.addEventListener('click', () => {
     toggleDropdown('inventoryDropdownButton', 'inventoryDropdownMenu', true);
     toggleDropdown('operationsDropdownButton', 'operationsDropdownMenu', true);
-    toggleDropdown('softwareDropdownButton', 'softwareDropdownMenu', true);
     toggleDropdown('historyLogsDropdownButton', 'historyLogsDropdownMenu', true);
   });
   byId('windowsCredsSaveButton').addEventListener('click', saveClientUpdateCredentials);
@@ -7089,7 +7083,7 @@
   byId('thirdPartySoftwareSaveButton').addEventListener('click', saveThirdPartySoftware);
   byId('thirdPartySoftwareCancelButton').addEventListener('click', closeThirdPartySoftwareForm);
   byId('thirdPartySoftwareScanButton').addEventListener('click', refreshThirdPartySoftwareScan);
-  byId('loggingTab').addEventListener('click', () => setView('logging', 'ingestion'));
+  byId('systemLogsTab').addEventListener('click', () => setView('systemLogs', 'ingestion'));
   byId('linuxServicesTab').addEventListener('click', () => setView('linuxServices'));
   byId('exportLinuxServicesBtn').addEventListener('click', exportLinuxServices);
   byId('exportLicensesBtn').addEventListener('click', exportLicenses);
@@ -7124,7 +7118,7 @@
   if (state.view === 'settings') loadSettingsSubviewData(state.subview);
   if (state.view === 'licenses') loadLicensesSubviewData(state.subview);
   if (state.view === 'softwareCatalog') loadSoftwareCatalogSubviewData(state.subview);
-  if (state.view === 'logging') loadLoggingSubviewData(state.subview);
+  if (state.view === 'systemLogs') loadSystemLogsSubviewData(state.subview);
   if (state.view === 'taskHistory') loadTaskHistorySubviewData(state.subview);
   updateInstallFieldVisibility();
   // Loaded unconditionally so renderClientsTable's empty-state check

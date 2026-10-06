@@ -39,25 +39,20 @@
         </div>
       </div>
       <div class="topnav-dropdown">
-        <button id="softwareDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Software <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
-        <div id="softwareDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
-        </div>
-      </div>
-      <div class="topnav-dropdown">
-        <button id="historyLogsDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">History &amp; Logs <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
-        <div id="historyLogsDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
-          <button id="taskHistoryTab" class="topnav-dropdown-item" type="button" role="menuitem">Task History</button>
-        </div>
-      </div>
-      <div class="topnav-dropdown">
         <button id="operationsDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Operations <span id="fleetActionsBadge" class="nav-badge hidden">0</span><span id="updatesBadge" class="nav-badge hidden">0</span><span id="linuxUpdatesBadge" class="nav-badge hidden">0</span><span id="softwarePushBadge" class="nav-badge hidden">0</span><svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
         <div id="operationsDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
           <button id="softwareCatalogTab" class="topnav-dropdown-item" type="button" role="menuitem">Software Catalog</button>
           <button id="agentActionsTab" class="topnav-dropdown-item" type="button" role="menuitem">Agent Actions</button>
         </div>
       </div>
+      <div class="topnav-dropdown">
+        <button id="historyLogsDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">History &amp; Logs <svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
+        <div id="historyLogsDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
+          <button id="taskHistoryTab" class="topnav-dropdown-item" type="button" role="menuitem">Task History</button>
+          <button id="systemLogsTab" class="topnav-dropdown-item" type="button" role="menuitem">System Logs</button>
+        </div>
+      </div>
       <button id="settingsTab" class="topnav-item" type="button">Settings</button>
-      <button id="loggingTab" class="topnav-item" type="button">Logging</button>
       <div class="topnav-spacer"></div>
       <span id="generatedAt" class="nav-status-text hidden">Waiting for inventory data.</span>
       <span id="serverVersionBadge" class="nav-status-text">Server: unknown</span>
@@ -271,7 +266,7 @@
                 <input id="generalSoftwareJobAttemptLogMaxEntries" type="number" min="100" max="100000" value="5000">
               </label>
             </div>
-            <p class="cert-hint">How long each of these logs is kept before being cleaned up automatically (Installs and Software under History &amp; Logs &gt; Task History, Ingestion under Logging).</p>
+            <p class="cert-hint">How long each of these logs is kept before being cleaned up automatically (Installs and Software under History &amp; Logs &gt; Task History, Ingestion under History &amp; Logs &gt; System Logs).</p>
             <div class="pkg-buttons">
               <button id="logRetentionSaveButton" class="primary-button" type="button">Save</button>
             </div>
@@ -1058,10 +1053,9 @@
           </div>
         </section>
 
-        <div id="loggingSubtabs" class="subtab-strip hidden" role="tablist" aria-label="Logging sections">
-          <button id="loggingSubtabIngestion" class="subtab-item" role="tab" type="button">Ingestion</button>
-          <button id="loggingSubtabInstalls" class="subtab-item" role="tab" type="button">Installs</button>
-          <button id="loggingSubtabDebug" class="subtab-item" role="tab" type="button">Debug</button>
+        <div id="systemLogsSubtabs" class="subtab-strip hidden" role="tablist" aria-label="System log sections">
+          <button id="systemLogsSubtabIngestion" class="subtab-item" role="tab" type="button">Ingestion</button>
+          <button id="systemLogsSubtabDebug" class="subtab-item" role="tab" type="button">Debug</button>
         </div>
 
         <section id="loggingView" class="hidden" aria-label="Ingestion rejection log">
