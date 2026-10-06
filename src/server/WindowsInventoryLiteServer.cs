@@ -1473,6 +1473,198 @@ namespace WindowsInventoryLite
         // update), found during a security review of the schedule feature.
         private readonly object configFileLock = new object();
 
+        // Official Generic Volume License Keys (GVLKs), fetched directly from
+        // Microsoft Learn (not reconstructed from memory or a third-party
+        // mirror) on 2026-10-06:
+        // https://learn.microsoft.com/en-us/windows-server/get-started/kms-client-activation-keys
+        // (page dated 2025-06-25). Used only to recognize an already-detected
+        // key as a known generic volume key, never to activate anything -
+        // these are public, Microsoft-published values.
+        private static readonly Dictionary<string, string> WindowsGvlkKeys = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "Windows 11 Pro/Windows 10 Pro", "W269N-WFGWX-YVC9B-4J6C9-T83GX" },
+            { "Windows 11 Pro N/Windows 10 Pro N", "MH37W-N47XK-V7XM9-C7227-GCQG9" },
+            { "Windows 11 Pro for Workstations/Windows 10 Pro for Workstations", "NRG8B-VKK3Q-CXVCJ-9G2XF-6Q84J" },
+            { "Windows 11 Pro for Workstations N/Windows 10 Pro for Workstations N", "9FNHH-K3HBT-3W4TD-6383H-6XYWF" },
+            { "Windows 11 Pro Education/Windows 10 Pro Education", "6TP4R-GNPTD-KYYHQ-7B7DP-J447Y" },
+            { "Windows 11 Pro Education N/Windows 10 Pro Education N", "YVWGF-BXNMC-HTQYQ-CPQ99-66QFC" },
+            { "Windows 11 Education/Windows 10 Education", "NW6C2-QMPVW-D7KKK-3GKT6-VCFB2" },
+            { "Windows 11 Education N/Windows 10 Education N", "2WH4N-8QGBV-H22JP-CT43Q-MDWWJ" },
+            { "Windows 11 Enterprise/Windows 10 Enterprise", "NPPR9-FWDCX-D2C8J-H872K-2YT43" },
+            { "Windows 11 Enterprise N/Windows 10 Enterprise N", "DPH2V-TTNVB-4X9Q3-TJR4H-KHJW4" },
+            { "Windows 11 Enterprise G/Windows 10 Enterprise G", "YYVX9-NTFWV-6MDM3-9PT4T-4M68B" },
+            { "Windows 11 Enterprise G N/Windows 10 Enterprise G N", "44RPN-FTY23-9VTTB-MP9BX-T84FV" },
+            { "Windows 11 Enterprise LTSC 2024/Windows 10 Enterprise LTSC 2021/2019", "M7XTQ-FN8P6-TTKYV-9D4CC-J462D" },
+            { "Windows 11 Enterprise N LTSC 2024/Windows 10 Enterprise N LTSC 2021/2019", "92NFX-8DJQP-P6BBQ-THF9C-7CG2H" },
+            { "Windows IoT Enterprise LTSC 2024/2021", "KBN8V-HFGQ4-MGXVD-347P6-PDQGT" },
+            { "Windows 10 Enterprise LTSB 2016", "DCPHK-NFMTC-H88MJ-PFHPY-QJ4BJ" },
+            { "Windows 10 Enterprise N LTSB 2016", "QFFDN-GRT3P-VKWWX-X7T3R-8B639" },
+            { "Windows 10 Enterprise LTSB 2015", "WNMTR-4C88C-JK8YV-HQ7T2-76DF9" },
+            { "Windows 10 Enterprise N LTSB 2015", "2F77B-TNFGY-69QQF-B8YKP-D69TJ" },
+            { "Windows 8.1 Pro", "GCRJD-8NW9H-F2CDX-CCM8D-9D6T9" },
+            { "Windows 8.1 Pro N", "HMCNV-VVBFX-7HMBH-CTY9B-B4FXY" },
+            { "Windows 8.1 Enterprise", "MHF9N-XY6XB-WVXMC-BTDCT-MKKG7" },
+            { "Windows 8.1 Enterprise N", "TT4HM-HN7YT-62K67-RGRQJ-JFFXW" },
+            { "Windows 8 Pro", "NG4HW-VH26C-733KW-K6F98-J8CK4" },
+            { "Windows 8 Pro N", "XCVCF-2NXM9-723PB-MHCB7-2RYQQ" },
+            { "Windows 8 Enterprise", "32JNW-9KQ84-P47T8-D8GGY-CWCK7" },
+            { "Windows 8 Enterprise N", "JMNMF-RHW7P-DMY6X-RF3DR-X2BQT" },
+            { "Windows 7 Professional", "FJ82H-XT6CR-J8D7P-XQJJ2-GPDD4" },
+            { "Windows 7 Professional N", "MRPKT-YTG23-K7D7T-X2JMM-QY7MG" },
+            { "Windows 7 Professional E", "W82YF-2Q76Y-63HXB-FGJG9-GF7QX" },
+            { "Windows 7 Enterprise", "33PXH-7Y6KF-2VJC9-XBBR8-HVTHH" },
+            { "Windows 7 Enterprise N", "YDRBP-3D83W-TY26F-D46B2-XCKRJ" },
+            { "Windows 7 Enterprise E", "C29WB-22CC8-VJ326-GHFJW-H9DH4" },
+            { "Windows Vista Business", "YFKBB-PQJJV-G996G-VWGXY-2V3X8" },
+            { "Windows Vista Business N", "HMBQG-8H2RH-C77VX-27R82-VMQBT" },
+            { "Windows Vista Enterprise", "VKK3X-68KWM-X2YGT-QR4M6-4BWMV" },
+            { "Windows Vista Enterprise N", "VTC42-BM838-43QHV-84HX6-XJXKV" },
+            { "Windows Server 2025 Standard", "TVRH6-WHNXV-R9WG3-9XRFY-MY832" },
+            { "Windows Server 2025 Datacenter", "D764K-2NDRG-47T6Q-P8T8W-YP6DF" },
+            { "Windows Server 2025 Datacenter: Azure Edition", "XGN3F-F394H-FD2MY-PP6FD-8MCRC" },
+            { "Windows Server 2022 Standard", "VDYBN-27WPP-V4HQT-9VMD4-VMK7H" },
+            { "Windows Server 2022 Datacenter", "WX4NM-KYWYW-QJJR4-XV3QB-6VM33" },
+            { "Windows Server 2022 Datacenter: Azure Edition", "NTBV8-9K7Q8-V27C6-M2BTV-KHMXV" },
+            { "Windows Server 2019 Standard", "N69G4-B89J2-4G8F4-WWYCC-J464C" },
+            { "Windows Server 2019 Datacenter", "WMDGN-G9PQG-XVVXX-R3X43-63DFG" },
+            { "Windows Server 2019 Essentials", "WVDHN-86M7X-466P6-VHXV7-YY726" },
+            { "Windows Server 2016 Standard", "WC2BQ-8NRM3-FDDYY-2BFGV-KHKQY" },
+            { "Windows Server 2016 Datacenter", "CB7KF-BWN84-R7R2Y-793K2-8XDDG" },
+            { "Windows Server 2016 Essentials", "JCKRF-N37P4-C2D82-9YXRT-4M63B" },
+            { "Windows Server, versions 20H2/2004/1909/1903/1809 Standard", "N2KJX-J94YW-TQVFB-DG9YT-724CC" },
+            { "Windows Server, versions 20H2/2004/1909/1903/1809 Datacenter", "6NMRW-2C8FM-D24W7-TQWMY-CWH2D" },
+            { "Windows Server, version 1803 Standard", "PTXN8-JFHJM-4WC78-MPCBR-9W4KR" },
+            { "Windows Server, version 1803 Datacenter", "2HXDN-KRXHB-GPYC7-YCKFJ-7FVDG" },
+            { "Windows Server, version 1709 Standard", "DPCNP-XQFKJ-BJF7R-FRC8D-GF6G4" },
+            { "Windows Server, version 1709 Datacenter", "6Y6KB-N82V8-D8CQV-23MJW-BWTG6" },
+            { "Windows Server 2012 R2 Standard", "D2N9P-3P6X9-2R39C-7RTCD-MDVJX" },
+            { "Windows Server 2012 R2 Datacenter", "W3GGN-FT8W3-Y4M27-J84CP-Q3VJ9" },
+            { "Windows Server 2012 R2 Essentials", "KNC87-3J2TX-XB4WP-VCPJV-M4FWM" },
+            { "Windows Server 2012", "BN3D2-R7TKB-3YPBD-8DRP2-27GG4" },
+            { "Windows Server 2012 N", "8N2M2-HWPGY-7PGT9-HGDD8-GVGGY" },
+            { "Windows Server 2012 Single Language", "2WN2H-YGCQR-KFX6K-CD6TF-84YXQ" },
+            { "Windows Server 2012 Country Specific", "4K36P-JN4VD-GDC6V-KDT89-DYFKP" },
+            { "Windows Server 2012 Standard", "XC9B7-NBPP2-83J2H-RHMBY-92BT4" },
+            { "Windows Server 2012 MultiPoint Standard", "HM7DN-YVMH3-46JC3-XYTG7-CYQJJ" },
+            { "Windows Server 2012 MultiPoint Premium", "XNH6W-2V9GX-RGJ4K-Y8X6F-QGJ2G" },
+            { "Windows Server 2012 Datacenter", "48HP8-DN98B-MYWDG-T2DCC-8W83P" },
+            { "Windows Server 2012 Essentials", "HTDQM-NBMMG-KGYDT-2DTKT-J2MPV" },
+            { "Windows Server 2008 R2 Web", "6TPJF-RBVHG-WBW2R-86QPH-6RTM4" },
+            { "Windows Server 2008 R2 HPC edition", "TT8MH-CG224-D3D7Q-498W2-9QCTX" },
+            { "Windows Server 2008 R2 Standard", "YC6KT-GKW9T-YTKYR-T4X34-R7VHC" },
+            { "Windows Server 2008 R2 Enterprise", "489J6-VHDMP-X63PK-3K798-CPX3Y" },
+            { "Windows Server 2008 R2 Datacenter", "74YFP-3QFB3-KQT8W-PMXWJ-7M648" },
+            { "Windows Server 2008 R2 for Itanium-based Systems", "GT63C-RJFQ3-4GMB6-BRFB9-CB83V" },
+            { "Windows Web Server 2008", "WYR28-R7TFJ-3X2YQ-YCY4H-M249D" },
+            { "Windows Server 2008 Standard", "TM24T-X9RMF-VWXK6-X8JC9-BFGM2" },
+            { "Windows Server 2008 Standard without Hyper-V", "W7VD6-7JFBR-RX26B-YKQ3Y-6FFFJ" },
+            { "Windows Server 2008 Enterprise", "YQGMW-MPWTJ-34KDK-48M3W-X4Q6V" },
+            { "Windows Server 2008 Enterprise without Hyper-V", "39BXF-X8Q23-P2WWT-38T2F-G3FPG" },
+            { "Windows Server 2008 HPC", "RCTX3-KWVHP-BR6TB-RB6DM-6X7HP" },
+            { "Windows Server 2008 Datacenter", "7M67G-PC374-GR742-YH8V4-TCBY3" },
+            { "Windows Server 2008 Datacenter without Hyper-V", "22XQ2-VRXRG-P8D42-K34TD-G3QQC" },
+            { "Windows Server 2008 for Itanium-Based Systems", "4DWFP-JF3DJ-B7DTH-78FJB-PDRHK" }
+        };
+
+        // Fetched directly from Microsoft Learn on 2026-10-06:
+        // https://learn.microsoft.com/en-us/deployoffice/vlactivation/gvlks
+        // (page dated 2026-04-24). Covers every product in each LTSC/volume
+        // suite (Word/Excel/etc individually), not just the suite SKU -
+        // Office reports activation per-SoftwareLicensingProduct row, which
+        // can be an individual app, not only the whole suite.
+        private static readonly Dictionary<string, string> OfficeGvlkKeys = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "Office LTSC Professional Plus 2024", "XJ2XN-FW8RK-P4HMP-DKDBV-GCVGB" },
+            { "Office LTSC Standard 2024", "V28N4-JG22K-W66P8-VTMGK-H6HGR" },
+            { "Project Professional 2024", "FQQ23-N4YCY-73HQ3-FM9WC-76HF4" },
+            { "Project Standard 2024", "PD3TT-NTHQQ-VC7CY-MFXK3-G87F8" },
+            { "Visio LTSC Professional 2024", "B7TN8-FJ8V3-7QYCP-HQPMV-YY89G" },
+            { "Visio LTSC Standard 2024", "JMMVY-XFNQC-KK4HK-9H7R3-WQQTV" },
+            { "Access LTSC 2024", "82FTR-NCHR7-W3944-MGRHM-JMCWD" },
+            { "Excel LTSC 2024", "F4DYN-89BP2-WQTWJ-GR8YC-CKGJG" },
+            { "Outlook LTSC 2024", "D2F8D-N3Q3B-J28PV-X27HD-RJWB9" },
+            { "PowerPoint LTSC 2024", "CW94N-K6GJH-9CTXY-MG2VC-FYCWP" },
+            { "Skype for Business LTSC 2024", "4NKHF-9HBQF-Q3B6C-7YV34-F64P3" },
+            { "Word LTSC 2024", "MQ84N-7VYDM-FXV7C-6K7CC-VFW9J" },
+            { "Office LTSC Professional Plus 2021", "FXYTK-NJJ8C-GB6DW-3DYQT-6F7TH" },
+            { "Office LTSC Standard 2021", "KDX7X-BNVR8-TXXGX-4Q7Y8-78VT3" },
+            { "Project Professional 2021", "FTNWT-C6WBT-8HMGF-K9PRX-QV9H8" },
+            { "Project Standard 2021", "J2JDC-NJCYY-9RGQ4-YXWMH-T3D4T" },
+            { "Visio LTSC Professional 2021", "KNH8D-FGHT4-T8RK3-CTDYJ-K2HT4" },
+            { "Visio LTSC Standard 2021", "MJVNY-BYWPY-CWV6J-2RKRT-4M8QG" },
+            { "Access LTSC 2021", "WM8YG-YNGDD-4JHDC-PG3F4-FC4T4" },
+            { "Excel LTSC 2021", "NWG3X-87C9K-TC7YY-BC2G7-G6RVC" },
+            { "Outlook LTSC 2021", "C9FM6-3N72F-HFJXB-TM3V9-T86R9" },
+            { "PowerPoint LTSC 2021", "TY7XF-NFRBR-KJ44C-G83KF-GX27K" },
+            { "Publisher LTSC 2021", "2MW9D-N4BXM-9VBPG-Q7W6M-KFBGQ" },
+            { "Skype for Business LTSC 2021", "HWCXN-K3WBT-WJBKY-R8BD9-XK29P" },
+            { "Word LTSC 2021", "TN8H9-M34D3-Y64V9-TR72V-X79KV" },
+            { "Office Professional Plus 2019", "NMMKJ-6RK4F-KMJVX-8D9MJ-6MWKP" },
+            { "Office Standard 2019", "6NWWJ-YQWMR-QKGCB-6TMB3-9D9HK" },
+            { "Project Professional 2019", "B4NPR-3FKK7-T2MBV-FRQ4W-PKD2B" },
+            { "Project Standard 2019", "C4F7P-NCP8C-6CQPT-MQHV9-JXD2M" },
+            { "Visio Professional 2019", "9BGNQ-K37YR-RQHF2-38RQ3-7VCBB" },
+            { "Visio Standard 2019", "7TQNQ-K3YQQ-3PFH7-CCPPM-X4VQ2" },
+            { "Access 2019", "9N9PT-27V4Y-VJ2PD-YXFMF-YTFQT" },
+            { "Excel 2019", "TMJWT-YYNMB-3BKTF-644FC-RVXBD" },
+            { "Outlook 2019", "7HD7K-N4PVK-BHBCQ-YWQRW-XW4VK" },
+            { "PowerPoint 2019", "RRNCX-C64HY-W2MM7-MCH9G-TJHMQ" },
+            { "Publisher 2019", "G2KWX-3NW6P-PY93R-JXK2T-C9Y9V" },
+            { "Skype for Business 2019", "NCJ33-JHBBY-HTK98-MYCV8-HMKHJ" },
+            { "Word 2019", "PBX3G-NWMT6-Q7XBW-PYJGG-WXD33" },
+            { "Office Professional Plus 2016", "XQNVK-8JYDB-WJ9W3-YJ8YR-WFG99" },
+            { "Office Standard 2016", "JNRGM-WHDWX-FJJG3-K47QV-DRTFM" },
+            { "Project Professional 2016", "YG9NW-3K39V-2T3HJ-93F3Q-G83KT" },
+            { "Project Standard 2016", "GNFHQ-F6YQM-KQDGJ-327XX-KQBVC" },
+            { "Visio Professional 2016", "PD3PC-RHNGV-FXJ29-8JK7D-RJRJK" },
+            { "Visio Standard 2016", "7WHWN-4T7MP-G96JF-G33KR-W8GF4" },
+            { "Access 2016", "GNH9Y-D2J4T-FJHGG-QRVH7-QPFDW" },
+            { "Excel 2016", "9C2PK-NWTVB-JMPW8-BFT28-7FTBF" },
+            { "OneNote 2016", "DR92N-9HTF2-97XKM-XW2WJ-XW3J6" },
+            { "Outlook 2016", "R69KK-NTPKF-7M3Q4-QYBHW-6MT9B" },
+            { "PowerPoint 2016", "J7MQP-HNJ4Y-WJ7YM-PFYGF-BY6C6" },
+            { "Publisher 2016", "F47MM-N3XJP-TQXJ9-BP99D-8K837" },
+            { "Skype for Business 2016", "869NQ-FJ69K-466HW-QYCP2-DDBV6" },
+            { "Word 2016", "WXY84-JN2Q9-RBCCQ-3Q3J3-3PFJ6" }
+        };
+
+        // key may be a full dashed key ("WXYZ1-...") or a bare 5-character
+        // partial (PartialProductKey's own shape, no dashes). Exact match
+        // for a full key; last-5-characters match (dashes stripped from the
+        // reference value) for a 5-character partial - a GVLK's last 5
+        // characters are what PartialProductKey would show on a KMS-client-
+        // activated machine, since the GVLK itself becomes the "installed"
+        // key in that case.
+        private static bool IsKnownGvlk(string key)
+        {
+            if (String.IsNullOrEmpty(key))
+            {
+                return false;
+            }
+            string normalized = key.Replace("-", "").Trim();
+            if (normalized.Length == 5)
+            {
+                foreach (string gvlk in WindowsGvlkKeys.Values)
+                {
+                    if (gvlk.Replace("-", "").EndsWith(normalized, StringComparison.OrdinalIgnoreCase)) return true;
+                }
+                foreach (string gvlk in OfficeGvlkKeys.Values)
+                {
+                    if (gvlk.Replace("-", "").EndsWith(normalized, StringComparison.OrdinalIgnoreCase)) return true;
+                }
+                return false;
+            }
+            foreach (string gvlk in WindowsGvlkKeys.Values)
+            {
+                if (String.Equals(gvlk.Replace("-", ""), normalized, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            foreach (string gvlk in OfficeGvlkKeys.Values)
+            {
+                if (String.Equals(gvlk.Replace("-", ""), normalized, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
+
         public InventoryServer(ServerOptions options)
         {
             this.options = options;
@@ -16638,6 +16830,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "SecretProtector.Protect reports the real field name and success flag when encryption succeeds", TestSecretProtectorReportsFieldNameAndSuccessOnSuccess);
             allPassed &= SelfTestCheck(output, "SecretProtector.Protect falls back to plaintext and reports failure with the real field name when the underlying protect call throws", TestSecretProtectorFallsBackAndReportsFailureWithFieldName);
             allPassed &= SelfTestCheck(output, "EncryptInventoryLicenseKeys DPAPI-protects each licenses[].key in place", TestEncryptInventoryLicenseKeysProtectsPlaintextKeys);
+            allPassed &= SelfTestCheck(output, "IsKnownGvlk recognizes a full Windows GVLK with and without dashes, rejects an unrelated key", TestIsKnownGvlkMatchesFullWindowsKey);
+            allPassed &= SelfTestCheck(output, "IsKnownGvlk recognizes a 5-character partial by its last-5-characters match, rejects an unrelated partial", TestIsKnownGvlkMatchesPartialKeyByLast5);
+            allPassed &= SelfTestCheck(output, "IsKnownGvlk recognizes a full Office GVLK", TestIsKnownGvlkMatchesOfficeKey);
+            allPassed &= SelfTestCheck(output, "IsKnownGvlk rejects null/empty input", TestIsKnownGvlkRejectsEmptyOrNull);
             allPassed &= SelfTestCheck(output, "NeedsMigration flags a plaintext value", TestNeedsMigrationPlaintextValue);
             allPassed &= SelfTestCheck(output, "NeedsMigration does not flag an already-encrypted or empty value", TestNeedsMigrationAlreadyEncryptedOrEmpty);
             allPassed &= SelfTestCheck(output, "BuildPowerShellInstallArguments includes -Token when a token is set, omits it when empty", TestBuildPowerShellInstallArgumentsIncludesToken);
@@ -22086,6 +22282,57 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (SecretProtector.Unprotect(protectedKey) != "PLAINTEXT123")
             {
                 return "expected Unprotect(EncryptInventoryLicenseKeys(x)) to round-trip back to the original plaintext";
+            }
+            return null;
+        }
+
+        private static string TestIsKnownGvlkMatchesFullWindowsKey()
+        {
+            if (!IsKnownGvlk("W269N-WFGWX-YVC9B-4J6C9-T83GX"))
+            {
+                return "expected the Windows 11/10 Pro GVLK (with dashes) to be recognized";
+            }
+            if (!IsKnownGvlk("W269NWFGWXYVC9B4J6C9T83GX"))
+            {
+                return "expected the same GVLK without dashes to be recognized";
+            }
+            if (IsKnownGvlk("AAAAA-AAAAA-AAAAA-AAAAA-AAAAA"))
+            {
+                return "expected an unrelated 25-character key to NOT be recognized as a GVLK";
+            }
+            return null;
+        }
+
+        private static string TestIsKnownGvlkMatchesPartialKeyByLast5()
+        {
+            // T83GX is the real last 5 characters of the Windows 11/10 Pro
+            // GVLK above - this is what PartialProductKey would show on a
+            // KMS-client-activated machine.
+            if (!IsKnownGvlk("T83GX"))
+            {
+                return "expected the last 5 characters of a known GVLK to be recognized as a partial match";
+            }
+            if (IsKnownGvlk("ZZZZZ"))
+            {
+                return "expected an unrelated 5-character partial to NOT be recognized";
+            }
+            return null;
+        }
+
+        private static string TestIsKnownGvlkMatchesOfficeKey()
+        {
+            if (!IsKnownGvlk("NMMKJ-6RK4F-KMJVX-8D9MJ-6MWKP"))
+            {
+                return "expected the Office Professional Plus 2019 GVLK to be recognized";
+            }
+            return null;
+        }
+
+        private static string TestIsKnownGvlkRejectsEmptyOrNull()
+        {
+            if (IsKnownGvlk(null) || IsKnownGvlk(""))
+            {
+                return "expected null/empty to never match as a GVLK";
             }
             return null;
         }
