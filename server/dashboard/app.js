@@ -6070,7 +6070,10 @@
         <td>${escapeHtml(row.computer)}</td>
         <td>${escapeHtml(row.product)}${kmsBadge}</td>
         <td class="mono">${escapeHtml(row.source)}${sharedNote}</td>
-        <td><button class="link-button" type="button" data-reveal-license-key data-client-id="${escapeHtml(row.computer)}" data-license-key-index="${row.index}">•••••• (show)</button></td>
+        <td>
+          <button class="link-button" type="button" data-reveal-license-key data-client-id="${escapeHtml(row.computer)}" data-license-key-index="${row.index}">•••••• (show)</button>
+          <button class="link-button" type="button" data-delete-license-key data-client-id="${escapeHtml(row.computer)}" data-license-key-index="${row.index}">Delete</button>
+        </td>
       </tr>`;
     });
 
@@ -6078,6 +6081,28 @@
       ? '<tr><td colspan="4" class="empty">License keys are not available: the fleet inventory failed to load.</td></tr>'
       : '<tr><td colspan="4" class="empty">No license keys collected yet.</td></tr>');
     renderPager('licensesKeysPager', 'licensesKeys', page, totalPages, () => renderLicensesKeysTable());
+  }
+
+  function deleteLicenseKey(computerName, index) {
+    if (!computerName) return;
+    const confirmed = window.confirm(`Delete this collected license key for ${computerName}? If the same key is still detectable on that machine, it will be collected again on its next report.`);
+    if (!confirmed) return;
+
+    fetch(`/api/v1/clients/${encodeURIComponent(computerName)}/license-keys/${index}`, {
+      method: 'DELETE',
+      cache: 'no-store'
+    })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const client = state.clients.find(c => c.computerName === computerName);
+        if (client && Array.isArray(client.licenses)) {
+          client.licenses.splice(index, 1);
+        }
+        renderLicensesKeysTable();
+      })
+      .catch(error => {
+        window.alert(`Failed to delete license key: ${error.message}`);
+      });
   }
 
   function renderIngestionRejectionsTable() {
@@ -6730,6 +6755,12 @@
         .catch(() => {
           revealKeyBtn.textContent = '•••••• (failed - retry)';
         });
+      return;
+    }
+
+    const deleteLicenseKeyBtn = e.target.closest('[data-delete-license-key]');
+    if (deleteLicenseKeyBtn) {
+      deleteLicenseKey(deleteLicenseKeyBtn.dataset.clientId, Number(deleteLicenseKeyBtn.dataset.licenseKeyIndex));
       return;
     }
 
