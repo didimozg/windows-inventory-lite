@@ -1898,6 +1898,87 @@ namespace WindowsInventoryLite
             }
         }
 
+        // Decodes the classic DigitalProductId binary blob into the 25-
+        // character Windows product key. Ported faithfully from the
+        // real PowerShell reference implementation (base24 alphabet,
+        // byte-array big-number division) rather than reimplemented from
+        // description - see docs/superpowers/specs/2026-10-06-license-key-detection-design.md
+        // for the original script this mirrors. Deliberately avoids
+        // System.Numerics.BigInteger (not available under .NET 3.5, and
+        // this client builds for net35 too) - uses the same byte-array
+        // carry-propagation technique the original script uses, which
+        // needs only byte/int arithmetic.
+        // Returns null if digitalProductId is too short to contain the key
+        // bytes (offset 52, 15 bytes - needs at least 67 bytes total), or
+        // if the decoded result is the all-placeholder key ("BBBBB-BBBBB-
+        // BBBBB-BBBBB-BBBBB") - the real signature of a MAK- or digital-
+        // license-activated machine where no real key was ever entered.
+        private static string DecodeDigitalProductIdKey(byte[] digitalProductId)
+        {
+            const int keyOffset = 52;
+            const int keyByteCount = 15;
+            if (digitalProductId == null || digitalProductId.Length < keyOffset + keyByteCount)
+            {
+                return null;
+            }
+
+            // Copy the 15-byte slice - the decode loop mutates it in place
+            // (storing each division's quotient back into the buffer), so
+            // operating on a copy avoids corrupting the caller's array.
+            byte[] buffer = new byte[keyByteCount];
+            Array.Copy(digitalProductId, keyOffset, buffer, 0, keyByteCount);
+
+            const string base24 = "BCDFGHJKMPQRTVWXY2346789";
+            const int decodeStringLength = 24;
+            const int decodeLength = 14;
+
+            bool containsN = (buffer[decodeLength] / 8) % 2 == 1;
+            buffer[decodeLength] = (byte)(buffer[decodeLength] & 0xF7);
+
+            char[] decodedKey = new char[decodeStringLength + 1];
+            for (int i = decodeStringLength; i >= 0; i--)
+            {
+                int digitMapIndex = 0;
+                for (int j = decodeLength; j >= 0; j--)
+                {
+                    digitMapIndex = digitMapIndex * 256 ^ buffer[j];
+                    buffer[j] = (byte)(digitMapIndex / base24.Length);
+                    digitMapIndex = digitMapIndex % base24.Length;
+                }
+                decodedKey[i] = base24[digitMapIndex];
+            }
+
+            string decoded = new string(decodedKey);
+
+            if (containsN)
+            {
+                int firstLetterIndex = base24.IndexOf(decoded[0]);
+                decoded = decoded.Substring(1);
+                decoded = decoded.Substring(0, firstLetterIndex) + "N" + decoded.Substring(firstLetterIndex);
+            }
+
+            // All-placeholder result: every character is base24[0] ('B') -
+            // the real signature of a MAK/digital-license machine with no
+            // real key material in these bytes. Not a real key - report
+            // nothing, let the caller fall back to PartialProductKey.
+            bool allPlaceholder = true;
+            for (int k = 0; k < decoded.Length; k++)
+            {
+                if (decoded[k] != base24[0]) { allPlaceholder = false; break; }
+            }
+            if (allPlaceholder)
+            {
+                return null;
+            }
+
+            System.Text.StringBuilder withDashes = new System.Text.StringBuilder(decoded);
+            for (int t = 20; t >= 5; t -= 5)
+            {
+                withDashes.Insert(t, '-');
+            }
+            return withDashes.ToString();
+        }
+
         private static Dictionary<string, object> QueryFirst(string query)
         {
             ArrayList list = QueryList(query);
@@ -2759,6 +2840,9 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "MaybeRunWsusScanCore does nothing when wsusCabHash is empty or unchanged from the last scan", TestMaybeRunWsusScanCoreNoOpsWhenHashEmptyOrUnchanged);
             allPassed &= SelfTestCheck(output, "MaybeRunWsusScanCore runs when the hash is unchanged but the last scan is older than the configured max age", TestMaybeRunWsusScanCoreRunsWhenStaleByAgeEvenIfHashUnchanged);
             allPassed &= SelfTestCheck(output, "MaybeRunWsusScanCore runs when forced, regardless of hash or age", TestMaybeRunWsusScanCoreRunsWhenForcedEvenIfFreshAndHashUnchanged);
+            allPassed &= SelfTestCheck(output, "DecodeDigitalProductIdKey round-trips a synthetic key through the test-only encoder", TestDecodeDigitalProductIdKeyRoundTrip);
+            allPassed &= SelfTestCheck(output, "DecodeDigitalProductIdKey returns null for an all-zero (placeholder) DigitalProductId", TestDecodeDigitalProductIdKeyDetectsPlaceholder);
+            allPassed &= SelfTestCheck(output, "DecodeDigitalProductIdKey returns null for a too-short DigitalProductId buffer", TestDecodeDigitalProductIdKeyHandlesShortInput);
             return allPassed;
         }
 
@@ -4006,6 +4090,96 @@ namespace WindowsInventoryLite
             if (!ran || !scanRan)
             {
                 return "expected a rescan to run when forced, even though the hash matches and the last scan is brand new";
+            }
+            return null;
+        }
+
+        // Test-only: the mathematical inverse of DecodeDigitalProductIdKey's
+        // core loop - builds a 15-byte buffer from a target base24 digit
+        // string via repeated multiply-by-24-and-add-digit with carry
+        // propagation (the mirror of the decoder's repeated divide-by-24).
+        // No BigInteger (same net35 constraint as the decoder itself) -
+        // plain byte-array arithmetic, carry kept in an int (max possible
+        // carry well under int range: 255*24+23).
+        private static byte[] EncodeDigitalProductIdKeyForTest(string rawKeyNoDashes, bool containsN)
+        {
+            const string base24 = "BCDFGHJKMPQRTVWXY2346789";
+            const int keyByteCount = 15;
+            byte[] buffer = new byte[keyByteCount];
+
+            string digits = rawKeyNoDashes;
+            if (containsN)
+            {
+                int nIndex = digits.IndexOf('N');
+                char reinsertChar = base24[0]; // placeholder removed below is irrelevant to the math; only the 24 non-N digits matter
+                digits = digits.Remove(nIndex, 1);
+            }
+
+            // Process most-significant digit first (index 0 of the 25-char
+            // string), each step: buffer = buffer * 24 + digit, carry
+            // propagated low-byte-first (index 0 = least significant byte,
+            // matching the decoder's own j=0..14 convention).
+            for (int d = 0; d < digits.Length; d++)
+            {
+                int digitValue = base24.IndexOf(digits[d]);
+                int carry = digitValue;
+                for (int j = 0; j <= 14; j++)
+                {
+                    int product = buffer[j] * 24 + carry;
+                    buffer[j] = (byte)(product & 0xFF);
+                    carry = product >> 8;
+                }
+            }
+
+            if (containsN)
+            {
+                buffer[14] = (byte)(buffer[14] | 0x08);
+            }
+
+            byte[] full = new byte[67];
+            Array.Copy(buffer, 0, full, 52, keyByteCount);
+            return full;
+        }
+
+        private static string TestDecodeDigitalProductIdKeyRoundTrip()
+        {
+            // A real key shape made only of base24 alphabet characters
+            // (B,C,D,F,G,H,J,K,M,P,Q,R,T,V,W,X,Y,2,3,4,6,7,8,9 - no vowels,
+            // no 0/1/5, matching Microsoft's own alphabet to avoid visual
+            // ambiguity) - not a real license, a synthetic round-trip
+            // fixture.
+            string target = "BCDFG-HJKMP-QRTVW-XY234-6789B";
+            string targetNoDashes = target.Replace("-", "");
+            byte[] blob = EncodeDigitalProductIdKeyForTest(targetNoDashes, false);
+            string decoded = DecodeDigitalProductIdKey(blob);
+            if (decoded != target)
+            {
+                return "expected round-trip decode to reproduce the original key, got '" + decoded + "' expected '" + target + "'";
+            }
+            return null;
+        }
+
+        private static string TestDecodeDigitalProductIdKeyDetectsPlaceholder()
+        {
+            // A real MAK/digital-license machine has nothing meaningful in
+            // these bytes - an all-zero 15-byte buffer decodes to all
+            // base24[0] ('B'), which must be reported as "no key", not a
+            // fake real-looking key.
+            byte[] blob = new byte[67]; // all zero
+            string decoded = DecodeDigitalProductIdKey(blob);
+            if (decoded != null)
+            {
+                return "expected an all-zero DigitalProductId to decode to null (placeholder), got '" + decoded + "'";
+            }
+            return null;
+        }
+
+        private static string TestDecodeDigitalProductIdKeyHandlesShortInput()
+        {
+            byte[] tooShort = new byte[10];
+            if (DecodeDigitalProductIdKey(tooShort) != null)
+            {
+                return "expected a too-short DigitalProductId buffer to decode to null, not throw or fabricate a key";
             }
             return null;
         }
