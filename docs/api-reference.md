@@ -156,9 +156,9 @@ Ingestion token always required on both, regardless of `RequireIngestionToken` -
 | POST | `/api/v1/server/admin-password` | Basic Auth | Set or rotate the dashboard admin username/password. |
 | GET | `/api/v1/server/ingestion-token` | Basic Auth | Return the live ingestion token value. |
 | POST | `/api/v1/server/ingestion-token/regenerate` | Basic Auth | Generate and save a new ingestion token. |
-| GET | `/api/v1/server/ingestion-rejections` | Basic Auth | Return the log of rejected ingestion-token attempts (Logging > Ingestion). |
+| GET | `/api/v1/server/ingestion-rejections` | Basic Auth | Return the log of rejected ingestion-token attempts (History & Logs > System Logs > Ingestion). |
 | DELETE | `/api/v1/server/ingestion-rejections` | Basic Auth | Clear the ingestion-rejection log immediately, independent of its retention settings. |
-| GET | `/api/v1/server/debug-log` | Basic Auth | Return the current content of the opt-in debug log (Logging > Debug). |
+| GET | `/api/v1/server/debug-log` | Basic Auth | Return the current content of the opt-in debug log (History & Logs > System Logs > Debug). |
 | DELETE | `/api/v1/server/debug-log` | Basic Auth | Clear the debug log immediately, independent of its retention settings. |
 | POST | `/api/v1/server/login` | None | Establish a server-side dashboard session with valid admin credentials; returns a `wil_session` cookie. |
 | POST | `/api/v1/server/logout` | Basic Auth | Invalidate the current session and clear the `wil_session` cookie. |
@@ -607,7 +607,7 @@ All four endpoints read and write one JSON array file (`_license-key-sources/lic
 
 ## Software distribution
 
-Added in v0.56.0. Two admin-managed catalogs (Windows Updates, Third-Party Software) name installer files on a UNC share; targeted Windows clients poll for their assignments, copy the file locally, run it, and report the result back. The server never connects outbound to a client for this feature - the opposite direction from Deploy > Actions. See `docs/threat-model.md` for the trust boundary (the share's own write-ACL) before enabling it.
+Added in v0.56.0. Two admin-managed catalogs (Windows Updates, Third-Party Software) name installer files on a UNC share; targeted Windows clients poll for their assignments, copy the file locally, run it, and report the result back. The server never connects outbound to a client for this feature - the opposite direction from Operations > Agent Actions > Actions. See `docs/threat-model.md` for the trust boundary (the share's own write-ACL) before enabling it.
 
 ### GET /api/v1/software-repository/settings
 
@@ -648,7 +648,7 @@ Return `{"windowsUpdates": [...]}` / `{"thirdPartySoftware": [...]}`, each recor
 
 Create a catalog entry. Body: `name` and `relativePath` are required; `arguments`, `targets` default to `""`, `requiresReboot` to `false`, `enabled` to `true` when omitted. `id`, `createdAt`, and `updatedAt` are always server-generated, never client-supplied. `relativePath` is share-relative (for example `windows-updates\kb5001716.msu`) - the client rejects a rooted path at run time. Response is the created record.
 
-`targets` is the same plain delimited text `ExpandInstallTargets` parses for Deploy > Actions, but restricted here to computer names: any token that expands to something `IPAddress.TryParse` accepts is rejected with `400 {"error": "targets must be computer names - ..."}`, naming the offending value. A mixed list is rejected outright rather than partly accepted. The reason is directional - this feature matches a client's own self-reported computer name against the list, so an IP address could never match anything. Other validation: `400 {"error": "name is required"}` / `{"error": "relativePath is required"}` / `{"error": "invalid request body"}`.
+`targets` is the same plain delimited text `ExpandInstallTargets` parses for Operations > Agent Actions > Actions, but restricted here to computer names: any token that expands to something `IPAddress.TryParse` accepts is rejected with `400 {"error": "targets must be computer names - ..."}`, naming the offending value. A mixed list is rejected outright rather than partly accepted. The reason is directional - this feature matches a client's own self-reported computer name against the list, so an IP address could never match anything. Other validation: `400 {"error": "name is required"}` / `{"error": "relativePath is required"}` / `{"error": "invalid request body"}`.
 
 ```bash
 curl -X POST https://server:8443/api/v1/windows-updates \

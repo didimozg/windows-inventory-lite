@@ -1599,11 +1599,12 @@
 
   // Global uses the saved Client Update account (or AD as a fallback);
   // Manual shows the username/password fields for a one-off override -
-  // same show/hide convention Deploy > Actions' installWinRmAuthMode uses.
-  // No Save/Delete here any more (moved to Settings > Windows > Client
-  // update credentials, mirroring Deploy > Actions' own credential block,
-  // which never had an in-page save either) - Manual mode's fields are
-  // purely "what to send for this one push," never persisted from here.
+  // same show/hide convention Operations > Agent Actions > Actions'
+  // installWinRmAuthMode uses. No Save/Delete here any more (moved to
+  // Settings > Credentials > Windows Client update credentials, mirroring
+  // Agent Actions' own credential block, which never had an in-page save
+  // either) - Manual mode's fields are purely "what to send for this one
+  // push," never persisted from here.
   function updateUpdatesCredentialFieldVisibility() {
     const manual = byId('updatesWinRmAuthMode').value === 'manual';
     byId('updatesWinRmUsernameField').classList.toggle('hidden', !manual);
@@ -2261,12 +2262,13 @@
       });
   }
 
-  // Shared by Deploy > Updates' read-only "Saved account:" hint and
-  // Settings > Windows > Client update credentials' editable fields - one
-  // GET serves both. Settings pre-fills the username directly (a
-  // management context, like every other settings form); Deploy >
-  // Updates' own Manual-mode fields are a separate, never-pre-filled pair
-  // (see updateUpdatesCredentialFieldVisibility) - typing there sends a
+  // Shared by Operations > Agent Actions > Push & Schedule's read-only
+  // "Saved account:" hint and Settings > Credentials > Windows Client
+  // update credentials' editable fields - one GET serves both. Settings
+  // pre-fills the username directly (a management context, like every
+  // other settings form); Push & Schedule's own Manual-mode fields are a
+  // separate, never-pre-filled pair (see
+  // updateUpdatesCredentialFieldVisibility) - typing there sends a
   // one-off override, it never reads or writes the saved account.
   function loadClientUpdateCredentials() {
     const hint = byId('updatesSavedAccountHint');
@@ -6913,18 +6915,43 @@
     items[nextIndex].focus();
   }
 
+  // Opening one top-nav dropdown while another is already open used to
+  // leave the first one open too: each button's own click handler calls
+  // stopPropagation() (so the click doesn't immediately re-close the menu
+  // this same click just opened, via the document listener below), but
+  // that also stops the click from ever reaching that document listener -
+  // which is the only thing that closes a DIFFERENT, already-open
+  // dropdown. Closing every other dropdown here, before toggling this
+  // one, fixes that without touching stopPropagation's own reason for
+  // being there. Reads .previousElementSibling off each
+  // .topnav-dropdown-menu (same lookup handleDropdownKeydown above
+  // already uses) rather than hardcoding the id pairs, so a future 4th
+  // dropdown is covered automatically.
+  function closeOtherTopNavDropdowns(exceptButton) {
+    document.querySelectorAll('.topnav-dropdown-menu').forEach((menu) => {
+      const button = menu.previousElementSibling;
+      if (button !== exceptButton) {
+        menu.classList.add('hidden');
+        button.setAttribute('aria-expanded', 'false');
+      }
+    });
+  }
+
   byId('inventoryDropdownButton').addEventListener('click', (event) => {
     event.stopPropagation();
+    closeOtherTopNavDropdowns(event.currentTarget);
     toggleDropdown('inventoryDropdownButton', 'inventoryDropdownMenu');
   });
   byId('inventoryDropdownMenu').addEventListener('keydown', handleDropdownKeydown);
   byId('operationsDropdownButton').addEventListener('click', (event) => {
     event.stopPropagation();
+    closeOtherTopNavDropdowns(event.currentTarget);
     toggleDropdown('operationsDropdownButton', 'operationsDropdownMenu');
   });
   byId('operationsDropdownMenu').addEventListener('keydown', handleDropdownKeydown);
   byId('historyLogsDropdownButton').addEventListener('click', (event) => {
     event.stopPropagation();
+    closeOtherTopNavDropdowns(event.currentTarget);
     toggleDropdown('historyLogsDropdownButton', 'historyLogsDropdownMenu');
   });
   byId('historyLogsDropdownMenu').addEventListener('keydown', handleDropdownKeydown);

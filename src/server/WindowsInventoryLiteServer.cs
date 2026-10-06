@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.88.0";
+        internal const string ProductVersion = "0.88.1";
 
         private static int Main(string[] args)
         {
@@ -8387,27 +8387,31 @@ namespace WindowsInventoryLite
         {
             string cookieHeader = request.Headers.ContainsKey("cookie") ? request.Headers["cookie"] : null;
             string sessionToken = GetCookieValue(cookieHeader, "wil_session");
-            if (!String.IsNullOrEmpty(sessionToken))
+            DateTime now = DateTime.UtcNow;
+            lock (sessionLock)
             {
-                lock (sessionLock)
+                // Unconditional, every call reaching this point - not just
+                // when this request's own cookie turns out to be expired
+                // (the branch below still exists for a VALID session's
+                // sliding-expiry refresh, the common case). Closes the one
+                // remaining gap: a session nobody ever presents again (tab
+                // closed, cookie discarded) and that no one else's later
+                // login happens to sweep out either, which would otherwise
+                // sit in sessionStore until the process restarts.
+                // sessionStore only ever holds a handful of concurrent admin
+                // sessions, so a full dictionary walk on every request is
+                // negligible - same "opportunistic, piggyback on a lock
+                // already being taken" reasoning as the login-time prune
+                // above, without adding a new timer/background thread.
+                PruneExpiredSessionsLocked(now);
+                if (!String.IsNullOrEmpty(sessionToken))
                 {
                     SessionRecord record;
                     sessionStore.TryGetValue(sessionToken, out record);
-                    DateTime now = DateTime.UtcNow;
                     if (IsSessionValid(record, now))
                     {
                         record.ExpiresUtc = ComputeSessionExpiry(now, options.SessionLifetimeHours);
                         return true;
-                    }
-                    // A found-but-expired record used to just fall through to
-                    // Basic Auth below, leaving the stale entry in sessionStore
-                    // until the next successful login's own prune swept it out -
-                    // a dashboard tab left open with nobody logging back in
-                    // could linger there indefinitely. Sweeping here too closes
-                    // that gap without adding a new timer/background thread.
-                    if (record != null)
-                    {
-                        PruneExpiredSessionsLocked(now);
                     }
                 }
             }
@@ -16837,6 +16841,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "RunLinuxClientUninstallTarget rejects an unsafe installPath before attempting any SSH connection", TestRunLinuxClientUninstallTargetRejectsUnsafeInstallPath);
             allPassed &= SelfTestCheck(output, "RunClientActionJob removes a completed job from the in-memory installJobs dictionary", TestRunClientActionJobRemovesCompletedJobFromMemory);
             allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized prunes an expired session from sessionStore on use, not just at the next login", TestIsWebRequestAuthorizedPrunesExpiredSessionOnUse);
+            allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized prunes an orphaned expired session even on an unrelated, cookie-less request", TestIsWebRequestAuthorizedPrunesOrphanedSessionOnUnrelatedRequest);
             allPassed &= SelfTestCheck(output, "ChangeAdminPassword invalidates every pre-rotation session on a successful rotation", TestChangeAdminPasswordInvalidatesSessionsOnSuccess);
             allPassed &= SelfTestCheck(output, "Content-Security-Policy restricts form-action to 'self'", TestContentSecurityPolicyRestrictsFormAction);
             allPassed &= SelfTestCheck(output, "NormalizeReportIdentifier treats a blank identifier the same as a missing one", TestNormalizeReportIdentifierTreatsBlankSameAsMissing);
@@ -26147,6 +26152,44 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (sessionStore.ContainsKey(expiredToken))
             {
                 return "expected an expired session found during IsWebRequestAuthorized to be pruned from sessionStore immediately, not left to linger until the next login";
+            }
+            return null;
+        }
+
+        // The test above covers a request that presents the expired
+        // session's own cookie. This covers the remaining gap that fix
+        // left open: a session nobody ever presents again at all (tab
+        // closed, cookie discarded) sitting in sessionStore until some
+        // unrelated login's batch prune happened to sweep it out. An
+        // unrelated request - no cookie, from a different "browser" - must
+        // now prune it too, since the sweep in IsWebRequestAuthorized runs
+        // unconditionally rather than only on this request's own cookie.
+        private static string TestIsWebRequestAuthorizedPrunesOrphanedSessionOnUnrelatedRequest()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            InventoryServer server = new InventoryServer(options);
+
+            System.Reflection.FieldInfo sessionStoreField = typeof(InventoryServer).GetField("sessionStore", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            Dictionary<string, SessionRecord> sessionStore = (Dictionary<string, SessionRecord>)sessionStoreField.GetValue(server);
+
+            string orphanedToken = "orphaned-token-nobody-ever-presents-again";
+            SessionRecord orphanedRecord = new SessionRecord();
+            orphanedRecord.ExpiresUtc = DateTime.UtcNow.AddHours(-1);
+            sessionStore[orphanedToken] = orphanedRecord;
+
+            RequestContext unrelatedRequest = new RequestContext();
+            unrelatedRequest.Headers = new Dictionary<string, string>();
+            unrelatedRequest.RemoteAddress = IPAddress.Parse("192.168.1.51");
+            // No cookie header at all - this request has nothing to do with
+            // the orphaned session above.
+
+            server.IsWebRequestAuthorized(unrelatedRequest);
+
+            if (sessionStore.ContainsKey(orphanedToken))
+            {
+                return "expected an unrelated, cookie-less request to still prune an orphaned expired session it never presented itself";
             }
             return null;
         }

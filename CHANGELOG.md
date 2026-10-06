@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.88.1] - Backlog cleanup: orphaned session pruning, top-nav dropdown exclusivity, stale nav hints
+
+### Fixed
+
+- **A login session that's never presented again (tab closed, cookie discarded) and that no later login happens to sweep out either used to sit in the server's in-memory session store indefinitely.** `IsWebRequestAuthorized` now prunes expired sessions unconditionally on every request reaching it, not only when that request's own cookie turns out to be expired - closing the one remaining gap in session cleanup. `sessionStore` only ever holds a handful of concurrent admin sessions, so the added dictionary walk is negligible; no new timer or background thread.
+- **Opening one top-nav dropdown (Inventory/Operations/History & Logs) while another was already open left the first one open too**, both visibly overlapping. Each button's own `click` handler calls `stopPropagation()` (needed so the click doesn't immediately re-close the menu it just opened via the document-level closer) - which also stopped the click from ever reaching that same document-level closer, the only thing that closed a *different*, already-open dropdown. Each button now explicitly closes every other open dropdown before toggling itself.
+- **Two stale nav cross-references from today's own Settings redesign (0.87.0)**: the Outbound proxy hint (Settings > Server) and two internal code comments still pointed WSUS cab schedule/status at "Settings > Credentials", which is where it lived before today's move into Settings > Windows - both corrected. Two more stale `docs/api-reference.md` mentions of the pre-nav-restructure "Logging > Ingestion"/"Logging > Debug" and "Deploy > Actions" names corrected to their current "History & Logs > System Logs" / "Operations > Agent Actions > Actions" equivalents (present-tense usages only - the file's historical "as of vX.Y.Z" mentions of old names were deliberately left as-is, since those correctly describe what a past release was called at the time).
+
+### Notes
+
+- Closes two residual items from `docs/backlog.md`'s session-pruning and dashboard-wide IA-pass entries, plus a newly-found stale hint - see that file for the full writeup.
+- `docs/pending-readme-updates.md` gained a consolidated entry describing the current final nav/Settings/Push & Schedule/Clients-table shape (0.86.0-0.88.0), superseding the several older, now-stale intermediate entries already in that file - none of which were rewritten, per this project's own README-update cadence (batched at release prep, not per-task).
+
 ## [0.88.0] - Clients table: all status badges consolidated into one Status column
 
 ### Changed
