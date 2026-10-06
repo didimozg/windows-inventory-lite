@@ -5295,6 +5295,53 @@
       .slice(0, limit);
   }
 
+  // Both helpers below are Windows-only: wsusMissingUpdates only ever gets
+  // written by a Windows client's own WSUS offline scan (WsusScanner.cs on
+  // the client, ReceiveWsusScanResults on the server) - Linux reports never
+  // carry the field. /api/v1/clients already returns it unredacted on every
+  // client object (unlike license keys), so this needs no new endpoint.
+
+  // One bar per client with at least one missing update, not bucketed/
+  // "Other"-summarized like getTopCpuModels - a named machine, not a
+  // category, so lumping the tail into "Other" would just hide which
+  // specific clients those are without saving much chart space.
+  function getTopClientsByMissingUpdates(clients, limit) {
+    return clients
+      .filter(client => clientPlatformLabel(client) === 'Windows')
+      .map(client => ({ label: clientDisplayName(client), count: (client.wsusMissingUpdates || []).length }))
+      .filter(item => item.count > 0)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, limit);
+  }
+
+  // Counts DISTINCT missing KBs per severity bucket fleet-wide (a KB missing
+  // on 10 machines counts once), matching how Operations > Software Catalog
+  // > Windows updates > Missing updates already presents one row per KB -
+  // not a count of every (client, KB) pair, which would just be dominated
+  // by whichever single KB happens to be missing on the most machines.
+  // Canonical MSRC order, not alphabetical or by count, so Critical is
+  // always the first/top bar regardless of which severity currently has
+  // the most KBs. Empty/unrecognized severity (a KB WUA didn't classify)
+  // still counts, as "Unspecified", rather than silently vanishing from
+  // the total.
+  function getMissingUpdatesBySeverity(clients) {
+    const order = ['Critical', 'Important', 'Moderate', 'Low', 'Unspecified'];
+    const seenKbIds = new Set();
+    const counts = new Map(order.map(label => [label, 0]));
+    clients
+      .filter(client => clientPlatformLabel(client) === 'Windows')
+      .forEach(client => {
+        (client.wsusMissingUpdates || []).forEach(update => {
+          const kbId = (update.kbId || '').toLowerCase();
+          if (!kbId || seenKbIds.has(kbId)) return;
+          seenKbIds.add(kbId);
+          const label = order.includes(update.msrcSeverity) ? update.msrcSeverity : 'Unspecified';
+          counts.set(label, counts.get(label) + 1);
+        });
+      });
+    return order.map(label => ({ label, count: counts.get(label) })).filter(item => item.count > 0);
+  }
+
   function renderBarChart(containerId, items) {
     const container = byId(containerId);
     if (!items.length) {
@@ -5368,6 +5415,11 @@
     renderBarChart('dashCpuChart', getTopCpuModels(allClients, 4));
     renderBarChart('dashRamChart', getRamBuckets(allClients));
     renderBarChart('dashStorageChart', getStorageTypeBreakdown(allClients));
+    byId('dashCriticalKbClientCount').textContent = allClients.filter(client =>
+      clientPlatformLabel(client) === 'Windows' && (client.wsusMissingUpdates || []).some(update => update.msrcSeverity === 'Critical')
+    ).length;
+    renderBarChart('dashTopMissingUpdatesChart', getTopClientsByMissingUpdates(allClients, 4));
+    renderBarChart('dashMissingUpdatesSeverityChart', getMissingUpdatesBySeverity(allClients));
   }
 
   // Each module renders as its own grid cell (2 columns) instead of one

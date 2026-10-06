@@ -6,6 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.89.0] - Dashboard: new Security card (Critical-KB clients, top clients by missing updates, missing updates by severity)
+
+### Added
+
+- **A new "Security" card on the main Dashboard**, after Hardware, matching the existing Software/Hardware cards' single-stat + bar-chart layout: a "Clients with a Critical missing update" count, a "Top clients by missing updates" bar chart (top 4), and a "Missing updates by severity" bar chart (Critical/Important/Moderate/Low/Unspecified, counting each distinct missing KB once fleet-wide, not once per affected machine).
+- Entirely dashboard-side: `/api/v1/clients` already returns each client's full `wsusMissingUpdates` array unredacted, so this needed no new endpoint and no server-side change. Windows-only (the field has no Linux equivalent) - Linux clients are excluded from all three the same way other Windows-only dashboard tiles already are.
+
+### Notes
+
+- Closes `docs/backlog.md`'s "dashboard vulnerability-focused tiles" entry, with one deliberate scope cut agreed with the user: a Windows-vs-Office split for the severity breakdown was dropped rather than built now, since today's WUA scan code (`WsusScanner.cs`) never reads the `Categories` property that would carry a product classification - adding that is new, unverified-live WUA interop (this file's own header: COM calls here "MUST be verified live... not unit-testable"), a materially bigger and riskier change than the rest of this feature. Re-open a fresh backlog entry if the product split is wanted later.
+- Live-verified with 3 synthetic client reports covering overlapping KBs across clients, multiple severities including an unclassified one, and multi-client ranking - all three tiles matched the expected counts exactly, including the fleet-wide KB dedup (one KB missing on 2 clients counted once in the severity chart, once per client in the ranking chart).
+
 ## [0.88.1] - Backlog cleanup: orphaned session pruning, top-nav dropdown exclusivity, stale nav hints
 
 ### Fixed
