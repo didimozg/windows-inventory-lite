@@ -6178,7 +6178,9 @@
     byId('installView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'actions'));
     byId('updatesView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'updates'));
     byId('packageView').classList.toggle('hidden', !(state.view === 'deploy' && state.subview === 'package'));
-    // Settings: exactly one of the five shows at a time (no stacking).
+    // Settings: one subview is visible at a time, but Server and Security
+    // each render as two sibling sections sharing the same subview key
+    // (serverSettingsView+generalStatusView; certificateView+adminPasswordView).
     byId('serverSettingsView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'server'));
     byId('generalStatusView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'server'));
     byId('windowsSettingsView').classList.toggle('hidden', !(state.view === 'settings' && state.subview === 'windows'));
