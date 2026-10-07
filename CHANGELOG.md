@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [Windows client 0.15.1] - Detected Windows activation key now labeled with the real OS version
+
+### Fixed
+
+- **A detected Windows activation key's product label was the generic, edition-only `SoftwareLicensingProduct.Name` string** ("Windows(R), Professional edition") with no OS major version at all for client SKUs, shown as-is in Licenses > Keys. Now uses `Win32_OperatingSystem.Caption` instead - already collected into the report's own `os.caption` field, no new query - which carries both the version (7/8/10/11, or a Server release) and the edition in one string (e.g. "Windows 10 Pro"). Office entries are untouched.
+
+### Notes
+
+- Live-verified on this session's own real Windows 10 Pro host: the Windows activation key entry's product label changed from the generic enum string to the real OS caption.
+
 ## [0.90.1] - Dashboard: fix zero-gap Save buttons, pair WinRM/SSH credentials, drop redundant schedule hints
 
 ### Fixed

@@ -20,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLiteClient";
-        internal const string ProductVersion = "0.15.0";
+        internal const string ProductVersion = "0.15.1";
 
         private static int Main(string[] args)
         {
@@ -1267,7 +1267,8 @@ namespace WindowsInventoryLite
             result["manufacturer"] = GetString(computer, "Manufacturer");
             result["model"] = GetString(computer, "Model");
             result["serialNumber"] = GetString(bios, "SerialNumber");
-            result["os"] = GetOperatingSystem();
+            Dictionary<string, object> os = GetOperatingSystem();
+            result["os"] = os;
             // Computed once and reused for both fields - GetOfficeVersion's
             // own ClickToRun-fallback used to call GetInstalledSoftware()
             // again internally, unconditionally, so --skip-software never
@@ -1278,7 +1279,7 @@ namespace WindowsInventoryLite
             result["office"] = GetOfficeVersion(installedSoftware);
             result["activation"] = GetActivation();
             ArrayList licenseKeys = GetLicenseKeys();
-            licenseKeys.AddRange(GetWindowsAndOfficeActivationKeys());
+            licenseKeys.AddRange(GetWindowsAndOfficeActivationKeys(GetString(os, "caption")));
             result["licenses"] = licenseKeys;
             result["software"] = installedSoftware;
 
@@ -1642,7 +1643,7 @@ namespace WindowsInventoryLite
         // their WMI query rather than widening their return shape and
         // risking that existing behavior. One extra cheap WMI call per
         // report cycle.
-        private ArrayList GetWindowsAndOfficeActivationKeys()
+        private ArrayList GetWindowsAndOfficeActivationKeys(string osCaption)
         {
             ArrayList result = new ArrayList();
             string query = "SELECT Name, ApplicationID, LicenseStatus, PartialProductKey FROM SoftwareLicensingProduct WHERE PartialProductKey IS NOT NULL";
@@ -1670,7 +1671,14 @@ namespace WindowsInventoryLite
 
             if (windowsProduct != null)
             {
-                string windowsName = GetString(windowsProduct, "Name");
+                // SoftwareLicensingProduct's own Name is a generic, edition-only
+                // string ("Windows(R), Professional edition") with no OS major
+                // version at all for client SKUs - Win32_OperatingSystem's
+                // Caption (already collected into the report's own "os" field,
+                // no extra query here) carries both the version number (7/8/10/
+                // 11, or a Server release) and the edition in one string, so it
+                // reads correctly where the licensing product name alone doesn't.
+                string windowsName = !String.IsNullOrEmpty(osCaption) ? osCaption : GetString(windowsProduct, "Name");
                 string fullKey = null;
                 string source = null;
 
