@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.90.1] - Dashboard: fix zero-gap Save buttons, pair WinRM/SSH credentials, drop redundant schedule hints
+
+### Fixed
+
+- **A form's Save button sitting flush against the field grid above it, no visible gap** - reported live on Settings > Linux's "Linux client targeting" card, but the same root cause (neither `.pkg-grid` nor `.pkg-buttons` carries a margin on the side facing the other) affected 5 instances project-wide: Settings > Linux's "Linux client targeting" and "Install defaults", and Settings > Windows's "Install defaults", "Windows updates install window", and "Third-party software install window". Fixed with one adjacent-sibling rule (`.pkg-grid + .pkg-buttons`) scoped to exactly this adjacency - left alone the many other places where a `.cert-hint`/`.pkg-status` paragraph already bridges the gap, or where `.pkg-buttons` sits nested inside its own `.pkg-grid` as a grid item and already gets spacing from the grid's own `gap`.
+
+### Changed
+
+- **Operations > Push & Schedule's WinRM credentials and SSH credentials cards now sit side by side** instead of stacked, matching the Windows schedule / Linux schedule / Linux client targeting row below. Given its own wider row (`.updates-credentials-row`) rather than reusing that row directly - its `.credential-manual-grid` needs more width than the 280px columns below support, which is exactly why WinRM used to get pulled out of a shared row entirely (see the standalone-block history this replaces).
+- **Removed the "Auto-pushes outdated Windows/Linux clients using the ... credentials above" hint lines** from the Windows schedule and Linux schedule cards - redundant now that both credentials cards sit directly above, visibly in view.
+
+### Notes
+
+- Live-verified on a scratch server via Playwright: all 5 fixed Save-button instances screenshotted before/after; the new WinRM/SSH row checked in both "Global" and "Manual credentials" modes (confirms the wider 2-column credential grid doesn't overflow) and at a narrow 1000px viewport (confirms it still wraps to stacked cleanly); spot-checked Settings > Credentials' nested-grid-item Save buttons to confirm the new CSS rule didn't introduce a double gap there.
+
 ## [0.90.0] - Automatic Windows/Office activation key detection, KMS marking, shared-key grouping, and a Delete action on collected license keys
 
 ### Added

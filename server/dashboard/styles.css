@@ -1874,6 +1874,21 @@ th.sort-desc::after {
   align-items: end;
 }
 
+/* Neither .pkg-grid nor .pkg-buttons carries its own margin on the side
+   that faces the other, so a form whose Save button follows its field
+   grid directly - nothing in between - got zero gap there (reported live
+   on Settings > Linux's "Linux client targeting" card). Where a
+   .cert-hint paragraph sits between them it already supplies this gap via
+   its own margin-bottom, and where .pkg-buttons is nested INSIDE a
+   .pkg-grid as a grid item instead of following it, the grid's own gap
+   covers it - this sibling-only selector leaves both of those alone and
+   fixes just the bare adjacency. Same value as .cert-hint's
+   margin-bottom, so the gap reads the same regardless of which element
+   supplies it. */
+.pkg-grid + .pkg-buttons {
+  margin-top: var(--space-md);
+}
+
 /* SSH key's file picker is the only field in its row (Upload/Delete are
    the row's other grid item), so it fell into .pkg-grid's first column -
    sized as a 2fr share meant for a URL field, not a "Choose File" button
@@ -2204,8 +2219,9 @@ th.sort-desc::after {
    overlapping/overflowing its half-width column, same failure the
    analogous "Linux Client update credentials" block (Settings > Linux)
    already hit and was fixed for by moving it out of a row entirely. WinRM
-   credentials got the same fix - it's now a standalone full-width block
-   above this row, not a row member. */
+   credentials got the same fix then. It now pairs with SSH credentials
+   instead, in its own wider row (.updates-credentials-row below, same
+   wide grid shape on both sides so neither overflows). */
 .updates-top-row {
   display: flex;
   flex-wrap: wrap;
@@ -2231,6 +2247,19 @@ th.sort-desc::after {
   border-bottom: none;
   margin-bottom: 0;
   padding-bottom: 0;
+}
+
+/* WinRM credentials and SSH credentials each hold .credential-manual-grid -
+   two minmax(200px, 420px) tracks side by side, ~416px minimum - too wide
+   for the 280px column above (that mismatch is exactly why WinRM used to
+   get pulled out of a shared row entirely, see the comment on
+   .updates-top-row itself). Reuses .updates-top-row for the flex/divider/
+   spacing mechanics but overrides the child basis wide enough for that
+   grid, so this pair can share a row with each other without the old
+   overflow. */
+.updates-top-row.updates-credentials-row .settings-block {
+  flex: 1 1 460px;
+  min-width: 460px;
 }
 
 .settings-block-title {

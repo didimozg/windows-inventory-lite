@@ -1223,60 +1223,61 @@
 
         <section id="updatesView" class="install-panel card-glow hidden" aria-label="Client updates">
           <h2 class="settings-block-title platform-section-title">Client updates</h2>
-          <div class="settings-block">
-            <h3 class="settings-block-title">WinRM credentials</h3>
-            <p id="updatesSavedAccountHint" class="cert-hint hidden"></p>
-            <div class="pkg-grid client-update-grid credential-manual-grid">
-              <label class="pkg-token-field credential-source-field">
-                WinRM credential source
-                <select id="updatesWinRmAuthMode">
-                  <option value="global">Global (saved account, AD fallback)</option>
-                  <option value="manual">Manual credentials</option>
-                </select>
+          <div class="updates-top-row updates-credentials-row">
+            <div class="settings-block">
+              <h3 class="settings-block-title">WinRM credentials</h3>
+              <p id="updatesSavedAccountHint" class="cert-hint hidden"></p>
+              <div class="pkg-grid client-update-grid credential-manual-grid">
+                <label class="pkg-token-field credential-source-field">
+                  WinRM credential source
+                  <select id="updatesWinRmAuthMode">
+                    <option value="global">Global (saved account, AD fallback)</option>
+                    <option value="manual">Manual credentials</option>
+                  </select>
+                </label>
+                <label id="updatesWinRmUsernameField" class="pkg-token-field hidden">
+                  Client update username
+                  <input id="updatesUsername" type="text" autocomplete="username" placeholder="DOMAIN\svc-account">
+                </label>
+                <label id="updatesWinRmPasswordField" class="pkg-token-field hidden">
+                  Client update password
+                  <input id="updatesPassword" type="password" autocomplete="new-password">
+                </label>
+              </div>
+            </div>
+            <div class="settings-block">
+              <h3 class="settings-block-title">SSH credentials</h3>
+              <div class="pkg-grid client-update-grid credential-manual-grid">
+                <label class="pkg-token-field credential-source-field">
+                  SSH credential source
+                  <select id="linuxUpdatesAuthMode">
+                    <option value="global">Global (saved account, AD fallback)</option>
+                    <option value="manual">Manual credentials</option>
+                    <option value="key">SSH key</option>
+                  </select>
+                </label>
+                <label id="linuxUpdatesCredentialsField" class="pkg-token-field hidden">
+                  Linux user
+                  <input id="linuxUpdatesUsername" type="text" autocomplete="username" placeholder="root">
+                </label>
+                <label id="linuxUpdatesPasswordField" class="pkg-token-field hidden">
+                  Linux password
+                  <input id="linuxUpdatesPassword" type="password" autocomplete="current-password">
+                </label>
+              </div>
+              <label class="check-label linux-updates-trust-field">
+                <input id="linuxUpdatesTrustNewHostKeys" type="checkbox">
+                Trust new host keys automatically (skip verification)
               </label>
-              <label id="updatesWinRmUsernameField" class="pkg-token-field hidden">
-                Client update username
-                <input id="updatesUsername" type="text" autocomplete="username" placeholder="DOMAIN\svc-account">
-              </label>
-              <label id="updatesWinRmPasswordField" class="pkg-token-field hidden">
-                Client update password
-                <input id="updatesPassword" type="password" autocomplete="new-password">
+              <label id="linuxUpdatesAcknowledgeHostKeyRiskField" class="check-label linux-updates-trust-field hidden">
+                <input id="linuxUpdatesAcknowledgeHostKeyRisk" type="checkbox">
+                I understand this accepts an unverified SSH host key on first connection
               </label>
             </div>
-          </div>
-          <div class="settings-block">
-            <h3 class="settings-block-title">SSH credentials</h3>
-            <div class="pkg-grid client-update-grid credential-manual-grid">
-              <label class="pkg-token-field credential-source-field">
-                SSH credential source
-                <select id="linuxUpdatesAuthMode">
-                  <option value="global">Global (saved account, AD fallback)</option>
-                  <option value="manual">Manual credentials</option>
-                  <option value="key">SSH key</option>
-                </select>
-              </label>
-              <label id="linuxUpdatesCredentialsField" class="pkg-token-field hidden">
-                Linux user
-                <input id="linuxUpdatesUsername" type="text" autocomplete="username" placeholder="root">
-              </label>
-              <label id="linuxUpdatesPasswordField" class="pkg-token-field hidden">
-                Linux password
-                <input id="linuxUpdatesPassword" type="password" autocomplete="current-password">
-              </label>
-            </div>
-            <label class="check-label linux-updates-trust-field">
-              <input id="linuxUpdatesTrustNewHostKeys" type="checkbox">
-              Trust new host keys automatically (skip verification)
-            </label>
-            <label id="linuxUpdatesAcknowledgeHostKeyRiskField" class="check-label linux-updates-trust-field hidden">
-              <input id="linuxUpdatesAcknowledgeHostKeyRisk" type="checkbox">
-              I understand this accepts an unverified SSH host key on first connection
-            </label>
           </div>
           <div class="updates-top-row">
             <div class="settings-block">
               <h3 class="settings-block-title">Windows schedule</h3>
-              <p class="cert-hint">Auto-pushes outdated Windows clients using the WinRM credentials above.</p>
               <p id="updatesScheduleCredentialWarning" class="cert-hint hidden">No saved WinRM account above - scheduled pushes will use the server's own service identity.</p>
               <div class="pkg-grid client-update-schedule-panel">
                 <label class="pkg-token-field">
@@ -1303,7 +1304,6 @@
             </div>
             <div class="settings-block">
               <h3 class="settings-block-title">Linux schedule</h3>
-              <p class="cert-hint">Auto-pushes outdated Linux clients using the SSH credentials above (no AD reuse for scheduled pushes).</p>
               <div class="pkg-grid client-update-schedule-panel">
                 <label class="pkg-token-field">
                   Schedule
