@@ -6,6 +6,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.91.0] - Licenses > Keys: one row per key, with every client using it listed
+
+### Changed
+
+- **A key shared by several clients (chiefly KMS/GVLK keys) used to produce one near-identical row per client**, with a "+N more" note revealing the rest only on hover. Now collapsed into a single row per distinct key: the Product/KMS badge/Key-reveal stay shared across the group, and a "Clients" column lists every client using that key, each with its own detection source and its own Delete button (deletes only that one client's collected entry, same semantics as before - if still detectable there, it reappears on its next report). A key unique to one client still renders the same way, as a one-member group - no special-casing needed.
+- Purely dashboard-side: grouping reuses the `sharedWith` field the server already computed and sent per entry (`BuildSharedActivationKeyGroups`, shipped in 0.90.0) - no server or client-agent change.
+
+### Notes
+
+- Live-verified on a scratch server with 3 synthetic reports (two clients sharing one real Windows 10 Pro GVLK via different detection sources, one client with its own unique key): grouping, the shared reveal, per-client delete (confirmed the dialog names the specific client, and the server-side JSON file lost only that one entry), and column sort all checked via Playwright.
+
 ## [Windows client 0.15.1] - Detected Windows activation key now labeled with the real OS version
 
 ### Fixed

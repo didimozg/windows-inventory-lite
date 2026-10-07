@@ -955,6 +955,26 @@ tr.stale td {
   display: block;
 }
 
+/* Licenses > Keys groups every client sharing an identical key into one
+   row (see groupLicenseKeyRows in app.js) - this is that group's client
+   list, one per line since each carries its own source label and its own
+   Delete button (deleting removes only that one client's collected entry,
+   same as before grouping - see the Delete button's own confirm text). */
+.license-key-clients {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.license-key-clients li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
 .empty {
   padding: var(--space-xl);
   text-align: center;

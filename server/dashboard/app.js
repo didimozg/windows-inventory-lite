@@ -6034,11 +6034,35 @@
     return rows;
   }
 
-  function licensesKeySortValue(row, key) {
+  // Collapses the flattened per-client rows into one row per distinct key:
+  // every row sharing the same (product, sharedWith set) is the same key by
+  // construction (the server only populates sharedWith - and keeps it
+  // identical across every member - for rows whose decrypted key and
+  // product both match, see BuildSharedActivationKeyGroups). A row with no
+  // sharedWith (key unique to that one client) becomes its own one-member
+  // group, keyed by computer+index so it never collides with another
+  // unshared row for a different product on the same client.
+  function groupLicenseKeyRows(rows) {
+    const groups = new Map();
+    rows.forEach(row => {
+      const shared = row.sharedWith.length > 1;
+      const groupKey = shared
+        ? 'shared\u001f' + row.product + '\u001f' + row.sharedWith.slice().sort().join('\u001f')
+        : 'single\u001f' + row.computer + '\u001f' + row.index;
+      if (!groups.has(groupKey)) {
+        groups.set(groupKey, { product: row.product, isKms: row.isKms, members: [] });
+      }
+      groups.get(groupKey).members.push({ computer: row.computer, source: row.source, index: row.index });
+    });
+    const result = Array.from(groups.values());
+    result.forEach(group => group.members.sort((a, b) => a.computer.localeCompare(b.computer)));
+    return result;
+  }
+
+  function licensesKeySortValue(group, key) {
     switch (key) {
-      case 'computer': return (row.computer || '').toLowerCase();
-      case 'product': return (row.product || '').toLowerCase();
-      case 'source': return (row.source || '').toLowerCase();
+      case 'computer': return (group.members[0] && group.members[0].computer || '').toLowerCase();
+      case 'product': return (group.product || '').toLowerCase();
       default: return '';
     }
   }
@@ -6055,31 +6079,31 @@
 
   function renderLicensesKeysTable() {
     const rows = flattenClientLicenseKeys(state.clients);
+    const groups = groupLicenseKeyRows(rows);
     const { key: sortKey, dir: sortDir } = state.sort.licensesKeys;
-    const sorted = applySort(rows, row => licensesKeySortValue(row, sortKey), sortDir);
+    const sorted = applySort(groups, group => licensesKeySortValue(group, sortKey), sortDir);
     const { items: pageItems, page, totalPages } = paginate(sorted, state.page.licensesKeys, state.pageSize.licensesKeys);
     state.page.licensesKeys = page;
 
-    const tableRows = pageItems.map(row => {
-      const kmsBadge = row.isKms ? ' <span class="usb-badge" title="This key matches a known Microsoft Generic Volume License Key (GVLK), not a unique retail/MAK key">KMS</span>' : '';
-      const otherComputers = row.sharedWith.filter(name => name !== row.computer);
-      const sharedNote = otherComputers.length
-        ? ` <small title="${escapeHtml(otherComputers.join(', '))}">+${otherComputers.length} more</small>`
-        : '';
+    const tableRows = pageItems.map(group => {
+      const kmsBadge = group.isKms ? ' <span class="usb-badge" title="This key matches a known Microsoft Generic Volume License Key (GVLK), not a unique retail/MAK key">KMS</span>' : '';
+      const primary = group.members[0];
+      const clientItems = group.members.map(member => `<li>
+          ${escapeHtml(member.computer)} <small class="mono">${escapeHtml(member.source)}</small>
+          <button class="link-button" type="button" data-delete-license-key data-client-id="${escapeHtml(member.computer)}" data-license-key-index="${member.index}">Delete</button>
+        </li>`).join('');
       return `<tr>
-        <td>${escapeHtml(row.computer)}</td>
-        <td>${escapeHtml(row.product)}${kmsBadge}</td>
-        <td class="mono">${escapeHtml(row.source)}${sharedNote}</td>
+        <td>${escapeHtml(group.product)}${kmsBadge}</td>
         <td>
-          <button class="link-button" type="button" data-reveal-license-key data-client-id="${escapeHtml(row.computer)}" data-license-key-index="${row.index}">•••••• (show)</button>
-          <button class="link-button" type="button" data-delete-license-key data-client-id="${escapeHtml(row.computer)}" data-license-key-index="${row.index}">Delete</button>
+          <button class="link-button" type="button" data-reveal-license-key data-client-id="${escapeHtml(primary.computer)}" data-license-key-index="${primary.index}">•••••• (show)</button>
         </td>
+        <td><ul class="license-key-clients">${clientItems}</ul></td>
       </tr>`;
     });
 
     byId('licensesKeysBody').innerHTML = tableRows.join('') || (state.clientsLoadFailed
-      ? '<tr><td colspan="4" class="empty">License keys are not available: the fleet inventory failed to load.</td></tr>'
-      : '<tr><td colspan="4" class="empty">No license keys collected yet.</td></tr>');
+      ? '<tr><td colspan="3" class="empty">License keys are not available: the fleet inventory failed to load.</td></tr>'
+      : '<tr><td colspan="3" class="empty">No license keys collected yet.</td></tr>');
     renderPager('licensesKeysPager', 'licensesKeys', page, totalPages, () => renderLicensesKeysTable());
   }
 
