@@ -4752,10 +4752,6 @@
           const lastGood = data.lastSuccessfulScanAt ? ` (showing results from the last successful scan: ${formatDateTime(data.lastSuccessfulScanAt)})` : '';
           messageElement.textContent = `Last scan attempt failed: ${data.errorMessage || 'unknown error'}${lastGood}`;
           messageElement.classList.remove('hidden');
-        } else if (data.scannedAt) {
-          messageElement.className = 'pkg-message';
-          messageElement.textContent = `Last scanned: ${formatDateTime(data.scannedAt)}`;
-          messageElement.classList.remove('hidden');
         } else {
           messageElement.classList.add('hidden');
         }
@@ -4907,10 +4903,6 @@
           messageElement.className = 'pkg-message error';
           const lastGood = data.lastSuccessfulScanAt ? ` (showing results from the last successful scan: ${formatDateTime(data.lastSuccessfulScanAt)})` : '';
           messageElement.textContent = `Last scan attempt failed: ${data.errorMessage || 'unknown error'}${lastGood}`;
-          messageElement.classList.remove('hidden');
-        } else if (data.scannedAt) {
-          messageElement.className = 'pkg-message';
-          messageElement.textContent = `Last scanned: ${formatDateTime(data.scannedAt)}`;
           messageElement.classList.remove('hidden');
         } else {
           messageElement.classList.add('hidden');
