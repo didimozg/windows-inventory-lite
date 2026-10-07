@@ -20,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLiteClient";
-        internal const string ProductVersion = "0.15.1";
+        internal const string ProductVersion = "0.16.0";
 
         private static int Main(string[] args)
         {
@@ -1742,11 +1742,44 @@ namespace WindowsInventoryLite
 
             if (officeProduct != null)
             {
+                string officeName = GetString(officeProduct, "Name");
                 string partial = GetString(officeProduct, "PartialProductKey");
+                string officeFullKey = null;
+                string officeFullKeyProductName = null;
+
+                // The registry scan only trusts a decoded key that ends with
+                // this same product's own WMI-reported PartialProductKey -
+                // no partial key means nothing to validate against, so the
+                // scan is skipped rather than risking an unvalidated result.
                 if (!String.IsNullOrEmpty(partial))
                 {
+                    try
+                    {
+                        officeFullKey = GetOfficeDigitalProductIdKey(partial, out officeFullKeyProductName);
+                    }
+                    catch
+                    {
+                        // A missing/unreadable Office registration hive is a
+                        // normal outcome (Click-to-Run/retail install, which
+                        // uses a different OSPP token-based licensing
+                        // mechanism with no DigitalProductID value to find
+                        // here at all) - fall through to the partial-key
+                        // fallback below.
+                    }
+                }
+
+                if (officeFullKey != null)
+                {
                     Dictionary<string, object> entry = new Dictionary<string, object>();
-                    entry["product"] = GetString(officeProduct, "Name");
+                    entry["product"] = !String.IsNullOrEmpty(officeFullKeyProductName) ? officeFullKeyProductName : officeName;
+                    entry["source"] = "Office activation (registry)";
+                    entry["key"] = officeFullKey;
+                    result.Add(entry);
+                }
+                else if (!String.IsNullOrEmpty(partial))
+                {
+                    Dictionary<string, object> entry = new Dictionary<string, object>();
+                    entry["product"] = officeName;
                     entry["source"] = "Office activation (partial)";
                     entry["key"] = partial;
                     result.Add(entry);
@@ -1762,6 +1795,96 @@ namespace WindowsInventoryLite
             if (rows.Count == 0) return null;
             Dictionary<string, object> row = (Dictionary<string, object>)rows[0];
             return GetString(row, "OA3xOriginalProductKey");
+        }
+
+        // A Volume License/MSI-activated Office install (KMS or MAK) registers
+        // itself under HKLM\SOFTWARE\Microsoft\Office\<version>\Registration\
+        // {GUID}, carrying its own DigitalProductID value using the same
+        // base24 encoding Windows' own DigitalProductId uses - but NOT at
+        // Windows' fixed byte offset (see DecodeOfficeDigitalProductIdKey's
+        // own comment for why expectedLastFive is required and how the
+        // offset is found). A Click-to-Run/retail install uses a different
+        // (OSPP token-based) licensing mechanism with no DigitalProductID
+        // value anywhere in this tree, so finding nothing is the normal
+        // outcome there, not an error. Walks every version/subkey instead of
+        // a hardcoded "Registration" path (matching the reference script
+        // this is ported from) since the exact middle segment isn't
+        // guaranteed stable across Office releases. Checked against both the
+        // native and Wow6432Node roots the same way GetInstalledSoftware
+        // already checks both for the Uninstall hive - a 32-bit Office
+        // install's registration lives under Wow6432Node when seen from a
+        // 64-bit view (and vice versa).
+        private static string GetOfficeDigitalProductIdKey(string expectedLastFive, out string productName)
+        {
+            string found = GetOfficeDigitalProductIdKeyUnderRoot(@"SOFTWARE\Microsoft\Office", expectedLastFive, out productName);
+            if (found != null)
+            {
+                return found;
+            }
+            return GetOfficeDigitalProductIdKeyUnderRoot(@"SOFTWARE\Wow6432Node\Microsoft\Office", expectedLastFive, out productName);
+        }
+
+        private static string GetOfficeDigitalProductIdKeyUnderRoot(string rootPath, string expectedLastFive, out string productName)
+        {
+            productName = null;
+            using (RegistryKey officeKey = Registry.LocalMachine.OpenSubKey(rootPath))
+            {
+                if (officeKey == null)
+                {
+                    return null;
+                }
+
+                foreach (string versionName in officeKey.GetSubKeyNames())
+                {
+                    string versionPath = rootPath + "\\" + versionName;
+                    using (RegistryKey versionKey = Registry.LocalMachine.OpenSubKey(versionPath))
+                    {
+                        if (versionKey == null)
+                        {
+                            continue;
+                        }
+
+                        foreach (string midName in versionKey.GetSubKeyNames())
+                        {
+                            string midPath = versionPath + "\\" + midName;
+                            using (RegistryKey midKey = Registry.LocalMachine.OpenSubKey(midPath))
+                            {
+                                if (midKey == null)
+                                {
+                                    continue;
+                                }
+
+                                foreach (string leafName in midKey.GetSubKeyNames())
+                                {
+                                    // One subkey's own broken ACL/data must not
+                                    // abort the rest of the walk - same
+                                    // per-entry handling as ReadUninstallKey.
+                                    try
+                                    {
+                                        string leafPath = midPath + "\\" + leafName;
+                                        byte[] digitalProductId = ReadRegistryBinary(Registry.LocalMachine, leafPath, "DigitalProductID");
+                                        if (digitalProductId == null)
+                                        {
+                                            continue;
+                                        }
+                                        string decoded = DecodeOfficeDigitalProductIdKey(digitalProductId, expectedLastFive);
+                                        if (String.IsNullOrEmpty(decoded))
+                                        {
+                                            continue;
+                                        }
+                                        productName = ReadRegistryString(Registry.LocalMachine, leafPath, "ProductName");
+                                        return decoded;
+                                    }
+                                    catch
+                                    {
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return null;
         }
 
         private static byte[] ReadRegistryBinary(RegistryKey root, string subKeyPath, string valueName)
@@ -2060,6 +2183,18 @@ namespace WindowsInventoryLite
             {
                 return null;
             }
+            return DecodeDigitalProductIdKeyAtOffset(digitalProductId, keyOffset);
+        }
+
+        // Core decode, factored out of DecodeDigitalProductIdKey so the same
+        // byte-arithmetic can run at an offset OTHER than Windows' fixed 52 -
+        // see DecodeOfficeDigitalProductIdKey below for why that's needed.
+        // Bounds are the caller's responsibility (DecodeDigitalProductIdKey
+        // checks length before calling; the Office scan below only calls
+        // this where a full 15-byte window exists).
+        private static string DecodeDigitalProductIdKeyAtOffset(byte[] digitalProductId, int keyOffset)
+        {
+            const int keyByteCount = 15;
 
             // Copy the 15-byte slice - the decode loop mutates it in place
             // (storing each division's quotient back into the buffer), so
@@ -2092,6 +2227,10 @@ namespace WindowsInventoryLite
             if (containsN)
             {
                 int firstLetterIndex = base24.IndexOf(decoded[0]);
+                if (firstLetterIndex < 0)
+                {
+                    return null;
+                }
                 decoded = decoded.Substring(1);
                 decoded = decoded.Substring(0, firstLetterIndex) + "N" + decoded.Substring(firstLetterIndex);
             }
@@ -2116,6 +2255,42 @@ namespace WindowsInventoryLite
                 withDashes.Insert(t, '-');
             }
             return withDashes.ToString();
+        }
+
+        // Office's own DigitalProductID carries the identical base24-encoded
+        // key material as Windows' - confirmed by decoding a real Volume
+        // License/KMS-activated Office 2016 install's actual registry value
+        // this session - but NOT at Windows' fixed offset 52: on that same
+        // real machine the key only appeared at byte offset 808 of a 1272-
+        // byte blob (nearly 8x Windows' ~164-byte one), found by brute-force
+        // scanning every offset and comparing against the SAME machine's own
+        // WMI-reported PartialProductKey. A single data point isn't enough
+        // to trust a fixed offset for every Office build/edition/blob size,
+        // so this scans every possible offset on EACH machine instead and
+        // only accepts a decoded key that ends with that machine's own
+        // already-verified PartialProductKey (expectedLastFive) - the result
+        // is self-validating per machine, never a plausible-looking wrong
+        // key, regardless of how Office's own blob layout varies. Returns
+        // null (falls back to the partial key alone) when no offset
+        // produces a match - the normal outcome for a Click-to-Run/retail
+        // install, which has no DigitalProductID value at all.
+        private static string DecodeOfficeDigitalProductIdKey(byte[] digitalProductId, string expectedLastFive)
+        {
+            const int keyByteCount = 15;
+            if (digitalProductId == null || String.IsNullOrEmpty(expectedLastFive) || expectedLastFive.Length != 5)
+            {
+                return null;
+            }
+
+            for (int offset = 0; offset + keyByteCount <= digitalProductId.Length; offset++)
+            {
+                string decoded = DecodeDigitalProductIdKeyAtOffset(digitalProductId, offset);
+                if (decoded != null && decoded.EndsWith(expectedLastFive, StringComparison.OrdinalIgnoreCase))
+                {
+                    return decoded;
+                }
+            }
+            return null;
         }
 
         private static Dictionary<string, object> QueryFirst(string query)
@@ -2983,6 +3158,9 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "DecodeDigitalProductIdKey round-trips a synthetic N-key (N not at position 0) through the test-only encoder", TestDecodeDigitalProductIdKeyRoundTripWithN);
             allPassed &= SelfTestCheck(output, "DecodeDigitalProductIdKey returns null for an all-zero (placeholder) DigitalProductId", TestDecodeDigitalProductIdKeyDetectsPlaceholder);
             allPassed &= SelfTestCheck(output, "DecodeDigitalProductIdKey returns null for a too-short DigitalProductId buffer", TestDecodeDigitalProductIdKeyHandlesShortInput);
+            allPassed &= SelfTestCheck(output, "DecodeOfficeDigitalProductIdKey finds a key at a non-Windows byte offset", TestDecodeOfficeDigitalProductIdKeyFindsNonWindowsOffset);
+            allPassed &= SelfTestCheck(output, "DecodeOfficeDigitalProductIdKey rejects a decoded key whose suffix doesn't match the expected partial key", TestDecodeOfficeDigitalProductIdKeyRejectsMismatchedPartial);
+            allPassed &= SelfTestCheck(output, "DecodeOfficeDigitalProductIdKey requires a valid 5-character expectedLastFive", TestDecodeOfficeDigitalProductIdKeyRequiresExpectedSuffix);
             return allPassed;
         }
 
@@ -4243,6 +4421,16 @@ namespace WindowsInventoryLite
         // carry well under int range: 255*24+23).
         private static byte[] EncodeDigitalProductIdKeyForTest(string rawKeyNoDashes, bool containsN)
         {
+            return EncodeDigitalProductIdKeyForTestAtOffset(rawKeyNoDashes, containsN, 52, 67);
+        }
+
+        // Same encoding as EncodeDigitalProductIdKeyForTest, but places the
+        // 15 encoded bytes at an arbitrary offset in an arbitrary-sized
+        // buffer - used to fabricate a synthetic "Office-shaped" blob (key
+        // bytes NOT at Windows' offset 52) for DecodeOfficeDigitalProductIdKey's
+        // own tests, without needing a second copy of the encode loop.
+        private static byte[] EncodeDigitalProductIdKeyForTestAtOffset(string rawKeyNoDashes, bool containsN, int offset, int totalLength)
+        {
             const string base24 = "BCDFGHJKMPQRTVWXY2346789";
             const int keyByteCount = 15;
             byte[] buffer = new byte[keyByteCount];
@@ -4282,8 +4470,8 @@ namespace WindowsInventoryLite
                 buffer[14] = (byte)(buffer[14] | 0x08);
             }
 
-            byte[] full = new byte[67];
-            Array.Copy(buffer, 0, full, 52, keyByteCount);
+            byte[] full = new byte[totalLength];
+            Array.Copy(buffer, 0, full, offset, keyByteCount);
             return full;
         }
 
@@ -4353,6 +4541,54 @@ namespace WindowsInventoryLite
             if (DecodeDigitalProductIdKey(oneByteShort) != null)
             {
                 return "expected a 66-byte (one byte short of the 67-byte minimum) DigitalProductId buffer to decode to null";
+            }
+            return null;
+        }
+
+        private static string TestDecodeOfficeDigitalProductIdKeyFindsNonWindowsOffset()
+        {
+            // Office's own DigitalProductID doesn't carry the key at
+            // Windows' fixed offset 52 - a real Volume License Office 2016
+            // install's blob (1272 bytes) had it at offset 808. This fixture
+            // mirrors that shape: same alphabet-only key, embedded far from
+            // offset 52 in a blob much larger than Windows' ~164 bytes.
+            string target = "BCDFG-HJKMP-QRTVW-XY234-6789B";
+            string targetNoDashes = target.Replace("-", "");
+            byte[] blob = EncodeDigitalProductIdKeyForTestAtOffset(targetNoDashes, false, 808, 1272);
+            string decoded = DecodeOfficeDigitalProductIdKey(blob, "6789B");
+            if (decoded != target)
+            {
+                return "expected the scan to find the key at a non-Windows offset, got '" + decoded + "' expected '" + target + "'";
+            }
+            return null;
+        }
+
+        private static string TestDecodeOfficeDigitalProductIdKeyRejectsMismatchedPartial()
+        {
+            // The real safeguard this exists for: a wrong offset can decode
+            // to a plausible-LOOKING key purely by chance (exactly what
+            // happened trying offset 52 on a real Office 2016 blob this
+            // session) - the scan must never surface such a result just
+            // because it decoded to something key-shaped. Here the blob
+            // genuinely contains a real key, but the caller's own
+            // (deliberately wrong) expected suffix doesn't match it, so the
+            // scan must report nothing rather than a false positive.
+            string target = "BCDFG-HJKMP-QRTVW-XY234-6789B";
+            byte[] blob = EncodeDigitalProductIdKeyForTestAtOffset(target.Replace("-", ""), false, 808, 1272);
+            string decoded = DecodeOfficeDigitalProductIdKey(blob, "WRONG");
+            if (decoded != null)
+            {
+                return "expected no match when the decoded key's suffix does not match expectedLastFive, got '" + decoded + "'";
+            }
+            return null;
+        }
+
+        private static string TestDecodeOfficeDigitalProductIdKeyRequiresExpectedSuffix()
+        {
+            byte[] blob = EncodeDigitalProductIdKeyForTestAtOffset("BCDFGHJKMPQRTVWXY2346789B", false, 808, 1272);
+            if (DecodeOfficeDigitalProductIdKey(blob, null) != null || DecodeOfficeDigitalProductIdKey(blob, "") != null || DecodeOfficeDigitalProductIdKey(blob, "BAD") != null)
+            {
+                return "expected a null/empty/wrong-length expectedLastFive to skip the scan and return null";
             }
             return null;
         }

@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [Windows client 0.16.0] - Full Office activation key recovery for Volume License/KMS installs
+
+### Added
+
+- **A Volume License/MSI-activated Office install (KMS or MAK) now yields its full 25-character product key**, not just the last-5-character `PartialProductKey` - a real, verified `DigitalProductID` registry value exists for these installs (under `HKLM\SOFTWARE\Microsoft\Office\<version>\Registration\{GUID}`), encoded with the same base24 scheme Windows' own `DigitalProductId` uses. A prior pass of this feature assumed Office 2013+ could never yield a full key at all - re-opened after the user independently reproduced full-key recovery on a real Office 2016 install via a community PowerShell script. Click-to-Run/retail Office (a different, OSPP token-based licensing mechanism) still has no `DigitalProductID` value to find, so it continues to fall back to the partial key exactly as before.
+
+### Fixed
+
+- **The byte offset is NOT the same as Windows'.** The community script (and this feature's own first implementation) assumed Office reused Windows' fixed offset 52 - live-tested against a real Volume License Office 2016 install this session, that produced a plausible-*looking* but WRONG 25-character key (confirmed wrong against the machine's own real `PartialProductKey` and the published GVLK). The real key was found at byte offset 808 of a 1272-byte blob (Windows' own blob is ~164 bytes) via a brute-force scan. Rather than hardcode 808 on one data point, the client now scans every possible offset on each machine and only accepts a decoded key whose last 5 characters match that same product's already-trusted `PartialProductKey` - self-validating per machine regardless of how Office's own blob layout varies by version/build, and incapable of ever surfacing an unverified, wrong-looking-right key.
+- Checked against both the native and `Wow6432Node` registry roots (32-bit Office on a 64-bit client process, and vice versa) - this fleet runs both.
+
+### Notes
+
+- Live-verified end to end on this session's own real, Volume License/KMS-activated Office 2016 Standard install: decoded key `JNRGM-WHDWX-FJJG3-K47QV-DRTFM` exactly matches both the machine's own real `PartialProductKey` suffix (`DRTFM`, re-confirmed live via WMI) and the server's own embedded "Office Standard 2016" GVLK table entry - so this also now correctly gets the KMS badge and cross-client grouping already built in 0.90.0/0.91.0.
+- 3 new self-tests cover the pure decode-and-validate logic (`DecodeOfficeDigitalProductIdKey`): finding a key at a non-Windows offset, rejecting a real decoded key when the expected suffix doesn't match (the actual safeguard this whole feature exists for), and refusing to scan without a valid 5-character anchor. The registry-tree-walk itself is WMI/registry-dependent glue, verified live rather than unit-tested, same as the rest of this feature.
+
 ## [0.91.0] - Licenses > Keys: one row per key, with every client using it listed
 
 ### Changed
