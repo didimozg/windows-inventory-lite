@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [0.92.0] - Licenses > Keys: "Add to licenses" promotes a detected key into the curated Catalog
+
+### Added
+
+- **A new "Add to licenses" button on every Licenses > Keys row** jumps to Licenses > Catalog with the Add form already open and prefilled: product name, the real decrypted key, and every client sharing it. Matched by product name first - a product that already has a Catalog entry opens that EXISTING record for editing (untouched by the prefill) instead of creating a duplicate, same precedent as the Software table's own "License" button. Closes the "Add" half of `docs/backlog.md`'s "Delete/Add actions on the Licenses > Keys table" entry (Delete shipped in 0.90.0).
+- The key is decrypted on demand the same way the existing "show" reveal already works - reuses a prior reveal's cached value when present, otherwise fetches it fresh.
+
+### Fixed
+
+- **The Catalog's Name field came up blank whenever the Add/Edit form opened with a name already filled in** (both this new button and the pre-existing Software-table "License" button) - `openLicenseForm`'s own trailing `.focus()` call triggered the Name field's datalist-reopen workaround (`handleDatalistFieldFocus`), which clears the visible value on focus and only restores it on blur. Now only autofocuses Name when it's genuinely empty (a brand-new blank entry) - a latent bug surfaced while testing the new button, pre-dating this release.
+
+### Notes
+
+- Live-verified on a scratch server with 2 synthetic reports sharing one real Windows 10 Pro GVLK: clicked "Add to licenses" with the key not yet revealed, confirmed the form opened with the correct product/key/both computers prefilled, saved, and confirmed the resulting Catalog row.
+
 ## [0.91.1] - Settings > Credentials: paired blocks read as one
 
 ### Changed

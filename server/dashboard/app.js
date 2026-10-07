@@ -4053,15 +4053,25 @@
     const license = licenseId ? state.licenses.find(l => l.id === licenseId) : null;
     byId('licenseName').value = license ? license.name || '' : (prefill && prefill.name) || '';
     byId('licenseVersion').value = license ? license.version || '' : (prefill && prefill.version) || '';
-    byId('licenseKey').value = license ? license.license || '' : '';
+    byId('licenseKey').value = license ? license.license || '' : (prefill && prefill.license) || '';
     byId('licenseComment').value = license ? license.comment || '' : '';
     byId('licenseComputerInput').value = '';
-    state.licenseFormComputers = license ? (license.computers || []).slice() : [];
+    state.licenseFormComputers = license ? (license.computers || []).slice() : ((prefill && prefill.computers) || []).slice();
     byId('licenseMessage').className = 'pkg-message hidden';
     updateVersionDatalist();
     renderLicenseComputerChips();
     byId('licenseForm').classList.remove('hidden');
-    byId('licenseName').focus();
+    // Only autofocus Name when it's actually empty (a brand-new blank
+    // entry). Name is a datalist-backed field whose own focus handler
+    // (handleDatalistFieldFocus, above) clears the visible value to work
+    // around Chromium refusing to reopen a datalist once it already
+    // matches an option - calling .focus() right after setting a real
+    // value here (editing, or prefill from Software/Licenses > Keys)
+    // would immediately clear what was just filled in, visible until the
+    // field is blurred.
+    if (!byId('licenseName').value) {
+      byId('licenseName').focus();
+    }
   }
 
   // Matched by name only: one license record commonly covers several
@@ -6098,12 +6108,13 @@
           <button class="link-button" type="button" data-reveal-license-key data-client-id="${escapeHtml(primary.computer)}" data-license-key-index="${primary.index}">•••••• (show)</button>
         </td>
         <td><ul class="license-key-clients">${clientItems}</ul></td>
+        <td><button class="export-button" type="button" data-add-license-key data-client-id="${escapeHtml(primary.computer)}" data-license-key-index="${primary.index}">Add to licenses</button></td>
       </tr>`;
     });
 
     byId('licensesKeysBody').innerHTML = tableRows.join('') || (state.clientsLoadFailed
-      ? '<tr><td colspan="3" class="empty">License keys are not available: the fleet inventory failed to load.</td></tr>'
-      : '<tr><td colspan="3" class="empty">No license keys collected yet.</td></tr>');
+      ? '<tr><td colspan="4" class="empty">License keys are not available: the fleet inventory failed to load.</td></tr>'
+      : '<tr><td colspan="4" class="empty">No license keys collected yet.</td></tr>');
     renderPager('licensesKeysPager', 'licensesKeys', page, totalPages, () => renderLicensesKeysTable());
   }
 
@@ -6126,6 +6137,56 @@
       })
       .catch(error => {
         window.alert(`Failed to delete license key: ${error.message}`);
+      });
+  }
+
+  // Jumps to Licenses > Catalog and opens the Add/Edit form prefilled with
+  // a detected key's product/key/client list - same navigate-then-open
+  // shape as openLicenseForSoftware (Software table's own "License"
+  // button). Matched by product name first: a product that already has a
+  // catalog entry opens that EXISTING record for editing, untouched by the
+  // prefill, rather than silently creating a duplicate - identical to how
+  // openLicenseForSoftware already treats an existing match.
+  function addLicenseKeyToCatalog(product, key, computers) {
+    setView('licenses', 'catalog');
+    fetch('/api/v1/licenses', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.licenses = data.licenses || [];
+        renderLicenses();
+        const existing = findLicenseForSoftware(product);
+        openLicenseForm(existing ? existing.id : null, { name: product, license: key, computers });
+      })
+      .catch(error => {
+        window.alert(`Could not load licenses: ${error.message}`);
+      });
+  }
+
+  // The key is only ever decrypted on request (same as the "show" reveal
+  // button) - reuses the cached value from a prior reveal when present,
+  // otherwise fetches it from the same endpoint the reveal button uses.
+  function addGroupLicenseKeyToCatalog(computerId, index, product, computers) {
+    if (state.revealedLicenseKeys[computerId] && state.revealedLicenseKeys[computerId][index] !== undefined) {
+      addLicenseKeyToCatalog(product, state.revealedLicenseKeys[computerId][index], computers);
+      return;
+    }
+
+    fetch(`/api/v1/clients/${encodeURIComponent(computerId)}/license-keys`, { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        const keys = (data.licenses || []).map(item => item.key);
+        if (keys[index] === undefined) throw new Error('Key missing from response.');
+        state.revealedLicenseKeys[computerId] = keys;
+        addLicenseKeyToCatalog(product, keys[index], computers);
+      })
+      .catch(error => {
+        window.alert(`Failed to load the license key: ${error.message}`);
       });
   }
 
@@ -6785,6 +6846,18 @@
     const deleteLicenseKeyBtn = e.target.closest('[data-delete-license-key]');
     if (deleteLicenseKeyBtn) {
       deleteLicenseKey(deleteLicenseKeyBtn.dataset.clientId, Number(deleteLicenseKeyBtn.dataset.licenseKeyIndex));
+      return;
+    }
+
+    const addLicenseKeyBtn = e.target.closest('[data-add-license-key]');
+    if (addLicenseKeyBtn) {
+      const clientId = addLicenseKeyBtn.dataset.clientId;
+      const index = Number(addLicenseKeyBtn.dataset.licenseKeyIndex);
+      const client = state.clients.find(c => c.computerName === clientId);
+      const item = client && Array.isArray(client.licenses) ? client.licenses[index] : null;
+      if (!item) return;
+      const computers = (item.sharedWith && item.sharedWith.length > 1) ? item.sharedWith.slice() : [clientId];
+      addGroupLicenseKeyToCatalog(clientId, index, item.product, computers);
       return;
     }
 
