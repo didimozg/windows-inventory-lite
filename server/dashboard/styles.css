@@ -2203,6 +2203,19 @@ th.sort-desc::after {
   border-bottom: 1px solid var(--divider-strong, var(--line));
 }
 
+/* Settings > Credentials: "Windows Client update credentials" reads as one
+   block with "Software repository" right under it, and likewise "Linux
+   Client update credentials" with "SSH key" - each pair stays two
+   independently-saved .settings-block sections (different Save buttons,
+   different endpoints), this only drops the divider line/gap between the
+   FIRST block of each pair and the one after it, closing the visual seam
+   without touching either save action. */
+.credentials-merge-top {
+  padding-bottom: 0;
+  margin-bottom: var(--space-lg);
+  border-bottom: none;
+}
+
 /* Applied alongside .settings-block (class="settings-block settings-card")
    on every Save-button block in Settings > Server/Windows/Linux, turning
    each one into its own card-glow card instead of a divider-separated
