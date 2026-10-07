@@ -1,0 +1,12 @@
+# The server's CSP header (WindowsInventoryLiteServer.cs) allow-lists the
+# dashboard's inline <script> by its exact SHA-256 hash, computed against
+# the LF-ending file as committed. This repo (and most Windows checkouts,
+# given core.autocrlf=true) would otherwise check these files out with
+# CRLF line endings, hashing to a different value than the one in the CSP
+# allow-list - silently blocking the script (the saved theme preference
+# then never restores, with only a CSP-violation console line to explain
+# it) on any checkout where autocrlf converted them. Force LF regardless of
+# platform or local git config so the committed hash always stays valid.
+server/dashboard/*.html text eol=lf
+server/dashboard/*.js text eol=lf
+server/dashboard/*.css text eol=lf

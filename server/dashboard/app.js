@@ -6125,6 +6125,14 @@
         if (client && Array.isArray(client.licenses)) {
           client.licenses.splice(index, 1);
         }
+        // state.revealedLicenseKeys[computerName] is keyed by POSITION in
+        // this client's own licenses array (see its own comment at the
+        // reveal handler) - every entry after the deleted one just shifted
+        // down by one, so the stale cached array would show the WRONG
+        // product's real key at those positions on the very next reveal
+        // (or "Add to licenses", which reads this same cache first).
+        // Dropping it forces a fresh fetch.
+        delete state.revealedLicenseKeys[computerName];
         renderLicensesKeysTable();
       })
       .catch(error => {
@@ -6932,11 +6940,15 @@
     const rescanWsusBtn = e.target.closest('[data-rescan-wsus-now]');
     if (rescanWsusBtn) {
       const computerName = rescanWsusBtn.dataset.rescanWsusNow;
-      // Direct interpolation into the attribute selector, matching this
-      // same listener's other computer/job-keyed lookups above (data-client,
-      // data-software, data-linux-client) - no cssEscape helper exists in
-      // this file, and computer names don't contain quote characters.
-      const statusEl = document.querySelector(`[data-rescan-wsus-now-status="${computerName}"]`);
+      // CSS.escape, not direct interpolation - a computer name is reported
+      // by the fleet itself (a compromised endpoint is attacker-influenced
+      // input, not necessarily quote-free), same reasoning as the
+      // CSS.escape(host)/CSS.escape(rowKey) call sites elsewhere in this
+      // same handler. An unescaped quote in the selector throws a
+      // synchronous, uncaught SyntaxError that aborts this whole handler
+      // before fetch() even runs - permanently breaking this one action
+      // for that one machine with nothing shown to the admin.
+      const statusEl = document.querySelector(`[data-rescan-wsus-now-status="${CSS.escape(computerName)}"]`);
       rescanWsusBtn.disabled = true;
       fetch(`/api/v1/windows-updates/rescan-now?computerName=${encodeURIComponent(computerName)}`, { method: 'POST' })
         .then(res => {
@@ -6955,7 +6967,7 @@
     const installWindowsUpdatesBtn = e.target.closest('[data-install-windows-updates-now]');
     if (installWindowsUpdatesBtn) {
       const computerName = installWindowsUpdatesBtn.dataset.installWindowsUpdatesNow;
-      const statusEl = document.querySelector(`[data-install-windows-updates-now-status="${computerName}"]`);
+      const statusEl = document.querySelector(`[data-install-windows-updates-now-status="${CSS.escape(computerName)}"]`);
       installWindowsUpdatesBtn.disabled = true;
       fetch(`/api/v1/clients/install-windows-updates-now?computerName=${encodeURIComponent(computerName)}`, { method: 'POST' })
         .then(res => {
@@ -6974,7 +6986,7 @@
     const installThirdPartySoftwareBtn = e.target.closest('[data-install-third-party-software-now]');
     if (installThirdPartySoftwareBtn) {
       const computerName = installThirdPartySoftwareBtn.dataset.installThirdPartySoftwareNow;
-      const statusEl = document.querySelector(`[data-install-third-party-software-now-status="${computerName}"]`);
+      const statusEl = document.querySelector(`[data-install-third-party-software-now-status="${CSS.escape(computerName)}"]`);
       installThirdPartySoftwareBtn.disabled = true;
       fetch(`/api/v1/clients/install-third-party-software-now?computerName=${encodeURIComponent(computerName)}`, { method: 'POST' })
         .then(res => {
@@ -7022,6 +7034,13 @@
         renderOsFilterActive();
         renderFilteredHardwarePage();
       }
+      // Harmless today only because this happens to be the last branch in
+      // this handler - every sibling branch above returns after handling
+      // its own data-* action so it can't fall through into a later
+      // closest() check and double-fire. Matching that here so the next
+      // branch appended after this one doesn't inherit that gap by
+      // accident.
+      return;
     }
   });
   byId('settingsSubtabServer').addEventListener('click', () => setView('settings', 'server'));

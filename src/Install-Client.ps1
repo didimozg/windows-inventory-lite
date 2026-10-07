@@ -68,9 +68,15 @@ function Test-IsElevatedAdmin {
 function Test-BatchSafeValue {
     param([string]$Value, [string]$FieldName)
     if ([string]::IsNullOrEmpty($Value)) { return }
-    $unsafeChars = [char[]]('"', '&', '|', '<', '>', '^', "`r", "`n")
+    # '%' is rejected, not just the shell-metacharacter set, because
+    # Invoke-ServiceCreate below runs this value's command line through
+    # `cmd.exe /c`, which expands %VAR% inline (confirmed live) - the same
+    # class of risk New-ClientGpoPackage.ps1 already escapes ('%' -> '%%')
+    # for its own cmd.exe-interpreted fields. Rejecting outright here since
+    # none of these fields legitimately need a literal '%'.
+    $unsafeChars = [char[]]('"', '&', '|', '<', '>', '^', '%', "`r", "`n")
     if ($Value.IndexOfAny($unsafeChars) -ge 0) {
-        throw "$FieldName contains a character that is not allowed here (double quote, &, |, <, >, ^, or a line break)."
+        throw "$FieldName contains a character that is not allowed here (double quote, &, |, <, >, ^, %, or a line break)."
     }
 }
 Test-BatchSafeValue -Value $ServerUrl -FieldName 'ServerUrl'

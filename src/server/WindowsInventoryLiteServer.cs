@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.92.1";
+        internal const string ProductVersion = "0.92.2";
 
         private static int Main(string[] args)
         {
@@ -4071,6 +4071,12 @@ namespace WindowsInventoryLite
                 SendText(stream, "{\"error\":\"computerName is required\"}", "application/json; charset=utf-8", 400);
                 return;
             }
+            if (IsReportIdentifierTooLong(computerName))
+            {
+                DebugLogger.Log(options, "Client", "Rejected WSUS scan results: computerName exceeds " + MaxReportIdentifierLength + " characters");
+                SendText(stream, "{\"error\":\"computerName is too long\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
 
             string cabHash = GetStringValue(payload, "cabHash");
             bool wuServiceAvailable = payload.ContainsKey("wuServiceAvailable") && Convert.ToBoolean(payload["wuServiceAvailable"]);
@@ -4078,6 +4084,30 @@ namespace WindowsInventoryLite
             if (missingUpdates == null)
             {
                 missingUpdates = new ArrayList();
+            }
+            // Strip any downloadUrl the server would never actually fetch
+            // (see IsAllowedWsusDownloadUrl) at ingestion, before it ever
+            // reaches disk - a compromised/misbehaving agent holding the
+            // one shared ingestion token otherwise has no other check
+            // stopping it from planting an arbitrary URL here for an
+            // admin's later "Download now" click to fetch and persist
+            // (TriggerWsusKbDownloadNow enforces the same allowlist again
+            // at that point, independently - this is defense in depth, not
+            // the only gate).
+            foreach (object item in missingUpdates)
+            {
+                Dictionary<string, object> missingUpdate = item as Dictionary<string, object>;
+                if (missingUpdate == null || !missingUpdate.ContainsKey("downloadUrl"))
+                {
+                    continue;
+                }
+                string reportedDownloadUrl = Convert.ToString(missingUpdate["downloadUrl"]);
+                string rejectionReason;
+                if (!String.IsNullOrEmpty(reportedDownloadUrl) && !IsAllowedWsusDownloadUrl(reportedDownloadUrl, out rejectionReason))
+                {
+                    DebugLogger.Log(options, "Client", "Dropped downloadUrl reported by '" + computerName + "' for a missing KB: " + rejectionReason);
+                    missingUpdate["downloadUrl"] = "";
+                }
             }
 
             string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
@@ -4285,34 +4315,46 @@ namespace WindowsInventoryLite
             }
 
             string path = Path.Combine(options.DataPath, SanitizeFileName(computerName) + ".json");
-            if (!File.Exists(path))
-            {
-                SendText(stream, "{\"error\":\"client not found\"}", "application/json; charset=utf-8", 404);
-                return;
-            }
-
             JavaScriptSerializer serializer = CreateJsonSerializer();
-            Dictionary<string, object> report;
-            try
+            // reportFileLock, not just a File.Exists/ReadAllText/WriteAllText
+            // sequence on its own - every other writer of a client's own
+            // report file (ReceiveInventory, PruneResolvedMissingKb,
+            // ReceiveWsusScanResults, ...) takes this same lock around its
+            // own read-modify-write for exactly this reason: an admin's
+            // delete racing a routine inventory check-in for the same
+            // machine could otherwise lose one side's write - the deleted
+            // key silently reappearing, or the delete clobbering a
+            // just-arrived report.
+            lock (reportFileLock)
             {
-                report = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
-            }
-            catch
-            {
-                SendText(stream, "{\"error\":\"client report could not be read\"}", "application/json; charset=utf-8", 500);
-                return;
-            }
+                if (!File.Exists(path))
+                {
+                    SendText(stream, "{\"error\":\"client not found\"}", "application/json; charset=utf-8", 404);
+                    return;
+                }
 
-            ArrayList licenses = report != null && report.ContainsKey("licenses") ? report["licenses"] as ArrayList : null;
-            if (licenses == null || index >= licenses.Count)
-            {
-                SendText(stream, "{\"error\":\"license key not found\"}", "application/json; charset=utf-8", 404);
-                return;
-            }
+                Dictionary<string, object> report;
+                try
+                {
+                    report = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(path, Encoding.UTF8));
+                }
+                catch
+                {
+                    SendText(stream, "{\"error\":\"client report could not be read\"}", "application/json; charset=utf-8", 500);
+                    return;
+                }
 
-            licenses.RemoveAt(index);
-            report["licenses"] = licenses;
-            File.WriteAllText(path, serializer.Serialize(report), Encoding.UTF8);
+                ArrayList licenses = report != null && report.ContainsKey("licenses") ? report["licenses"] as ArrayList : null;
+                if (licenses == null || index >= licenses.Count)
+                {
+                    SendText(stream, "{\"error\":\"license key not found\"}", "application/json; charset=utf-8", 404);
+                    return;
+                }
+
+                licenses.RemoveAt(index);
+                report["licenses"] = licenses;
+                File.WriteAllText(path, serializer.Serialize(report), Encoding.UTF8);
+            }
             SendJson(stream, "{\"status\":\"deleted\"}");
         }
 
@@ -6785,11 +6827,29 @@ namespace WindowsInventoryLite
             }
 
             // Last line of defence, mirroring RunLinuxClientInstallTarget's own
-            // re-validation at its point of use - the caller (StartClientAction)
+            // re-validation at its point of use (TryValidateLinuxPushValues,
+            // which runs both checks below) - the caller (StartClientAction)
             // is currently the only call site and already validates installPath,
             // but a validator that exists without being re-checked at the actual
             // point of use is exactly the shape that produced this project's
-            // install-path validation gaps before.
+            // install-path validation gaps before. Both checks, not just
+            // IsValidLinuxInstallPath - a previous pass here added only the
+            // structural (/opt/, no .. traversal) check and missed the shell-
+            // metacharacter one, leaving a real injection gap in the one
+            // value this function interpolates into a remote shell command
+            // (TryValidateLinuxPushValues isn't called directly here since
+            // it also requires serverUrl/token, which uninstall has neither
+            // of).
+            try
+            {
+                ValidatePosixShellSafe(installPath, "installPath");
+            }
+            catch (ArgumentException ex)
+            {
+                result["status"] = "failed";
+                result["message"] = ex.Message;
+                return result;
+            }
             if (!IsValidLinuxInstallPath(installPath))
             {
                 result["status"] = "failed";
@@ -6863,7 +6923,21 @@ namespace WindowsInventoryLite
         // Draining both streams via the OutputDataReceived/ErrorDataReceived
         // events (available since .NET 2.0, no async/await needed) reads both
         // concurrently regardless of which one the child fills first.
-        private static void ReadProcessStreamsWithoutDeadlock(Process process, out string output, out string error)
+        // Bounded by RemotePushProcessTimeoutMs - a hung remote process
+        // (dropped connection with no RST, a wedged remote service,
+        // plink.exe blocked on a prompt it can't answer because stdin was
+        // already closed) used to block this ThreadPool worker thread
+        // indefinitely via a parameterless WaitForExit(), unlike every
+        // OTHER external process call in this file (GetExeVersion's 5s,
+        // ExtractKbFromMsuFile's 30s). RunClientActionJob processes a bulk
+        // job's targets sequentially on ONE worker, so one hung target used
+        // to silently stop every later target in that same job from ever
+        // being attempted too, with the job's own status stuck at
+        // "running" forever instead of surfacing a timeout. Returns false
+        // (and kills the process) on timeout instead of blocking forever.
+        private const int RemotePushProcessTimeoutMs = 900000;
+
+        private static bool ReadProcessStreamsWithoutDeadlock(Process process, int timeoutMs, out string output, out string error)
         {
             StringBuilder outputBuilder = new StringBuilder();
             StringBuilder errorBuilder = new StringBuilder();
@@ -6877,9 +6951,21 @@ namespace WindowsInventoryLite
             };
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
-            process.WaitForExit();
+            bool exited = process.WaitForExit(timeoutMs);
+            if (!exited)
+            {
+                try { process.Kill(); } catch { }
+                // A killed process exits promptly - this second,
+                // no-timeout WaitForExit() only waits for that teardown and
+                // for the async output/error readers to flush whatever
+                // partial output was already buffered, matching the
+                // two-call pattern .NET's own docs recommend when combining
+                // BeginOutputReadLine with a timeout.
+                process.WaitForExit(5000);
+            }
             output = outputBuilder.ToString();
             error = errorBuilder.ToString();
+            return exited;
         }
 
         private static Dictionary<string, object> RunLinuxSshProcess(string commandBody, string authMode, string username, string password, string keyPath, Dictionary<string, object> result)
@@ -6901,12 +6987,21 @@ namespace WindowsInventoryLite
                     process.StandardInput.WriteLine(authMode == "key" ? keyPath : password);
                     process.StandardInput.Close();
                     string output, error;
-                    ReadProcessStreamsWithoutDeadlock(process, out output, out error);
-                    result["exitCode"] = process.ExitCode;
-                    result["output"] = output;
-                    result["error"] = error;
-                    result["status"] = process.ExitCode == 0 ? "completed" : "failed";
-                    result["message"] = process.ExitCode == 0 ? "Linux client command completed." : "Linux client command failed.";
+                    if (!ReadProcessStreamsWithoutDeadlock(process, RemotePushProcessTimeoutMs, out output, out error))
+                    {
+                        result["status"] = "failed";
+                        result["message"] = "Linux client command timed out after " + (RemotePushProcessTimeoutMs / 1000) + " seconds and was terminated.";
+                        result["output"] = output;
+                        result["error"] = error;
+                    }
+                    else
+                    {
+                        result["exitCode"] = process.ExitCode;
+                        result["output"] = output;
+                        result["error"] = error;
+                        result["status"] = process.ExitCode == 0 ? "completed" : "failed";
+                        result["message"] = process.ExitCode == 0 ? "Linux client command completed." : "Linux client command failed.";
+                    }
                 }
             }
             catch (Exception ex)
@@ -7190,12 +7285,21 @@ namespace WindowsInventoryLite
                         process.StandardInput.Close();
                     }
                     string output, error;
-                    ReadProcessStreamsWithoutDeadlock(process, out output, out error);
-                    result["exitCode"] = process.ExitCode;
-                    result["output"] = output;
-                    result["error"] = error;
-                    result["status"] = process.ExitCode == 0 ? "completed" : "failed";
-                    result["message"] = process.ExitCode == 0 ? "Client install command completed." : "Client install command failed.";
+                    if (!ReadProcessStreamsWithoutDeadlock(process, RemotePushProcessTimeoutMs, out output, out error))
+                    {
+                        result["status"] = "failed";
+                        result["message"] = "Client install command timed out after " + (RemotePushProcessTimeoutMs / 1000) + " seconds and was terminated.";
+                        result["output"] = output;
+                        result["error"] = error;
+                    }
+                    else
+                    {
+                        result["exitCode"] = process.ExitCode;
+                        result["output"] = output;
+                        result["error"] = error;
+                        result["status"] = process.ExitCode == 0 ? "completed" : "failed";
+                        result["message"] = process.ExitCode == 0 ? "Client install command completed." : "Client install command failed.";
+                    }
                 }
             }
             catch (Exception ex)
@@ -7248,12 +7352,21 @@ namespace WindowsInventoryLite
                         process.StandardInput.Close();
                     }
                     string output, error;
-                    ReadProcessStreamsWithoutDeadlock(process, out output, out error);
-                    result["exitCode"] = process.ExitCode;
-                    result["output"] = output;
-                    result["error"] = error;
-                    result["status"] = process.ExitCode == 0 ? "completed" : "failed";
-                    result["message"] = process.ExitCode == 0 ? "Client uninstall command completed." : "Client uninstall command failed.";
+                    if (!ReadProcessStreamsWithoutDeadlock(process, RemotePushProcessTimeoutMs, out output, out error))
+                    {
+                        result["status"] = "failed";
+                        result["message"] = "Client uninstall command timed out after " + (RemotePushProcessTimeoutMs / 1000) + " seconds and was terminated.";
+                        result["output"] = output;
+                        result["error"] = error;
+                    }
+                    else
+                    {
+                        result["exitCode"] = process.ExitCode;
+                        result["output"] = output;
+                        result["error"] = error;
+                        result["status"] = process.ExitCode == 0 ? "completed" : "failed";
+                        result["message"] = process.ExitCode == 0 ? "Client uninstall command completed." : "Client uninstall command failed.";
+                    }
                 }
             }
             catch (Exception ex)
@@ -11724,6 +11837,54 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // display) can work with directly. A repeat download of the same
         // KB overwrites its own prior file rather than accumulating
         // hash-suffixed duplicates.
+        // Confirmed SSRF + fleet-wide-RCE chain, closed here: downloadUrl
+        // originates from an agent's own wsus-scan-results report
+        // (ReceiveWsusScanResults), authenticated only by the one ingestion
+        // token every fleet member holds - a compromised/misbehaving agent
+        // could otherwise plant an arbitrary URL, and an admin's routine
+        // "Download now" click would have the SERVER itself fetch and
+        // persist whatever that URL returns, then PerformWsusKbDownload
+        // wires the result straight into the existing (often enabled)
+        // catalog entry for the next scheduled install push - reaching
+        // every targeted machine in the fleet. Requires https and a host
+        // under a real Microsoft update-distribution domain; widen this
+        // list only for a verified, documented Microsoft CDN host, never
+        // to accommodate one specific reported KB.
+        private static readonly string[] AllowedWsusDownloadHosts = new string[]
+        {
+            "windowsupdate.com",
+            "microsoft.com",
+            "msocdn.com",
+            "office.com",
+        };
+
+        internal static bool IsAllowedWsusDownloadUrl(string url, out string reason)
+        {
+            reason = null;
+            Uri uri;
+            if (String.IsNullOrEmpty(url) || !Uri.TryCreate(url, UriKind.Absolute, out uri))
+            {
+                reason = "downloadUrl is missing or not a valid absolute URL";
+                return false;
+            }
+            if (!String.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "downloadUrl must use https";
+                return false;
+            }
+            string host = uri.Host;
+            foreach (string allowedHost in AllowedWsusDownloadHosts)
+            {
+                if (String.Equals(host, allowedHost, StringComparison.OrdinalIgnoreCase) ||
+                    host.EndsWith("." + allowedHost, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            reason = "downloadUrl's host '" + host + "' is not a recognized Microsoft update-distribution domain";
+            return false;
+        }
+
         internal static string BuildKbDownloadFileName(string kbId, string downloadUrl)
         {
             string normalized = kbId.StartsWith("KB", StringComparison.OrdinalIgnoreCase) ? kbId.Substring(2) : kbId;
@@ -11817,6 +11978,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // replaces. response.ContentLength is -1 when the server doesn't
         // advertise a length; callers/consumers treat a non-positive
         // totalBytes as "unknown size."
+        // MaxDownloadBytes bounds the in-memory buffer regardless of what
+        // Content-Length claims (or omits) - without this, a chunked
+        // response with no advertised length would be read fully into
+        // memory with no cap, a memory-exhaustion DoS available to
+        // whatever malicious/unexpected host IsAllowedWsusDownloadUrl's
+        // caller-side check didn't already rule out.
+        private const long MaxDownloadBytes = 2L * 1024 * 1024 * 1024;
+
         private byte[] DownloadBytesFromUrl(string url, int timeoutMs, Action<long, long> onProgress)
         {
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
@@ -11841,8 +12010,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 int read;
                 while ((read = responseStream.Read(buffer, 0, buffer.Length)) > 0)
                 {
-                    memoryStream.Write(buffer, 0, read);
                     bytesRead += read;
+                    if (bytesRead > MaxDownloadBytes)
+                    {
+                        throw new InvalidOperationException("Download exceeded the maximum allowed size of " + MaxDownloadBytes + " bytes.");
+                    }
+                    memoryStream.Write(buffer, 0, read);
                     onProgress(bytesRead, totalBytes);
                 }
                 return memoryStream.ToArray();
@@ -12110,6 +12283,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (String.IsNullOrEmpty(downloadUrl))
             {
                 SendText(stream, "{\"error\":\"No client has reported a download URL for this KB yet.\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            string downloadUrlRejectionReason;
+            if (!IsAllowedWsusDownloadUrl(downloadUrl, out downloadUrlRejectionReason))
+            {
+                SendJsonError(stream, "Refusing to download: " + downloadUrlRejectionReason, 400);
                 return;
             }
 
@@ -13618,7 +13797,17 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (alreadyConfigured)
             {
                 string currentPassword = Convert.ToString(payload.ContainsKey("currentPassword") ? payload["currentPassword"] : "");
-                if (!FixedTimeEquals(currentPassword, options.WebPassword))
+                bool currentPasswordMatches = FixedTimeEquals(currentPassword, options.WebPassword);
+                // Same shared counter SendLoginResult feeds (RecordBasicAuthAttempt),
+                // checked globally at the very top of HandleClient's dispatch
+                // (IsBasicAuthLockedOut) before this endpoint is even reached -
+                // without this call, an attacker holding a valid session
+                // cookie could guess currentPassword an unlimited number of
+                // times with no lockout at all, the one password-comparison
+                // surface in this file that wasn't rate-limited like every
+                // other one.
+                RecordBasicAuthAttempt(request.RemoteAddress, currentPasswordMatches);
+                if (!currentPasswordMatches)
                 {
                     SendText(stream, "{\"error\":\"current password is incorrect\"}", "application/json; charset=utf-8", 401);
                     return;
@@ -14628,8 +14817,22 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 licenses = LoadLicenses();
             }
 
+            // license is DPAPI-encrypted at rest (CreateLicense/UpdateLicense)
+            // but shown as plain text in the Catalog table, same as before
+            // encryption was added - Unprotect on a legacy/already-plaintext
+            // value (no "dpapi:" prefix) returns it unchanged, so an
+            // un-migrated record from before this fix reads back exactly as
+            // it did before, and gets encrypted on its next save.
+            List<Dictionary<string, object>> decryptedLicenses = new List<Dictionary<string, object>>(licenses.Count);
+            foreach (Dictionary<string, object> license in licenses)
+            {
+                Dictionary<string, object> decrypted = new Dictionary<string, object>(license);
+                decrypted["license"] = SecretProtector.Unprotect(GetStringValue(license, "license"));
+                decryptedLicenses.Add(decrypted);
+            }
+
             Dictionary<string, object> response = new Dictionary<string, object>();
-            response["licenses"] = licenses;
+            response["licenses"] = decryptedLicenses;
             SendJson(stream, serializer.Serialize(response));
         }
 
@@ -14658,12 +14861,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return;
             }
 
+            string rawLicenseValue = Convert.ToString(payload.ContainsKey("license") ? payload["license"] : "").Trim();
+            bool licenseEncryptedSuccessfully;
             string nowUtc = DateTime.UtcNow.ToString("o");
             Dictionary<string, object> record = new Dictionary<string, object>();
             record["id"] = Guid.NewGuid().ToString("N");
             record["name"] = name;
             record["version"] = Convert.ToString(payload.ContainsKey("version") ? payload["version"] : "").Trim();
-            record["license"] = Convert.ToString(payload.ContainsKey("license") ? payload["license"] : "").Trim();
+            record["license"] = SecretProtector.Protect(rawLicenseValue, options, "license", out licenseEncryptedSuccessfully);
             record["comment"] = Convert.ToString(payload.ContainsKey("comment") ? payload["comment"] : "").Trim();
             record["computers"] = NormalizeComputerList(payload.ContainsKey("computers") ? payload["computers"] : null);
             record["createdAt"] = nowUtc;
@@ -14676,7 +14881,14 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 SaveLicenses(licenses);
             }
 
-            SendJson(stream, serializer.Serialize(record));
+            // The response (and every other reader - SendLicenses) always
+            // gets the plaintext value back, same as before this field
+            // started being encrypted at rest - this is a disk-confidentiality
+            // control, not a reveal-on-click UI feature like the auto-detected
+            // Licenses > Keys table has.
+            Dictionary<string, object> responseRecord = new Dictionary<string, object>(record);
+            responseRecord["license"] = rawLicenseValue;
+            SendJson(stream, serializer.Serialize(responseRecord));
         }
 
         private void UpdateLicense(Stream stream, RequestContext request)
@@ -14725,15 +14937,23 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     return;
                 }
 
+                string rawLicenseValue = Convert.ToString(payload.ContainsKey("license") ? payload["license"] : "").Trim();
+                bool licenseEncryptedSuccessfully;
                 record["name"] = name;
                 record["version"] = Convert.ToString(payload.ContainsKey("version") ? payload["version"] : "").Trim();
-                record["license"] = Convert.ToString(payload.ContainsKey("license") ? payload["license"] : "").Trim();
+                record["license"] = SecretProtector.Protect(rawLicenseValue, options, "license", out licenseEncryptedSuccessfully);
                 record["comment"] = Convert.ToString(payload.ContainsKey("comment") ? payload["comment"] : "").Trim();
                 record["computers"] = NormalizeComputerList(payload.ContainsKey("computers") ? payload["computers"] : null);
                 record["updatedAt"] = DateTime.UtcNow.ToString("o");
 
                 SaveLicenses(licenses);
-                SendJson(stream, serializer.Serialize(record));
+
+                // Same plaintext-in-the-response convention as CreateLicense -
+                // encryption is an at-rest control, not a UI reveal-on-click
+                // feature.
+                Dictionary<string, object> responseRecord = new Dictionary<string, object>(record);
+                responseRecord["license"] = rawLicenseValue;
+                SendJson(stream, serializer.Serialize(responseRecord));
             }
         }
 
@@ -15268,6 +15488,33 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             internal Action<List<Dictionary<string, object>>> Save;
         }
 
+        // Shared by both targets and excludedComputers (Create and Update,
+        // both catalogs via SoftwareCatalogSpec) - neither field can ever be
+        // an IP address/range, since AppendJobIfTargeted only ever matches
+        // by the client's own reported computer name. A shared helper keeps
+        // both fields validated identically instead of letting them drift
+        // apart - excludedComputers used to have no such check while
+        // targets did, silently letting an admin "exclude" an IP that could
+        // never have matched anyway, the more dangerous direction (the job
+        // still reaches the machine they meant to exclude).
+        private bool TryRejectIpAddressTargets(Stream stream, string fieldName, string delimitedValue)
+        {
+            if (String.IsNullOrEmpty(delimitedValue))
+            {
+                return false;
+            }
+            foreach (string expandedTarget in ExpandInstallTargets(delimitedValue))
+            {
+                IPAddress parsedIp;
+                if (IPAddress.TryParse(expandedTarget, out parsedIp))
+                {
+                    SendJsonError(stream, fieldName + " must be computer names - this feature assigns jobs by the client's own reported computer name, not by connecting to an IP, so an IP address or range will never match any client: " + expandedTarget, 400);
+                    return true;
+                }
+            }
+            return false;
+        }
+
         private void CreateSoftwareCatalogEntry(Stream stream, RequestContext request, SoftwareCatalogSpec spec)
         {
             JavaScriptSerializer serializer = CreateJsonSerializer();
@@ -15321,18 +15568,16 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             // client polls and asks what is assigned to its own reported
             // computer name, so an expanded IP token can never equal a
             // computer name and the entry would silently reach zero machines
-            // forever. Reject it at save time instead.
-            if (!String.IsNullOrEmpty(targets))
+            // forever (or, for excludedComputers, silently never exclude the
+            // machine the admin meant to exclude - the more dangerous
+            // direction). Reject both fields at save time instead.
+            if (TryRejectIpAddressTargets(stream, "targets", targets))
             {
-                foreach (string expandedTarget in ExpandInstallTargets(targets))
-                {
-                    IPAddress parsedIp;
-                    if (IPAddress.TryParse(expandedTarget, out parsedIp))
-                    {
-                        SendJsonError(stream, "targets must be computer names - this feature assigns jobs by the client's own reported computer name, not by connecting to an IP, so an IP address or range will never match any client: " + expandedTarget, 400);
-                        return;
-                    }
-                }
+                return;
+            }
+            if (TryRejectIpAddressTargets(stream, "excludedComputers", excludedComputers))
+            {
+                return;
             }
             if (targetMode == "missingKb" && String.IsNullOrEmpty(kbId))
             {
@@ -15412,17 +15657,13 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 SendText(stream, "{\"error\":\"relativePath must be a path inside the " + spec.Subfolder + " subfolder, with no .. traversal outside it\"}", "application/json; charset=utf-8", 400);
                 return;
             }
-            if (!String.IsNullOrEmpty(targets))
+            if (TryRejectIpAddressTargets(stream, "targets", targets))
             {
-                foreach (string expandedTarget in ExpandInstallTargets(targets))
-                {
-                    IPAddress parsedIp;
-                    if (IPAddress.TryParse(expandedTarget, out parsedIp))
-                    {
-                        SendJsonError(stream, "targets must be computer names - this feature assigns jobs by the client's own reported computer name, not by connecting to an IP, so an IP address or range will never match any client: " + expandedTarget, 400);
-                        return;
-                    }
-                }
+                return;
+            }
+            if (TryRejectIpAddressTargets(stream, "excludedComputers", excludedComputers))
+            {
+                return;
             }
             if (targetMode == "missingKb" && String.IsNullOrEmpty(kbId))
             {
@@ -16880,6 +17121,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "AppendJobIfTargeted only targets a machine reporting Critical severity when restrictToCriticalOnly is true, targets normally when false", TestAppendJobIfTargetedRestrictsToCriticalSeverityWhenEnabled);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/windows-update-jobs targets a real client despite a legacy bare-digit catalog kbId", TestSendWindowsUpdateJobsTargetsRealClientDespiteLegacyBareDigitCatalogKbId);
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate/UpdateWindowsUpdate persist excludedComputers", TestCreateAndUpdateWindowsUpdatePersistExcludedComputers);
+            allPassed &= SelfTestCheck(output, "CreateWindowsUpdate rejects an IP address in targets and, identically, in excludedComputers", TestCreateWindowsUpdateRejectsIpAddressInTargetsAndExcludedComputers);
             allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries WinRM first when both ports are open", TestDecideAutoDetectProtocolsBothOpen);
             allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries only WinRM when just that port is open", TestDecideAutoDetectProtocolsWinRmOnly);
             allPassed &= SelfTestCheck(output, "DecideAutoDetectProtocols tries only SSH when just that port is open", TestDecideAutoDetectProtocolsSshOnly);
@@ -17139,6 +17381,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ComputeStickyUsbStorage is true when newly reported, regardless of previous", TestComputeStickyUsbStorageTrueWhenNewlyReportedRegardlessOfPrevious);
             allPassed &= SelfTestCheck(output, "ComputeStickyUsbStorage treats a missing previous field as false, not a throw", TestComputeStickyUsbStorageTreatsMissingPreviousFieldAsFalse);
             allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
+            allPassed &= SelfTestCheck(output, "CreateLicense DPAPI-encrypts the license field at rest - never written in plaintext", TestCreateLicenseEncryptsLicenseFieldAtRest);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/licenses decrypts the license field back to plaintext for display", TestSendLicensesDecryptsLicenseFieldForDisplay);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/licenses still reads a legacy pre-encryption plaintext license value unchanged", TestSendLicensesReadsLegacyPlaintextLicenseUnchanged);
             allPassed &= SelfTestCheck(output, "IsValidRegistryHiveName accepts only HKEY_LOCAL_MACHINE/HKEY_CURRENT_USER", TestIsValidRegistryHiveNameAcceptsOnlyKnownHives);
             allPassed &= SelfTestCheck(output, "IsValidRegistryPathOrValueName rejects control characters and oversized input", TestIsValidRegistryPathOrValueNameRejectsControlCharsAndOversizedInput);
             allPassed &= SelfTestCheck(output, "License key sources CRUD storage round-trips through disk", TestLicenseKeySourcesCrudRoundTrip);
@@ -17202,10 +17447,13 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "Full session lifecycle: a cookie value produced by SendLoginResult authorizes IsWebRequestAuthorized, then SendLogoutResult makes that same cookie stop authorizing it", TestSessionLifecycleEndToEndLoginAuthorizeLogout);
             allPassed &= SelfTestCheck(output, "ChangeAdminPassword does not mutate the live credential or clear sessions when persisting the new config fails", TestChangeAdminPasswordDoesNotMutateStateWhenSaveFails);
             allPassed &= SelfTestCheck(output, "RunLinuxClientUninstallTarget rejects an unsafe installPath before attempting any SSH connection", TestRunLinuxClientUninstallTargetRejectsUnsafeInstallPath);
+            allPassed &= SelfTestCheck(output, "RunLinuxClientUninstallTarget rejects an installPath containing a shell metacharacter, mirroring the install path's own ValidatePosixShellSafe check", TestRunLinuxClientUninstallTargetRejectsShellMetacharactersInInstallPath);
+            allPassed &= SelfTestCheck(output, "ReadProcessStreamsWithoutDeadlock kills the child process and returns false when it exceeds the given timeout", TestReadProcessStreamsWithoutDeadlockKillsAndReturnsFalseOnTimeout);
             allPassed &= SelfTestCheck(output, "RunClientActionJob removes a completed job from the in-memory installJobs dictionary", TestRunClientActionJobRemovesCompletedJobFromMemory);
             allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized prunes an expired session from sessionStore on use, not just at the next login", TestIsWebRequestAuthorizedPrunesExpiredSessionOnUse);
             allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized prunes an orphaned expired session even on an unrelated, cookie-less request", TestIsWebRequestAuthorizedPrunesOrphanedSessionOnUnrelatedRequest);
             allPassed &= SelfTestCheck(output, "ChangeAdminPassword invalidates every pre-rotation session on a successful rotation", TestChangeAdminPasswordInvalidatesSessionsOnSuccess);
+            allPassed &= SelfTestCheck(output, "ChangeAdminPassword locks out the caller's IP after repeated wrong currentPassword guesses, same shared counter as Basic Auth/login", TestChangeAdminPasswordLocksOutAfterRepeatedWrongCurrentPassword);
             allPassed &= SelfTestCheck(output, "Content-Security-Policy restricts form-action to 'self'", TestContentSecurityPolicyRestrictsFormAction);
             allPassed &= SelfTestCheck(output, "NormalizeReportIdentifier treats a blank identifier the same as a missing one", TestNormalizeReportIdentifierTreatsBlankSameAsMissing);
             allPassed &= SelfTestCheck(output, "IsReportIdentifierTooLong rejects an oversized computerName/hostname before it can reach Path.Combine", TestIsReportIdentifierTooLongRejectsOversizedValuesOnly);
@@ -17274,6 +17522,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results requires a valid ingestion token unconditionally", TestReceiveWsusScanResultsRejectsWithoutValidToken);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results writes wsusMissingUpdates/wsusScannedCabHash/wsusScanAt onto the real stored report and preserves other pre-existing fields", TestReceiveWsusScanResultsWritesFieldsOntoExistingReportAndPreservesOtherFields);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results with wuServiceAvailable=false still writes wuServiceUnavailable=true and an empty missing-updates list", TestReceiveWsusScanResultsRecordsServiceUnavailableFlag);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results strips a disallowed downloadUrl at ingestion, keeping the rest of that missing-KB entry intact", TestReceiveWsusScanResultsStripsDisallowedDownloadUrl);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results rejects an overlong computerName with 400", TestReceiveWsusScanResultsRejectsOverlongComputerName);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results is a no-op for an unknown computer with no stored report", TestReceiveWsusScanResultsIsNoOpForUnknownComputer);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/wsus-scan-results clears a pending forceWsusRescan flag for that computer once a real report arrives", TestReceiveWsusScanResultsClearsForceWsusRescanFlag);
             allPassed &= SelfTestCheck(output, "TriggerInstallWindowsUpdatesNow sets the flag, reflected true only for the named computer's next inventory ack", TestTriggerInstallWindowsUpdatesNowSetsFlagOnlyForNamedComputer);
@@ -17311,6 +17561,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "BuildKbDownloadFileName uses the KB id and the URL's own extension", TestBuildKbDownloadFileNameUsesKbIdAndUrlExtension);
             allPassed &= SelfTestCheck(output, "BuildKbDownloadFileName normalizes a bare-digit kbId to the canonical 'KB' form", TestBuildKbDownloadFileNameNormalizesBareDigitKbId);
             allPassed &= SelfTestCheck(output, "BuildKbDownloadFileName falls back to .exe for a malformed URL rather than throwing", TestBuildKbDownloadFileNameFallsBackToExeForAMalformedUrl);
+            allPassed &= SelfTestCheck(output, "IsAllowedWsusDownloadUrl accepts known Microsoft update-distribution hosts over https", TestIsAllowedWsusDownloadUrlAcceptsKnownMicrosoftHosts);
+            allPassed &= SelfTestCheck(output, "IsAllowedWsusDownloadUrl rejects non-https, unrecognized hosts, a subdomain-confusion bypass attempt, file:// URLs, and malformed URLs", TestIsAllowedWsusDownloadUrlRejectsNonHttpsAndUnknownHosts);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore succeeds and reports the deterministic windows-updates\\KB{n}{ext} relativePath", TestPerformWsusKbDownloadCoreSucceedsAndWritesUnderDeterministicName);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore categorizes a non-ProtocolError WebException as 'network'", TestPerformWsusKbDownloadCoreCategorizesNetworkFailure);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore categorizes a ProtocolError WebException as 'badResponse'", TestPerformWsusKbDownloadCoreCategorizesProtocolErrorAsBadResponse);
@@ -17324,6 +17576,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "POST /api/v1/windows-updates/{id}/download-now returns 404 for an unknown catalog entry id", TestTriggerWsusKbDownloadNowReturns404ForUnknownId);
             allPassed &= SelfTestCheck(output, "POST /api/v1/windows-updates/{id}/download-now rejects a non-missingKb entry with 400", TestTriggerWsusKbDownloadNowRejectsWhenNotMissingKbMode);
             allPassed &= SelfTestCheck(output, "POST /api/v1/windows-updates/{id}/download-now rejects with 400 when no client has reported a downloadUrl", TestTriggerWsusKbDownloadNowRejectsWhenNoDownloadUrlKnown);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/windows-updates/{id}/download-now rejects with 400 when the stored downloadUrl's host is not an allowed Microsoft update domain", TestTriggerWsusKbDownloadNowRejectsDisallowedDownloadUrl);
             allPassed &= SelfTestCheck(output, "The per-KB download in-progress guard is scoped per entry id, not shared globally", TestWsusKbDownloadInProgressGuardIsPerEntryId);
             allPassed &= SelfTestCheck(output, "Per-KB download progress is scoped to its own entry id and gone after release", TestWsusKbDownloadProgressIsPerEntryIdAndClearsOnRelease);
             return allPassed;
@@ -17646,6 +17899,83 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (afterUpdate.Count != 1 || GetStringValue(afterUpdate[0], "excludedComputers") != "PC-THREE")
                 {
                     return "expected excludedComputers to be updatable, got: " + GetStringValue(afterUpdate[0], "excludedComputers");
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        // Regression coverage for a real gap: "targets" already rejected an
+        // IP address/range at save time (AppendJobIfTargeted only ever
+        // matches by the client's own reported computer name), but
+        // "excludedComputers" had no equivalent check - an admin typing an
+        // IP there got no error and the exclusion silently never took
+        // effect, the more dangerous direction (the job still reaches the
+        // machine they meant to exclude). Both fields must now be rejected
+        // identically.
+        private static string TestCreateWindowsUpdateRejectsIpAddressInTargetsAndExcludedComputers()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-rejectip-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                Dictionary<string, object> targetsBody = new Dictionary<string, object>();
+                targetsBody["name"] = "Reject IP Targets Test";
+                targetsBody["relativePath"] = @"windows-updates\test.msu";
+                targetsBody["targets"] = "192.168.1.50";
+
+                RequestContext targetsRequest = new RequestContext();
+                targetsRequest.Method = "POST";
+                targetsRequest.Path = "/api/v1/windows-updates";
+                targetsRequest.Headers = new Dictionary<string, string>();
+                targetsRequest.Body = serializer.Serialize(targetsBody);
+
+                string targetsResponseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.CreateWindowsUpdate(stream, targetsRequest);
+                    targetsResponseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+                if (targetsResponseText.IndexOf("must be computer names", StringComparison.Ordinal) < 0)
+                {
+                    return "expected an IP address in 'targets' to be rejected, got: " + targetsResponseText;
+                }
+                if (server.LoadWindowsUpdates().Count != 0)
+                {
+                    return "expected no catalog entry to be created when targets is rejected";
+                }
+
+                Dictionary<string, object> excludedBody = new Dictionary<string, object>();
+                excludedBody["name"] = "Reject IP ExcludedComputers Test";
+                excludedBody["relativePath"] = @"windows-updates\test.msu";
+                excludedBody["excludedComputers"] = "192.168.1.51";
+
+                RequestContext excludedRequest = new RequestContext();
+                excludedRequest.Method = "POST";
+                excludedRequest.Path = "/api/v1/windows-updates";
+                excludedRequest.Headers = new Dictionary<string, string>();
+                excludedRequest.Body = serializer.Serialize(excludedBody);
+
+                string excludedResponseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.CreateWindowsUpdate(stream, excludedRequest);
+                    excludedResponseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+                if (excludedResponseText.IndexOf("must be computer names", StringComparison.Ordinal) < 0)
+                {
+                    return "expected an IP address in 'excludedComputers' to be rejected the same way as 'targets', got: " + excludedResponseText;
+                }
+                if (server.LoadWindowsUpdates().Count != 0)
+                {
+                    return "expected no catalog entry to be created when excludedComputers is rejected";
                 }
                 return null;
             }
@@ -25047,6 +25377,134 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
+        // Regression coverage for a real gap: the curated Licenses catalog
+        // used to write the "license" field (which the UI's own hint text
+        // says can hold a real product key) straight to disk in plaintext,
+        // unlike the auto-detected Licenses > Keys entries, which are
+        // DPAPI-protected via EncryptInventoryLicenseKeys. CreateLicense
+        // must now encrypt it the same way.
+        private static string TestCreateLicenseEncryptsLicenseFieldAtRest()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-licenseencrypt-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/licenses";
+                request.Body = "{\"name\":\"Test Software\",\"license\":\"REAL-SECRET-KEY-12345\"}";
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("CreateLicense", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                }
+
+                string rawFileContent = File.ReadAllText(Path.Combine(dataPath, "_licenses", "licenses.json"), Encoding.UTF8);
+                if (rawFileContent.IndexOf("REAL-SECRET-KEY-12345", StringComparison.Ordinal) >= 0)
+                {
+                    return "expected the raw license value to never appear in plaintext on disk, found it in: " + rawFileContent;
+                }
+                if (rawFileContent.IndexOf("dpapi:", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the stored license field to carry the dpapi: prefix, got: " + rawFileContent;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendLicensesDecryptsLicenseFieldForDisplay()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-licensedecrypt-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext createRequest = new RequestContext();
+                createRequest.Method = "POST";
+                createRequest.Path = "/api/v1/licenses";
+                createRequest.Body = "{\"name\":\"Test Software\",\"license\":\"REAL-SECRET-KEY-67890\"}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo createMethod = typeof(InventoryServer).GetMethod("CreateLicense", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    createMethod.Invoke(server, new object[] { stream, createRequest });
+                }
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo sendMethod = typeof(InventoryServer).GetMethod("SendLicenses", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    sendMethod.Invoke(server, new object[] { stream });
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("REAL-SECRET-KEY-67890", StringComparison.Ordinal) < 0)
+                {
+                    return "expected GET /api/v1/licenses to return the real decrypted license value, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // A licenses.json written before this fix (or hand-edited) has a
+        // plain, non-"dpapi:"-prefixed license value - SecretProtector.Unprotect
+        // passes that through unchanged (see its own class comment), so an
+        // un-migrated record must keep reading back exactly as before.
+        private static string TestSendLicensesReadsLegacyPlaintextLicenseUnchanged()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-licenselegacy-" + Guid.NewGuid().ToString("N"));
+            string licensesDir = Path.Combine(dataPath, "_licenses");
+            Directory.CreateDirectory(licensesDir);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                List<Dictionary<string, object>> legacyLicenses = new List<Dictionary<string, object>>();
+                Dictionary<string, object> legacyRecord = new Dictionary<string, object>();
+                legacyRecord["id"] = "legacy-1";
+                legacyRecord["name"] = "Legacy Software";
+                legacyRecord["license"] = "LEGACY-PLAINTEXT-KEY";
+                legacyLicenses.Add(legacyRecord);
+                File.WriteAllText(Path.Combine(licensesDir, "licenses.json"), serializer.Serialize(legacyLicenses), new UTF8Encoding(false));
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo sendMethod = typeof(InventoryServer).GetMethod("SendLicenses", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    sendMethod.Invoke(server, new object[] { stream });
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("LEGACY-PLAINTEXT-KEY", StringComparison.Ordinal) < 0)
+                {
+                    return "expected a pre-existing plaintext license value to still read back unchanged, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
         private static string TestIsValidRegistryHiveNameAcceptsOnlyKnownHives()
         {
             if (!IsValidRegistryHiveName("HKEY_LOCAL_MACHINE"))
@@ -26638,6 +27096,82 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
+        // The test above only exercises the STRUCTURAL check
+        // (IsValidLinuxInstallPath, "/etc" has no "/opt/" prefix) - this one
+        // regression-guards the shell-metacharacter check
+        // (ValidatePosixShellSafe) that RunLinuxClientInstallTarget's own
+        // re-validation (TryValidateLinuxPushValues) already applied but the
+        // uninstall sibling did not, until now. An installPath shaped like
+        // "/opt/wil; rm -rf /" has a real /opt/ prefix and no "." or ".."
+        // segment, so it passes IsValidLinuxInstallPath cleanly and would
+        // have reached the remote uninstall shell command unfiltered before
+        // this fix.
+        private static string TestRunLinuxClientUninstallTargetRejectsShellMetacharactersInInstallPath()
+        {
+            string dataDir = Path.Combine(Path.GetTempPath(), "wil-selftest-uninstall-shellsafe-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataDir);
+            try
+            {
+                string stubUninstallerPath = Path.Combine(dataDir, "Uninstall-ClientDebianSSH.ps1");
+                File.WriteAllText(stubUninstallerPath, "# stub, never actually run - installPath validation fails before this would be invoked");
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataDir;
+                options.LinuxSshUninstallerPath = stubUninstallerPath;
+                InventoryServer server = new InventoryServer(options);
+
+                System.Reflection.MethodInfo runMethod = typeof(InventoryServer).GetMethod("RunLinuxClientUninstallTarget", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                object resultObj = runMethod.Invoke(server, new object[] { "192.0.2.10", "manual", "root", "x", null, "/opt/wil; rm -rf /", false });
+                Dictionary<string, object> result = (Dictionary<string, object>)resultObj;
+
+                if (GetStringValue(result, "status") != "failed")
+                {
+                    return "expected an installPath containing a shell metacharacter (';') to be rejected before any SSH connection is attempted, got status '" + GetStringValue(result, "status") + "'";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataDir, true); } catch { }
+            }
+        }
+
+        // Regression coverage for a real gap: this helper used to call the
+        // parameterless Process.WaitForExit(), which blocks the calling
+        // ThreadPool worker forever if the child process never exits on its
+        // own (a dropped SSH/WinRM connection with no RST, a wedged remote
+        // service) - every OTHER external process call in this file already
+        // bounds its own wait (GetExeVersion's 5s, ExtractKbFromMsuFile's
+        // 30s). Uses a short timeout against a deliberately slow real
+        // process so this test itself stays fast, rather than exercising
+        // the real 900-second production timeout.
+        private static string TestReadProcessStreamsWithoutDeadlockKillsAndReturnsFalseOnTimeout()
+        {
+            ProcessStartInfo startInfo = new ProcessStartInfo();
+            startInfo.FileName = "powershell.exe";
+            startInfo.Arguments = "-NoProfile -Command \"Start-Sleep -Seconds 30\"";
+            startInfo.UseShellExecute = false;
+            startInfo.RedirectStandardOutput = true;
+            startInfo.RedirectStandardError = true;
+            startInfo.CreateNoWindow = true;
+
+            System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("ReadProcessStreamsWithoutDeadlock", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            using (Process process = Process.Start(startInfo))
+            {
+                object[] parameters = new object[] { process, 500, null, null };
+                bool completed = (bool)method.Invoke(null, parameters);
+                if (completed)
+                {
+                    return "expected a process sleeping for 30s to NOT complete within a 500ms timeout";
+                }
+                if (!process.HasExited)
+                {
+                    return "expected the timed-out process to have been killed";
+                }
+            }
+            return null;
+        }
+
         // installJobs (in-memory) held plaintext WinRM/SSH passwords resident for
         // the server process's entire lifetime, growing unbounded, since nothing
         // ever removed a completed job from it - the on-disk job file already
@@ -26854,6 +27388,62 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (!server.IsWebRequestAuthorized(freshRequest))
                 {
                     return "expected the fresh session cookie issued by the successful rotation to authorize a request";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataDir, true); } catch { }
+            }
+        }
+
+        // Regression coverage for a real gap: ChangeAdminPassword's own
+        // currentPassword comparison used to never call
+        // RecordBasicAuthAttempt, so an attacker holding a hijacked session
+        // cookie could guess it an unlimited number of times - the one
+        // password-comparison surface in this file that wasn't rate-limited
+        // like every other one (Basic Auth, login). IsBasicAuthLockedOut is
+        // checked globally at the top of HandleClient's dispatch, so once
+        // this endpoint feeds the same shared counter, enough wrong guesses
+        // must lock the attacker's IP out of the whole server, not just
+        // this one endpoint.
+        private static string TestChangeAdminPasswordLocksOutAfterRepeatedWrongCurrentPassword()
+        {
+            string dataDir = Path.Combine(Path.GetTempPath(), "wil-selftest-password-change-lockout-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataDir);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataDir;
+                options.ConfigPath = Path.Combine(dataDir, "server-config.json");
+                options.WebUsername = "admin";
+                options.WebPassword = "original-password";
+                options.LoginLockoutThreshold = 3;
+                options.LoginLockoutWindowMinutes = 15;
+                options.LoginLockoutDurationMinutes = 15;
+                InventoryServer server = new InventoryServer(options);
+                IPAddress attackerIp = IPAddress.Parse("203.0.113.77");
+
+                System.Reflection.MethodInfo changeMethod = typeof(InventoryServer).GetMethod("ChangeAdminPassword", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                for (int i = 0; i < 3; i++)
+                {
+                    RequestContext request = new RequestContext();
+                    request.Headers = new Dictionary<string, string>();
+                    request.RemoteAddress = attackerIp;
+                    request.Body = "{\"currentPassword\":\"wrong-guess-" + i + "\",\"newUsername\":\"admin\",\"newPassword\":\"irrelevant1\"}";
+                    using (MemoryStream stream = new MemoryStream())
+                    {
+                        changeMethod.Invoke(server, new object[] { stream, request });
+                    }
+                }
+
+                RequestContext lockoutCheck = new RequestContext();
+                lockoutCheck.Headers = new Dictionary<string, string>();
+                lockoutCheck.RemoteAddress = attackerIp;
+                int retryAfterSeconds;
+                if (!server.IsBasicAuthLockedOut(lockoutCheck, out retryAfterSeconds))
+                {
+                    return "expected the attacker's IP to be locked out after 3 wrong currentPassword guesses against ChangeAdminPassword (threshold 3)";
                 }
                 return null;
             }
@@ -27768,6 +28358,57 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return null;
         }
 
+        private static string TestIsAllowedWsusDownloadUrlAcceptsKnownMicrosoftHosts()
+        {
+            string reason;
+            string[] allowed = new string[]
+            {
+                "https://download.windowsupdate.com/d/msdownload/update/x.exe",
+                "https://go.microsoft.com/fwlink/?LinkID=74689",
+                "https://windowsupdate.com/x.exe",
+            };
+            foreach (string url in allowed)
+            {
+                if (!InventoryServer.IsAllowedWsusDownloadUrl(url, out reason))
+                {
+                    return "expected '" + url + "' to be allowed, was rejected with: " + reason;
+                }
+            }
+            return null;
+        }
+
+        private static string TestIsAllowedWsusDownloadUrlRejectsNonHttpsAndUnknownHosts()
+        {
+            string reason;
+            // Not https.
+            if (InventoryServer.IsAllowedWsusDownloadUrl("http://download.windowsupdate.com/x.exe", out reason))
+            {
+                return "expected a plain-http URL to be rejected even on an otherwise-allowed host";
+            }
+            // Attacker-controlled host, not Microsoft.
+            if (InventoryServer.IsAllowedWsusDownloadUrl("https://evil.example.com/x.exe", out reason))
+            {
+                return "expected an unrecognized host to be rejected";
+            }
+            // Subdomain-confusion bypass attempt: a hyphenated prefix must
+            // NOT be treated as a subdomain of the allowed host.
+            if (InventoryServer.IsAllowedWsusDownloadUrl("https://evil-windowsupdate.com/x.exe", out reason))
+            {
+                return "expected 'evil-windowsupdate.com' to be rejected - it is not a subdomain of windowsupdate.com";
+            }
+            // file:// scheme (local file read via the "download" path).
+            if (InventoryServer.IsAllowedWsusDownloadUrl("file:///etc/passwd", out reason))
+            {
+                return "expected a file:// URL to be rejected";
+            }
+            // Malformed/relative URL.
+            if (InventoryServer.IsAllowedWsusDownloadUrl("not-a-url", out reason))
+            {
+                return "expected a malformed URL to be rejected";
+            }
+            return null;
+        }
+
         private static string TestPerformWsusKbDownloadCoreSucceedsAndWritesUnderDeterministicName()
         {
             byte[] fakeContent = new byte[2048];
@@ -28159,6 +28800,61 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (response.IndexOf("400", StringComparison.OrdinalIgnoreCase) < 0)
                 {
                     return "expected a 400 response when no client has reported a downloadUrl, got: " + response;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
+        private static string TestTriggerWsusKbDownloadNowRejectsDisallowedDownloadUrl()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            try
+            {
+                InventoryServer server = new InventoryServer(new ServerOptions { DataPath = tempDir });
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "missing-kb-entry";
+                entry["targetMode"] = "missingKb";
+                entry["kbId"] = "KB0000002";
+                entries.Add(entry);
+                System.Reflection.MethodInfo saveMethod = typeof(InventoryServer).GetMethod("SaveWindowsUpdates", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                saveMethod.Invoke(server, new object[] { entries });
+
+                // A client report carrying a downloadUrl that IsAllowedWsusDownloadUrl
+                // would reject - simulates one that was planted before this
+                // guard existed, or arrived through any other path. This is
+                // the exact attack this test regression-guards against: the
+                // server must refuse to fetch it even though it's already on
+                // disk, not just at ingestion time.
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                report["computerName"] = "TEST-PC-BADURL";
+                ArrayList missingUpdates = new ArrayList();
+                Dictionary<string, object> missingEntry = new Dictionary<string, object>();
+                missingEntry["kbId"] = "KB0000002";
+                missingEntry["downloadUrl"] = "https://evil.example.com/payload.exe";
+                missingUpdates.Add(missingEntry);
+                report["wsusMissingUpdates"] = missingUpdates;
+                File.WriteAllText(Path.Combine(tempDir, "TEST-PC-BADURL.json"), serializer.Serialize(report), new UTF8Encoding(false));
+
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/windows-updates/missing-kb-entry/download-now";
+                request.Headers = new Dictionary<string, string>();
+
+                MemoryStream stream = new MemoryStream();
+                System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("TriggerWsusKbDownloadNow", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                method.Invoke(server, new object[] { stream, request });
+
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (response.IndexOf("400", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    return "expected a 400 response for a disallowed downloadUrl host, got: " + response;
                 }
                 return null;
             }
@@ -31276,6 +31972,103 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (savedMissing == null || savedMissing.Count != 1)
                 {
                     return "expected the one previously-recorded missing update to still be present";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        // Regression coverage for the SSRF/fleet-wide-RCE chain closed by
+        // IsAllowedWsusDownloadUrl: a compromised agent reporting a
+        // non-Microsoft downloadUrl must never get that URL persisted - it
+        // should be stripped at ingestion, with the rest of that missing-KB
+        // entry (kbId, title, etc.) kept intact.
+        private static string TestReceiveWsusScanResultsStripsDisallowedDownloadUrl()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-scanresultsstripurl-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                Dictionary<string, object> existingReport = new Dictionary<string, object>();
+                existingReport["computerName"] = "TEST-PC-STRIPURL";
+                string reportPath = Path.Combine(options.DataPath, "TEST-PC-STRIPURL.json");
+                File.WriteAllText(reportPath, serializer.Serialize(existingReport), new UTF8Encoding(false));
+
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/client/wsus-scan-results";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "real-token";
+                request.Body = "{\"computerName\":\"TEST-PC-STRIPURL\",\"missingUpdates\":[{\"kbId\":\"KB5099539\",\"title\":\"Test update\",\"downloadUrl\":\"https://evil.example.com/payload.exe\"}]}";
+                request.RemoteAddress = IPAddress.Loopback;
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("ReceiveWsusScanResults", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                }
+
+                Dictionary<string, object> savedReport = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(reportPath, Encoding.UTF8));
+                ArrayList missing = savedReport["wsusMissingUpdates"] as ArrayList;
+                if (missing == null || missing.Count != 1)
+                {
+                    return "expected the missing-KB entry to still be recorded (only its downloadUrl should be stripped)";
+                }
+                Dictionary<string, object> firstMissing = missing[0] as Dictionary<string, object>;
+                if (firstMissing == null || Convert.ToString(firstMissing["kbId"]) != "KB5099539" || Convert.ToString(firstMissing["title"]) != "Test update")
+                {
+                    return "expected kbId/title to survive untouched alongside the stripped downloadUrl";
+                }
+                string storedDownloadUrl = firstMissing.ContainsKey("downloadUrl") ? Convert.ToString(firstMissing["downloadUrl"]) : null;
+                if (!String.IsNullOrEmpty(storedDownloadUrl))
+                {
+                    return "expected the disallowed downloadUrl to be stripped to empty, got: " + storedDownloadUrl;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveWsusScanResultsRejectsOverlongComputerName()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-scanresultsoverlong-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                string overlongName = new string('A', 300);
+
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/client/wsus-scan-results";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "real-token";
+                request.Body = "{\"computerName\":\"" + overlongName + "\",\"missingUpdates\":[]}";
+                request.RemoteAddress = IPAddress.Loopback;
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo method = typeof(InventoryServer).GetMethod("ReceiveWsusScanResults", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    method.Invoke(server, new object[] { stream, request });
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("too long", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    return "expected a 'computerName is too long' rejection, got: " + responseText;
                 }
                 return null;
             }

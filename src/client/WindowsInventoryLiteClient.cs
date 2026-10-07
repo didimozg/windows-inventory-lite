@@ -20,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLiteClient";
-        internal const string ProductVersion = "0.16.0";
+        internal const string ProductVersion = "0.16.1";
 
         private static int Main(string[] args)
         {
@@ -1543,6 +1543,25 @@ namespace WindowsInventoryLite
             public string ValueName;
         }
 
+        // This field is learned entirely from the server's own inventory-ack
+        // response (ApplyInventoryAckResponse writes learned["licenseKeySources"]
+        // from it directly, no validation at that point) and then used here
+        // to read and report back an arbitrary registry value - with no
+        // check at all, a compromised server (or a bug letting anything else
+        // write into the learned-state file) could direct every client in
+        // the fleet to read and exfiltrate any HKLM/HKCU value under cover
+        // of ordinary inventory telemetry, not just real license keys.
+        // Every legitimate use of this feature (the admin-configured
+        // "License key sources" catalog - e.g. KriptoPro CSP's own
+        // registration key, see this class's own comment above) reads a
+        // vendor's own settings under the hive's SOFTWARE subtree; nothing
+        // under SAM/SECURITY/SYSTEM/etc. is ever a real license key source.
+        private static bool IsAllowedLicenseKeySourcePath(string registryPath)
+        {
+            return registryPath.StartsWith(@"SOFTWARE\", StringComparison.OrdinalIgnoreCase)
+                || String.Equals(registryPath, "SOFTWARE", StringComparison.OrdinalIgnoreCase);
+        }
+
         private List<LicenseKeySource> LoadLicenseKeySourcesCache()
         {
             List<LicenseKeySource> result = new List<LicenseKeySource>();
@@ -1573,7 +1592,7 @@ namespace WindowsInventoryLite
                     source.RegistryHive = GetString(record, "registryHive");
                     source.RegistryPath = GetString(record, "registryPath");
                     source.ValueName = GetString(record, "valueName");
-                    if (!String.IsNullOrEmpty(source.RegistryPath) && !String.IsNullOrEmpty(source.ValueName))
+                    if (!String.IsNullOrEmpty(source.RegistryPath) && !String.IsNullOrEmpty(source.ValueName) && IsAllowedLicenseKeySourcePath(source.RegistryPath))
                     {
                         result.Add(source);
                     }
@@ -3144,6 +3163,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ApplyInventoryAckResponse returns independent WindowsUpdate/ThirdPartySoftware flags for each ack shape", TestApplyInventoryAckResponseReturnsIndependentFlagsForEachType);
             allPassed &= SelfTestCheck(output, "ApplyConfigFromServer ignores an out-of-range interval and applies an in-range one", TestApplyConfigFromServerValidatesIntervalRange);
             allPassed &= SelfTestCheck(output, "LoadLicenseKeySourcesCache parses a source written via ApplyInventoryAckResponse", TestLoadLicenseKeySourcesCacheParsesEntryWrittenThroughAckResponse);
+            allPassed &= SelfTestCheck(output, "LoadLicenseKeySourcesCache rejects a source whose registryPath is outside the SOFTWARE subtree (e.g. SAM, SECURITY)", TestLoadLicenseKeySourcesCacheRejectsSourceOutsideSoftwareSubtree);
             allPassed &= SelfTestCheck(output, "WsusScanner.ShouldRescan returns true when hashes differ or the client has never scanned, false when they match", TestWsusScannerShouldRescanCompares);
             allPassed &= SelfTestCheck(output, "DownloadAndVerifyWsusCab writes the file and returns true when the downloaded bytes' hash matches", TestDownloadAndVerifyWsusCabSucceedsOnHashMatch);
             allPassed &= SelfTestCheck(output, "DownloadAndVerifyWsusCab returns false and does not write the file when the downloaded bytes' hash does not match", TestDownloadAndVerifyWsusCabFailsOnHashMismatch);
@@ -4152,6 +4172,47 @@ namespace WindowsInventoryLite
                 if (parsed[0].Product != "KriptoPro" || parsed[0].ValueName != "SerialNumber")
                 {
                     return "expected the parsed source's fields to match what was written, got Product='" + parsed[0].Product + "' ValueName='" + parsed[0].ValueName + "'";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); } catch { }
+            }
+        }
+
+        // Regression coverage for a real gap: licenseKeySources is learned
+        // entirely from the server's inventory-ack response with no
+        // validation - without IsAllowedLicenseKeySourcePath, a compromised
+        // server could direct every client to read and report back any
+        // HKLM/HKCU value (e.g. SAM, SECURITY) under cover of ordinary
+        // inventory telemetry. Every legitimate source lives under the
+        // SOFTWARE subtree; anything else must be dropped at load time.
+        private static string TestLoadLicenseKeySourcesCacheRejectsSourceOutsideSoftwareSubtree()
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "wil-selftest-learnedstate-licensekeys-reject-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(tempDir);
+                ClientOptions options = new ClientOptions();
+                options.OutputPath = tempDir;
+                InventoryCollector collector = new InventoryCollector(options);
+
+                string ack = "{\"licenseKeySources\":["
+                    + "{\"product\":\"Malicious\",\"registryHive\":\"HKEY_LOCAL_MACHINE\",\"registryPath\":\"SAM\\\\SAM\\\\Domains\",\"valueName\":\"F\"},"
+                    + "{\"product\":\"AlsoMalicious\",\"registryHive\":\"HKEY_LOCAL_MACHINE\",\"registryPath\":\"SECURITY\\\\Policy\\\\Secrets\",\"valueName\":\"X\"},"
+                    + "{\"product\":\"KriptoPro\",\"registryHive\":\"HKEY_LOCAL_MACHINE\",\"registryPath\":\"SOFTWARE\\\\WOW6432Node\\\\Test\",\"valueName\":\"SerialNumber\"}"
+                    + "]}";
+                collector.ApplyInventoryAckResponse(ack);
+
+                List<LicenseKeySource> parsed = collector.LoadLicenseKeySourcesCache();
+                if (parsed.Count != 1)
+                {
+                    return "expected only the one SOFTWARE-subtree source to survive, got " + parsed.Count + " entries";
+                }
+                if (parsed[0].Product != "KriptoPro")
+                {
+                    return "expected the surviving source to be the legitimate SOFTWARE-subtree one, got Product='" + parsed[0].Product + "'";
                 }
                 return null;
             }

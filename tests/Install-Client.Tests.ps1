@@ -11,6 +11,10 @@ Describe 'Windows Inventory Lite Install-Client client-data layout' {
         { . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory' -InstallPath 'C:\wil&calc.exe' } | Should -Throw '*InstallPath*'
     }
 
+    It 'rejects an InstallPath containing a percent sign (cmd.exe /c expands %VAR%)' {
+        { . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory' -InstallPath 'C:\wil%WINDIR%' } | Should -Throw '*InstallPath*'
+    }
+
     It 'accepts a safe InstallPath' {
         { . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory' -InstallPath 'C:\ProgramData\WindowsInventoryLite\client-data' } | Should -Not -Throw
     }

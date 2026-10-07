@@ -270,6 +270,10 @@ Describe 'Windows Inventory Lite Install-Server config and validation helpers' {
             { Test-BatchSafeValue -Value 'C:\pkg & calc.exe' -FieldName 'LinuxClientPackagePath' } | Should -Throw
         }
 
+        It 'rejects a value containing a percent sign (cmd.exe /c expands %VAR%)' {
+            { Test-BatchSafeValue -Value 'C:\pkg%WINDIR%' -FieldName 'LinuxClientPackagePath' } | Should -Throw
+        }
+
         It 'accepts an ordinary ProgramData path' {
             { Test-BatchSafeValue -Value 'C:\ProgramData\WindowsInventoryLite\linux-client-package' -FieldName 'LinuxClientPackagePath' } | Should -Not -Throw
         }
