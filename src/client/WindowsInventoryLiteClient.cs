@@ -507,7 +507,25 @@ namespace WindowsInventoryLite
                 // file (instead of returning the whole body as a byte[]) is
                 // what lets this handle a multi-hundred-MB .msu/.cab without
                 // holding the entire file in memory at once.
+                //
+                // Overload, not a default parameter value - this project's
+                // net35 target compiles with the .NET 3.5 SDK's csc.exe
+                // (C# 3.0), which does not support optional parameters
+                // (CS0241). Every production call site keeps calling this
+                // exact 2-argument signature unchanged and gets the real
+                // 30-minute/15-second constants via the overload below.
                 internal Dictionary<string, object> RunOneJob(Dictionary<string, object> job, Func<string, string, string, string> downloadToFileAndComputeSha256)
+                {
+                    return RunOneJob(job, downloadToFileAndComputeSha256, InstallProcessTimeoutMilliseconds, GracefulShutdownGraceMilliseconds);
+                }
+
+                // installProcessTimeoutMs/gracefulShutdownGraceMs let
+                // self-tests pass small values instead of the real
+                // 30-minute/15-second constants, so the timeout-and-kill
+                // path can be exercised against a real short-lived child
+                // process in well under a second instead of needing to
+                // wait out the real timeout.
+                internal Dictionary<string, object> RunOneJob(Dictionary<string, object> job, Func<string, string, string, string> downloadToFileAndComputeSha256, int installProcessTimeoutMs, int gracefulShutdownGraceMs)
                 {
                     string id = InventoryCollector.GetString(job, "id");
                     string catalogType = InventoryCollector.GetString(job, "catalogType");
@@ -604,7 +622,7 @@ namespace WindowsInventoryLite
 
                         using (Process process = Process.Start(psi))
                         {
-                            bool exited = process.WaitForExit(InstallProcessTimeoutMilliseconds);
+                            bool exited = process.WaitForExit(installProcessTimeoutMs);
                             if (!exited)
                             {
                                 // Most /quiet-style installs never create a
@@ -624,7 +642,7 @@ namespace WindowsInventoryLite
                                 {
                                     if (process.CloseMainWindow())
                                     {
-                                        exited = process.WaitForExit(GracefulShutdownGraceMilliseconds);
+                                        exited = process.WaitForExit(gracefulShutdownGraceMs);
                                         if (exited)
                                         {
                                             DebugLogger.Log(options, "Job", "Installer for job '" + id + "' exited on its own after a graceful close request, avoiding a hard kill.");
@@ -639,7 +657,7 @@ namespace WindowsInventoryLite
                                     try { process.WaitForExit(5000); } catch { }
                                     resultEntry["success"] = false;
                                     resultEntry["exitCode"] = -1;
-                                    resultEntry["errorMessage"] = "installer did not exit within " + (InstallProcessTimeoutMilliseconds / 60000) + " minutes and was terminated";
+                                    resultEntry["errorMessage"] = "installer did not exit within " + (installProcessTimeoutMs / 60000) + " minutes and was terminated";
                                 }
                             }
 
@@ -3205,6 +3223,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ToSoftwareDownloadUrl builds the expected catalogType/id query string", TestToSoftwareDownloadUrlBuildsExpectedQueryString);
             allPassed &= SelfTestCheck(output, "TryEnrollIfNeededCore never calls postJson once Token is already set", TestTryEnrollIfNeededCoreSkipsWhenTokenAlreadySet);
             allPassed &= SelfTestCheck(output, "TryEnrollIfNeededCore never calls postJson when no EnrollmentToken is configured", TestTryEnrollIfNeededCoreSkipsWhenNoEnrollmentTokenConfigured);
+            allPassed &= SelfTestCheck(output, "Collect() returns every expected top-level field with a sane type, against this machine's real WMI/registry data", TestCollectReturnsAllExpectedTopLevelFieldsWithSaneTypes);
+            allPassed &= SelfTestCheck(output, "CollectAndSave writes a local inventory JSON file and never attempts a network call when no ServerUrl is configured", TestCollectAndSaveWritesLocalInventoryFileWithoutAttemptingNetworkWhenNoServerUrl);
             allPassed &= SelfTestCheck(output, "TryEnrollIfNeededCore posts to the enroll URL with EnrollmentToken and applies the issued token to options.Token", TestTryEnrollIfNeededCoreAppliesIssuedTokenFromResponse);
             allPassed &= SelfTestCheck(output, "TryEnrollIfNeededCore swallows a failed enroll attempt instead of throwing, leaving Token empty", TestTryEnrollIfNeededCoreSwallowsPostJsonException);
             allPassed &= SelfTestCheck(output, "ShouldClearTokenForReenrollment clears on a 401 when EnrollmentToken is configured", TestShouldClearTokenForReenrollmentClearsOn401WhenEnrollmentTokenConfigured);
@@ -3212,6 +3232,9 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ShouldClearTokenForReenrollment leaves Token alone for non-401 failures", TestShouldClearTokenForReenrollmentLeavesTokenAloneForNonAuthFailures);
             allPassed &= SelfTestCheck(output, "RunOneJob refuses to run the installer when downloaded content does not match the expected contentSha256", TestRunOneJobRefusesToRunWhenDownloadedContentDoesNotMatchExpectedHash);
             allPassed &= SelfTestCheck(output, "RunOneJob skips hash verification when the job carries no contentSha256", TestRunOneJobSkipsVerificationWhenJobHasNoContentSha256);
+            allPassed &= SelfTestCheck(output, "RunOneJob reports success and deletes the downloaded copy when a real installer exits 0 quickly", TestRunOneJobReportsSuccessAndCleansUpWhenTheInstallerExitsZeroQuickly);
+            allPassed &= SelfTestCheck(output, "RunOneJob reports the real exit code and deletes the downloaded copy when a real installer exits nonzero", TestRunOneJobReportsFailureWithRealExitCodeWhenTheInstallerExitsNonZero);
+            allPassed &= SelfTestCheck(output, "RunOneJob kills a real installer that exceeds its timeout and still deletes the downloaded copy", TestRunOneJobKillsAndCleansUpWhenTheInstallerExceedsItsTimeout);
             allPassed &= SelfTestCheck(output, "StreamToFileAndComputeSha256 writes the full source stream to the destination file and returns its correct SHA256 hash", TestStreamToFileAndComputeSha256WritesFileAndComputesCorrectHash);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns SignatureRequired when RequireSignatureForSelfUpdate is true and no signature was advertised", TestApplySelfUpdateFromServerCoreReturnsSignatureRequiredWhenMissing);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns SignatureMismatch when the advertised signature does not verify", TestApplySelfUpdateFromServerCoreReturnsSignatureMismatchForBadSignature);
@@ -3951,6 +3974,99 @@ namespace WindowsInventoryLite
             return null;
         }
 
+        // Collect()/CollectAndSave() - the client's actual top-level
+        // inventory-collection orchestration - had no test at all before
+        // this, despite being the single most central thing this client
+        // does. Runs against this machine's REAL WMI/registry data (same
+        // as production - there is no mock-WMI layer in this codebase), so
+        // it checks structural shape (every expected field present, with a
+        // sane type) rather than exact values, which differ per machine.
+        private static string TestCollectReturnsAllExpectedTopLevelFieldsWithSaneTypes()
+        {
+            ClientOptions options = new ClientOptions();
+            InventoryCollector collector = new InventoryCollector(options);
+
+            Dictionary<string, object> inventory = collector.Collect();
+
+            string[] requiredKeys = new string[] {
+                "schemaVersion", "clientVersion", "collectedAt", "computerName", "domain",
+                "ipAddresses", "manufacturer", "model", "serialNumber", "os", "office",
+                "activation", "licenses", "software", "cpu", "ramModules", "ramTotalMb",
+                "disks", "hasUsbStorage"
+            };
+            foreach (string key in requiredKeys)
+            {
+                if (!inventory.ContainsKey(key))
+                {
+                    return "expected Collect() to always include the '" + key + "' field";
+                }
+            }
+
+            if (Convert.ToString(inventory["schemaVersion"]) != "1.0")
+            {
+                return "expected schemaVersion '1.0', got: " + inventory["schemaVersion"];
+            }
+            if (Convert.ToString(inventory["clientVersion"]) != Program.ProductVersion)
+            {
+                return "expected clientVersion to be this build's own Program.ProductVersion, got: " + inventory["clientVersion"];
+            }
+            if (Convert.ToString(inventory["computerName"]) != Environment.MachineName)
+            {
+                return "expected computerName to be this machine's real Environment.MachineName";
+            }
+            if (!(inventory["os"] is Dictionary<string, object>))
+            {
+                return "expected os to be a nested object";
+            }
+            if (!(inventory["software"] is ArrayList) || !(inventory["disks"] is ArrayList) || !(inventory["ramModules"] is ArrayList) || !(inventory["licenses"] is ArrayList))
+            {
+                return "expected software/disks/ramModules/licenses to each be a list";
+            }
+            if (Convert.ToInt64(inventory["ramTotalMb"]) < 0)
+            {
+                return "expected ramTotalMb to be a non-negative number, got: " + inventory["ramTotalMb"];
+            }
+            return null;
+        }
+
+        private static string TestCollectAndSaveWritesLocalInventoryFileWithoutAttemptingNetworkWhenNoServerUrl()
+        {
+            string outputDir = Path.Combine(Path.GetTempPath(), "wil-collectandsave-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(outputDir);
+            try
+            {
+                ClientOptions options = new ClientOptions();
+                options.OutputPath = outputDir;
+                options.ServerUrl = ""; // no ServerUrl - CollectAndSave must only write locally, never attempt a POST
+                options.SkipSoftware = true; // keep this test fast - software enumeration isn't what's being tested here
+                InventoryCollector collector = new InventoryCollector(options);
+
+                ForceImmediateCheckFlags flags = collector.CollectAndSave();
+                if (flags == null)
+                {
+                    return "expected CollectAndSave to always return a non-null ForceImmediateCheckFlags, even with no ServerUrl configured";
+                }
+
+                string expectedPath = Path.Combine(outputDir, SanitizeFileName(Environment.MachineName) + ".json");
+                if (!File.Exists(expectedPath))
+                {
+                    return "expected a local inventory JSON file at " + expectedPath;
+                }
+
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                Dictionary<string, object> written = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(expectedPath));
+                if (GetString(written, "computerName") != Environment.MachineName)
+                {
+                    return "expected the written file's computerName to be this machine's real name";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(outputDir, true); } catch { }
+            }
+        }
+
         private static string TestTryEnrollIfNeededCoreAppliesIssuedTokenFromResponse()
         {
             ClientOptions options = new ClientOptions();
@@ -4106,6 +4222,141 @@ namespace WindowsInventoryLite
             if (errorMessage.IndexOf("does not match", StringComparison.OrdinalIgnoreCase) >= 0)
             {
                 return "expected hash verification to be skipped when contentSha256 is empty, but got a hash-mismatch error";
+            }
+            return null;
+        }
+
+        // The two tests above only exercise RunOneJob's hash-verification
+        // branch, which returns before Process.Start is ever reached -
+        // nothing previously tested the real install-and-wait path at all.
+        // These three use a real copy of the real local powershell.exe as
+        // the "installer" (a real PE image genuinely launchable via
+        // UseShellExecute=false, unlike the garbage bytes the tests above
+        // write) so Process.Start, WaitForExit, exit-code handling, and -
+        // for the timeout case - CloseMainWindow/Kill all run for real, not
+        // mocked. installProcessTimeoutMs/gracefulShutdownGraceMs are
+        // passed as small values so the timeout test completes in well
+        // under a second instead of needing to wait out the real 30-minute
+        // constant.
+        private static string RealPowerShellExePath()
+        {
+            // Path.Combine's 3-/4-argument overloads are .NET 4.0+ only -
+            // the net35 target's BCL has just the 2-argument version.
+            string systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
+            return Path.Combine(Path.Combine(Path.Combine(systemDirectory, "WindowsPowerShell"), "v1.0"), "powershell.exe");
+        }
+
+        private static string TestRunOneJobReportsSuccessAndCleansUpWhenTheInstallerExitsZeroQuickly()
+        {
+            ClientOptions options = new ClientOptions();
+            Program.InventoryService.SoftwareJobRunner runner = new Program.InventoryService.SoftwareJobRunner(options, true);
+
+            Dictionary<string, object> job = new Dictionary<string, object>();
+            job["id"] = "entry-1";
+            job["catalogType"] = "windowsUpdate";
+            job["relativePath"] = @"windows-updates\fake-installer.exe";
+            job["arguments"] = "-NoProfile -NonInteractive -Command \"exit 0\"";
+            job["contentSha256"] = "";
+
+            string capturedDestPath = null;
+            Dictionary<string, object> result = runner.RunOneJob(job, (url, token, destPath) =>
+            {
+                capturedDestPath = destPath;
+                File.Copy(RealPowerShellExePath(), destPath, true);
+                return "";
+            }, 10000, 2000);
+
+            if (!Convert.ToBoolean(result["success"]))
+            {
+                return "expected success for an installer that exits 0 quickly, got: " + Convert.ToString(result["errorMessage"]);
+            }
+            if (Convert.ToInt32(result["exitCode"]) != 0)
+            {
+                return "expected exitCode 0, got: " + result["exitCode"];
+            }
+            if (capturedDestPath != null && File.Exists(capturedDestPath))
+            {
+                return "expected the downloaded installer copy to be deleted after a successful run";
+            }
+            return null;
+        }
+
+        private static string TestRunOneJobReportsFailureWithRealExitCodeWhenTheInstallerExitsNonZero()
+        {
+            ClientOptions options = new ClientOptions();
+            Program.InventoryService.SoftwareJobRunner runner = new Program.InventoryService.SoftwareJobRunner(options, true);
+
+            Dictionary<string, object> job = new Dictionary<string, object>();
+            job["id"] = "entry-1";
+            job["catalogType"] = "windowsUpdate";
+            job["relativePath"] = @"windows-updates\fake-installer.exe";
+            job["arguments"] = "-NoProfile -NonInteractive -Command \"exit 7\"";
+            job["contentSha256"] = "";
+
+            string capturedDestPath = null;
+            Dictionary<string, object> result = runner.RunOneJob(job, (url, token, destPath) =>
+            {
+                capturedDestPath = destPath;
+                File.Copy(RealPowerShellExePath(), destPath, true);
+                return "";
+            }, 10000, 2000);
+
+            if (Convert.ToBoolean(result["success"]))
+            {
+                return "expected failure for an installer that exits with a nonzero code";
+            }
+            if (Convert.ToInt32(result["exitCode"]) != 7)
+            {
+                return "expected the real exit code 7 to be reported, got: " + result["exitCode"];
+            }
+            string errorMessage = Convert.ToString(result["errorMessage"]);
+            if (errorMessage.IndexOf("exited with code 7", StringComparison.Ordinal) < 0)
+            {
+                return "expected an errorMessage naming the real exit code, got: " + errorMessage;
+            }
+            if (capturedDestPath != null && File.Exists(capturedDestPath))
+            {
+                return "expected the downloaded installer copy to be deleted after a failed run";
+            }
+            return null;
+        }
+
+        private static string TestRunOneJobKillsAndCleansUpWhenTheInstallerExceedsItsTimeout()
+        {
+            ClientOptions options = new ClientOptions();
+            Program.InventoryService.SoftwareJobRunner runner = new Program.InventoryService.SoftwareJobRunner(options, true);
+
+            Dictionary<string, object> job = new Dictionary<string, object>();
+            job["id"] = "entry-1";
+            job["catalogType"] = "windowsUpdate";
+            job["relativePath"] = @"windows-updates\fake-installer.exe";
+            // Sleeps far longer than the 300 ms timeout/200 ms grace period
+            // passed below - CreateNoWindow means CloseMainWindow() returns
+            // false immediately (no window to close), so this falls straight
+            // through to Kill() without actually waiting out the grace period.
+            job["arguments"] = "-NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 120\"";
+            job["contentSha256"] = "";
+
+            string capturedDestPath = null;
+            Dictionary<string, object> result = runner.RunOneJob(job, (url, token, destPath) =>
+            {
+                capturedDestPath = destPath;
+                File.Copy(RealPowerShellExePath(), destPath, true);
+                return "";
+            }, 300, 200);
+
+            if (Convert.ToBoolean(result["success"]))
+            {
+                return "expected failure once the installer exceeds its timeout";
+            }
+            string errorMessage = Convert.ToString(result["errorMessage"]);
+            if (errorMessage.IndexOf("did not exit within", StringComparison.OrdinalIgnoreCase) < 0 || errorMessage.IndexOf("terminated", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                return "expected a timeout/terminated errorMessage, got: " + errorMessage;
+            }
+            if (capturedDestPath != null && File.Exists(capturedDestPath))
+            {
+                return "expected the downloaded installer copy to be deleted even after the process was killed for exceeding its timeout";
             }
             return null;
         }

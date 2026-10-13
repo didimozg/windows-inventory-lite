@@ -19,6 +19,17 @@ jobs:
         shell: pwsh
         run: node --check server/dashboard/app.js
 
+      # app.js itself had zero behavioral tests before this - only the
+      # syntax check above. This runs the real, unmodified app.js (its one
+      # change for testability is an inert module.exports guard at the very
+      # end, never reached by a real browser) against a minimal stub DOM,
+      # exercising its pure, logic-bearing helper functions for real
+      # instead of just parsing them. See the test file's own comment for
+      # why a hand-rolled stub instead of a jsdom dependency.
+      - name: Run dashboard JavaScript tests
+        shell: pwsh
+        run: node tests/dashboard-logic.test.js
+
       # Windows PowerShell 5.1 (not pwsh/PowerShell 7): this project's tests
       # touch System.Web.Extensions types that only resolve via the .NET
       # Framework GAC, which PowerShell 7's .NET Core runtime doesn't have -

@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "1.0.7";
+        internal const string ProductVersion = "1.0.8";
 
         private static int Main(string[] args)
         {
@@ -18633,6 +18633,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ValidatePosixShellSafe accepts safe values including null/empty", TestValidatePosixShellSafeAcceptsSafeValues);
             allPassed &= SelfTestCheck(output, "ReadRequest fails cleanly when the connection closes mid-headers", TestReadRequestFailsCleanlyOnAConnectionClosedMidHeaders);
             allPassed &= SelfTestCheck(output, "ReadRequest fails cleanly on an immediately closed connection", TestReadRequestFailsCleanlyOnAnImmediatelyClosedConnection);
+            allPassed &= SelfTestCheck(output, "ReadRequest rejects headers over the 64 KB size limit", TestReadRequestRejectsHeadersOverSizeLimit);
+            allPassed &= SelfTestCheck(output, "ReadRequest rejects a Content-Length over the 16 MB body size limit", TestReadRequestRejectsBodyOverSizeLimit);
             allPassed &= SelfTestCheck(output, "A 'null' JSON body deserializes to null, which is why the ingestion endpoints need an explicit guard", TestNullJsonBodyDeserializesToNullNotAnEmptyDictionary);
             allPassed &= SelfTestCheck(output, "TryValidateLinuxPushValues rejects shell-unsafe serverUrl/token/installPath", TestTryValidateLinuxPushValuesRejectsUnsafeValuesAndAcceptsSafeOnes);
             allPassed &= SelfTestCheck(output, "IsClientVersionCurrent matches either package version", TestIsClientVersionCurrentMatchesEitherPackage);
@@ -18822,6 +18824,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "IsValidRegistryHiveName accepts only HKEY_LOCAL_MACHINE/HKEY_CURRENT_USER", TestIsValidRegistryHiveNameAcceptsOnlyKnownHives);
             allPassed &= SelfTestCheck(output, "IsValidRegistryPathOrValueName rejects control characters and oversized input", TestIsValidRegistryPathOrValueNameRejectsControlCharsAndOversizedInput);
             allPassed &= SelfTestCheck(output, "License key sources CRUD storage round-trips through disk", TestLicenseKeySourcesCrudRoundTrip);
+            allPassed &= SelfTestCheck(output, "License key sources HTTP handlers (create/list/update/delete, including 404 for an unknown id) round-trip correctly", TestLicenseKeySourceHttpHandlersCrudRoundTrip);
+            allPassed &= SelfTestCheck(output, "CreateLicenseKeySource rejects a missing product or an unsupported registryHive with 400, persisting nothing", TestCreateLicenseKeySourceRejectsInvalidInput);
             allPassed &= SelfTestCheck(output, "Windows updates catalog CRUD storage round-trips through disk", TestWindowsUpdatesCrudRoundTrip);
             allPassed &= SelfTestCheck(output, "Third-party software catalog CRUD storage round-trips through disk", TestThirdPartySoftwareCrudRoundTrip);
             allPassed &= SelfTestCheck(output, "LoadJsonRecordList returns an empty list when the file does not exist", TestLoadJsonRecordListReturnsEmptyWhenFileMissing);
@@ -26528,6 +26532,62 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
+        // Neither of the two size limits ReadRequest enforces (64 KB of
+        // headers, 16 MB of body) had a test before this - only the
+        // separate "connection closed mid-read" cases above did. A caller
+        // that ignores either limit entirely (reads until EOF with no cap)
+        // is a real memory-exhaustion risk this test would catch.
+        private static string TestReadRequestRejectsHeadersOverSizeLimit()
+        {
+            // No "\r\n\r\n" anywhere in this payload, so the read loop keeps
+            // going until the 64 KB header-size check trips - never reaches
+            // a real request line, which is the point: the cap must apply
+            // before any attempt to parse what was sent so far.
+            byte[] oversizedHeaders = Encoding.ASCII.GetBytes(new string('A', 70000));
+            using (MemoryStream stream = new MemoryStream(oversizedHeaders))
+            {
+                try
+                {
+                    ReadRequest(stream);
+                    return "expected headers over 64 KB to be rejected";
+                }
+                catch (InvalidOperationException ex)
+                {
+                    if (ex.Message.IndexOf("64 KB", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected the 64 KB header-size message, got: " + ex.Message;
+                    }
+                    return null;
+                }
+            }
+        }
+
+        private static string TestReadRequestRejectsBodyOverSizeLimit()
+        {
+            // The Content-Length check happens right after the headers
+            // parse, before any body bytes are read - so the request
+            // never needs to actually contain 16 MB of body for this to
+            // be exercised, only claim it via the header.
+            string headerText = "POST /api/v1/inventory HTTP/1.1\r\nContent-Length: 20000000\r\n\r\n";
+            byte[] requestBytes = Encoding.ASCII.GetBytes(headerText);
+            using (MemoryStream stream = new MemoryStream(requestBytes))
+            {
+                try
+                {
+                    ReadRequest(stream);
+                    return "expected a Content-Length over 16 MB to be rejected";
+                }
+                catch (InvalidOperationException ex)
+                {
+                    if (ex.Message.IndexOf("16 MB", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected the 16 MB body-size message, got: " + ex.Message;
+                    }
+                    return null;
+                }
+            }
+        }
+
         private static string TestNullJsonBodyDeserializesToNullNotAnEmptyDictionary()
         {
             // The premise the ingestion endpoints' null-guard exists for: a body of
@@ -29334,6 +29394,180 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (GetStringValue(reloaded[0], "product") != "Test Product")
                 {
                     return "expected the saved product name to round-trip through disk";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // The round-trip test just above only exercises the storage layer
+        // (LoadLicenseKeySources/SaveLicenseKeySources) - none of the real
+        // HTTP handlers (SendLicenseKeySources/CreateLicenseKeySource/
+        // UpdateLicenseKeySource/DeleteLicenseKeySource) had a single test
+        // calling them before these. The handlers do their own validation
+        // and id-lookup work the storage layer alone can't catch a
+        // regression in.
+        private static string TestLicenseKeySourceHttpHandlersCrudRoundTrip()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-license-key-source-http-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                RequestContext createRequest = new RequestContext();
+                createRequest.Method = "POST";
+                createRequest.Path = "/api/v1/license-key-sources";
+                createRequest.Headers = new Dictionary<string, string>();
+                createRequest.Body = "{\"product\":\"Test Product\",\"registryHive\":\"HKEY_LOCAL_MACHINE\",\"registryPath\":\"SOFTWARE\\\\Test\",\"valueName\":\"TestValue\"}";
+                string createdId;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.CreateLicenseKeySource(stream, createRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("200 OK", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected 200 from a valid create, got: " + responseText;
+                    }
+                    string jsonBody = responseText.Substring(responseText.IndexOf("\r\n\r\n", StringComparison.Ordinal) + 4);
+                    Dictionary<string, object> created = serializer.Deserialize<Dictionary<string, object>>(jsonBody);
+                    createdId = GetStringValue(created, "id");
+                    if (String.IsNullOrEmpty(createdId))
+                    {
+                        return "expected the created record to carry a generated id";
+                    }
+                }
+
+                RequestContext listRequest = new RequestContext();
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendLicenseKeySources(stream);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("Test Product", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected the just-created source to appear in SendLicenseKeySources, got: " + responseText;
+                    }
+                }
+
+                RequestContext updateRequest = new RequestContext();
+                updateRequest.Method = "PUT";
+                updateRequest.Path = "/api/v1/license-key-sources/" + createdId;
+                updateRequest.Headers = new Dictionary<string, string>();
+                updateRequest.Body = "{\"product\":\"Renamed Product\",\"registryHive\":\"HKEY_CURRENT_USER\",\"registryPath\":\"SOFTWARE\\\\Renamed\",\"valueName\":\"RenamedValue\"}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.UpdateLicenseKeySource(stream, updateRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("Renamed Product", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected the update response to reflect the new product name, got: " + responseText;
+                    }
+                }
+
+                RequestContext updateMissingRequest = new RequestContext();
+                updateMissingRequest.Method = "PUT";
+                updateMissingRequest.Path = "/api/v1/license-key-sources/no-such-id";
+                updateMissingRequest.Headers = new Dictionary<string, string>();
+                updateMissingRequest.Body = "{\"product\":\"X\",\"registryHive\":\"HKEY_LOCAL_MACHINE\",\"registryPath\":\"SOFTWARE\\\\X\",\"valueName\":\"X\"}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.UpdateLicenseKeySource(stream, updateMissingRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("404", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected 404 updating an unknown id, got: " + responseText;
+                    }
+                }
+
+                RequestContext deleteMissingRequest = new RequestContext();
+                deleteMissingRequest.Method = "DELETE";
+                deleteMissingRequest.Path = "/api/v1/license-key-sources/no-such-id";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DeleteLicenseKeySource(stream, deleteMissingRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("404", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected 404 deleting an unknown id, got: " + responseText;
+                    }
+                }
+
+                RequestContext deleteRequest = new RequestContext();
+                deleteRequest.Method = "DELETE";
+                deleteRequest.Path = "/api/v1/license-key-sources/" + createdId;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DeleteLicenseKeySource(stream, deleteRequest);
+                }
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendLicenseKeySources(stream);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("Renamed Product", StringComparison.Ordinal) >= 0)
+                    {
+                        return "expected the deleted source to no longer appear in SendLicenseKeySources, got: " + responseText;
+                    }
+                }
+
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestCreateLicenseKeySourceRejectsInvalidInput()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-license-key-source-validation-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext missingProduct = new RequestContext();
+                missingProduct.Method = "POST";
+                missingProduct.Path = "/api/v1/license-key-sources";
+                missingProduct.Headers = new Dictionary<string, string>();
+                missingProduct.Body = "{\"registryHive\":\"HKEY_LOCAL_MACHINE\",\"registryPath\":\"SOFTWARE\\\\Test\",\"valueName\":\"TestValue\"}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.CreateLicenseKeySource(stream, missingProduct);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("400", StringComparison.Ordinal) < 0 || responseText.IndexOf("product is required", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected 400 'product is required' for a missing product, got: " + responseText;
+                    }
+                }
+
+                RequestContext badHive = new RequestContext();
+                badHive.Method = "POST";
+                badHive.Path = "/api/v1/license-key-sources";
+                badHive.Headers = new Dictionary<string, string>();
+                badHive.Body = "{\"product\":\"Test\",\"registryHive\":\"HKEY_CLASSES_ROOT\",\"registryPath\":\"SOFTWARE\\\\Test\",\"valueName\":\"TestValue\"}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.CreateLicenseKeySource(stream, badHive);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("400", StringComparison.Ordinal) < 0 || responseText.IndexOf("registryHive", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected 400 naming registryHive for an unsupported hive, got: " + responseText;
+                    }
+                }
+
+                List<Dictionary<string, object>> sources = server.LoadLicenseKeySources();
+                if (sources.Count != 0)
+                {
+                    return "expected neither rejected create to have persisted anything, got " + sources.Count + " source(s)";
                 }
                 return null;
             }

@@ -7554,4 +7554,18 @@
   updateLinuxUpdatesAuthModeFieldsUi();
   updateUpdatesCredentialFieldVisibility();
   updateUpdatesSelectionState();
+
+  // Inert in a real browser (module is never defined there) - exposes a
+  // handful of pure, logic-bearing functions to tests/dashboard-logic.test.js,
+  // which runs this whole file under Node against a minimal stub DOM (see
+  // that file's own comment) since this project has no bundler/module
+  // system to split them into their own file without touching every call
+  // site. Keep this list in sync with what that test file actually needs -
+  // it is not meant to become a general-purpose export of the whole app.
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+      text, formatDateTime, formatInstallDate, escapeHtml, escapeHtmlOrEmpty,
+      isStale, safeId, versionSortKey, formatFileSize, applySort, paginate
+    };
+  }
 }());
