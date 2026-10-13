@@ -3608,7 +3608,7 @@ namespace WindowsInventoryLite
             }
 
             SoftwareCatalogSpec spec;
-            if (catalogType == "windowsUpdate")
+            if (String.Equals(catalogType, "windowsUpdate", StringComparison.OrdinalIgnoreCase))
             {
                 spec = new SoftwareCatalogSpec();
                 spec.Lock = windowsUpdatesLock;
@@ -3616,7 +3616,7 @@ namespace WindowsInventoryLite
                 spec.Load = LoadWindowsUpdates;
                 spec.Save = SaveWindowsUpdates;
             }
-            else if (catalogType == "thirdPartySoftware")
+            else if (String.Equals(catalogType, "thirdPartySoftware", StringComparison.OrdinalIgnoreCase))
             {
                 spec = new SoftwareCatalogSpec();
                 spec.Lock = thirdPartySoftwareLock;
