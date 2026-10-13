@@ -6,6 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [1.0.6] - Closed the H1 round's 4 remaining follow-up items: a legacy-endpoint retirement switch, a dashboard label fix, and lock-free hashing
+
+### Added
+
+- **`disableLegacySoftwareRepositoryConnection` setting (default `false`).** `GET /api/v1/client/software-repository-connection` (deprecated since 1.0.2, still fully live for clients that haven't upgraded) now logs a distinct debug-log line naming the caller's source IP on every call, and once an admin has confirmed from that log that nothing is still using it, setting this to `true` via `POST /api/v1/server/settings` makes the endpoint return `404` instead of the plaintext share credential. Deliberately not a dashboard checkbox - a one-time, deliberate retirement action, not something to flip by accident. Does not remove the endpoint itself, so it stays reversible.
+
+### Fixed
+
+- **Dashboard ingestion-rejections view no longer mislabels the AD-gate's rejection reason as generic "Token mismatch."** `app.js`'s reason cell was a 2-way check (`"missing"` vs. everything else shown as "mismatched"); the AD-gate's own real rejection text ("...has no matching AD computer object") fell through to the generic label, so a real attack signal (someone already holding a valid `EnrollmentToken`, trying fabricated computer names) read as routine noise. Now shows the server's own reason text directly for anything that isn't one of the two known short codes.
+- **Hashing a software-distribution file no longer happens while holding the catalog's lock.** `UpdateSoftwareCatalogEntry` now hashes before taking `spec.Lock`, matching `CreateSoftwareCatalogEntry`'s existing pattern. `PerformWsusKbDownload` now hashes before taking `windowsUpdatesLock` (`ApplyWsusKbDownloadResultToEntry` takes the hash as a parameter instead of computing it itself). `BackfillMissingContentSha256` - the one path that can hash several large files in a single pass - got a real 3-phase rewrite: find which entries are missing a hash (locked, in-memory only) -> hash all of them with no lock held -> re-load fresh and apply only to entries still missing a hash once the lock is re-taken, so a concurrent save or delete during the unlocked hashing phase can't produce a stale write. All three previously could block every concurrent job-poll request for this catalog for as long as a 0.5-1.5 GB file took to hash.
+
+### Notes
+
+- Rotating the software-repository credential (the other item from this same follow-up list) turned out not to need a code change at all - `ConfigureSoftwareRepositoryCredentials` (Settings > Credentials) already lets an admin set a new one at any time. Noting it here since nothing had pointed at it explicitly before.
+- Server self-tests: 555 -> 557 (2 new, covering the retirement switch's settings round-trip and 404-when-disabled behavior). The 3 lock-related fixes were verified by confirming each function's EXISTING self-tests still pass unmodified after the restructuring (none of them assert on timing/locking directly, so no new tests were needed there) - full suite re-run, 557/557. Client unchanged (83/83 both targets - no client code touched). Pester unaffected (no `.ps1` touched).
+- Closes all 4 items from the H1 round's own "Follow-up items this review surfaced" list (see `[1.0.2]` above and `docs/backlog.md`).
+- Version: patch-only per this project's own standing rule.
+
 ## [1.0.5] - Auth-rejection self-tests for the 7 client-facing endpoints that had none
 
 ### Added

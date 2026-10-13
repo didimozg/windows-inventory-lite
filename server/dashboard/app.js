@@ -6407,7 +6407,7 @@
         <td class="mono">${escapeHtml(entry.sourceIp)}</td>
         <td>${entry.hostname ? escapeHtml(entry.hostname) : '—'}</td>
         <td>${escapeHtml(entry.endpoint)}</td>
-        <td>${entry.reason === 'missing' ? 'Token missing' : 'Token mismatch'}</td>
+        <td>${entry.reason === 'missing' ? 'Token missing' : (entry.reason === 'mismatched' ? 'Token mismatch' : escapeHtml(entry.reason))}</td>
         <td>${entry.matchedClient ? escapeHtml(entry.matchedClient) : '—'}</td>
       </tr>`);
 

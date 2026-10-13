@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "1.0.5";
+        internal const string ProductVersion = "1.0.6";
 
         private static int Main(string[] args)
         {
@@ -154,6 +154,13 @@ namespace WindowsInventoryLite
         public string SoftwareRepositoryPath;
         public string SoftwareRepositoryUsername;
         public string SoftwareRepositoryPassword;
+        // Off by default - see SendSoftwareRepositoryConnectionInfo's own
+        // comment. Every call to that endpoint is logged regardless of this
+        // setting, so an admin can confirm nothing is still using it before
+        // turning this on; once on, the endpoint returns 404 instead of the
+        // plaintext share credential, and every upgraded client already
+        // uses GET /api/v1/client/software-download instead.
+        public bool DisableLegacySoftwareRepositoryConnection;
         public int SoftwareShareScanIntervalMinutes;
         // Used by the WSUS cab downloader (a later task) when the network
         // requires an outbound proxy - see BuildOutboundProxy. Empty host
@@ -694,6 +701,11 @@ namespace WindowsInventoryLite
                 {
                     string autoCreateOnlyCriticalKbsText = GetConfigString(config, "AutoCreateOnlyCriticalKbs");
                     options.AutoCreateOnlyCriticalKbs = String.Equals(autoCreateOnlyCriticalKbsText, "true", StringComparison.OrdinalIgnoreCase);
+                }
+                if (!options.DisableLegacySoftwareRepositoryConnection)
+                {
+                    string disableLegacySoftwareRepositoryConnectionText = GetConfigString(config, "DisableLegacySoftwareRepositoryConnection");
+                    options.DisableLegacySoftwareRepositoryConnection = String.Equals(disableLegacySoftwareRepositoryConnectionText, "true", StringComparison.OrdinalIgnoreCase);
                 }
                 if (!options.EnableLinuxClientSelfUpdate)
                 {
@@ -3662,6 +3674,21 @@ namespace WindowsInventoryLite
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
                 return;
             }
+
+            // Opt-in retirement switch for this legacy endpoint - off by
+            // default, so upgrading does not break a fleet that has not
+            // finished moving to GET /api/v1/client/software-download yet.
+            // The log line just below fires on every call regardless of
+            // this setting, specifically so an admin can watch for it and
+            // confirm nothing is still calling this endpoint before turning
+            // the switch on.
+            if (options.DisableLegacySoftwareRepositoryConnection)
+            {
+                SendText(stream, "{\"error\":\"this endpoint has been disabled by the administrator - the client must be upgraded to use GET /api/v1/client/software-download instead\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+
+            DebugLogger.Log(options, "Client", "Legacy software-repository-connection endpoint called from " + request.RemoteAddress + " - this discloses the software-repository credential in plaintext. Once no client still needs it, set disableLegacySoftwareRepositoryConnection to retire it.");
 
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["path"] = options.SoftwareRepositoryPath ?? "";
@@ -11659,6 +11686,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             result["enableWindowsClientSelfUpdate"] = options.EnableWindowsClientSelfUpdate;
             result["autoCreateWindowsUpdateCatalogEntries"] = options.AutoCreateWindowsUpdateCatalogEntries;
             result["autoCreateOnlyCriticalKbs"] = options.AutoCreateOnlyCriticalKbs;
+            result["disableLegacySoftwareRepositoryConnection"] = options.DisableLegacySoftwareRepositoryConnection;
             result["enableLinuxClientSelfUpdate"] = options.EnableLinuxClientSelfUpdate;
             result["hstsMaxAgeHours"] = options.HstsMaxAgeHours;
             result["thumbprint"] = options.CertificateThumbprint;
@@ -12724,13 +12752,18 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // WSUS-triggered re-download doesn't silently leave behind a hash
         // that would cause every subsequent legitimate client download of
         // this same entry to fail verification.
-        private static void ApplyWsusKbDownloadResultToEntry(List<Dictionary<string, object>> entries, string id, string relativePath, ServerOptions options)
+        //
+        // Takes the hash as a parameter rather than computing it here -
+        // the caller (PerformWsusKbDownload) hashes before taking
+        // windowsUpdatesLock, so this purely in-memory mutation is all
+        // that happens while the lock is held.
+        private static void ApplyWsusKbDownloadResultToEntry(List<Dictionary<string, object>> entries, string id, string relativePath, string contentSha256)
         {
             Dictionary<string, object> entry = entries.Find(e => String.Equals(GetStringValue(e, "id"), id, StringComparison.OrdinalIgnoreCase));
             if (entry != null)
             {
                 entry["relativePath"] = relativePath;
-                entry["contentSha256"] = ComputeCatalogEntryContentSha256(options, relativePath) ?? "";
+                entry["contentSha256"] = contentSha256 ?? "";
                 entry["updatedAt"] = DateTime.UtcNow.ToString("o");
             }
         }
@@ -12785,10 +12818,13 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 if (result.Success)
                 {
+                    // Hashed here, before the lock - see
+                    // ApplyWsusKbDownloadResultToEntry's own comment.
+                    string contentSha256 = ComputeCatalogEntryContentSha256(options, result.RelativePath) ?? "";
                     lock (windowsUpdatesLock)
                     {
                         List<Dictionary<string, object>> entries = LoadWindowsUpdates();
-                        ApplyWsusKbDownloadResultToEntry(entries, id, result.RelativePath, options);
+                        ApplyWsusKbDownloadResultToEntry(entries, id, result.RelativePath, contentSha256);
                         SaveWindowsUpdates(entries);
                     }
                 }
@@ -13404,6 +13440,15 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 {
                     options.AutoCreateOnlyCriticalKbs = autoCreateOnlyCriticalKbs;
                     updates["AutoCreateOnlyCriticalKbs"] = options.AutoCreateOnlyCriticalKbs ? "true" : "false";
+                });
+            }
+            if (payload.ContainsKey("disableLegacySoftwareRepositoryConnection"))
+            {
+                bool disableLegacySoftwareRepositoryConnection = Convert.ToBoolean(payload["disableLegacySoftwareRepositoryConnection"]);
+                pendingApply.Add(() =>
+                {
+                    options.DisableLegacySoftwareRepositoryConnection = disableLegacySoftwareRepositoryConnection;
+                    updates["DisableLegacySoftwareRepositoryConnection"] = options.DisableLegacySoftwareRepositoryConnection ? "true" : "false";
                 });
             }
             if (payload.ContainsKey("enableLinuxClientSelfUpdate"))
@@ -16774,6 +16819,13 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return;
             }
 
+            // Hashed here, before the lock, same as CreateSoftwareCatalogEntry
+            // already does - reading a large (0.5-1.5 GB) file to hash it can
+            // take a while, and doing that while holding spec.Lock would block
+            // every concurrent job-poll request for this catalog for the
+            // duration.
+            string contentSha256 = ComputeCatalogEntryContentSha256(options, relativePath) ?? "";
+
             lock (spec.Lock)
             {
                 List<Dictionary<string, object>> entries = spec.Load();
@@ -16795,7 +16847,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 record["name"] = name;
                 record["relativePath"] = relativePath;
-                record["contentSha256"] = ComputeCatalogEntryContentSha256(options, relativePath) ?? "";
+                record["contentSha256"] = contentSha256;
                 record["arguments"] = arguments;
                 record["requiresReboot"] = requiresReboot;
                 record["enabled"] = enabled;
@@ -17372,20 +17424,63 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // and the file is only rewritten when at least one entry actually
         // changed, so a scan that backfills nothing leaves the catalog
         // file untouched.
+        // Three phases, deliberately not one "load, hash each, save" pass
+        // under a single lock hold: hashing every entry missing one can mean
+        // reading several large (0.5-1.5 GB) files in a row, which would
+        // otherwise block every concurrent job-poll request for this
+        // catalog for the whole scan. Phase 1 and 3 each hold catalogLock
+        // only for an in-memory list operation; the actual file reads in
+        // phase 2 happen with no lock held at all.
         private void BackfillMissingContentSha256(object catalogLock, Func<List<Dictionary<string, object>>> load, Action<List<Dictionary<string, object>>> save)
         {
+            // Phase 1: find out, under the lock, which entries currently
+            // have no hash and what file each should be hashed from.
+            List<KeyValuePair<string, string>> pendingIdsAndPaths = new List<KeyValuePair<string, string>>();
+            lock (catalogLock)
+            {
+                foreach (Dictionary<string, object> entry in load())
+                {
+                    if (String.IsNullOrEmpty(GetStringValue(entry, "contentSha256")))
+                    {
+                        pendingIdsAndPaths.Add(new KeyValuePair<string, string>(GetStringValue(entry, "id"), GetStringValue(entry, "relativePath")));
+                    }
+                }
+            }
+
+            if (pendingIdsAndPaths.Count == 0)
+            {
+                return;
+            }
+
+            // Phase 2: hash each candidate's file with no lock held.
+            Dictionary<string, string> hashesById = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (KeyValuePair<string, string> idAndPath in pendingIdsAndPaths)
+            {
+                string hash = ComputeCatalogEntryContentSha256(options, idAndPath.Value);
+                if (hash != null)
+                {
+                    hashesById[idAndPath.Key] = hash;
+                }
+            }
+
+            if (hashesById.Count == 0)
+            {
+                return;
+            }
+
+            // Phase 3: re-take the lock, re-load fresh, and apply a hash
+            // only to an entry that is STILL missing one - unchanged
+            // fail-closed guarantee as before, now also covering the case
+            // where something else (a save, a delete) touched this catalog
+            // during phase 2's unlocked hashing.
             lock (catalogLock)
             {
                 List<Dictionary<string, object>> entries = load();
                 bool changed = false;
                 foreach (Dictionary<string, object> entry in entries)
                 {
-                    if (!String.IsNullOrEmpty(GetStringValue(entry, "contentSha256")))
-                    {
-                        continue;
-                    }
-                    string hash = ComputeCatalogEntryContentSha256(options, GetStringValue(entry, "relativePath"));
-                    if (hash != null)
+                    string hash;
+                    if (String.IsNullOrEmpty(GetStringValue(entry, "contentSha256")) && hashesById.TryGetValue(GetStringValue(entry, "id"), out hash))
                     {
                         entry["contentSha256"] = hash;
                         changed = true;
@@ -18383,6 +18478,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips enableWindowsClientSelfUpdate/enableLinuxClientSelfUpdate", TestConfigureServerSettingsRoundTripsSelfUpdateToggles);
             allPassed &= SelfTestCheck(output, "autoCreateWindowsUpdateCatalogEntries defaults to false and round-trips through the real settings GET/POST handlers", TestAutoCreateWindowsUpdateCatalogEntriesSettingRoundTrips);
             allPassed &= SelfTestCheck(output, "autoCreateOnlyCriticalKbs defaults to false and round-trips through the real settings GET/POST handlers", TestAutoCreateOnlyCriticalKbsSettingRoundTrips);
+            allPassed &= SelfTestCheck(output, "disableLegacySoftwareRepositoryConnection defaults to false and round-trips through the real settings GET/POST handlers", TestDisableLegacySoftwareRepositoryConnectionSettingRoundTrips);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips debugLogRetentionDays/debugLogMaxSizeMb", TestConfigureServerSettingsRoundTripsDebugLogCaps);
             allPassed &= SelfTestCheck(output, "SendDebugLog returns empty content when the log file does not exist", TestSendDebugLogReturnsEmptyContentWhenFileMissing);
             allPassed &= SelfTestCheck(output, "SendDebugLog round-trips real file content", TestSendDebugLogRoundTripsRealFileContent);
@@ -18458,6 +18554,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/third-party-software-jobs requires a valid ingestion token unconditionally, rejects with 401 when missing/wrong", TestSendThirdPartySoftwareJobsRejectsWithoutValidToken);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/software-jobs/results requires a valid ingestion token unconditionally, rejects with 401 when missing/wrong", TestReceiveSoftwareJobResultsRejectsWithoutValidToken);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-repository-connection requires a valid ingestion token unconditionally, rejects with 401 when missing/wrong", TestSendSoftwareRepositoryConnectionInfoRejectsWithoutValidToken);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-repository-connection returns 404 (never the real credential) once an admin has disabled it via disableLegacySoftwareRepositoryConnection", TestSendSoftwareRepositoryConnectionInfoReturns404WhenDisabled);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall updates a target's stored clientVersion", TestPatchClientReportVersionAfterInstallUpdatesVersion);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall's lastInstalledAtUtc is cleared once a real report overwrites the file", TestPatchClientReportVersionAfterInstallFieldClearedByRealReport);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall is a no-op when the target has no stored report yet", TestPatchClientReportVersionAfterInstallMissingReport);
@@ -20964,6 +21061,60 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     getResponseText = Encoding.UTF8.GetString(getStream.ToArray());
                 }
                 if (getResponseText.IndexOf("\"autoCreateOnlyCriticalKbs\":true", StringComparison.Ordinal) < 0)
+                {
+                    return "expected the settings GET response to reflect the new value, got: " + getResponseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestDisableLegacySoftwareRepositoryConnectionSettingRoundTrips()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.EnableHttp = true;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-disable-legacy-repo-setting-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                if (options.DisableLegacySoftwareRepositoryConnection)
+                {
+                    return "expected DisableLegacySoftwareRepositoryConnection to default to false";
+                }
+
+                RequestContext postRequest = new RequestContext();
+                postRequest.Method = "POST";
+                postRequest.Path = "/api/v1/server/settings";
+                postRequest.Headers = new Dictionary<string, string>();
+                postRequest.Body = "{\"disableLegacySoftwareRepositoryConnection\":true}";
+
+                using (MemoryStream postStream = new MemoryStream())
+                {
+                    server.ConfigureServerSettings(postStream, postRequest);
+                }
+                if (!options.DisableLegacySoftwareRepositoryConnection)
+                {
+                    return "expected the live options object to be updated to true after POST";
+                }
+
+                RequestContext getRequest = new RequestContext();
+                getRequest.Method = "GET";
+                getRequest.Path = "/api/v1/server/settings";
+                getRequest.Headers = new Dictionary<string, string>();
+
+                string getResponseText;
+                using (MemoryStream getStream = new MemoryStream())
+                {
+                    server.SendServerSettings(getStream);
+                    getResponseText = Encoding.UTF8.GetString(getStream.ToArray());
+                }
+                if (getResponseText.IndexOf("\"disableLegacySoftwareRepositoryConnection\":true", StringComparison.Ordinal) < 0)
                 {
                     return "expected the settings GET response to reflect the new value, got: " + getResponseText;
                 }
@@ -25234,6 +25385,45 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     if (responseText.IndexOf("401 Unauthorized", StringComparison.OrdinalIgnoreCase) < 0)
                     {
                         return "expected a 401 response with a wrong token, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendSoftwareRepositoryConnectionInfoReturns404WhenDisabled()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-repoconnectiondisabled-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            options.SoftwareRepositoryUsername = @"CONTOSO\svc-share";
+            options.SoftwareRepositoryPassword = "real-share-password";
+            options.DisableLegacySoftwareRepositoryConnection = true;
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client/software-repository-connection";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "real-token";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareRepositoryConnectionInfo(stream, request);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("404", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected a 404 response once disabled, even with a valid token, got: " + responseText;
+                    }
+                    if (responseText.IndexOf("real-share-password", StringComparison.Ordinal) >= 0)
+                    {
+                        return "expected the real credential to never appear in the response once this endpoint is disabled, got: " + responseText;
                     }
                 }
                 return null;
@@ -32722,45 +32912,30 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
         private static string TestApplyWsusKbDownloadResultToEntryRepinsContentSha256ToTheNewFile()
         {
-            string tempRepo = Path.Combine(Path.GetTempPath(), "wil-wsuskb-repin-test-" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(Path.Combine(tempRepo, "windows-updates"));
-            string filePath = Path.Combine(tempRepo, "windows-updates", "KB2222222.exe");
-            byte[] newContent = Encoding.UTF8.GetBytes("freshly re-downloaded content");
-            File.WriteAllBytes(filePath, newContent);
-            try
+            // No real file/ServerOptions needed any more - the function
+            // takes the new hash as a parameter (computed by the caller,
+            // outside windowsUpdatesLock) rather than computing it itself.
+            // Real-hash-from-a-real-file coverage lives in
+            // TestComputeCatalogEntryContentSha256HashesRealFileContent.
+            const string expected = "freshly-downloaded-content-hash";
+            List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+            Dictionary<string, object> entry = new Dictionary<string, object>();
+            entry["id"] = "entry-1";
+            entry["relativePath"] = @"windows-updates\KB2222222-old.exe";
+            entry["contentSha256"] = "stale-hash-from-before-the-redownload";
+            entries.Add(entry);
+
+            InventoryServer.ApplyWsusKbDownloadResultToEntry(entries, "entry-1", @"windows-updates\KB2222222.exe", expected);
+
+            if ((string)entry["relativePath"] != @"windows-updates\KB2222222.exe")
             {
-                ServerOptions options = new ServerOptions();
-                options.SoftwareRepositoryPath = tempRepo;
-
-                string expected;
-                using (SHA256 sha256 = SHA256.Create())
-                {
-                    expected = BitConverter.ToString(sha256.ComputeHash(newContent)).Replace("-", "").ToLowerInvariant();
-                }
-
-                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
-                Dictionary<string, object> entry = new Dictionary<string, object>();
-                entry["id"] = "entry-1";
-                entry["relativePath"] = @"windows-updates\KB2222222-old.exe";
-                entry["contentSha256"] = "stale-hash-from-before-the-redownload";
-                entries.Add(entry);
-
-                InventoryServer.ApplyWsusKbDownloadResultToEntry(entries, "entry-1", @"windows-updates\KB2222222.exe", options);
-
-                if ((string)entry["relativePath"] != @"windows-updates\KB2222222.exe")
-                {
-                    return "expected relativePath to be updated to the new file, got: " + entry["relativePath"];
-                }
-                if ((string)entry["contentSha256"] != expected)
-                {
-                    return "expected contentSha256 re-pinned to the new file's real hash '" + expected + "', got: " + entry["contentSha256"];
-                }
-                return null;
+                return "expected relativePath to be updated to the new file, got: " + entry["relativePath"];
             }
-            finally
+            if ((string)entry["contentSha256"] != expected)
             {
-                Directory.Delete(tempRepo, true);
+                return "expected contentSha256 re-pinned to the given hash '" + expected + "', got: " + entry["contentSha256"];
             }
+            return null;
         }
 
         private static string TestPerformWsusKbDownloadCoreRejectsAPathTraversalKbIdWithoutDownloadingAnything()
