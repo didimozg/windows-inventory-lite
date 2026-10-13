@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [1.0.7] - M3: close the DNS-rebinding gap in the no-password/loopback admin path
+
+### Fixed
+
+- **A loopback request is no longer automatically trusted as admin while Basic Auth is unconfigured, regardless of its Host header.** `IPAddress.IsLoopback` cannot by itself distinguish a real local admin from an attacker's page whose domain has just been DNS-rebound to `127.0.0.1` - the admin's own browser (this convenience mode's whole premise is that the admin is physically on the server's console/RDP session) would send a same-origin-looking request that nonetheless lands on the loopback interface. The browser's Host header still carries the attacker's original domain name regardless of what DNS currently resolves it to, so `IsWebRequestAuthorized`'s no-password branch now also requires the Host header (when present) to be `localhost`, `127.0.0.1`, `[::1]`, or this machine's own name. A missing Host header (a non-browser local caller, e.g. a local script) is still trusted, the same reasoning this file's CSRF checks already use for a missing Origin/Referer.
+
+### Notes
+
+- Closes the DNS-rebinding half of the external security audit's M3 finding. The other half - "any local user on the same host is trusted," "anything proxied through a reverse proxy on the same host inherits that trust" - is correctly a by-design trade-off of what the no-password convenience mode IS, not a gap: closing it would mean requiring a password always. See `docs/backlog.md` and `docs/threat-model.md` for the full reasoning.
+- Live-verified on a real scratch server via Playwright, not just self-tested: a plain `http://localhost:PORT/` browser session still loads the full dashboard with no password prompt, confirming the legitimate no-password/console-admin flow is unaffected by this change.
+- Server self-tests: 557 -> 558 (1 new, covering the rejection case and all three still-trusted Host values in one test). Client unchanged. Pester unaffected.
+- Version: patch-only per this project's own standing rule.
+
 ## [1.0.6] - Closed the H1 round's 4 remaining follow-up items: a legacy-endpoint retirement switch, a dashboard label fix, and lock-free hashing
 
 ### Added

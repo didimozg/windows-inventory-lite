@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "1.0.6";
+        internal const string ProductVersion = "1.0.7";
 
         private static int Main(string[] args)
         {
@@ -9189,6 +9189,50 @@ namespace WindowsInventoryLite
             return builder.ToString();
         }
 
+        // DNS-rebinding defense for the no-password/loopback-trust branch
+        // just below: a page served from an attacker's domain, once that
+        // domain's DNS is rebound to 127.0.0.1, can make the admin's own
+        // browser (the no-password mode's whole premise is that the admin
+        // is physically on the server's own console/RDP session) send a
+        // same-origin-looking fetch() that nonetheless arrives on this
+        // server's loopback interface - IPAddress.IsLoopback alone cannot
+        // tell that apart from the admin genuinely typing localhost into
+        // the address bar. The browser's Host header still carries the
+        // ORIGINAL hostname (the attacker's domain), not whatever DNS
+        // resolved it to, so checking it against a small allowlist of
+        // values a real local admin would actually use closes this gap
+        // without requiring a password. A missing Host header is treated
+        // as trusted, same reasoning IsCrossSiteRequestRejected already
+        // uses for a missing Origin/Referer - a real browser always sends
+        // Host, so its absence means a non-browser local caller (curl, a
+        // local script), which is exactly what this convenience mode is
+        // also meant to support.
+        private static bool IsTrustedLoopbackHost(RequestContext request)
+        {
+            string host = request.Headers.ContainsKey("host") ? request.Headers["host"] : null;
+            if (String.IsNullOrEmpty(host))
+            {
+                return true;
+            }
+
+            string hostNameOnly;
+            if (host.StartsWith("[", StringComparison.Ordinal))
+            {
+                int closingBracket = host.IndexOf(']');
+                hostNameOnly = closingBracket >= 0 ? host.Substring(0, closingBracket + 1) : host;
+            }
+            else
+            {
+                int colonIndex = host.IndexOf(':');
+                hostNameOnly = colonIndex >= 0 ? host.Substring(0, colonIndex) : host;
+            }
+
+            return String.Equals(hostNameOnly, "localhost", StringComparison.OrdinalIgnoreCase)
+                || String.Equals(hostNameOnly, "127.0.0.1", StringComparison.Ordinal)
+                || String.Equals(hostNameOnly, "[::1]", StringComparison.Ordinal)
+                || String.Equals(hostNameOnly, Environment.MachineName, StringComparison.OrdinalIgnoreCase);
+        }
+
         private bool IsWebRequestAuthorized(RequestContext request)
         {
             string cookieHeader = request.Headers.ContainsKey("cookie") ? request.Headers["cookie"] : null;
@@ -9232,7 +9276,7 @@ namespace WindowsInventoryLite
                 // local machine until an administrator sets WebUsername/
                 // WebPassword. POST /api/v1/inventory is unaffected: it is
                 // dispatched before this check and gated by its own Token.
-                return request.RemoteAddress != null && IPAddress.IsLoopback(request.RemoteAddress);
+                return request.RemoteAddress != null && IPAddress.IsLoopback(request.RemoteAddress) && IsTrustedLoopbackHost(request);
             }
 
             string authorization = request.Headers.ContainsKey("authorization") ? request.Headers["authorization"] : null;
@@ -18453,6 +18497,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ReceiveInventory logs a warning when two different computerNames collide onto the same report filename", TestReceiveInventoryWarnsOnFilenameCollisionBetweenDifferentComputerNames);
             allPassed &= SelfTestCheck(output, "FixedTimeEquals matches identical strings and rejects everything else", TestFixedTimeEquals);
             allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized restricts to loopback while Basic Auth is unconfigured", TestIsWebRequestAuthorizedRestrictsToLoopbackWhenUnconfigured);
+            allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized rejects a loopback request whose Host header names an untrusted domain (DNS rebinding), accepts localhost/127.0.0.1/machine name", TestIsWebRequestAuthorizedRejectsLoopbackWithAnUntrustedHostHeader);
             allPassed &= SelfTestCheck(output, "GetCookieValue parses a named cookie out of a raw Cookie header", TestGetCookieValueParsesNamedCookie);
             allPassed &= SelfTestCheck(output, "IsSessionValid checks expiry with a strict (not inclusive) comparison", TestIsSessionValidChecksExpiry);
             allPassed &= SelfTestCheck(output, "ComputeSessionExpiry adds the given number of hours to now", TestComputeSessionExpiryAddsHours);
@@ -19902,6 +19947,56 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (!server.IsWebRequestAuthorized(remoteWithAuth))
             {
                 return "expected a non-loopback request with correct Basic Auth credentials to be authorized once Basic Auth is configured";
+            }
+
+            return null;
+        }
+
+        // DNS-rebinding defense: IPAddress.IsLoopback alone cannot tell a
+        // real local admin apart from an attacker's page whose domain has
+        // just been rebound to 127.0.0.1 - see IsTrustedLoopbackHost's own
+        // comment for the full reasoning. This test is the one that would
+        // have caught the gap the external security audit's M3 finding
+        // described.
+        private static string TestIsWebRequestAuthorizedRejectsLoopbackWithAnUntrustedHostHeader()
+        {
+            ServerOptions options = new ServerOptions();
+            InventoryServer server = new InventoryServer(options);
+
+            RequestContext rebindingRequest = new RequestContext();
+            rebindingRequest.Headers = new Dictionary<string, string>();
+            rebindingRequest.Headers["host"] = "attacker-controlled.example";
+            rebindingRequest.RemoteAddress = IPAddress.Loopback;
+            if (server.IsWebRequestAuthorized(rebindingRequest))
+            {
+                return "expected a loopback request with a Host header naming an untrusted domain to be rejected (DNS rebinding)";
+            }
+
+            RequestContext localhostRequest = new RequestContext();
+            localhostRequest.Headers = new Dictionary<string, string>();
+            localhostRequest.Headers["host"] = "localhost:8080";
+            localhostRequest.RemoteAddress = IPAddress.Loopback;
+            if (!server.IsWebRequestAuthorized(localhostRequest))
+            {
+                return "expected a loopback request with Host 'localhost:8080' to still be authorized";
+            }
+
+            RequestContext loopbackIpRequest = new RequestContext();
+            loopbackIpRequest.Headers = new Dictionary<string, string>();
+            loopbackIpRequest.Headers["host"] = "127.0.0.1:8080";
+            loopbackIpRequest.RemoteAddress = IPAddress.Loopback;
+            if (!server.IsWebRequestAuthorized(loopbackIpRequest))
+            {
+                return "expected a loopback request with Host '127.0.0.1:8080' to still be authorized";
+            }
+
+            RequestContext machineNameRequest = new RequestContext();
+            machineNameRequest.Headers = new Dictionary<string, string>();
+            machineNameRequest.Headers["host"] = Environment.MachineName;
+            machineNameRequest.RemoteAddress = IPAddress.Loopback;
+            if (!server.IsWebRequestAuthorized(machineNameRequest))
+            {
+                return "expected a loopback request with Host set to this machine's own name to still be authorized";
             }
 
             return null;
