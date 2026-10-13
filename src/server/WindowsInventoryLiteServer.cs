@@ -2658,6 +2658,10 @@ namespace WindowsInventoryLite
                     {
                         SendThirdPartySoftwareJobs(stream, request);
                     }
+                    else if (request.Method == "GET" && request.Path.StartsWith("/api/v1/client/software-download", StringComparison.OrdinalIgnoreCase))
+                    {
+                        SendSoftwareDownload(stream, request);
+                    }
                     else if (request.Method == "POST" && request.Path == "/api/v1/client/software-jobs/start")
                     {
                         ReceiveSoftwareJobStart(stream, request);
@@ -3559,6 +3563,122 @@ namespace WindowsInventoryLite
             result["password"] = options.SoftwareRepositoryPassword ?? "";
             JavaScriptSerializer serializer = CreateJsonSerializer();
             SendJson(stream, serializer.Serialize(result));
+        }
+
+        // Alternative to SendSoftwareRepositoryConnectionInfo above: lets a
+        // client fetch one catalog entry's installer file bytes directly
+        // over this same authenticated channel, with no share path/
+        // username/password ever disclosed to the client at all. Same
+        // always-required-token posture as that endpoint - see its own
+        // comment for the full reasoning.
+        private void SendSoftwareDownload(Stream stream, RequestContext request)
+        {
+            string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
+            if (IsClientTokenRejected(true, token))
+            {
+                RecordIngestionRejection(request, "software-download", ResolveIngestionRejectionReason(token));
+                SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
+                return;
+            }
+
+            string catalogType = null;
+            string id = null;
+            int queryStart = request.Path.IndexOf('?');
+            if (queryStart >= 0)
+            {
+                string query = request.Path.Substring(queryStart + 1);
+                foreach (string pair in query.Split('&'))
+                {
+                    int equalsIndex = pair.IndexOf('=');
+                    if (equalsIndex <= 0)
+                    {
+                        continue;
+                    }
+                    string key = pair.Substring(0, equalsIndex);
+                    string value = Uri.UnescapeDataString(pair.Substring(equalsIndex + 1));
+                    if (key == "catalogType")
+                    {
+                        catalogType = value;
+                    }
+                    else if (key == "id")
+                    {
+                        id = value;
+                    }
+                }
+            }
+
+            SoftwareCatalogSpec spec;
+            if (catalogType == "windowsUpdate")
+            {
+                spec = new SoftwareCatalogSpec();
+                spec.Lock = windowsUpdatesLock;
+                spec.Subfolder = "windows-updates";
+                spec.Load = LoadWindowsUpdates;
+                spec.Save = SaveWindowsUpdates;
+            }
+            else if (catalogType == "thirdPartySoftware")
+            {
+                spec = new SoftwareCatalogSpec();
+                spec.Lock = thirdPartySoftwareLock;
+                spec.Subfolder = "third-party-software";
+                spec.Load = LoadThirdPartySoftware;
+                spec.Save = SaveThirdPartySoftware;
+            }
+            else
+            {
+                SendText(stream, "{\"error\":\"unrecognized catalogType\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+
+            Dictionary<string, object> entry;
+            lock (spec.Lock)
+            {
+                List<Dictionary<string, object>> entries = spec.Load();
+                entry = entries.Find(e => String.Equals(GetStringValue(e, "id"), id, StringComparison.OrdinalIgnoreCase));
+            }
+            if (entry == null)
+            {
+                SendText(stream, "{\"error\":\"catalog entry not found\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+
+            string relativePath = GetStringValue(entry, "relativePath");
+            byte[] bytes;
+            try
+            {
+                bytes = WithSoftwareRepositoryIdentity(options, delegate
+                {
+                    string fullPath = Path.Combine(options.SoftwareRepositoryPath, relativePath);
+                    return File.ReadAllBytes(fullPath);
+                });
+            }
+            catch (FileNotFoundException)
+            {
+                // The catalog entry itself is valid (an admin can define one
+                // before its file is actually uploaded - see
+                // ComputeCatalogEntryContentSha256's own comment on that same
+                // degrade), so a missing file is this endpoint's own 404, not
+                // an unexpected 500 - same "not found" treatment the other
+                // download endpoints in this file (DownloadWsusCab,
+                // DownloadClientPackageUpdate) already give a missing file.
+                SendText(stream, "{\"error\":\"catalog entry's file was not found on disk\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                SendText(stream, "{\"error\":\"catalog entry's file was not found on disk\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+            catch (Exception ex)
+            {
+                // Anything else (e.g. a configured repository identity that
+                // fails to log on, an inaccessible share) is a genuinely
+                // unexpected failure, not a routine "not found".
+                SendJsonError(stream, "Could not read the file for this catalog entry: " + ex.Message, 500);
+                return;
+            }
+
+            SendBytes(stream, bytes, "application/octet-stream", Path.GetFileName(relativePath));
         }
 
         private void SendWindowsUpdateJobs(Stream stream, RequestContext request)
@@ -18021,6 +18141,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/windows-update-jobs still targets a static-mode entry by hostname unchanged, zero regression from the missingKb addition", TestSendWindowsUpdateJobsStaticTargetingUnaffected);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/windows-update-jobs includes wsusCabHash, empty when no cab is configured and the real hash once one is", TestSendWindowsUpdateJobsIncludesWsusCabHash);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/windows-update-jobs includes wsusScanMaxAgeDays and forceWsusRescan, flipping to true only after a rescan-now request for that exact computer", TestSendWindowsUpdateJobsIncludesWsusScanMaxAgeDaysAndForceFlag);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-download serves the real file bytes for a valid token, catalogType, and id", TestSendSoftwareDownloadServesRealFileBytesForValidRequest);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-download returns 404 for an id that does not exist in the given catalogType", TestSendSoftwareDownloadReturns404ForUnknownId);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-download returns 404 (not 500) for an unrecognized or missing catalogType", TestSendSoftwareDownloadReturns404ForUnrecognizedCatalogType);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-download returns 404 (not 500) when a valid catalog entry's file is missing from disk", TestSendSoftwareDownloadReturns404WhenCatalogEntryFileIsMissingFromDisk);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-download requires a valid ingestion token unconditionally, rejects with 401 when missing/wrong", TestSendSoftwareDownloadRejectsWithoutValidToken);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall updates a target's stored clientVersion", TestPatchClientReportVersionAfterInstallUpdatesVersion);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall's lastInstalledAtUtc is cleared once a real report overwrites the file", TestPatchClientReportVersionAfterInstallFieldClearedByRealReport);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall is a no-op when the target has no stored report yet", TestPatchClientReportVersionAfterInstallMissingReport);
@@ -24098,6 +24223,281 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendSoftwareDownloadServesRealFileBytesForValidRequest()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-software-download-test-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-software-download-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "third-party-software"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                byte[] expectedBytes = new byte[] { 0x4D, 0x5A, 1, 2, 3, 4, 5 };
+                File.WriteAllBytes(Path.Combine(shareRoot, "third-party-software", "app-setup.exe"), expectedBytes);
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                options.Token = "real-token";
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "app-1";
+                entry["name"] = "Test App";
+                entry["relativePath"] = @"third-party-software\app-setup.exe";
+                entries.Add(entry);
+                server.SaveThirdPartySoftware(entries);
+
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client/software-download?catalogType=thirdPartySoftware&id=app-1";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "real-token";
+
+                byte[] responseBytes;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareDownload(stream, request);
+                    responseBytes = stream.ToArray();
+                }
+
+                string responseText = Encoding.ASCII.GetString(responseBytes);
+                if (responseText.IndexOf("HTTP/1.1 200 OK", StringComparison.Ordinal) < 0)
+                {
+                    return "expected a 200 OK response for a valid token, catalogType, and id, got: " + responseText;
+                }
+                int headerEnd = responseText.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+                if (headerEnd < 0)
+                {
+                    return "expected a header/body separator in the response, got: " + responseText;
+                }
+                byte[] actualBody = new byte[responseBytes.Length - (headerEnd + 4)];
+                Array.Copy(responseBytes, headerEnd + 4, actualBody, 0, actualBody.Length);
+                if (actualBody.Length != expectedBytes.Length)
+                {
+                    return "expected the response body to be exactly the catalog file's " + expectedBytes.Length + " bytes, got " + actualBody.Length + " bytes";
+                }
+                for (int i = 0; i < expectedBytes.Length; i++)
+                {
+                    if (actualBody[i] != expectedBytes[i])
+                    {
+                        return "expected the response body to match the catalog file's bytes exactly, mismatch at index " + i;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendSoftwareDownloadReturns404ForUnknownId()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-software-download-404id-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-software-download-404id-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(shareRoot);
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                options.Token = "real-token";
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client/software-download?catalogType=thirdPartySoftware&id=does-not-exist";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "real-token";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareDownload(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("404", StringComparison.Ordinal) < 0)
+                {
+                    return "expected 404 for an id that does not exist in the thirdPartySoftware catalog, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendSoftwareDownloadReturns404ForUnrecognizedCatalogType()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-software-download-404type-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.Token = "real-token";
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client/software-download?catalogType=not-a-real-type&id=app-1";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "real-token";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareDownload(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("404", StringComparison.Ordinal) < 0)
+                {
+                    return "expected 404 (not a 500/exception) for an unrecognized catalogType, got: " + responseText;
+                }
+
+                RequestContext missingTypeRequest = new RequestContext();
+                missingTypeRequest.Method = "GET";
+                missingTypeRequest.Path = "/api/v1/client/software-download?id=app-1";
+                missingTypeRequest.Headers = new Dictionary<string, string>();
+                missingTypeRequest.Headers["x-inventory-token"] = "real-token";
+
+                string missingTypeResponseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareDownload(stream, missingTypeRequest);
+                    missingTypeResponseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (missingTypeResponseText.IndexOf("404", StringComparison.Ordinal) < 0)
+                {
+                    return "expected 404 (not a 500/exception) for a missing catalogType, got: " + missingTypeResponseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // Covers a case the brief's own draft handler did not distinguish
+        // from an unexpected server error: a catalog entry can legitimately
+        // exist (e.g. an admin defined it before uploading the install
+        // media - see ComputeCatalogEntryContentSha256's own comment on that
+        // same degrade) while relativePath points at nothing on disk. That
+        // is this endpoint's own "not found", not a 500.
+        private static string TestSendSoftwareDownloadReturns404WhenCatalogEntryFileIsMissingFromDisk()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-software-download-404file-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-software-download-404file-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "third-party-software"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                options.Token = "real-token";
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "app-not-uploaded-yet";
+                entry["name"] = "Not Uploaded Yet";
+                // Deliberately never written to shareRoot - the catalog
+                // entry exists, the file does not.
+                entry["relativePath"] = @"third-party-software\missing-setup.exe";
+                entries.Add(entry);
+                server.SaveThirdPartySoftware(entries);
+
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client/software-download?catalogType=thirdPartySoftware&id=app-not-uploaded-yet";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "real-token";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareDownload(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("404", StringComparison.Ordinal) < 0)
+                {
+                    return "expected 404 (not 500) for a catalog entry whose file is missing from disk, got: " + responseText;
+                }
+                if (responseText.IndexOf("500", StringComparison.Ordinal) >= 0)
+                {
+                    return "expected no 500 for a missing-file catalog entry, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendSoftwareDownloadRejectsWithoutValidToken()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-swdownloadauth-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client/software-download?catalogType=thirdPartySoftware&id=app-1";
+                request.Headers = new Dictionary<string, string>();
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareDownload(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("401", StringComparison.Ordinal) < 0)
+                {
+                    return "expected a 401 response with no token, got: " + responseText;
+                }
+
+                RequestContext wrongTokenRequest = new RequestContext();
+                wrongTokenRequest.Method = "GET";
+                wrongTokenRequest.Path = "/api/v1/client/software-download?catalogType=thirdPartySoftware&id=app-1";
+                wrongTokenRequest.Headers = new Dictionary<string, string>();
+                wrongTokenRequest.Headers["x-inventory-token"] = "wrong-token";
+
+                string wrongTokenResponseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareDownload(stream, wrongTokenRequest);
+                    wrongTokenResponseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (wrongTokenResponseText.IndexOf("401", StringComparison.Ordinal) < 0)
+                {
+                    return "expected a 401 response with a wrong token, got: " + wrongTokenResponseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
             }
         }
 
