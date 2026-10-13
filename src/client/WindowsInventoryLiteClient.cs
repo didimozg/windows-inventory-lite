@@ -5,7 +5,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Management;
 using System.Net;
-using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -64,83 +63,12 @@ namespace WindowsInventoryLite
             return 0;
         }
 
-        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern bool LogonUser(string lpszUsername, string lpszDomain, string lpszPassword, int dwLogonType, int dwLogonProvider, out IntPtr phToken);
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        private static extern bool CloseHandle(IntPtr handle);
-
-        private const int Logon32LogonNewCredentials = 9;
-        private const int Logon32ProviderWinNt50 = 3;
-
-        private static void SplitDomainUsername(string input, out string domain, out string username)
-        {
-            int separatorIndex = input.IndexOf('\\');
-            if (separatorIndex < 0)
-            {
-                domain = ".";
-                username = input;
-            }
-            else
-            {
-                domain = input.Substring(0, separatorIndex);
-                username = input.Substring(separatorIndex + 1);
-            }
-        }
-
-        // Deliberate duplicate of the server's helper of the same name: the
-        // client and the server are separate executables with no shared
-        // assembly, and this project's convention is per-file duplication
-        // rather than a shared library.
-        //
-        // LOGON32_LOGON_NEW_CREDENTIALS does not validate the credentials
-        // here - a wrong username or password still yields a "successful"
-        // token, and the failure only surfaces when the impersonated code
-        // actually touches the share. Callers must therefore treat share I/O
-        // failures inside the action as the normal way bad credentials show up.
-        private static void WithSoftwareRepositoryIdentity(string repositoryUsername, string repositoryPassword, Action action)
-        {
-            if (String.IsNullOrEmpty(repositoryUsername) || String.IsNullOrEmpty(repositoryPassword))
-            {
-                action();
-                return;
-            }
-
-            string domain;
-            string username;
-            SplitDomainUsername(repositoryUsername, out domain, out username);
-
-            IntPtr tokenHandle = IntPtr.Zero;
-            try
-            {
-                if (!LogonUser(username, domain, repositoryPassword, Logon32LogonNewCredentials, Logon32ProviderWinNt50, out tokenHandle))
-                {
-                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-                }
-
-                using (WindowsIdentity identity = new WindowsIdentity(tokenHandle))
-                {
-                    WindowsImpersonationContext context = identity.Impersonate();
-                    try
-                    {
-                        action();
-                    }
-                    finally
-                    {
-                        context.Undo();
-                    }
-                }
-            }
-            finally
-            {
-                if (tokenHandle != IntPtr.Zero)
-                {
-                    CloseHandle(tokenHandle);
-                }
-            }
-        }
-
-        private sealed class InventoryService : ServiceBase
+        // internal rather than private so InventoryCollector (a separate
+        // top-level class's self-tests) can construct SoftwareJobRunner
+        // and call its RunOneJob directly - matching GetString's own
+        // precedent for sharing logic across that same top-level-class
+        // boundary, just in the other direction.
+        internal sealed class InventoryService : ServiceBase
         {
             private readonly ClientOptions options;
             private Timer timer;
@@ -406,7 +334,9 @@ namespace WindowsInventoryLite
                 }
             }
 
-            private sealed class SoftwareJobRunner
+            // internal rather than private - see the comment on the
+            // enclosing InventoryService class for why.
+            internal sealed class SoftwareJobRunner
             {
                 private readonly ClientOptions options;
                 private readonly bool isWindowsUpdatePipeline;
@@ -481,12 +411,10 @@ namespace WindowsInventoryLite
 
                     HashSet<string> alreadySucceeded = LoadSoftwareJobSuccessCache();
 
-                    // Fetching the repository connection info returns the share
-                    // password in plaintext (see SendSoftwareRepositoryConnectionInfo
-                    // on the server). Most cycles have no unfinished job, so check
-                    // the success cache BEFORE asking for the credential - this
-                    // avoids sending it across the wire and doing a share logon on
-                    // every tick when there is no actual work to do.
+                    // Most cycles have no unfinished job - skip the result
+                    // loop entirely rather than calling RunOneJob (and its
+                    // ReportJobStart telemetry ping) for every already-
+                    // succeeded entry only to have it filtered out below.
                     bool hasUnfinishedJob = false;
                     foreach (object item in jobs)
                     {
@@ -506,25 +434,6 @@ namespace WindowsInventoryLite
                         return;
                     }
 
-                    string connectionJson = FetchSoftwareRepositoryConnection();
-                    if (String.IsNullOrEmpty(connectionJson))
-                    {
-                        return;
-                    }
-
-                    Dictionary<string, object> connection = serializer.Deserialize<Dictionary<string, object>>(connectionJson);
-                    if (connection == null)
-                    {
-                        return;
-                    }
-                    string repositoryPath = InventoryCollector.GetString(connection, "path");
-                    string repositoryUsername = InventoryCollector.GetString(connection, "username");
-                    string repositoryPassword = InventoryCollector.GetString(connection, "password");
-                    if (String.IsNullOrEmpty(repositoryPath))
-                    {
-                        return;
-                    }
-
                     ArrayList results = new ArrayList();
                     foreach (object item in jobs)
                     {
@@ -540,7 +449,7 @@ namespace WindowsInventoryLite
                             continue;
                         }
 
-                        Dictionary<string, object> resultEntry = RunOneJob(job, repositoryPath, repositoryUsername, repositoryPassword);
+                        Dictionary<string, object> resultEntry = RunOneJob(job, InventoryCollector.HttpGetBytes);
                         results.Add(resultEntry);
 
                         if (Convert.ToBoolean(resultEntry["success"]))
@@ -574,32 +483,6 @@ namespace WindowsInventoryLite
                     return id + "|" + (updatedAt ?? "");
                 }
 
-                // CRITICAL: Process.Start does NOT run under the calling
-                // thread's impersonation token. CreateProcess loads the
-                // target image using the PROCESS token (this service's own
-                // running identity), not the calling thread's impersonation -
-                // thread-level impersonation only affects file I/O and network
-                // calls made directly on that thread, never a newly created
-                // process. Launching straight from a UNC path INSIDE
-                // WithSoftwareRepositoryIdentity would therefore fail in
-                // exactly the case explicit share credentials exist to
-                // handle - a service identity with no access to the share.
-                //
-                // The fix: copy the installer to a local temp path WHILE
-                // impersonating (File.Copy DOES honor thread impersonation,
-                // unlike process creation), then launch that LOCAL copy AFTER
-                // impersonation has ended. The installer then runs under this
-                // service's own normal identity - which is fine, since running
-                // "as" the share account was never the goal, only READING from
-                // the share as that account was.
-                //
-                // Known MVP limitation, not fixed here: an installer that
-                // expects sibling files in its own directory (not a single
-                // self-contained exe/msi) will not find them once copied alone
-                // to a temp folder - the dashboard's "File path in share" field
-                // hint documents this constraint rather than copying whole
-                // directories, which would silently copy more than a given
-                // entry asked for.
                 private const int InstallProcessTimeoutMilliseconds = 30 * 60 * 1000;
 
                 // Best-effort grace period after requesting a graceful close
@@ -612,7 +495,15 @@ namespace WindowsInventoryLite
                 // diagnostics-design.md.
                 private const int GracefulShutdownGraceMilliseconds = 15 * 1000;
 
-                private Dictionary<string, object> RunOneJob(Dictionary<string, object> job, string repositoryPath, string repositoryUsername, string repositoryPassword)
+                // internal rather than private - see the comment on the
+                // SoftwareJobRunner class for why.
+                //
+                // downloadBytes(url, token) matches
+                // InventoryCollector.HttpGetBytes's own signature exactly -
+                // production code passes HttpGetBytes directly, self-tests
+                // inject a fake returning in-memory bytes with no network
+                // I/O.
+                internal Dictionary<string, object> RunOneJob(Dictionary<string, object> job, Func<string, string, byte[]> downloadBytes)
                 {
                     string id = InventoryCollector.GetString(job, "id");
                     string catalogType = InventoryCollector.GetString(job, "catalogType");
@@ -630,46 +521,48 @@ namespace WindowsInventoryLite
                     string localCopyPath = null;
                     try
                     {
-                        string fullPath;
-                        string pathError = InventoryCollector.ValidateJobRelativePath(repositoryPath, catalogType, relativePath, out fullPath);
-                        if (pathError != null)
-                        {
-                            resultEntry["success"] = false;
-                            resultEntry["exitCode"] = -1;
-                            resultEntry["errorMessage"] = pathError;
-                            return resultEntry;
-                        }
-                        string tempPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + Path.GetExtension(relativePath));
-                        localCopyPath = tempPath;
-
+                        byte[] downloadedBytes;
                         try
                         {
-                            WithSoftwareRepositoryIdentity(repositoryUsername, repositoryPassword, () =>
+                            string downloadUrl = InventoryCollector.ToSoftwareDownloadUrl(options.ServerUrl, catalogType, id);
+                            downloadedBytes = downloadBytes(downloadUrl, options.Token);
+                        }
+                        catch (Exception ex)
+                        {
+                            resultEntry["success"] = false;
+                            resultEntry["exitCode"] = -1;
+                            resultEntry["errorMessage"] = "failed to download installer: " + ex.Message;
+                            return resultEntry;
+                        }
+
+                        // The server now computes contentSha256 at a trusted
+                        // boundary (catalog entry save / WSUS re-download)
+                        // and ships it with every job assignment. An older
+                        // catalog entry saved before that change carries no
+                        // hash at all - contentSha256 is empty - and the
+                        // download proceeds unverified rather than being
+                        // rejected outright for content the server itself
+                        // never computed a hash for.
+                        string expectedSha256 = InventoryCollector.GetString(job, "contentSha256");
+                        if (!String.IsNullOrEmpty(expectedSha256))
+                        {
+                            string actualSha256;
+                            using (SHA256 sha256 = SHA256.Create())
                             {
-                                File.Copy(fullPath, tempPath, true);
-                            });
+                                actualSha256 = BitConverter.ToString(sha256.ComputeHash(downloadedBytes)).Replace("-", "").ToLowerInvariant();
+                            }
+                            if (!String.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
+                            {
+                                resultEntry["success"] = false;
+                                resultEntry["exitCode"] = -1;
+                                resultEntry["errorMessage"] = "downloaded file content does not match the server's expected hash - refusing to run it";
+                                return resultEntry;
+                            }
                         }
-                        catch (FileNotFoundException)
-                        {
-                            resultEntry["success"] = false;
-                            resultEntry["exitCode"] = -1;
-                            resultEntry["errorMessage"] = "file not found: " + relativePath;
-                            return resultEntry;
-                        }
-                        catch (DirectoryNotFoundException)
-                        {
-                            resultEntry["success"] = false;
-                            resultEntry["exitCode"] = -1;
-                            resultEntry["errorMessage"] = "file not found: " + relativePath;
-                            return resultEntry;
-                        }
-                        catch (UnauthorizedAccessException ex)
-                        {
-                            resultEntry["success"] = false;
-                            resultEntry["exitCode"] = -1;
-                            resultEntry["errorMessage"] = "access denied reading from the software repository - check the configured share credentials: " + ex.Message;
-                            return resultEntry;
-                        }
+
+                        string tempPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + Path.GetExtension(relativePath));
+                        localCopyPath = tempPath;
+                        File.WriteAllBytes(tempPath, downloadedBytes);
 
                         // UseShellExecute=false means CreateProcess loads
                         // FileName as a PE image, so only a real executable can
@@ -857,18 +750,6 @@ namespace WindowsInventoryLite
                         }
                     }
                     return found;
-                }
-
-                private string FetchSoftwareRepositoryConnection()
-                {
-                    try
-                    {
-                        return InventoryCollector.HttpGet(InventoryCollector.ToConnectionInfoUrl(options.ServerUrl), options.Token);
-                    }
-                    catch
-                    {
-                        return null;
-                    }
                 }
 
                 private string FetchAssignedJobs()
@@ -3321,6 +3202,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ToHttpsServerUrl swaps scheme and port, keeping host and path", TestToHttpsServerUrlSwapsSchemeAndPortKeepingHostAndPath);
             allPassed &= SelfTestCheck(output, "ToHttpsServerUrl returns null for a malformed serverUrl", TestToHttpsServerUrlReturnsNullForMalformedServerUrl);
             allPassed &= SelfTestCheck(output, "ToEnrollUrl swaps the /api/v1/inventory suffix for /api/v1/client/enroll", TestToEnrollUrlSwapsInventorySuffix);
+            allPassed &= SelfTestCheck(output, "ToSoftwareDownloadUrl builds the expected catalogType/id query string", TestToSoftwareDownloadUrlBuildsExpectedQueryString);
             allPassed &= SelfTestCheck(output, "TryEnrollIfNeededCore never calls postJson once Token is already set", TestTryEnrollIfNeededCoreSkipsWhenTokenAlreadySet);
             allPassed &= SelfTestCheck(output, "TryEnrollIfNeededCore never calls postJson when no EnrollmentToken is configured", TestTryEnrollIfNeededCoreSkipsWhenNoEnrollmentTokenConfigured);
             allPassed &= SelfTestCheck(output, "TryEnrollIfNeededCore posts to the enroll URL with EnrollmentToken and applies the issued token to options.Token", TestTryEnrollIfNeededCoreAppliesIssuedTokenFromResponse);
@@ -3328,6 +3210,8 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ShouldClearTokenForReenrollment clears on a 401 when EnrollmentToken is configured", TestShouldClearTokenForReenrollmentClearsOn401WhenEnrollmentTokenConfigured);
             allPassed &= SelfTestCheck(output, "ShouldClearTokenForReenrollment leaves Token alone when no EnrollmentToken is configured", TestShouldClearTokenForReenrollmentLeavesTokenAloneWhenNoEnrollmentTokenConfigured);
             allPassed &= SelfTestCheck(output, "ShouldClearTokenForReenrollment leaves Token alone for non-401 failures", TestShouldClearTokenForReenrollmentLeavesTokenAloneForNonAuthFailures);
+            allPassed &= SelfTestCheck(output, "RunOneJob refuses to run the installer when downloaded content does not match the expected contentSha256", TestRunOneJobRefusesToRunWhenDownloadedContentDoesNotMatchExpectedHash);
+            allPassed &= SelfTestCheck(output, "RunOneJob skips hash verification when the job carries no contentSha256", TestRunOneJobSkipsVerificationWhenJobHasNoContentSha256);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns SignatureRequired when RequireSignatureForSelfUpdate is true and no signature was advertised", TestApplySelfUpdateFromServerCoreReturnsSignatureRequiredWhenMissing);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns SignatureMismatch when the advertised signature does not verify", TestApplySelfUpdateFromServerCoreReturnsSignatureMismatchForBadSignature);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns Applied when a genuinely valid RSA signature is provided and required", TestApplySelfUpdateFromServerCoreAppliesWithValidSignature);
@@ -3345,13 +3229,6 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "DownloadAndVerifyWsusCab returns false and does not write the file when the downloaded bytes' hash does not match", TestDownloadAndVerifyWsusCabFailsOnHashMismatch);
             allPassed &= SelfTestCheck(output, "PostWsusScanResults returns true and posts the expected JSON fields when the injected postJson succeeds", TestPostWsusScanResultsReturnsTrueAndPostsExpectedFieldsOnSuccess);
             allPassed &= SelfTestCheck(output, "PostWsusScanResults returns false when the injected postJson throws", TestPostWsusScanResultsReturnsFalseWhenPostJsonThrows);
-            allPassed &= SelfTestCheck(output, "ValidateJobRelativePath rejects an empty relativePath", TestValidateJobRelativePathRejectsEmpty);
-            allPassed &= SelfTestCheck(output, "ValidateJobRelativePath rejects a rooted relativePath", TestValidateJobRelativePathRejectsRooted);
-            allPassed &= SelfTestCheck(output, "ValidateJobRelativePath rejects an unrecognized catalogType", TestValidateJobRelativePathRejectsUnrecognizedCatalogType);
-            allPassed &= SelfTestCheck(output, "ValidateJobRelativePath rejects a '..' that escapes the repository entirely", TestValidateJobRelativePathRejectsEscapeOutsideRepository);
-            allPassed &= SelfTestCheck(output, "ValidateJobRelativePath rejects a '..' that crosses into a sibling catalogType's subfolder", TestValidateJobRelativePathRejectsEscapeIntoSiblingSubfolder);
-            allPassed &= SelfTestCheck(output, "ValidateJobRelativePath accepts a well-formed, confined relativePath", TestValidateJobRelativePathAcceptsWellFormedPath);
-            allPassed &= SelfTestCheck(output, "ValidateJobRelativePath accepts a well-formed thirdPartySoftware relativePath", TestValidateJobRelativePathAcceptsThirdPartySoftwareCatalogType);
             allPassed &= SelfTestCheck(output, "ResolveInstallerLaunch dispatches .msi to msiexec.exe", TestResolveInstallerLaunchDispatchesMsiToMsiexec);
             allPassed &= SelfTestCheck(output, "ResolveInstallerLaunch dispatches .msu to wusa.exe", TestResolveInstallerLaunchDispatchesMsuToWusa);
             allPassed &= SelfTestCheck(output, "ResolveInstallerLaunch dispatches .cab to dism.exe", TestResolveInstallerLaunchDispatchesCabToDism);
@@ -4026,6 +3903,17 @@ namespace WindowsInventoryLite
             return null;
         }
 
+        private static string TestToSoftwareDownloadUrlBuildsExpectedQueryString()
+        {
+            string url = InventoryCollector.ToSoftwareDownloadUrl("https://server.example.com/api/v1/inventory", "windowsUpdate", "entry-1");
+            string expected = "https://server.example.com/api/v1/client/software-download?catalogType=windowsUpdate&id=entry-1";
+            if (url != expected)
+            {
+                return "expected '" + expected + "', got: " + url;
+            }
+            return null;
+        }
+
         private static string TestTryEnrollIfNeededCoreSkipsWhenTokenAlreadySet()
         {
             ClientOptions options = new ClientOptions();
@@ -4145,6 +4033,64 @@ namespace WindowsInventoryLite
             if (InventoryCollector.ShouldClearTokenForReenrollment("correct-bootstrap-secret", "Unable to connect to the remote server"))
             {
                 return "expected false for a network-level failure with no HTTP status at all";
+            }
+            return null;
+        }
+
+        private static string TestRunOneJobRefusesToRunWhenDownloadedContentDoesNotMatchExpectedHash()
+        {
+            ClientOptions options = new ClientOptions();
+            Program.InventoryService.SoftwareJobRunner runner = new Program.InventoryService.SoftwareJobRunner(options, true);
+
+            Dictionary<string, object> job = new Dictionary<string, object>();
+            job["id"] = "entry-1";
+            job["catalogType"] = "windowsUpdate";
+            job["relativePath"] = @"windows-updates\KB1111111.exe";
+            job["arguments"] = "";
+            job["requiresReboot"] = false;
+            job["contentSha256"] = "0000000000000000000000000000000000000000000000000000000000000000000000000000"; // 64 hex chars, deliberately wrong
+
+            byte[] tamperedContent = Encoding.UTF8.GetBytes("not what the server expects");
+            Dictionary<string, object> result = runner.RunOneJob(job, (url, token) => tamperedContent);
+
+            if (Convert.ToBoolean(result["success"]))
+            {
+                return "expected the job to fail when downloaded content does not match contentSha256";
+            }
+            string errorMessage = Convert.ToString(result["errorMessage"]);
+            if (errorMessage.IndexOf("does not match", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                return "expected a hash-mismatch errorMessage, got: " + errorMessage;
+            }
+            return null;
+        }
+
+        private static string TestRunOneJobSkipsVerificationWhenJobHasNoContentSha256()
+        {
+            ClientOptions options = new ClientOptions();
+            Program.InventoryService.SoftwareJobRunner runner = new Program.InventoryService.SoftwareJobRunner(options, true);
+
+            Dictionary<string, object> job = new Dictionary<string, object>();
+            job["id"] = "entry-1";
+            job["catalogType"] = "windowsUpdate";
+            job["relativePath"] = @"windows-updates\KB1111111.exe";
+            job["arguments"] = "/S";
+            job["requiresReboot"] = false;
+            job["contentSha256"] = "";
+
+            byte[] anyContent = Encoding.UTF8.GetBytes("anything, not verified");
+            Dictionary<string, object> result = runner.RunOneJob(job, (url, token) => anyContent);
+
+            // Must NOT fail for a hash reason when no contentSha256 is present -
+            // it may still fail later (no real installer at the temp path, this
+            // self-test never spawns a real process a priori) but the specific
+            // hash-mismatch errorMessage from the test above must never appear
+            // here, proving the graceful-degrade path is taken instead of a
+            // false-positive rejection.
+            string errorMessage = result.ContainsKey("errorMessage") ? Convert.ToString(result["errorMessage"]) : "";
+            if (errorMessage.IndexOf("does not match", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "expected hash verification to be skipped when contentSha256 is empty, but got a hash-mismatch error";
             }
             return null;
         }
@@ -4922,100 +4868,6 @@ namespace WindowsInventoryLite
             return null;
         }
 
-        private static string TestValidateJobRelativePathRejectsEmpty()
-        {
-            string fullPath;
-            string error = ValidateJobRelativePath(@"C:\repo", "windowsUpdate", "", out fullPath);
-            if (error == null || fullPath != null)
-            {
-                return "expected an empty relativePath to be rejected with a non-null error and a null fullPath, got error=" + error + ", fullPath=" + fullPath;
-            }
-            if (!error.StartsWith("relativePath must be a non-empty path"))
-            {
-                return "expected the empty-path error message, got: " + error;
-            }
-            return null;
-        }
-
-        private static string TestValidateJobRelativePathRejectsRooted()
-        {
-            string fullPath;
-            string error = ValidateJobRelativePath(@"C:\repo", "windowsUpdate", @"C:\evil.msi", out fullPath);
-            if (error == null)
-            {
-                return "expected a rooted relativePath to be rejected";
-            }
-            if (!error.StartsWith("relativePath must be a non-empty path"))
-            {
-                return "expected the rooted-path error message, got: " + error;
-            }
-            return null;
-        }
-
-        private static string TestValidateJobRelativePathRejectsUnrecognizedCatalogType()
-        {
-            string fullPath;
-            string error = ValidateJobRelativePath(@"C:\repo", "somethingElse", @"windows-updates\KB1.msu", out fullPath);
-            if (error == null || !error.StartsWith("unrecognized catalogType"))
-            {
-                return "expected an unrecognized catalogType to be rejected, got: " + error;
-            }
-            return null;
-        }
-
-        private static string TestValidateJobRelativePathRejectsEscapeOutsideRepository()
-        {
-            string fullPath;
-            string error = ValidateJobRelativePath(@"C:\repo", "windowsUpdate", @"..\outside.msi", out fullPath);
-            if (error == null || !error.StartsWith("relativePath must stay within"))
-            {
-                return "expected a '..' that escapes the repository entirely to be rejected, got: " + error;
-            }
-            return null;
-        }
-
-        private static string TestValidateJobRelativePathRejectsEscapeIntoSiblingSubfolder()
-        {
-            // "windowsUpdate" jobs are confined to the windows-updates
-            // subfolder - a relativePath that "..\"s sideways into the
-            // sibling third-party-software subfolder must be rejected just
-            // as surely as one that escapes the repository entirely.
-            string fullPath;
-            string error = ValidateJobRelativePath(@"C:\repo", "windowsUpdate", @"..\third-party-software\tool.exe", out fullPath);
-            if (error == null || !error.StartsWith("relativePath must stay within"))
-            {
-                return "expected a relativePath crossing into a sibling subfolder to be rejected, got: " + error;
-            }
-            return null;
-        }
-
-        private static string TestValidateJobRelativePathAcceptsWellFormedPath()
-        {
-            string fullPath;
-            string error = ValidateJobRelativePath(@"C:\repo", "windowsUpdate", @"windows-updates\sub\KB1.msu", out fullPath);
-            if (error != null)
-            {
-                return "expected a well-formed, confined relativePath to be accepted, got error: " + error;
-            }
-            string expected = Path.GetFullPath(Path.Combine(@"C:\repo", @"windows-updates\sub\KB1.msu"));
-            if (fullPath != expected)
-            {
-                return "expected fullPath to be the canonicalized combination of repositoryPath and relativePath, got: " + fullPath;
-            }
-            return null;
-        }
-
-        private static string TestValidateJobRelativePathAcceptsThirdPartySoftwareCatalogType()
-        {
-            string fullPath;
-            string error = ValidateJobRelativePath(@"C:\repo", "thirdPartySoftware", @"third-party-software\tool.exe", out fullPath);
-            if (error != null)
-            {
-                return "expected a well-formed thirdPartySoftware relativePath to be accepted, got error: " + error;
-            }
-            return null;
-        }
-
         private static string TestResolveInstallerLaunchDispatchesMsiToMsiexec()
         {
             string fileName;
@@ -5724,51 +5576,6 @@ namespace WindowsInventoryLite
             }
         }
 
-        // Pure path-confinement check for a software-repository job's
-        // relativePath - no filesystem access. Returns null (and sets
-        // fullPath) when relativePath is safe to use; returns the exact
-        // errorMessage RunOneJob should report otherwise. Pulled out of
-        // RunOneJob so it's unit-testable without a real repository share.
-        // internal rather than private so SoftwareJobRunner (a separate
-        // top-level class's nested type) can reuse it, matching GetString's
-        // own precedent for sharing logic across that boundary.
-        //
-        // IsPathRooted only rejects an absolute/UNC relativePath - it does
-        // nothing about ".." segments, which Path.Combine does not resolve.
-        // Canonicalizing with GetFullPath (a purely lexical operation, no
-        // filesystem access) and confirming the result still falls under the
-        // ONE subfolder this catalogType is allowed to read from means a
-        // crafted "..\..\x" cannot reach anything else the repository
-        // account can see - e.g. a general file share reused for this
-        // feature rather than a dedicated, narrowly-scoped one.
-        internal static string ValidateJobRelativePath(string repositoryPath, string catalogType, string relativePath, out string fullPath)
-        {
-            fullPath = null;
-            if (String.IsNullOrEmpty(relativePath) || Path.IsPathRooted(relativePath))
-            {
-                return "relativePath must be a non-empty path relative to the software repository: " + relativePath;
-            }
-
-            string expectedSubfolder =
-                String.Equals(catalogType, "windowsUpdate", StringComparison.OrdinalIgnoreCase) ? "windows-updates" :
-                String.Equals(catalogType, "thirdPartySoftware", StringComparison.OrdinalIgnoreCase) ? "third-party-software" :
-                null;
-            if (expectedSubfolder == null)
-            {
-                return "unrecognized catalogType: " + catalogType;
-            }
-
-            string candidateFullPath = Path.GetFullPath(Path.Combine(repositoryPath, relativePath));
-            string expectedPrefix = Path.GetFullPath(Path.Combine(repositoryPath, expectedSubfolder)) + Path.DirectorySeparatorChar;
-            if (!candidateFullPath.StartsWith(expectedPrefix, StringComparison.OrdinalIgnoreCase))
-            {
-                return "relativePath must stay within the " + expectedSubfolder + " subfolder of the software repository: " + relativePath;
-            }
-
-            fullPath = candidateFullPath;
-            return null;
-        }
-
         // Pure mapping from a downloaded installer file's extension to the
         // process that should launch it - no I/O, no process creation.
         // Pulled out of RunOneJob so it's unit-testable without actually
@@ -5946,11 +5753,6 @@ namespace WindowsInventoryLite
             return inventoryUrl;
         }
 
-        internal static string ToConnectionInfoUrl(string serverUrl)
-        {
-            return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/software-repository-connection");
-        }
-
         internal static string ToEnrollUrl(string serverUrl)
         {
             return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/enroll");
@@ -5982,6 +5784,11 @@ namespace WindowsInventoryLite
         internal static string ToThirdPartySoftwareJobsUrl(string serverUrl)
         {
             return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/third-party-software-jobs?computerName=" + Uri.EscapeDataString(Environment.MachineName));
+        }
+
+        internal static string ToSoftwareDownloadUrl(string serverUrl, string catalogType, string id)
+        {
+            return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/software-download?catalogType=" + Uri.EscapeDataString(catalogType) + "&id=" + Uri.EscapeDataString(id));
         }
 
         internal static string ToClientPackageUpdateDownloadUrl(string serverUrl, string target)
