@@ -18612,6 +18612,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "Auto-create defaults a detected .exe candidate's arguments to '/S' instead of leaving them empty (a real production hang, not just interactive-install risk)", TestAutoCreateDefaultsExeArgumentsToSlashS);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository never auto-creates when the setting is off, a KB conflicts, or that KB already has any catalog entry (even disabled)", TestScanSoftwareRepositorySkipsAutoCreateWhenDisabledConflictedOrAlreadyCatalogued);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository backfills contentSha256 for a pre-existing catalog entry that predates the content-integrity feature (empty hash on upgrade, no admin action needed)", TestScanSoftwareRepositoryBackfillsMissingContentSha256ForPreExistingEntries);
+            allPassed &= SelfTestCheck(output, "ScanSoftwareRepository's backfill also covers thirdPartySoftware entries, not just windowsUpdate", TestScanSoftwareRepositoryBackfillsMissingContentSha256ForThirdPartySoftwareEntries);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository's backfill never overwrites an already-present contentSha256, even if it no longer matches the real file (fail-closed, not a bug)", TestScanSoftwareRepositoryDoesNotOverwriteAnAlreadyPresentContentSha256);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates reports a catalog entry's real file size from the share, or null when the file no longer exists", TestSendWindowsUpdatesReportsRealFileSizeOrNullWhenMissing);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates resolves severity/targetedComputerNames for a legacy bare-digit catalog kbId against a real 'KB'-prefixed client report", TestSendWindowsUpdatesResolvesSeverityAndTargetsForLegacyBareDigitKbId);
@@ -34003,6 +34004,65 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (GetStringValue(afterScan[0], "contentSha256") != expectedHash)
                 {
                     return "expected the pre-existing entry's contentSha256 to be backfilled to the real file's hash '" + expectedHash + "', got: " + GetStringValue(afterScan[0], "contentSha256");
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // BackfillMissingContentSha256 is called once per catalog
+        // (windowsUpdates and thirdPartySoftware) with different Load/Save
+        // delegates - the windowsUpdate case above already proves the
+        // function itself works, but only this test catches a mistake at
+        // the thirdPartySoftware call site specifically (e.g. a copy-paste
+        // error passing the wrong catalog's delegates).
+        private static string TestScanSoftwareRepositoryBackfillsMissingContentSha256ForThirdPartySoftwareEntries()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-share-scan-backfill-tps-test-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-share-scan-backfill-tps-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "windows-updates"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "third-party-software"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                byte[] content = Encoding.UTF8.GetBytes("pre-existing third-party entry content for backfill test");
+                File.WriteAllBytes(Path.Combine(shareRoot, "third-party-software", "tool-preexisting.exe"), content);
+                string expectedHash;
+                using (SHA256 sha256 = SHA256.Create())
+                {
+                    expectedHash = BitConverter.ToString(sha256.ComputeHash(content)).Replace("-", "").ToLowerInvariant();
+                }
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> preExisting = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entryWithoutHash = new Dictionary<string, object>();
+                entryWithoutHash["id"] = "pre-existing-tps-no-hash";
+                entryWithoutHash["name"] = "Pre-existing third-party entry with no hash yet";
+                entryWithoutHash["relativePath"] = @"third-party-software\tool-preexisting.exe";
+                entryWithoutHash["contentSha256"] = "";
+                entryWithoutHash["targetMode"] = "static";
+                entryWithoutHash["enabled"] = true;
+                preExisting.Add(entryWithoutHash);
+                server.SaveThirdPartySoftware(preExisting);
+
+                server.ScanSoftwareRepository();
+
+                List<Dictionary<string, object>> afterScan = server.LoadThirdPartySoftware();
+                if (afterScan.Count != 1)
+                {
+                    return "expected the backfill scan to leave exactly one thirdPartySoftware entry, got " + afterScan.Count;
+                }
+                if (GetStringValue(afterScan[0], "contentSha256") != expectedHash)
+                {
+                    return "expected the pre-existing third-party entry's contentSha256 to be backfilled to the real file's hash '" + expectedHash + "', got: " + GetStringValue(afterScan[0], "contentSha256");
                 }
                 return null;
             }
