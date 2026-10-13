@@ -20,7 +20,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLiteClient";
-        internal const string ProductVersion = "0.16.1";
+        internal const string ProductVersion = "0.18.0";
 
         private static int Main(string[] args)
         {
@@ -630,43 +630,13 @@ namespace WindowsInventoryLite
                     string localCopyPath = null;
                     try
                     {
-                        if (String.IsNullOrEmpty(relativePath) || Path.IsPathRooted(relativePath))
+                        string fullPath;
+                        string pathError = InventoryCollector.ValidateJobRelativePath(repositoryPath, catalogType, relativePath, out fullPath);
+                        if (pathError != null)
                         {
                             resultEntry["success"] = false;
                             resultEntry["exitCode"] = -1;
-                            resultEntry["errorMessage"] = "relativePath must be a non-empty path relative to the software repository: " + relativePath;
-                            return resultEntry;
-                        }
-
-                        // IsPathRooted above only rejects an absolute/UNC
-                        // relativePath - it does nothing about ".." segments,
-                        // which Path.Combine does not resolve. Canonicalize
-                        // with GetFullPath (a purely lexical operation, no
-                        // filesystem access) and confirm the result still
-                        // falls under the ONE subfolder this catalogType is
-                        // allowed to read from, so a crafted "..\..\x" cannot
-                        // reach anything else the repository account can see
-                        // - e.g. a general file share reused for this feature
-                        // rather than a dedicated, narrowly-scoped one.
-                        string expectedSubfolder =
-                            String.Equals(catalogType, "windowsUpdate", StringComparison.OrdinalIgnoreCase) ? "windows-updates" :
-                            String.Equals(catalogType, "thirdPartySoftware", StringComparison.OrdinalIgnoreCase) ? "third-party-software" :
-                            null;
-                        if (expectedSubfolder == null)
-                        {
-                            resultEntry["success"] = false;
-                            resultEntry["exitCode"] = -1;
-                            resultEntry["errorMessage"] = "unrecognized catalogType: " + catalogType;
-                            return resultEntry;
-                        }
-
-                        string fullPath = Path.GetFullPath(Path.Combine(repositoryPath, relativePath));
-                        string expectedPrefix = Path.GetFullPath(Path.Combine(repositoryPath, expectedSubfolder)) + Path.DirectorySeparatorChar;
-                        if (!fullPath.StartsWith(expectedPrefix, StringComparison.OrdinalIgnoreCase))
-                        {
-                            resultEntry["success"] = false;
-                            resultEntry["exitCode"] = -1;
-                            resultEntry["errorMessage"] = "relativePath must stay within the " + expectedSubfolder + " subfolder of the software repository: " + relativePath;
+                            resultEntry["errorMessage"] = pathError;
                             return resultEntry;
                         }
                         string tempPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + Path.GetExtension(relativePath));
@@ -712,27 +682,29 @@ namespace WindowsInventoryLite
                         // application for this OS platform" on every attempt.
                         string extension = Path.GetExtension(relativePath);
                         resultEntry["installerFormat"] = String.IsNullOrEmpty(extension) ? null : extension.TrimStart('.').ToLowerInvariant();
+
+                        // A compromised server could otherwise smuggle one of
+                        // this installer's own package-selection switches
+                        // (e.g. msiexec's "/i", dism's "/packagepath:") into
+                        // the catalog entry's admin-configured arguments
+                        // field, redirecting the install at a different file
+                        // than the one relativePath already resolved and the
+                        // software-repository confinement already validated.
+                        string dangerousArgumentReason;
+                        if (InventoryCollector.TryFindDangerousInstallerArgument(extension, arguments, out dangerousArgumentReason))
+                        {
+                            resultEntry["success"] = false;
+                            resultEntry["exitCode"] = -1;
+                            resultEntry["errorMessage"] = dangerousArgumentReason;
+                            return resultEntry;
+                        }
+
+                        string installerFileName;
+                        string installerArguments;
+                        InventoryCollector.ResolveInstallerLaunch(extension, localCopyPath, arguments, out installerFileName, out installerArguments);
                         ProcessStartInfo psi = new ProcessStartInfo();
-                        if (String.Equals(extension, ".msi", StringComparison.OrdinalIgnoreCase))
-                        {
-                            psi.FileName = "msiexec.exe";
-                            psi.Arguments = "/i \"" + localCopyPath + "\" " + (arguments ?? "");
-                        }
-                        else if (String.Equals(extension, ".msu", StringComparison.OrdinalIgnoreCase))
-                        {
-                            psi.FileName = "wusa.exe";
-                            psi.Arguments = "\"" + localCopyPath + "\" " + (arguments ?? "");
-                        }
-                        else if (String.Equals(extension, ".cab", StringComparison.OrdinalIgnoreCase))
-                        {
-                            psi.FileName = "dism.exe";
-                            psi.Arguments = "/online /add-package /packagepath:\"" + localCopyPath + "\" " + (arguments ?? "");
-                        }
-                        else
-                        {
-                            psi.FileName = localCopyPath;
-                            psi.Arguments = arguments ?? "";
-                        }
+                        psi.FileName = installerFileName;
+                        psi.Arguments = installerArguments;
                         psi.UseShellExecute = false;
                         psi.CreateNoWindow = true;
                         psi.WorkingDirectory = Path.GetTempPath();
@@ -1017,6 +989,18 @@ namespace WindowsInventoryLite
         public string ServerSharePath;
         public string ServerUrl;
         public string Token;
+        // A separate, narrowly-scoped bootstrap secret for POST
+        // /api/v1/client/enroll ONLY - never sent to any other endpoint.
+        // Set instead of Token on a GPO-deployed client that has no real
+        // ingestion token yet; TryEnrollIfNeeded (InventoryCollector) uses
+        // it to obtain a real per-machine Token on first contact, then
+        // persists that token the same way a learned token already is
+        // (ApplyLearnedIngestionToken), so this value is only ever
+        // consulted while Token itself is still empty. See EnrollClient on
+        // the server side and docs/threat-model.md for why this exists -
+        // embedding the real shared Token in a SYSVOL-readable GPO .cmd is
+        // the risk this closes.
+        public string EnrollmentToken;
         public string OutputPath;
         public int IntervalHours;
         public int WindowsUpdateCheckIntervalHours;
@@ -1032,7 +1016,26 @@ namespace WindowsInventoryLite
         // default false so an existing self-update-enabled deployment is
         // never silently broken by upgrading to a client build that knows
         // about these flags - an admin opts in deliberately per install.
+        //
+        // RequireHttpsForSelfUpdate is re-evaluated dynamically on every
+        // self-update check (ApplySelfUpdateFromServerCore), not just once
+        // against this client's own static ServerUrl: if ServerUrl is http
+        // but the server's ack just advertised an active httpsPort (added
+        // after this client was deployed, a real and expected rollout
+        // order - see BuildWindowsClientUpdateInfo's own comment), the
+        // client opportunistically retries the download over https instead.
+        // AllowHttpFallbackForSelfUpdate controls what happens when no such
+        // https option is available (or the opportunistic attempt itself
+        // fails, e.g. an invalid/self-signed cert - this client never
+        // overrides .NET's default certificate validation, so that failure
+        // is a real TLS rejection, not a formality): false keeps today's
+        // strict "require" meaning (refuse rather than ever touch http);
+        // true permits falling back to the plain ServerUrl, matching how
+        // self-update already behaves with neither flag set, so a
+        // certificate-less deployment (a real, common environment this
+        // project runs in) keeps working exactly as before.
         public bool RequireHttpsForSelfUpdate;
+        public bool AllowHttpFallbackForSelfUpdate;
         public bool RequireSignatureForSelfUpdate;
         // Off by default - a plain-text log file capturing each collection
         // cycle's outcome (success or the full exception on failure). See
@@ -1074,6 +1077,10 @@ namespace WindowsInventoryLite
                 {
                     options.RequireHttpsForSelfUpdate = true;
                 }
+                else if (key == "--allow-http-self-update-fallback")
+                {
+                    options.AllowHttpFallbackForSelfUpdate = true;
+                }
                 else if (key == "--require-signed-self-update")
                 {
                     options.RequireSignatureForSelfUpdate = true;
@@ -1089,6 +1096,10 @@ namespace WindowsInventoryLite
                 else if (key == "--token" && i + 1 < args.Length)
                 {
                     options.Token = args[++i];
+                }
+                else if (key == "--enrollment-token" && i + 1 < args.Length)
+                {
+                    options.EnrollmentToken = args[++i];
                 }
                 else if (key == "--output" && i + 1 < args.Length)
                 {
@@ -1142,6 +1153,17 @@ namespace WindowsInventoryLite
             if (!String.IsNullOrEmpty(environmentToken))
             {
                 options.Token = environmentToken;
+            }
+
+            // Same off-the-command-line reasoning as WIL_INGESTION_TOKEN
+            // above - a GPO-deployed EnrollmentToken is exactly as
+            // SYSVOL/`sc qc`-exposed as the real token used to be if it sat
+            // on the command line, so it goes through the identical
+            // registry-Environment channel.
+            string environmentEnrollmentToken = Environment.GetEnvironmentVariable("WIL_ENROLLMENT_TOKEN");
+            if (!String.IsNullOrEmpty(environmentEnrollmentToken))
+            {
+                options.EnrollmentToken = environmentEnrollmentToken;
             }
 
             return options;
@@ -1241,7 +1263,36 @@ namespace WindowsInventoryLite
             ForceImmediateCheckFlags forceImmediateCheckFlags = new ForceImmediateCheckFlags();
             if (!String.IsNullOrEmpty(options.ServerUrl))
             {
-                string responseBody = PostJson(options.ServerUrl, json, options.Token);
+                TryEnrollIfNeeded();
+                string responseBody;
+                try
+                {
+                    responseBody = PostJson(options.ServerUrl, json, options.Token);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    // A per-machine token stops working the moment it is
+                    // revoked (Settings > Server > Enrollment Token) or
+                    // rotated away by a later enrollment under the same
+                    // computerName (EnrollClient on the server - re-enrolling
+                    // an already-enrolled name now issues a brand-new token
+                    // rather than returning the old one unchanged). Without
+                    // this, a revoked/rotated-away client would 401 forever:
+                    // TryEnrollIfNeeded only ever attempts enrollment while
+                    // options.Token is still empty, and this client never
+                    // clears a token just because it stopped working. Clear
+                    // it here so the NEXT cycle's TryEnrollIfNeeded call
+                    // re-enrolls automatically - this cycle's report still
+                    // fails and propagates exactly as before (PostJson's own
+                    // "Server returned HTTP 401" exception, unchanged),
+                    // report acceptance is not retried inline.
+                    if (ShouldClearTokenForReenrollment(options.EnrollmentToken, ex.Message))
+                    {
+                        options.Token = "";
+                        DebugLogger.Log(options, "Server", "Inventory report rejected with 401 - clearing the learned token so the next cycle re-enrolls.");
+                    }
+                    throw;
+                }
                 forceImmediateCheckFlags = ApplyInventoryAckResponse(responseBody);
                 if (options.RunOnce)
                 {
@@ -2643,6 +2694,62 @@ namespace WindowsInventoryLite
         // service key) must not fail the report that already succeeded -
         // the in-process token (options.Token, set immediately below) still
         // works for the remainder of this process's lifetime either way.
+        // Lets a GPO-deployed client - started with only a low-privilege
+        // EnrollmentToken and no real Token yet - obtain its own
+        // per-machine ingestion token from the server before the inventory
+        // POST just below ever runs, instead of embedding the real shared
+        // Token in a SYSVOL-readable GPO .cmd file (see EnrollClient on the
+        // server side). A no-op once options.Token is set, whether that
+        // was true from install or because an earlier cycle's enrollment
+        // already succeeded and persisted it via ApplyLearnedIngestionToken
+        // - so this never re-enrolls on every single cycle once it has
+        // worked once. Best-effort: a failure here (server unreachable,
+        // EnrollmentToken wrong or not configured) is logged and
+        // swallowed - the PostJson call right after this returns gets its
+        // own 401 in that case, exactly like today's behavior for a client
+        // with no token at all, so a transient enrollment failure degrades
+        // to "this cycle's report is rejected," not a crashed cycle.
+        private void TryEnrollIfNeeded()
+        {
+            TryEnrollIfNeededCore(PostJson, ApplyLearnedIngestionToken);
+        }
+
+        // postJson AND applyLearnedToken are both injected so self-tests can
+        // exercise the real decision/parsing logic above without a live
+        // server and, just as important, without ever reaching the real
+        // ApplyLearnedIngestionToken - that call writes to the real
+        // HKLM\SYSTEM\...\Services\WindowsInventoryLiteClient registry key
+        // (see ApplyIngestionTokenToRegistryCore's own comment on why tests
+        // must never touch it, even when running elevated). Mirrors why
+        // ApplySelfUpdateFromServerCore takes a download delegate.
+        internal void TryEnrollIfNeededCore(Func<string, string, string, string> postJson, Action<string> applyLearnedToken)
+        {
+            if (!String.IsNullOrEmpty(options.Token) || String.IsNullOrEmpty(options.EnrollmentToken))
+            {
+                return;
+            }
+
+            try
+            {
+                string enrollUrl = ToEnrollUrl(options.ServerUrl);
+                Dictionary<string, object> body = new Dictionary<string, object>();
+                body["computerName"] = Environment.MachineName;
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                string responseBody = postJson(enrollUrl, serializer.Serialize(body), options.EnrollmentToken);
+                Dictionary<string, object> response = serializer.Deserialize<Dictionary<string, object>>(responseBody);
+                string issuedToken = response != null && response.ContainsKey("token") ? Convert.ToString(response["token"]) : null;
+                if (!String.IsNullOrEmpty(issuedToken))
+                {
+                    applyLearnedToken(issuedToken);
+                    DebugLogger.Log(options, "Server", "Enrolled with the server and obtained a per-machine ingestion token.");
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLogger.Log(options, "Error", "Enrollment attempt failed: " + ex.Message);
+            }
+        }
+
         private void ApplyLearnedIngestionToken(string newToken)
         {
             options.Token = newToken;
@@ -2960,10 +3067,38 @@ namespace WindowsInventoryLite
                 DebugLogger.Log(options, "SelfUpdate", "Server advertised version " + newVersion + " for target " + target + ", but it is not newer than this client's own " + currentVersion + " - ignoring (would be a downgrade, or the version string could not be compared).");
                 return SelfUpdateOutcome.NotNewer;
             }
+            // ServerUrl's own scheme is still checked first - if it's
+            // already https, nothing below runs and downloadUrl is built
+            // from it directly further down, exactly as before this change.
+            string downloadUrl = ToClientPackageUpdateDownloadUrl(options.ServerUrl, target);
+            bool usingOpportunisticHttps = false;
             if (options.RequireHttpsForSelfUpdate && !(options.ServerUrl ?? "").StartsWith("https://", StringComparison.OrdinalIgnoreCase))
             {
-                DebugLogger.Log(options, "SelfUpdate", "RequireHttpsForSelfUpdate is set and ServerUrl is not https - refusing to self-update over an unencrypted transport.");
-                return SelfUpdateOutcome.HttpsRequired;
+                if (update.ContainsKey("httpsPort"))
+                {
+                    int httpsPort;
+                    if (Int32.TryParse(Convert.ToString(update["httpsPort"]), out httpsPort) && httpsPort > 0)
+                    {
+                        string httpsServerUrl = ToHttpsServerUrl(options.ServerUrl, httpsPort);
+                        if (httpsServerUrl != null)
+                        {
+                            downloadUrl = ToClientPackageUpdateDownloadUrl(httpsServerUrl, target);
+                            usingOpportunisticHttps = true;
+                        }
+                    }
+                }
+
+                if (!usingOpportunisticHttps && !options.AllowHttpFallbackForSelfUpdate)
+                {
+                    DebugLogger.Log(options, "SelfUpdate", "RequireHttpsForSelfUpdate is set, ServerUrl is not https, the server did not advertise an active httpsPort, and AllowHttpFallbackForSelfUpdate is not set - refusing to self-update over an unencrypted transport.");
+                    return SelfUpdateOutcome.HttpsRequired;
+                }
+                // Either an https candidate was found (tried below, with a
+                // fallback to plain ServerUrl on failure only if
+                // AllowHttpFallbackForSelfUpdate allows it), or none was
+                // available but AllowHttpFallbackForSelfUpdate explicitly
+                // permits proceeding over the original ServerUrl anyway -
+                // downloadUrl is already set to the right one of those.
             }
             string expectedSha256 = Convert.ToString(update[hashKey]);
             if (String.IsNullOrEmpty(expectedSha256))
@@ -2978,8 +3113,34 @@ namespace WindowsInventoryLite
                 string exeDirectory = Path.GetDirectoryName(exePath);
                 string newExePath = Path.Combine(exeDirectory, "WindowsInventoryLiteClient.exe.new");
 
-                string downloadUrl = ToClientPackageUpdateDownloadUrl(options.ServerUrl, target);
-                byte[] downloadedBytes = download(downloadUrl, options.Token);
+                byte[] downloadedBytes;
+                try
+                {
+                    downloadedBytes = download(downloadUrl, options.Token);
+                }
+                catch (Exception ex)
+                {
+                    if (usingOpportunisticHttps && options.AllowHttpFallbackForSelfUpdate)
+                    {
+                        // The opportunistic https attempt failed - an
+                        // invalid/self-signed cert (this client never
+                        // overrides .NET's default certificate validation,
+                        // so this is a real TLS rejection), the port not
+                        // actually listening, etc. AllowHttpFallbackForSelfUpdate
+                        // permits retrying over the original ServerUrl
+                        // instead of giving up; without it, this exception
+                        // propagates to the outer catch as a plain Error,
+                        // matching "require" semantics (refuse rather than
+                        // ever fall back to an unencrypted channel).
+                        DebugLogger.Log(options, "SelfUpdate", "Opportunistic https self-update download failed (" + ex.Message + ") - falling back to the original ServerUrl since AllowHttpFallbackForSelfUpdate is set.");
+                        downloadUrl = ToClientPackageUpdateDownloadUrl(options.ServerUrl, target);
+                        downloadedBytes = download(downloadUrl, options.Token);
+                    }
+                    else
+                    {
+                        throw;
+                    }
+                }
 
                 string actualSha256;
                 using (SHA256 sha256 = SHA256.Create())
@@ -3152,6 +3313,21 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns Error when download throws", TestApplySelfUpdateFromServerCoreReturnsErrorWhenDownloadThrows);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns HttpsRequired when RequireHttpsForSelfUpdate is true and ServerUrl is http", TestApplySelfUpdateFromServerCoreReturnsHttpsRequiredForHttpServerUrl);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore proceeds when RequireHttpsForSelfUpdate is true and ServerUrl is https", TestApplySelfUpdateFromServerCoreProceedsWhenHttpsSatisfied);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore falls back to http when no httpsPort is advertised and AllowHttpFallbackForSelfUpdate is set", TestApplySelfUpdateFromServerCoreFallsBackToHttpWhenNoHttpsPortAdvertised);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore still requires https when no httpsPort is advertised and AllowHttpFallbackForSelfUpdate is not set", TestApplySelfUpdateFromServerCoreStillRequiresHttpsWhenFallbackNotAllowedAndNoHttpsPortAdvertised);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore uses the advertised httpsPort opportunistically when ServerUrl is http", TestApplySelfUpdateFromServerCoreUsesOpportunisticHttpsWhenAdvertised);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore falls back to the original ServerUrl when the opportunistic https attempt fails and fallback is allowed", TestApplySelfUpdateFromServerCoreOpportunisticHttpsFailureFallsBackWhenAllowed);
+            allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore propagates a failed opportunistic https attempt as Error, never a silent http fallback, when fallback is not allowed", TestApplySelfUpdateFromServerCoreOpportunisticHttpsFailurePropagatesWhenFallbackNotAllowed);
+            allPassed &= SelfTestCheck(output, "ToHttpsServerUrl swaps scheme and port, keeping host and path", TestToHttpsServerUrlSwapsSchemeAndPortKeepingHostAndPath);
+            allPassed &= SelfTestCheck(output, "ToHttpsServerUrl returns null for a malformed serverUrl", TestToHttpsServerUrlReturnsNullForMalformedServerUrl);
+            allPassed &= SelfTestCheck(output, "ToEnrollUrl swaps the /api/v1/inventory suffix for /api/v1/client/enroll", TestToEnrollUrlSwapsInventorySuffix);
+            allPassed &= SelfTestCheck(output, "TryEnrollIfNeededCore never calls postJson once Token is already set", TestTryEnrollIfNeededCoreSkipsWhenTokenAlreadySet);
+            allPassed &= SelfTestCheck(output, "TryEnrollIfNeededCore never calls postJson when no EnrollmentToken is configured", TestTryEnrollIfNeededCoreSkipsWhenNoEnrollmentTokenConfigured);
+            allPassed &= SelfTestCheck(output, "TryEnrollIfNeededCore posts to the enroll URL with EnrollmentToken and applies the issued token to options.Token", TestTryEnrollIfNeededCoreAppliesIssuedTokenFromResponse);
+            allPassed &= SelfTestCheck(output, "TryEnrollIfNeededCore swallows a failed enroll attempt instead of throwing, leaving Token empty", TestTryEnrollIfNeededCoreSwallowsPostJsonException);
+            allPassed &= SelfTestCheck(output, "ShouldClearTokenForReenrollment clears on a 401 when EnrollmentToken is configured", TestShouldClearTokenForReenrollmentClearsOn401WhenEnrollmentTokenConfigured);
+            allPassed &= SelfTestCheck(output, "ShouldClearTokenForReenrollment leaves Token alone when no EnrollmentToken is configured", TestShouldClearTokenForReenrollmentLeavesTokenAloneWhenNoEnrollmentTokenConfigured);
+            allPassed &= SelfTestCheck(output, "ShouldClearTokenForReenrollment leaves Token alone for non-401 failures", TestShouldClearTokenForReenrollmentLeavesTokenAloneForNonAuthFailures);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns SignatureRequired when RequireSignatureForSelfUpdate is true and no signature was advertised", TestApplySelfUpdateFromServerCoreReturnsSignatureRequiredWhenMissing);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns SignatureMismatch when the advertised signature does not verify", TestApplySelfUpdateFromServerCoreReturnsSignatureMismatchForBadSignature);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns Applied when a genuinely valid RSA signature is provided and required", TestApplySelfUpdateFromServerCoreAppliesWithValidSignature);
@@ -3169,6 +3345,26 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "DownloadAndVerifyWsusCab returns false and does not write the file when the downloaded bytes' hash does not match", TestDownloadAndVerifyWsusCabFailsOnHashMismatch);
             allPassed &= SelfTestCheck(output, "PostWsusScanResults returns true and posts the expected JSON fields when the injected postJson succeeds", TestPostWsusScanResultsReturnsTrueAndPostsExpectedFieldsOnSuccess);
             allPassed &= SelfTestCheck(output, "PostWsusScanResults returns false when the injected postJson throws", TestPostWsusScanResultsReturnsFalseWhenPostJsonThrows);
+            allPassed &= SelfTestCheck(output, "ValidateJobRelativePath rejects an empty relativePath", TestValidateJobRelativePathRejectsEmpty);
+            allPassed &= SelfTestCheck(output, "ValidateJobRelativePath rejects a rooted relativePath", TestValidateJobRelativePathRejectsRooted);
+            allPassed &= SelfTestCheck(output, "ValidateJobRelativePath rejects an unrecognized catalogType", TestValidateJobRelativePathRejectsUnrecognizedCatalogType);
+            allPassed &= SelfTestCheck(output, "ValidateJobRelativePath rejects a '..' that escapes the repository entirely", TestValidateJobRelativePathRejectsEscapeOutsideRepository);
+            allPassed &= SelfTestCheck(output, "ValidateJobRelativePath rejects a '..' that crosses into a sibling catalogType's subfolder", TestValidateJobRelativePathRejectsEscapeIntoSiblingSubfolder);
+            allPassed &= SelfTestCheck(output, "ValidateJobRelativePath accepts a well-formed, confined relativePath", TestValidateJobRelativePathAcceptsWellFormedPath);
+            allPassed &= SelfTestCheck(output, "ValidateJobRelativePath accepts a well-formed thirdPartySoftware relativePath", TestValidateJobRelativePathAcceptsThirdPartySoftwareCatalogType);
+            allPassed &= SelfTestCheck(output, "ResolveInstallerLaunch dispatches .msi to msiexec.exe", TestResolveInstallerLaunchDispatchesMsiToMsiexec);
+            allPassed &= SelfTestCheck(output, "ResolveInstallerLaunch dispatches .msu to wusa.exe", TestResolveInstallerLaunchDispatchesMsuToWusa);
+            allPassed &= SelfTestCheck(output, "ResolveInstallerLaunch dispatches .cab to dism.exe", TestResolveInstallerLaunchDispatchesCabToDism);
+            allPassed &= SelfTestCheck(output, "ResolveInstallerLaunch defaults to launching the downloaded file directly for any other extension", TestResolveInstallerLaunchDefaultsToDirectExecution);
+            allPassed &= SelfTestCheck(output, "ResolveInstallerLaunch treats null arguments as empty", TestResolveInstallerLaunchHandlesNullArguments);
+            allPassed &= SelfTestCheck(output, "TryFindDangerousInstallerArgument rejects msiexec's own package-selection switches", TestTryFindDangerousInstallerArgumentRejectsMsiPackageSelectionSwitches);
+            allPassed &= SelfTestCheck(output, "TryFindDangerousInstallerArgument accepts legitimate msiexec arguments, including ones that share a prefix with a dangerous switch", TestTryFindDangerousInstallerArgumentAcceptsLegitimateMsiArguments);
+            allPassed &= SelfTestCheck(output, "TryFindDangerousInstallerArgument rejects wusa's own package-selection switches", TestTryFindDangerousInstallerArgumentRejectsMsuPackageSelectionSwitches);
+            allPassed &= SelfTestCheck(output, "TryFindDangerousInstallerArgument accepts legitimate wusa arguments", TestTryFindDangerousInstallerArgumentAcceptsLegitimateMsuArguments);
+            allPassed &= SelfTestCheck(output, "TryFindDangerousInstallerArgument rejects dism's own package-selection switches", TestTryFindDangerousInstallerArgumentRejectsCabPackageSelectionSwitches);
+            allPassed &= SelfTestCheck(output, "TryFindDangerousInstallerArgument accepts legitimate dism arguments", TestTryFindDangerousInstallerArgumentAcceptsLegitimateCabArguments);
+            allPassed &= SelfTestCheck(output, "TryFindDangerousInstallerArgument never rejects anything for direct execution (no installer-selection switch convention to smuggle)", TestTryFindDangerousInstallerArgumentNeverRejectsDirectExecution);
+            allPassed &= SelfTestCheck(output, "TryFindDangerousInstallerArgument never rejects null or empty arguments", TestTryFindDangerousInstallerArgumentHandlesNullOrEmpty);
             allPassed &= SelfTestCheck(output, "ReportJobStart posts computerName/catalogType/id/attemptId and returns true on success", TestReportJobStartPostsExpectedFieldsAndReturnsTrueOnSuccess);
             allPassed &= SelfTestCheck(output, "ReportJobStart returns false when the injected postJson throws", TestReportJobStartReturnsFalseWhenPostJsonThrows);
             allPassed &= SelfTestCheck(output, "MaybeRunWsusScanCore does nothing when wsusCabHash is empty or unchanged from the last scan", TestMaybeRunWsusScanCoreNoOpsWhenHashEmptyOrUnchanged);
@@ -3597,6 +3793,360 @@ namespace WindowsInventoryLite
                 try { File.Delete(exePath + ".new"); } catch { }
                 try { File.Delete(Path.Combine(Path.GetDirectoryName(exePath), "wil-self-update.cmd")); } catch { }
             }
+        }
+
+        // The exact scenario this whole mechanism exists for: a client
+        // deployed before a certificate existed (ServerUrl is http,
+        // RequireHttpsForSelfUpdate is on) still has no httpsPort advertised
+        // - a certificate-less test rig is a real, common environment this
+        // project runs in, not just a transitional state. With
+        // AllowHttpFallbackForSelfUpdate set, self-update must keep working
+        // over plain http exactly as it would with RequireHttpsForSelfUpdate
+        // off entirely - no regression for this deployment shape.
+        private static string TestApplySelfUpdateFromServerCoreFallsBackToHttpWhenNoHttpsPortAdvertised()
+        {
+            string exePath = Path.Combine(Path.GetTempPath(), "wil-selftest-nohttpsport-" + Guid.NewGuid().ToString("N") + ".exe");
+            byte[] newContent = Encoding.ASCII.GetBytes("new-build-content");
+            string hash;
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                hash = BitConverter.ToString(sha256.ComputeHash(newContent)).Replace("-", "").ToLowerInvariant();
+            }
+            Dictionary<string, object> update = new Dictionary<string, object>();
+            update["versionNet35"] = "9.9.9";
+            update["sha256Net35"] = hash;
+            update["versionNet40"] = "9.9.9";
+            update["sha256Net40"] = hash;
+            // Deliberately no "httpsPort" key - the server genuinely has no
+            // HTTPS configured, matching a real certificate-less deployment.
+            ClientOptions options = new ClientOptions();
+            options.ServerUrl = "http://server.example.local/api/v1/inventory";
+            options.RequireHttpsForSelfUpdate = true;
+            options.AllowHttpFallbackForSelfUpdate = true;
+            List<string> requestedUrls = new List<string>();
+            try
+            {
+                SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options, (url, token) =>
+                {
+                    requestedUrls.Add(url);
+                    return newContent;
+                }, (fileName, arguments) => true, null, null);
+                if (outcome != SelfUpdateOutcome.Applied)
+                {
+                    return "expected Applied when no httpsPort is advertised but AllowHttpFallbackForSelfUpdate is set, got " + outcome;
+                }
+                if (requestedUrls.Count != 1 || !requestedUrls[0].StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "expected exactly one download attempt, over the original http ServerUrl, got: " + String.Join(", ", requestedUrls.ToArray());
+                }
+                return null;
+            }
+            finally
+            {
+                try { File.Delete(exePath + ".new"); } catch { }
+                try { File.Delete(Path.Combine(Path.GetDirectoryName(exePath), "wil-self-update.cmd")); } catch { }
+            }
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreStillRequiresHttpsWhenFallbackNotAllowedAndNoHttpsPortAdvertised()
+        {
+            // Same "no httpsPort advertised" condition as the fallback test
+            // above, but AllowHttpFallbackForSelfUpdate is NOT set (its
+            // default) - must still refuse exactly like the original,
+            // pre-opportunistic-https HttpsRequired behavior. Guards against
+            // the new httpsPort logic accidentally loosening the strict case.
+            Dictionary<string, object> update = new Dictionary<string, object>();
+            update["versionNet35"] = "9.9.9";
+            update["sha256Net35"] = "irrelevant-not-reached";
+            update["versionNet40"] = "9.9.9";
+            update["sha256Net40"] = "irrelevant-not-reached";
+            ClientOptions options = new ClientOptions();
+            options.ServerUrl = "http://server.example.local/api/v1/inventory";
+            options.RequireHttpsForSelfUpdate = true;
+            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) => new byte[0], (fileName, arguments) => true, null, null);
+            if (outcome != SelfUpdateOutcome.HttpsRequired)
+            {
+                return "expected HttpsRequired when no httpsPort is advertised and AllowHttpFallbackForSelfUpdate is not set, got " + outcome;
+            }
+            return null;
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreUsesOpportunisticHttpsWhenAdvertised()
+        {
+            string exePath = Path.Combine(Path.GetTempPath(), "wil-selftest-opportunistichttps-" + Guid.NewGuid().ToString("N") + ".exe");
+            byte[] newContent = Encoding.ASCII.GetBytes("new-build-content");
+            string hash;
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                hash = BitConverter.ToString(sha256.ComputeHash(newContent)).Replace("-", "").ToLowerInvariant();
+            }
+            Dictionary<string, object> update = new Dictionary<string, object>();
+            update["versionNet35"] = "9.9.9";
+            update["sha256Net35"] = hash;
+            update["versionNet40"] = "9.9.9";
+            update["sha256Net40"] = hash;
+            update["httpsPort"] = 8443;
+            ClientOptions options = new ClientOptions();
+            options.ServerUrl = "http://server.example.local/api/v1/inventory";
+            options.RequireHttpsForSelfUpdate = true;
+            // AllowHttpFallbackForSelfUpdate deliberately left false - an
+            // advertised, successfully-used httpsPort must satisfy "require"
+            // on its own, with no fallback needed.
+            List<string> requestedUrls = new List<string>();
+            try
+            {
+                SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options, (url, token) =>
+                {
+                    requestedUrls.Add(url);
+                    return newContent;
+                }, (fileName, arguments) => true, null, null);
+                if (outcome != SelfUpdateOutcome.Applied)
+                {
+                    return "expected Applied when an httpsPort is advertised and the https download succeeds, got " + outcome;
+                }
+                if (requestedUrls.Count != 1 || !requestedUrls[0].StartsWith("https://server.example.local:8443/", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "expected exactly one download attempt, over https on the advertised port 8443, got: " + String.Join(", ", requestedUrls.ToArray());
+                }
+                return null;
+            }
+            finally
+            {
+                try { File.Delete(exePath + ".new"); } catch { }
+                try { File.Delete(Path.Combine(Path.GetDirectoryName(exePath), "wil-self-update.cmd")); } catch { }
+            }
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreOpportunisticHttpsFailureFallsBackWhenAllowed()
+        {
+            string exePath = Path.Combine(Path.GetTempPath(), "wil-selftest-httpsfailfallback-" + Guid.NewGuid().ToString("N") + ".exe");
+            byte[] newContent = Encoding.ASCII.GetBytes("new-build-content");
+            string hash;
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                hash = BitConverter.ToString(sha256.ComputeHash(newContent)).Replace("-", "").ToLowerInvariant();
+            }
+            Dictionary<string, object> update = new Dictionary<string, object>();
+            update["versionNet35"] = "9.9.9";
+            update["sha256Net35"] = hash;
+            update["versionNet40"] = "9.9.9";
+            update["sha256Net40"] = hash;
+            update["httpsPort"] = 8443;
+            ClientOptions options = new ClientOptions();
+            options.ServerUrl = "http://server.example.local/api/v1/inventory";
+            options.RequireHttpsForSelfUpdate = true;
+            options.AllowHttpFallbackForSelfUpdate = true;
+            List<string> requestedUrls = new List<string>();
+            try
+            {
+                // Simulates a TLS failure (e.g. an invalid/self-signed
+                // certificate) on the first (https) attempt only - the
+                // second call, if one happens, is the http fallback.
+                SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, exePath, "0.5.1", options, (url, token) =>
+                {
+                    requestedUrls.Add(url);
+                    if (url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new System.Net.WebException("simulated TLS failure - invalid certificate");
+                    }
+                    return newContent;
+                }, (fileName, arguments) => true, null, null);
+                if (outcome != SelfUpdateOutcome.Applied)
+                {
+                    return "expected Applied after falling back to http once the https attempt failed, got " + outcome;
+                }
+                if (requestedUrls.Count != 2)
+                {
+                    return "expected exactly two download attempts (https then http), got: " + String.Join(", ", requestedUrls.ToArray());
+                }
+                if (!requestedUrls[0].StartsWith("https://", StringComparison.OrdinalIgnoreCase) || !requestedUrls[1].StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "expected the first attempt to be https and the second to be http, got: " + String.Join(", ", requestedUrls.ToArray());
+                }
+                return null;
+            }
+            finally
+            {
+                try { File.Delete(exePath + ".new"); } catch { }
+                try { File.Delete(Path.Combine(Path.GetDirectoryName(exePath), "wil-self-update.cmd")); } catch { }
+            }
+        }
+
+        private static string TestApplySelfUpdateFromServerCoreOpportunisticHttpsFailurePropagatesWhenFallbackNotAllowed()
+        {
+            Dictionary<string, object> update = new Dictionary<string, object>();
+            update["versionNet35"] = "9.9.9";
+            update["sha256Net35"] = "aaaa";
+            update["versionNet40"] = "9.9.9";
+            update["sha256Net40"] = "aaaa";
+            update["httpsPort"] = 8443;
+            ClientOptions options = new ClientOptions();
+            options.ServerUrl = "http://server.example.local/api/v1/inventory";
+            options.RequireHttpsForSelfUpdate = true;
+            // AllowHttpFallbackForSelfUpdate deliberately left false - a
+            // failed https attempt must never silently fall back to http.
+            SelfUpdateOutcome outcome = ApplySelfUpdateFromServerCore(update, @"C:\fake\WindowsInventoryLiteClient.exe", "0.5.1", options, (url, token) =>
+            {
+                throw new System.Net.WebException("simulated TLS failure - invalid certificate");
+            }, (fileName, arguments) => true, null, null);
+            if (outcome != SelfUpdateOutcome.Error)
+            {
+                return "expected Error (never a silent http fallback) when the https attempt fails and AllowHttpFallbackForSelfUpdate is not set, got " + outcome;
+            }
+            return null;
+        }
+
+        private static string TestToHttpsServerUrlSwapsSchemeAndPortKeepingHostAndPath()
+        {
+            string result = ToHttpsServerUrl("http://server.example.local:8080/api/v1/inventory", 8443);
+            if (result != "https://server.example.local:8443/api/v1/inventory")
+            {
+                return "expected the scheme and port to be swapped with host and path unchanged, got: " + result;
+            }
+            return null;
+        }
+
+        private static string TestToHttpsServerUrlReturnsNullForMalformedServerUrl()
+        {
+            string result = ToHttpsServerUrl("not-a-url", 8443);
+            if (result != null)
+            {
+                return "expected null for a malformed serverUrl, got: " + result;
+            }
+            return null;
+        }
+
+        private static string TestToEnrollUrlSwapsInventorySuffix()
+        {
+            string result = InventoryCollector.ToEnrollUrl("https://server.example.local/api/v1/inventory");
+            if (result != "https://server.example.local/api/v1/client/enroll")
+            {
+                return "expected the /api/v1/inventory suffix to be swapped for /api/v1/client/enroll, got: " + result;
+            }
+            return null;
+        }
+
+        private static string TestTryEnrollIfNeededCoreSkipsWhenTokenAlreadySet()
+        {
+            ClientOptions options = new ClientOptions();
+            options.ServerUrl = "https://server.example.local/api/v1/inventory";
+            options.Token = "already-have-a-real-token";
+            options.EnrollmentToken = "some-bootstrap-secret";
+            InventoryCollector collector = new InventoryCollector(options);
+
+            bool postJsonCalled = false;
+            collector.TryEnrollIfNeededCore((url, json, token) => { postJsonCalled = true; return "{}"; }, token => { throw new InvalidOperationException("applyLearnedToken must never be called when postJson itself was never called"); });
+
+            if (postJsonCalled)
+            {
+                return "expected TryEnrollIfNeededCore to never call postJson once Token is already set";
+            }
+            return null;
+        }
+
+        private static string TestTryEnrollIfNeededCoreSkipsWhenNoEnrollmentTokenConfigured()
+        {
+            ClientOptions options = new ClientOptions();
+            options.ServerUrl = "https://server.example.local/api/v1/inventory";
+            options.Token = "";
+            options.EnrollmentToken = "";
+            InventoryCollector collector = new InventoryCollector(options);
+
+            bool postJsonCalled = false;
+            collector.TryEnrollIfNeededCore((url, json, token) => { postJsonCalled = true; return "{}"; }, token => { throw new InvalidOperationException("applyLearnedToken must never be called when postJson itself was never called"); });
+
+            if (postJsonCalled)
+            {
+                return "expected TryEnrollIfNeededCore to never call postJson when no EnrollmentToken is configured";
+            }
+            return null;
+        }
+
+        private static string TestTryEnrollIfNeededCoreAppliesIssuedTokenFromResponse()
+        {
+            ClientOptions options = new ClientOptions();
+            options.ServerUrl = "https://server.example.local/api/v1/inventory";
+            options.Token = "";
+            options.EnrollmentToken = "correct-bootstrap-secret";
+            InventoryCollector collector = new InventoryCollector(options);
+
+            string capturedUrl = null;
+            string capturedToken = null;
+            string appliedToken = null;
+            collector.TryEnrollIfNeededCore(
+                (url, json, token) =>
+                {
+                    capturedUrl = url;
+                    capturedToken = token;
+                    return "{\"token\":\"freshly-issued-per-machine-token\"}";
+                },
+                token => { appliedToken = token; });
+
+            if (capturedUrl != "https://server.example.local/api/v1/client/enroll")
+            {
+                return "expected postJson to be called against the enroll URL, got: " + capturedUrl;
+            }
+            if (capturedToken != "correct-bootstrap-secret")
+            {
+                return "expected postJson to be called with the EnrollmentToken as its auth token, got: " + capturedToken;
+            }
+            // Deliberately asserts on the injected delegate's captured
+            // argument, not on options.Token/the real registry - calling the
+            // real ApplyLearnedIngestionToken here would write to the actual
+            // HKLM service key (see TryEnrollIfNeededCore's own comment).
+            if (appliedToken != "freshly-issued-per-machine-token")
+            {
+                return "expected the issued token from the response to be passed to applyLearnedToken, got: " + appliedToken;
+            }
+            return null;
+        }
+
+        private static string TestTryEnrollIfNeededCoreSwallowsPostJsonException()
+        {
+            ClientOptions options = new ClientOptions();
+            options.ServerUrl = "https://server.example.local/api/v1/inventory";
+            options.Token = "";
+            options.EnrollmentToken = "correct-bootstrap-secret";
+            InventoryCollector collector = new InventoryCollector(options);
+
+            collector.TryEnrollIfNeededCore((url, json, token) => { throw new InvalidOperationException("Server returned HTTP 401"); }, token => { throw new InvalidOperationException("applyLearnedToken must never be called when postJson itself threw"); });
+
+            if (!String.IsNullOrEmpty(options.Token))
+            {
+                return "expected options.Token to remain empty when the enroll attempt itself fails";
+            }
+            return null;
+        }
+
+        private static string TestShouldClearTokenForReenrollmentClearsOn401WhenEnrollmentTokenConfigured()
+        {
+            if (!InventoryCollector.ShouldClearTokenForReenrollment("correct-bootstrap-secret", "Server returned HTTP 401"))
+            {
+                return "expected true for a 401 failure with EnrollmentToken configured";
+            }
+            return null;
+        }
+
+        private static string TestShouldClearTokenForReenrollmentLeavesTokenAloneWhenNoEnrollmentTokenConfigured()
+        {
+            if (InventoryCollector.ShouldClearTokenForReenrollment("", "Server returned HTTP 401"))
+            {
+                return "expected false when no EnrollmentToken is configured - clearing Token here would strand the client with no credential at all, since it has nothing to re-enroll with";
+            }
+            return null;
+        }
+
+        private static string TestShouldClearTokenForReenrollmentLeavesTokenAloneForNonAuthFailures()
+        {
+            if (InventoryCollector.ShouldClearTokenForReenrollment("correct-bootstrap-secret", "Server returned HTTP 500"))
+            {
+                return "expected false for a non-401 failure - a transient server error must never throw away a token that may still be valid";
+            }
+            if (InventoryCollector.ShouldClearTokenForReenrollment("correct-bootstrap-secret", "Unable to connect to the remote server"))
+            {
+                return "expected false for a network-level failure with no HTTP status at all";
+            }
+            return null;
         }
 
         private static string TestApplySelfUpdateFromServerCoreReturnsSignatureRequiredWhenMissing()
@@ -4372,6 +4922,297 @@ namespace WindowsInventoryLite
             return null;
         }
 
+        private static string TestValidateJobRelativePathRejectsEmpty()
+        {
+            string fullPath;
+            string error = ValidateJobRelativePath(@"C:\repo", "windowsUpdate", "", out fullPath);
+            if (error == null || fullPath != null)
+            {
+                return "expected an empty relativePath to be rejected with a non-null error and a null fullPath, got error=" + error + ", fullPath=" + fullPath;
+            }
+            if (!error.StartsWith("relativePath must be a non-empty path"))
+            {
+                return "expected the empty-path error message, got: " + error;
+            }
+            return null;
+        }
+
+        private static string TestValidateJobRelativePathRejectsRooted()
+        {
+            string fullPath;
+            string error = ValidateJobRelativePath(@"C:\repo", "windowsUpdate", @"C:\evil.msi", out fullPath);
+            if (error == null)
+            {
+                return "expected a rooted relativePath to be rejected";
+            }
+            if (!error.StartsWith("relativePath must be a non-empty path"))
+            {
+                return "expected the rooted-path error message, got: " + error;
+            }
+            return null;
+        }
+
+        private static string TestValidateJobRelativePathRejectsUnrecognizedCatalogType()
+        {
+            string fullPath;
+            string error = ValidateJobRelativePath(@"C:\repo", "somethingElse", @"windows-updates\KB1.msu", out fullPath);
+            if (error == null || !error.StartsWith("unrecognized catalogType"))
+            {
+                return "expected an unrecognized catalogType to be rejected, got: " + error;
+            }
+            return null;
+        }
+
+        private static string TestValidateJobRelativePathRejectsEscapeOutsideRepository()
+        {
+            string fullPath;
+            string error = ValidateJobRelativePath(@"C:\repo", "windowsUpdate", @"..\outside.msi", out fullPath);
+            if (error == null || !error.StartsWith("relativePath must stay within"))
+            {
+                return "expected a '..' that escapes the repository entirely to be rejected, got: " + error;
+            }
+            return null;
+        }
+
+        private static string TestValidateJobRelativePathRejectsEscapeIntoSiblingSubfolder()
+        {
+            // "windowsUpdate" jobs are confined to the windows-updates
+            // subfolder - a relativePath that "..\"s sideways into the
+            // sibling third-party-software subfolder must be rejected just
+            // as surely as one that escapes the repository entirely.
+            string fullPath;
+            string error = ValidateJobRelativePath(@"C:\repo", "windowsUpdate", @"..\third-party-software\tool.exe", out fullPath);
+            if (error == null || !error.StartsWith("relativePath must stay within"))
+            {
+                return "expected a relativePath crossing into a sibling subfolder to be rejected, got: " + error;
+            }
+            return null;
+        }
+
+        private static string TestValidateJobRelativePathAcceptsWellFormedPath()
+        {
+            string fullPath;
+            string error = ValidateJobRelativePath(@"C:\repo", "windowsUpdate", @"windows-updates\sub\KB1.msu", out fullPath);
+            if (error != null)
+            {
+                return "expected a well-formed, confined relativePath to be accepted, got error: " + error;
+            }
+            string expected = Path.GetFullPath(Path.Combine(@"C:\repo", @"windows-updates\sub\KB1.msu"));
+            if (fullPath != expected)
+            {
+                return "expected fullPath to be the canonicalized combination of repositoryPath and relativePath, got: " + fullPath;
+            }
+            return null;
+        }
+
+        private static string TestValidateJobRelativePathAcceptsThirdPartySoftwareCatalogType()
+        {
+            string fullPath;
+            string error = ValidateJobRelativePath(@"C:\repo", "thirdPartySoftware", @"third-party-software\tool.exe", out fullPath);
+            if (error != null)
+            {
+                return "expected a well-formed thirdPartySoftware relativePath to be accepted, got error: " + error;
+            }
+            return null;
+        }
+
+        private static string TestResolveInstallerLaunchDispatchesMsiToMsiexec()
+        {
+            string fileName;
+            string processArguments;
+            ResolveInstallerLaunch(".msi", @"C:\temp\pkg.msi", "/qn", out fileName, out processArguments);
+            if (fileName != "msiexec.exe")
+            {
+                return "expected .msi to dispatch to msiexec.exe, got: " + fileName;
+            }
+            if (processArguments != "/i \"C:\\temp\\pkg.msi\" /qn")
+            {
+                return "expected msiexec arguments to be '/i \"<path>\" <arguments>', got: " + processArguments;
+            }
+            return null;
+        }
+
+        private static string TestResolveInstallerLaunchDispatchesMsuToWusa()
+        {
+            string fileName;
+            string processArguments;
+            ResolveInstallerLaunch(".msu", @"C:\temp\KB1.msu", "/quiet", out fileName, out processArguments);
+            if (fileName != "wusa.exe")
+            {
+                return "expected .msu to dispatch to wusa.exe, got: " + fileName;
+            }
+            if (processArguments != "\"C:\\temp\\KB1.msu\" /quiet")
+            {
+                return "expected wusa arguments to be '\"<path>\" <arguments>', got: " + processArguments;
+            }
+            return null;
+        }
+
+        private static string TestResolveInstallerLaunchDispatchesCabToDism()
+        {
+            string fileName;
+            string processArguments;
+            ResolveInstallerLaunch(".cab", @"C:\temp\pkg.cab", "", out fileName, out processArguments);
+            if (fileName != "dism.exe")
+            {
+                return "expected .cab to dispatch to dism.exe, got: " + fileName;
+            }
+            if (processArguments != "/online /add-package /packagepath:\"C:\\temp\\pkg.cab\" ")
+            {
+                return "expected dism arguments to be '/online /add-package /packagepath:\"<path>\" <arguments>', got: " + processArguments;
+            }
+            return null;
+        }
+
+        private static string TestResolveInstallerLaunchDefaultsToDirectExecution()
+        {
+            string fileName;
+            string processArguments;
+            ResolveInstallerLaunch(".exe", @"C:\temp\setup.exe", "/S", out fileName, out processArguments);
+            if (fileName != @"C:\temp\setup.exe")
+            {
+                return "expected any other extension to launch the downloaded file directly, got: " + fileName;
+            }
+            if (processArguments != "/S")
+            {
+                return "expected arguments to pass through unchanged for direct execution, got: " + processArguments;
+            }
+            return null;
+        }
+
+        private static string TestResolveInstallerLaunchHandlesNullArguments()
+        {
+            string fileName;
+            string processArguments;
+            ResolveInstallerLaunch(".msi", @"C:\temp\pkg.msi", null, out fileName, out processArguments);
+            if (processArguments != "/i \"C:\\temp\\pkg.msi\" ")
+            {
+                return "expected a null arguments value to be treated as empty, got: " + processArguments;
+            }
+            return null;
+        }
+
+        private static string TestTryFindDangerousInstallerArgumentRejectsMsiPackageSelectionSwitches()
+        {
+            string[] dangerous = new string[] { "/i", "/a", "/x", "/j", "/p", "/uninstall", "/fpecms", "/f" };
+            foreach (string value in dangerous)
+            {
+                string reason;
+                if (!TryFindDangerousInstallerArgument(".msi", value, out reason))
+                {
+                    return "expected '" + value + "' to be rejected for a .msi installer";
+                }
+            }
+            return null;
+        }
+
+        private static string TestTryFindDangerousInstallerArgumentAcceptsLegitimateMsiArguments()
+        {
+            // /passive and /forcerestart both start with the same two
+            // characters as the repair switch ("/f...") or are otherwise
+            // easy to mis-flag with a naive prefix check - this is the
+            // regression test for that specific false-positive risk.
+            string[] legitimate = new string[] { "/qn", "/quiet", "/passive", "/norestart", "/forcerestart", "/promptrestart", "/l*v C:\\log.txt", "TRANSFORMS=x.mst ALLUSERS=1" };
+            foreach (string value in legitimate)
+            {
+                string reason;
+                if (TryFindDangerousInstallerArgument(".msi", value, out reason))
+                {
+                    return "expected legitimate argument '" + value + "' to be accepted for a .msi installer, got reason: " + reason;
+                }
+            }
+            return null;
+        }
+
+        private static string TestTryFindDangerousInstallerArgumentRejectsMsuPackageSelectionSwitches()
+        {
+            string[] dangerous = new string[] { "/uninstall", "/extract", "/extract:C:\\out" };
+            foreach (string value in dangerous)
+            {
+                string reason;
+                if (!TryFindDangerousInstallerArgument(".msu", value, out reason))
+                {
+                    return "expected '" + value + "' to be rejected for a .msu installer";
+                }
+            }
+            return null;
+        }
+
+        private static string TestTryFindDangerousInstallerArgumentAcceptsLegitimateMsuArguments()
+        {
+            string[] legitimate = new string[] { "/quiet", "/norestart", "/forcerestart", "/promptrestart" };
+            foreach (string value in legitimate)
+            {
+                string reason;
+                if (TryFindDangerousInstallerArgument(".msu", value, out reason))
+                {
+                    return "expected legitimate argument '" + value + "' to be accepted for a .msu installer, got reason: " + reason;
+                }
+            }
+            return null;
+        }
+
+        private static string TestTryFindDangerousInstallerArgumentRejectsCabPackageSelectionSwitches()
+        {
+            string[] dangerous = new string[] { "/packagepath:\\\\server\\share\\evil.cab", "/image:D:\\mount", "/add-package", "/remove-package" };
+            foreach (string value in dangerous)
+            {
+                string reason;
+                if (!TryFindDangerousInstallerArgument(".cab", value, out reason))
+                {
+                    return "expected '" + value + "' to be rejected for a .cab installer";
+                }
+            }
+            return null;
+        }
+
+        private static string TestTryFindDangerousInstallerArgumentAcceptsLegitimateCabArguments()
+        {
+            string[] legitimate = new string[] { "/quiet", "/norestart", "/logpath:C:\\dism.log" };
+            foreach (string value in legitimate)
+            {
+                string reason;
+                if (TryFindDangerousInstallerArgument(".cab", value, out reason))
+                {
+                    return "expected legitimate argument '" + value + "' to be accepted for a .cab installer, got reason: " + reason;
+                }
+            }
+            return null;
+        }
+
+        private static string TestTryFindDangerousInstallerArgumentNeverRejectsDirectExecution()
+        {
+            // Direct execution of the downloaded file has no "which
+            // package/image" switch convention to smuggle - the file that
+            // runs is always the one relativePath already resolved - so
+            // nothing is rejected here, even values that look alarming for
+            // the other installer types.
+            string[] values = new string[] { "/i /packagepath:x /add-package", "/S", "" };
+            foreach (string value in values)
+            {
+                string reason;
+                if (TryFindDangerousInstallerArgument(".exe", value, out reason))
+                {
+                    return "expected direct execution (.exe) to never reject any argument, got reason for '" + value + "': " + reason;
+                }
+            }
+            return null;
+        }
+
+        private static string TestTryFindDangerousInstallerArgumentHandlesNullOrEmpty()
+        {
+            string reason;
+            if (TryFindDangerousInstallerArgument(".msi", null, out reason))
+            {
+                return "expected null arguments to never be rejected";
+            }
+            if (TryFindDangerousInstallerArgument(".msi", "", out reason))
+            {
+                return "expected empty arguments to never be rejected";
+            }
+            return null;
+        }
+
         private static string TestReportJobStartPostsExpectedFieldsAndReturnsTrueOnSuccess()
         {
             string capturedUrl = null;
@@ -4738,8 +5579,12 @@ namespace WindowsInventoryLite
                 // fails with no usable error, while plain HTTP keeps working
                 // (masking the cause). 3072 = SecurityProtocolType.Tls12's
                 // underlying value; the cast keeps this compiling under the
-                // pre-4.5 target used for the Net35 client build.
-                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
+                // pre-4.5 target used for the Net35 client build. Assigned
+                // (not OR'd in) so this never leaves an older OS/.NET's
+                // legacy SSL3/TLS1.0/1.1 default enabled alongside it - every
+                // HTTPS call this client makes is to this same server, which
+                // only ever accepts TLS 1.2 anyway.
+                ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072;
             }
 
             byte[] body = Encoding.UTF8.GetBytes(json);
@@ -4780,7 +5625,7 @@ namespace WindowsInventoryLite
         {
             if (url.StartsWith("https:", StringComparison.OrdinalIgnoreCase))
             {
-                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
+                ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072;
             }
 
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
@@ -4814,7 +5659,7 @@ namespace WindowsInventoryLite
         {
             if (url.StartsWith("https:", StringComparison.OrdinalIgnoreCase))
             {
-                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
+                ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072;
             }
 
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
@@ -4879,6 +5724,189 @@ namespace WindowsInventoryLite
             }
         }
 
+        // Pure path-confinement check for a software-repository job's
+        // relativePath - no filesystem access. Returns null (and sets
+        // fullPath) when relativePath is safe to use; returns the exact
+        // errorMessage RunOneJob should report otherwise. Pulled out of
+        // RunOneJob so it's unit-testable without a real repository share.
+        // internal rather than private so SoftwareJobRunner (a separate
+        // top-level class's nested type) can reuse it, matching GetString's
+        // own precedent for sharing logic across that boundary.
+        //
+        // IsPathRooted only rejects an absolute/UNC relativePath - it does
+        // nothing about ".." segments, which Path.Combine does not resolve.
+        // Canonicalizing with GetFullPath (a purely lexical operation, no
+        // filesystem access) and confirming the result still falls under the
+        // ONE subfolder this catalogType is allowed to read from means a
+        // crafted "..\..\x" cannot reach anything else the repository
+        // account can see - e.g. a general file share reused for this
+        // feature rather than a dedicated, narrowly-scoped one.
+        internal static string ValidateJobRelativePath(string repositoryPath, string catalogType, string relativePath, out string fullPath)
+        {
+            fullPath = null;
+            if (String.IsNullOrEmpty(relativePath) || Path.IsPathRooted(relativePath))
+            {
+                return "relativePath must be a non-empty path relative to the software repository: " + relativePath;
+            }
+
+            string expectedSubfolder =
+                String.Equals(catalogType, "windowsUpdate", StringComparison.OrdinalIgnoreCase) ? "windows-updates" :
+                String.Equals(catalogType, "thirdPartySoftware", StringComparison.OrdinalIgnoreCase) ? "third-party-software" :
+                null;
+            if (expectedSubfolder == null)
+            {
+                return "unrecognized catalogType: " + catalogType;
+            }
+
+            string candidateFullPath = Path.GetFullPath(Path.Combine(repositoryPath, relativePath));
+            string expectedPrefix = Path.GetFullPath(Path.Combine(repositoryPath, expectedSubfolder)) + Path.DirectorySeparatorChar;
+            if (!candidateFullPath.StartsWith(expectedPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return "relativePath must stay within the " + expectedSubfolder + " subfolder of the software repository: " + relativePath;
+            }
+
+            fullPath = candidateFullPath;
+            return null;
+        }
+
+        // Pure mapping from a downloaded installer file's extension to the
+        // process that should launch it - no I/O, no process creation.
+        // Pulled out of RunOneJob so it's unit-testable without actually
+        // launching msiexec/wusa/dism as a side effect of a self-test.
+        // internal rather than private so SoftwareJobRunner (a separate
+        // top-level class's nested type) can reuse it, matching GetString's
+        // own precedent for sharing logic across that boundary.
+        //
+        // UseShellExecute=false means CreateProcess loads FileName as a PE
+        // image, so only a real executable can be launched directly. Every
+        // other packaging format needs its own host process: .msi ->
+        // msiexec.exe, .msu (a cabinet the Windows Update stack installs) ->
+        // wusa.exe, .cab -> dism.exe. Without this dispatch an .msu/.cab
+        // entry - the Windows Updates catalog's own designed content - fails
+        // with "not a valid application for this OS platform" on every
+        // attempt.
+        internal static void ResolveInstallerLaunch(string extension, string localCopyPath, string arguments, out string fileName, out string processArguments)
+        {
+            if (String.Equals(extension, ".msi", StringComparison.OrdinalIgnoreCase))
+            {
+                fileName = "msiexec.exe";
+                processArguments = "/i \"" + localCopyPath + "\" " + (arguments ?? "");
+            }
+            else if (String.Equals(extension, ".msu", StringComparison.OrdinalIgnoreCase))
+            {
+                fileName = "wusa.exe";
+                processArguments = "\"" + localCopyPath + "\" " + (arguments ?? "");
+            }
+            else if (String.Equals(extension, ".cab", StringComparison.OrdinalIgnoreCase))
+            {
+                fileName = "dism.exe";
+                processArguments = "/online /add-package /packagepath:\"" + localCopyPath + "\" " + (arguments ?? "");
+            }
+            else
+            {
+                fileName = localCopyPath;
+                processArguments = arguments ?? "";
+            }
+        }
+
+        // Rejects a server-supplied installer `arguments` string that
+        // contains one of THIS installer's own "which package/image to act
+        // on" switches - a compromised server could otherwise smuggle an
+        // extra /i, /packagepath:, etc. into an admin-configured catalog
+        // entry's arguments field to redirect the install at a different
+        // file than the one relativePath already resolved and the
+        // software-repository confinement already validated. Scoped to each
+        // installer's own documented switches (verified against their real
+        // command-line syntax, not guessed) rather than a blanket character
+        // filter - legitimate admin-configured content (PROPERTY=value
+        // pairs, /quiet, /norestart, /log:path, values containing '=' or
+        // spaces) is never touched. Direct execution of the downloaded file
+        // itself (RunOneJob's "else" dispatch branch) has no such
+        // switch convention to smuggle - the file that ever runs is always
+        // the one relativePath already resolved - so nothing is rejected
+        // for that case.
+        internal static bool TryFindDangerousInstallerArgument(string extension, string arguments, out string reason)
+        {
+            reason = null;
+            if (String.IsNullOrEmpty(arguments))
+            {
+                return false;
+            }
+
+            string[] tokens = arguments.Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+
+            if (String.Equals(extension, ".msi", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (string token in tokens)
+                {
+                    if (token.Equals("/i", StringComparison.OrdinalIgnoreCase)
+                        || token.Equals("/a", StringComparison.OrdinalIgnoreCase)
+                        || token.Equals("/x", StringComparison.OrdinalIgnoreCase)
+                        || token.Equals("/j", StringComparison.OrdinalIgnoreCase)
+                        || token.Equals("/p", StringComparison.OrdinalIgnoreCase)
+                        || token.Equals("/uninstall", StringComparison.OrdinalIgnoreCase)
+                        || IsMsiexecRepairSwitch(token))
+                    {
+                        reason = "arguments must not contain msiexec's own package-selection switch '" + token + "' - it could redirect the install at a different package than the one already resolved from relativePath";
+                        return true;
+                    }
+                }
+            }
+            else if (String.Equals(extension, ".msu", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (string token in tokens)
+                {
+                    if (token.Equals("/uninstall", StringComparison.OrdinalIgnoreCase)
+                        || token.Equals("/extract", StringComparison.OrdinalIgnoreCase)
+                        || token.StartsWith("/extract:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        reason = "arguments must not contain wusa's own '" + token + "' switch - /uninstall targets a different package and /extract writes arbitrary files to an admin-chosen destination";
+                        return true;
+                    }
+                }
+            }
+            else if (String.Equals(extension, ".cab", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (string token in tokens)
+                {
+                    if (token.Equals("/add-package", StringComparison.OrdinalIgnoreCase)
+                        || token.Equals("/remove-package", StringComparison.OrdinalIgnoreCase)
+                        || token.Equals("/packagepath", StringComparison.OrdinalIgnoreCase)
+                        || token.StartsWith("/packagepath:", StringComparison.OrdinalIgnoreCase)
+                        || token.Equals("/image", StringComparison.OrdinalIgnoreCase)
+                        || token.StartsWith("/image:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        reason = "arguments must not contain dism's own '" + token + "' switch - dism accepts multiple /packagepath: values in one call, which could stage an extra, attacker-chosen package alongside the one already resolved from relativePath";
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        // msiexec's repair switch is "/f" optionally glued directly to one or
+        // more modifier letters (e.g. "/fpecms") with no separator -
+        // distinguished here from an unrelated switch that merely starts
+        // with the same two characters (e.g. "/forcerestart", a legitimate
+        // restart-behavior switch) by requiring every remaining character to
+        // be one of msiexec's documented repair modifiers.
+        private static bool IsMsiexecRepairSwitch(string token)
+        {
+            if (!token.StartsWith("/f", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+            for (int i = 2; i < token.Length; i++)
+            {
+                if ("poecdaumsv".IndexOf(Char.ToLowerInvariant(token[i])) < 0)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         internal static bool ReportJobStart(string serverUrl, string token, string computerName, string catalogType, string id, string attemptId, Func<string, string, string, string> postJson)
         {
             JavaScriptSerializer serializer = new JavaScriptSerializer();
@@ -4923,6 +5951,29 @@ namespace WindowsInventoryLite
             return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/software-repository-connection");
         }
 
+        internal static string ToEnrollUrl(string serverUrl)
+        {
+            return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/enroll");
+        }
+
+        // Pure decision extracted out of CollectAndSave's own catch block so
+        // it is directly testable without a live server or WMI collection -
+        // mirrors why TryEnrollIfNeededCore/ApplySelfUpdateFromServerCore
+        // are their own injectable/pure functions too. Only clears the
+        // learned token when enrollment is even in use (no EnrollmentToken
+        // configured means there is nothing to re-enroll with, so clearing
+        // Token would just strand the client with no credential at all) and
+        // the failure was specifically a 401 (matches PostJson's own
+        // "Server returned HTTP " + statusCode exception text) - any other
+        // failure (network blip, 500, etc.) must not throw away a token
+        // that may well still be valid.
+        internal static bool ShouldClearTokenForReenrollment(string enrollmentToken, string exceptionMessage)
+        {
+            return !String.IsNullOrEmpty(enrollmentToken)
+                && !String.IsNullOrEmpty(exceptionMessage)
+                && exceptionMessage.IndexOf("HTTP 401", StringComparison.Ordinal) >= 0;
+        }
+
         internal static string ToWindowsUpdateJobsUrl(string serverUrl)
         {
             return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client/windows-update-jobs?computerName=" + Uri.EscapeDataString(Environment.MachineName));
@@ -4936,6 +5987,39 @@ namespace WindowsInventoryLite
         internal static string ToClientPackageUpdateDownloadUrl(string serverUrl, string target)
         {
             return ToSoftwareRepositoryUrl(serverUrl, "/api/v1/client-package/update-download?target=" + Uri.EscapeDataString(target));
+        }
+
+        // Builds an https variant of serverUrl on a different port (the
+        // server's own advertised httpsPort) - same host and path, scheme
+        // and port swapped. Used only to opportunistically retry a
+        // self-update download when ServerUrl itself is http; see
+        // ClientOptions.RequireHttpsForSelfUpdate's own comment. Returns
+        // null if serverUrl isn't a well-formed absolute URL - defensive
+        // only, since a malformed ServerUrl would already have failed every
+        // other call this client makes. Checked explicitly with
+        // IsWellFormedUriString rather than relying on the UriBuilder
+        // constructor to throw for bad input - it does not: UriBuilder is
+        // lenient enough to accept a bare string like "not-a-url" as a
+        // hostname and build a syntactically valid (but meaningless)
+        // "https://not-a-url:.../" from it instead of failing, found live by
+        // this function's own self-test.
+        internal static string ToHttpsServerUrl(string serverUrl, int httpsPort)
+        {
+            if (!Uri.IsWellFormedUriString(serverUrl, UriKind.Absolute))
+            {
+                return null;
+            }
+            try
+            {
+                UriBuilder builder = new UriBuilder(serverUrl);
+                builder.Scheme = "https";
+                builder.Port = httpsPort;
+                return builder.Uri.ToString();
+            }
+            catch (Exception)
+            {
+                return null;
+            }
         }
 
         internal static string ToSoftwareJobResultsUrl(string serverUrl)

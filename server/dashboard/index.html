@@ -41,8 +41,8 @@
       <div class="topnav-dropdown">
         <button id="operationsDropdownButton" class="topnav-item" type="button" aria-haspopup="true" aria-expanded="false">Operations <span id="fleetActionsBadge" class="nav-badge hidden">0</span><span id="updatesBadge" class="nav-badge hidden">0</span><span id="linuxUpdatesBadge" class="nav-badge hidden">0</span><span id="softwarePushBadge" class="nav-badge hidden">0</span><svg class="topnav-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1 L5 5 L9 1"/></svg></button>
         <div id="operationsDropdownMenu" class="topnav-dropdown-menu hidden" role="menu">
-          <button id="softwareCatalogTab" class="topnav-dropdown-item" type="button" role="menuitem">Software Catalog</button>
           <button id="agentActionsTab" class="topnav-dropdown-item" type="button" role="menuitem">Agent Actions</button>
+          <button id="softwareCatalogTab" class="topnav-dropdown-item" type="button" role="menuitem">Software Catalog</button>
         </div>
       </div>
       <div class="topnav-dropdown">
@@ -251,6 +251,33 @@
             <div id="ingestionTokenMessage" class="pkg-message hidden"></div>
           </div>
           <div class="settings-block settings-card">
+            <h2 class="settings-block-title">Enrollment Token</h2>
+            <p id="enrollmentTokenStatusText" class="pkg-status">Loading status...</p>
+            <label class="token-value-field">
+              Current token
+              <input id="enrollmentTokenValue" type="text" class="mono" readonly value="">
+            </label>
+            <p class="cert-hint">Bootstrap secret for a GPO-deployed client with no ingestion token yet - it calls the server once to obtain its own real per-machine token, instead of the shared ingestion token ever being embedded in <code>Install-ClientGpo.cmd</code> (readable by every domain computer on SYSVOL). Used by <code>New-ClientGpoPackage.ps1 -EnrollmentToken</code>.</p>
+            <div class="pkg-buttons">
+              <button id="enrollmentTokenRegenerateButton" class="danger-button" type="button">Regenerate</button>
+            </div>
+            <div id="enrollmentTokenMessage" class="pkg-message hidden"></div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Computer name</th>
+                    <th>Enrolled (UTC)</th>
+                    <th>Revoke</th>
+                  </tr>
+                </thead>
+                <tbody id="clientTokensBody">
+                  <tr><td colspan="3" class="empty">Loading...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="settings-block settings-card">
             <h2 class="settings-block-title">Log retention &amp; Diagnostics</h2>
             <div class="pkg-grid general-grid log-retention-grid">
               <label class="pkg-token-field">
@@ -317,6 +344,7 @@
               <span>Certificate<small id="statusCertDetail">-</small></span>
             </div>
           </div>
+          <p id="statusHttpCleartextWarning" class="status-warning hidden">HTTP is still reachable in cleartext on port <span id="statusHttpCleartextPort">-</span> alongside HTTPS - the dashboard and credentials can be served unencrypted there until it is turned off. This is a supported recovery path if HTTPS ever stops working, so leaving it on can be deliberate; disable it below once you have confirmed HTTPS is reachable from an actual client.</p>
         </section>
 
         <section id="windowsSettingsView" class="install-panel card-glow hidden" aria-label="Windows client settings">
@@ -792,6 +820,7 @@
                   <th data-sort-table="licenses" data-sort-key="license" class="sortable">License</th>
                   <th data-sort-table="licenses" data-sort-key="comment" class="sortable">Comment</th>
                   <th>Computers</th>
+                  <th>Detected</th>
                   <th>Edit</th>
                   <th>Delete</th>
                 </tr>
@@ -1184,13 +1213,17 @@
                 Interval (hours)
                 <input id="pkgIntervalHours" type="number" min="1" max="24" value="6">
               </label>
+              <label class="check-label pkg-enrollment-token-field">
+                <input id="pkgUseEnrollmentToken" type="checkbox">
+                Use Enrollment Token instead of the shared ingestion token
+              </label>
               <div class="pkg-buttons">
                 <button id="pkgSaveButton" class="primary-button" type="button">Save</button>
                 <button id="pkgDownloadButton" class="export-button" type="button">Download GPO package</button>
               </div>
             </div>
             <p class="cert-hint">By default the GPO startup script (<code>Install-ClientGpo.cmd</code>) looks for the client files in its own folder. Set this only when the script and the client files are deployed to different locations (for example, the script runs from SYSVOL but the client executables live on a separate file share) - an UNC path such as <code>\\server\share\gpo-client</code>.</p>
-            <p class="cert-hint">The generated package always uses the server's current ingestion token. The client installs to <code>%ProgramData%\WindowsInventoryLite\client-data</code>.</p>
+            <p id="pkgTokenModeHint" class="cert-hint">The generated package always uses the server's current ingestion token. The client installs to <code>%ProgramData%\WindowsInventoryLite\client-data</code>.</p>
             <div id="pkgMessage" class="pkg-message hidden"></div>
           </div>
 

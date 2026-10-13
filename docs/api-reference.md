@@ -1,6 +1,6 @@
 # API Reference
 
-This is a practical lookup document for the server's HTTP API, not an OpenAPI/Swagger spec. It covers the real, current route surface: 83 routes (68 exact-match paths, 15 with a parameterized path segment) - down from 53 as of v0.42.0, which removed the four separate Linux install/uninstall job routes (`/api/v1/linux-client-install`, `/linux-client-uninstall`, and their GET list/detail equivalents) in favor of the unified `/api/v1/client-install`/`/client-uninstall` pair, up again with the two session endpoints, up again with the five license-key routes (the four-route `/api/v1/license-key-sources` catalog plus the `/api/v1/clients/{computerName}/license-keys` reveal endpoint), up again with v0.56.0's sixteen software-distribution routes documented below, up again with v0.66.0's four `DELETE`-verb "clear now" routes (one per Logging subtab, each sharing its path with an already-documented `GET` route), up by two more with the self-update download endpoints below (`/api/v1/client-package/update-download`, `/api/v1/linux-client-package/update-download`) - both existed in the server since v0.61.0 but were never added to this document, a gap found and closed during a 2026-09-16 full-project review - and up by three more in v0.81.0: the `GET /api/v1/client/software-jobs` poll was split into `GET /api/v1/client/windows-update-jobs`/`GET /api/v1/client/third-party-software-jobs` (net +1), and the earlier combined "check now" trigger was replaced by `POST /api/v1/clients/install-windows-updates-now`/`POST /api/v1/clients/install-third-party-software-now` (net +2, since the combined predecessor was never added to this document either). Recounted directly against the routing chain for this pass. It does not cover the static dashboard asset routes (`/`, `/app.js`, `/styles.css`, `/favicon.svg`, `/brand-mark.png`), which serve dashboard files rather than API data - note that these are not actually unauthenticated either; see "Session cookie" below for how a first-time visitor still reaches a login page despite that. Some other admin-triggered action routes under `/api/v1/windows-updates/` (`cab-status`, `missing-summary`, `download-schedule`, `download-log`, `cab-download-now`, `rescan-now`, and the per-KB `{id}/download-now`) are also missing from the tables below - a pre-existing gap, not introduced by this pass; flagged here rather than fixed, since closing it is unrelated to the windowsUpdate/thirdPartySoftware split this revision covers.
+This is a practical lookup document for the server's HTTP API, not an OpenAPI/Swagger spec. It covers the real, current route surface: 88 routes (72 exact-match paths, 16 with a parameterized path segment) - up by five in 0.95.0 for client enrollment (`POST /api/v1/client/enroll`, `GET`/`POST /api/v1/server/enrollment-token[/regenerate]`, `GET /api/v1/client-tokens`, `DELETE /api/v1/client-tokens/{computerName}` - see "Client enrollment" below and `docs/threat-model.md`) - down from 53 as of v0.42.0, which removed the four separate Linux install/uninstall job routes (`/api/v1/linux-client-install`, `/linux-client-uninstall`, and their GET list/detail equivalents) in favor of the unified `/api/v1/client-install`/`/client-uninstall` pair, up again with the two session endpoints, up again with the five license-key routes (the four-route `/api/v1/license-key-sources` catalog plus the `/api/v1/clients/{computerName}/license-keys` reveal endpoint), up again with v0.56.0's sixteen software-distribution routes documented below, up again with v0.66.0's four `DELETE`-verb "clear now" routes (one per Logging subtab, each sharing its path with an already-documented `GET` route), up by two more with the self-update download endpoints below (`/api/v1/client-package/update-download`, `/api/v1/linux-client-package/update-download`) - both existed in the server since v0.61.0 but were never added to this document, a gap found and closed during a 2026-09-16 full-project review - and up by three more in v0.81.0: the `GET /api/v1/client/software-jobs` poll was split into `GET /api/v1/client/windows-update-jobs`/`GET /api/v1/client/third-party-software-jobs` (net +1), and the earlier combined "check now" trigger was replaced by `POST /api/v1/clients/install-windows-updates-now`/`POST /api/v1/clients/install-third-party-software-now` (net +2, since the combined predecessor was never added to this document either). Recounted directly against the routing chain for this pass. It does not cover the static dashboard asset routes (`/`, `/app.js`, `/styles.css`, `/favicon.svg`, `/brand-mark.png`), which serve dashboard files rather than API data - note that these are not actually unauthenticated either; see "Session cookie" below for how a first-time visitor still reaches a login page despite that. Some other admin-triggered action routes under `/api/v1/windows-updates/` (`cab-status`, `missing-summary`, `download-schedule`, `download-log`, `cab-download-now`, `rescan-now`, and the per-KB `{id}/download-now`) are also missing from the tables below - a pre-existing gap, not introduced by this pass; flagged here rather than fixed, since closing it is unrelated to the windowsUpdate/thirdPartySoftware split this revision covers.
 
 ## Conventions
 
@@ -11,6 +11,7 @@ This is a practical lookup document for the server's HTTP API, not an OpenAPI/Sw
 - **Ingestion token** guards the client-facing endpoints, via the `X-Inventory-Token` request header, checked inside each handler before Basic Auth would otherwise apply (these routes are dispatched before the Basic Auth check runs at all). A rejected token gets a `401` with plain-text body `Unauthorized`, not the JSON error shape below. Two groups, with different enforcement rules:
   - The three inventory-ingestion endpoints (`POST /api/v1/inventory`, `POST /api/v1/linux/inventory`, `POST /api/v1/linux/inventory/service-status`) honor the `RequireIngestionToken` server setting; when it is off, they accept any request unauthenticated.
   - The other six client-facing endpoints ignore `RequireIngestionToken` and always require a real, matching token, failing closed when no `Token` is configured at all: the four software-distribution client endpoints (`GET /api/v1/client/windows-update-jobs`, `GET /api/v1/client/third-party-software-jobs` - split by catalog type in v0.81.0, replacing the single `GET /api/v1/client/software-jobs` - `POST /api/v1/client/software-jobs/results`, `GET /api/v1/client/software-repository-connection`, all since v0.56.0), and the two self-update download endpoints (`GET /api/v1/client-package/update-download`, `GET /api/v1/linux-client-package/update-download`, since v0.61.0 - see "Client self-update" below). This is deliberate for all six: they return a plaintext share credential, the fleet's job assignments, or the raw client binary/executable itself, none of which the ingestion token's own "low-sensitivity, fake-inventory-only" trust model was designed to cover. See `docs/threat-model.md`.
+  - `POST /api/v1/client/enroll` (since 0.95.0) also always requires a real, matching token via the same `X-Inventory-Token` header, but checked against a *different* configured value - `EnrollmentToken`, not `Token` - and accepted only on this one route. See "Client enrollment" below.
 
 **Cross-site request checks (v0.48.0+, tightened v0.68.0).** Every `POST`/`PUT`/`DELETE` route, with no exemption of any kind, requires: if the request has an `Origin` or `Referer` header, it must match this server's own `Host`; and if the request has a body, `Content-Type` must be `application/json` (an optional `; charset=...` suffix is fine). Both checks are skipped entirely when the corresponding header is absent - direct API automation (like the `curl` examples below), and every genuine ingestion/client-facing request, sends neither `Origin` nor `Referer` and is unaffected. This check now runs first, unconditionally, before any route dispatch or other auth check - including the four device-ingestion routes (`/api/v1/inventory`, `/api/v1/linux/inventory`, `/api/v1/linux/inventory/service-status`, `/api/v1/client/software-jobs/results`), which used to sit ahead of it in the dispatch chain and so were entirely unprotected by it whenever `RequireIngestionToken` was off (fixed as part of the SEC-I2 hardening pass, v0.68.0 - see `docs/threat-model.md`). A violation gets a `400` with the usual `{"error": "..."}` shape. Every `curl` example below already sends `Content-Type: application/json` on any request with a body, so none of them need updating.
 
@@ -37,6 +38,21 @@ This project does not use a structured `{"error": {"code": ..., "message": ...}}
 | POST | `/api/v1/inventory` | Ingestion token | Accept a Windows client's inventory report. |
 | POST | `/api/v1/linux/inventory` | Ingestion token | Accept a Linux client's inventory report. |
 | POST | `/api/v1/linux/inventory/service-status` | Ingestion token | Merge a service active/inactive snapshot into an existing Linux report. |
+
+### Client enrollment (client to server)
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| POST | `/api/v1/client/enroll` | Enrollment token (always, never `RequireIngestionToken`) | Exchange the bootstrap `EnrollmentToken` for a real per-machine ingestion token, keyed by `computerName`. Re-enrolling an already-enrolled `computerName` rotates to a brand-new token, invalidating the previous one - it does NOT return the existing value unchanged (see the enrollment security note under "Client enrollment" in `docs/threat-model.md` for why). |
+
+Auth here is deliberately a *different* credential from every other client-facing route: the `X-Inventory-Token` header must match the server's configured `EnrollmentToken`, not the shared `Token` - a wrong or missing value gets the same plain-text `401 Unauthorized` as every other ingestion-token failure, but is checked and logged (`client-enroll` tag) against `EnrollmentToken` specifically. See `docs/threat-model.md` for why this exists (GPO-distributed `Install-ClientGpo.cmd` no longer needs to embed the real shared token). Request body: `{"computerName": "..."}`. `400` `{"error": "computerName is required"}` if missing or too long. Response: `{"token": "<the machine's real per-machine ingestion token>"}` - used by the client exactly like `Token` from then on, for every other client-facing endpoint, with no further special handling.
+
+```bash
+curl -X POST https://server:8443/api/v1/client/enroll \
+  -H "X-Inventory-Token: <enrollment token>" \
+  -H "Content-Type: application/json" \
+  -d '{"computerName": "PC-01"}'
+```
 
 ### Software distribution (client to server)
 
@@ -158,6 +174,10 @@ Ingestion token always required on both, regardless of `RequireIngestionToken` -
 | POST | `/api/v1/server/ingestion-token/regenerate` | Basic Auth | Generate and save a new ingestion token. |
 | GET | `/api/v1/server/ingestion-rejections` | Basic Auth | Return the log of rejected ingestion-token attempts (History & Logs > System Logs > Ingestion). |
 | DELETE | `/api/v1/server/ingestion-rejections` | Basic Auth | Clear the ingestion-rejection log immediately, independent of its retention settings. |
+| GET | `/api/v1/server/enrollment-token` | Basic Auth | Return the live enrollment (bootstrap) token value and whether one is configured. |
+| POST | `/api/v1/server/enrollment-token/regenerate` | Basic Auth | Generate and save a new enrollment token. |
+| GET | `/api/v1/client-tokens` | Basic Auth | List every per-machine token issued via enrollment (`computerName` and `issuedAtUtc` only - never the token value itself). |
+| DELETE | `/api/v1/client-tokens/{computerName}` | Basic Auth | Revoke one machine's per-machine token immediately. `404` if none is on record for that name. |
 | GET | `/api/v1/server/debug-log` | Basic Auth | Return the current content of the opt-in debug log (History & Logs > System Logs > Debug). |
 | DELETE | `/api/v1/server/debug-log` | Basic Auth | Clear the debug log immediately, independent of its retention settings. |
 | POST | `/api/v1/server/login` | None | Establish a server-side dashboard session with valid admin credentials; returns a `wil_session` cookie. |
@@ -244,10 +264,23 @@ Returns the full Windows client inventory index in one response. Top-level field
 
 Looks up one client's stored report and returns its `licenses` array with every `key` decrypted (`SecretProtector.Unprotect`). The computer name is taken as everything between the `/api/v1/clients/` prefix and the `/license-keys` suffix (URL-decoded, trimmed), the same way the description/delete routes above extract it. Called only when the dashboard admin explicitly clicks "show" on one license entry - nothing is bulk-decrypted or pre-fetched.
 
-- Response: `{"licenses": [{"product": "...", "source": "...", "key": "..."}]}`. `404 {"error": "client not found"}` if the client has no stored report (including an unreadable/corrupt report file) or the URL has no computer-name segment at all. A report with a missing or non-array `licenses` field is still a `200` with `licenses: []`, not a 404.
+- Response: `{"licenses": [{"product": "...", "source": "...", "key": "...", "isKms": false, "sharedWith": []}]}`. `isKms` is `true` when the key matches a known Microsoft volume-license (GVLK) key for that product (computed at ingest time, `IsKnownGvlk`). `sharedWith` lists every computer name whose own `product`+decrypted-key pair matches this one (built fresh on each client-listing load, `BuildSharedActivationKeyGroups`) - present only when at least one other machine shares the key; omitted (not an empty array) otherwise. `404 {"error": "client not found"}` if the client has no stored report (including an unreadable/corrupt report file) or the URL has no computer-name segment at all. A report with a missing or non-array `licenses` field is still a `200` with `licenses: []`, not a 404.
 
 ```bash
 curl -X GET "https://server:8443/api/v1/clients/WORKSTATION01/license-keys" \
+  -u admin:password
+```
+
+### DELETE /api/v1/clients/{computerName}/license-keys/{index}
+
+Removes one entry from a client's stored `licenses` array by its position (`index`, 0-based, matching the order the array comes back in from the GET route above). Registered ahead of the broader `DELETE /api/v1/clients/{computerName}` route below so it isn't shadowed by it. Takes the same `reportFileLock` every other writer of that client's report file takes, so it can't race a concurrent inventory report for the same machine.
+
+If the key is still detectable on that machine the next time it reports, the entry reappears - this endpoint only ever removes the currently-stored copy, it does not suppress future (re-)detection.
+
+- Response: `{"status": "deleted"}`. `400 {"error": "invalid license key index"}` for a non-numeric or negative index segment. `404 {"error": "client not found"}` if the computer has no stored report, or `404 {"error": "license key not found"}` if the index is out of range for that client's current `licenses` array.
+
+```bash
+curl -X DELETE "https://server:8443/api/v1/clients/WORKSTATION01/license-keys/0" \
   -u admin:password
 ```
 
@@ -503,6 +536,22 @@ POST generates a new 64-character random token, persists it, and only then swaps
 curl -X POST https://server:8443/api/v1/server/ingestion-token/regenerate -u admin:password
 ```
 
+### GET /api/v1/server/enrollment-token and POST /api/v1/server/enrollment-token/regenerate
+
+GET returns `{"configured": ..., "token": ...}` - the actual live value, same "visible to any authenticated admin session" posture as the ingestion token above (this is a bootstrap secret for `POST /api/v1/client/enroll` only, not a credential that itself grants inventory access). POST generates a new random value and persists it (encrypted at rest, same as `Token`); unlike regenerating the ingestion token, this has no effect on any already-enrolled client - each already has its own real per-machine token. It does invalidate any not-yet-used copy still sitting in an undeployed or stale GPO package, which must be rebuilt (`New-ClientGpoPackage.ps1 -EnrollmentToken`) before it can enroll anything.
+
+```bash
+curl -X POST https://server:8443/api/v1/server/enrollment-token/regenerate -u admin:password
+```
+
+### GET /api/v1/client-tokens and DELETE /api/v1/client-tokens/{computerName}
+
+GET returns `{"tokens": [{"computerName": ..., "issuedAtUtc": ...}, ...]}` - every machine that has ever enrolled, newest and oldest side by side with no particular order guaranteed. The token value itself is never included; unlike the shared ingestion token, a per-machine token has no legitimate reason to ever be displayed back once issued. DELETE revokes one machine's token immediately - it stops authenticating on its very next request. `404 {"error": "no token found for that computer name"}` if nothing is on record for that name. The machine can re-enroll and receive a fresh token at any time, as long as `EnrollmentToken` is still configured; this is a point-in-time revoke, not a permanent per-machine ban.
+
+```bash
+curl -X DELETE "https://server:8443/api/v1/client-tokens/PC-01" -u admin:password
+```
+
 ### GET /api/v1/server/ingestion-rejections
 
 Returns the server's log of rejected ingestion-token attempts, most-recent-first: `{"entries": [...]}` where each entry has `timestampUtc`, `sourceIp`, `hostname` (a best-effort reverse-DNS lookup of `sourceIp` - can be `null`; an attacker controls what PTR record their own IP resolves to, if any, so never treat it as a verified identity), `endpoint` (which ingestion route), `reason` (`"missing"` or `"mismatched"`), and `matchedClient` (the known client's name if matched by source IP, else `null`). `ingestionRejectionLogRetentionDays` and `ingestionRejectionLogMaxEntries` are targets the log is kept close to, not an exact real-time bound: both are re-checked on every new rejection and again at server startup (not on a timer), and the count cap is enforced in batches for write efficiency, so entry count can transiently run over `ingestionRejectionLogMaxEntries` by a small margin, or entries can briefly outlive `ingestionRejectionLogRetentionDays`, between prune passes.
@@ -561,7 +610,9 @@ Searches Active Directory for computer objects under the configured Organization
 
 ### GET /api/v1/licenses
 
-Returns `{"licenses": [...]}`, each record `{id, name, version, license, comment, computers, createdAt, updatedAt}`. There is no `expiresAt` or `seats` field - license records here are a flat catalog of admin-entered product keys, not a license-enforcement structure.
+Returns `{"licenses": [...]}`, each record `{id, name, version, license, comment, computers, detectedComputers, createdAt, updatedAt}`. There is no `expiresAt` or `seats` field - license records here are a flat catalog of admin-entered product keys, not a license-enforcement structure.
+
+`detectedComputers` (since 0.96.0) is purely computed, never persisted to `licenses.json` and never accepted on `POST`/`PUT` - the live set of machines currently reporting a client-side activation entry whose `product`/decrypted key match this record's own `name`/`license` (case-insensitive, trimmed - the same convention the dashboard's own "Add to licenses" matching already uses). Deliberately independent of `computers` (the static, admin-owned field set by `POST`/`PUT`/"Add to licenses"): nothing is ever written into `computers` just because a machine appears here, and a machine that stops reporting the key simply stops appearing in `detectedComputers` on the next request - no automatic add or prune of the stored field, by design.
 
 ### POST /api/v1/licenses
 

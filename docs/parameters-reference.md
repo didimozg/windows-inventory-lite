@@ -28,6 +28,7 @@ Full parameter tables for every install/build/uninstall script, the `server-conf
 | `-ClientIntervalHours` | `6` | Collection interval embedded in the generated `Install-ClientGpo.cmd`, when `-ClientServerUrl` is set (1-24). |
 | `-PackageSharePath` | `-` | GPO package share path embedded in the generated `Install-ClientGpo.cmd`, when `-ClientServerUrl` is set. Only needed when the GPO startup script and the client files are deployed to different locations. Default: the script's own folder. |
 | `-Token` | `-` | Ingestion token required in the `X-Inventory-Token` header. Optional. |
+| `-EnrollmentToken` | `-` | Bootstrap secret `POST /api/v1/client/enroll` checks against, for a GPO-deployed client to obtain its own per-machine ingestion token on first contact instead of the real shared `-Token` ever being embedded in `Install-ClientGpo.cmd`. Passed through to `New-ClientGpoPackage.ps1` when `-ClientServerUrl` also generates a GPO package. Optional - never auto-generated. See `docs/threat-model.md`. |
 | `-WebUsername` | `-` | Basic Auth username for dashboard and web API access. Optional. |
 | `-WebPassword` | `-` | Basic Auth password for dashboard and web API access. Optional. |
 | `-CertificateThumbprint` | `-` | Thumbprint of a certificate already in `LocalMachine\My` to use for HTTPS. Optional. |
@@ -55,6 +56,7 @@ Full parameter tables for every install/build/uninstall script, the `server-conf
 | `-ServerUrl` | `-` | HTTP endpoint that receives client JSON reports. Mandatory. |
 | `-ServerSharePath` | `-` | UNC path to the server drop share for direct file delivery. Optional. |
 | `-Token` | `-` | Ingestion token sent in `X-Inventory-Token`. Optional. |
+| `-EnrollmentToken` | `-` | Bootstrap secret written to the service's registry Environment value (`WIL_ENROLLMENT_TOKEN`), never the command line. Used instead of `-Token` to call `POST /api/v1/client/enroll` and obtain a real per-machine token on first contact. Optional. |
 | `-IntervalHours` | `6` | Collection interval in hours (1-24). |
 | `-SoftwareCheckIntervalHours` | `6` | How often the client polls for assigned software-distribution jobs (1-24). Separate timer from `-IntervalHours`; emitted as `--software-check-interval-hours` in the service command line. |
 | `-InstallPath` | `-` | Installation folder for the client service. Default: `C:\ProgramData\WindowsInventoryLite\client-data`. |
@@ -76,6 +78,9 @@ Full parameter tables for every install/build/uninstall script, the `server-conf
 | `-CredentialPassword` | `-` | WinRM password as a `SecureString`. Used if `-Credential` is not provided. |
 | `-AddToTrustedHosts` | `off` | Add target computers to WinRM TrustedHosts before connecting. |
 | `-Force` | `off` | Reinstall the client even if the version already matches. |
+| `-RequireHttpsSelfUpdate` | `off` | Forwarded to the remote `Deploy-ClientGpo.ps1` invocation. Require HTTPS for client self-update; protects against a MITM pushing a fake update over plain HTTP. |
+| `-AllowHttpSelfUpdateFallback` | `off` | Forwarded to the remote `Deploy-ClientGpo.ps1` invocation. When `-RequireHttpsSelfUpdate` is set but HTTPS is unavailable, fall back to HTTP instead of refusing to update. Ignored unless `-RequireHttpsSelfUpdate` is also set. |
+| `-RequireSignedSelfUpdate` | `off` | Forwarded to the remote `Deploy-ClientGpo.ps1` invocation. Require a verified digital signature for client self-update. See `docs/self-update-signing.md`. |
 | `-KeepRemotePackage` | `off` | Do not delete the temporary package folder from the remote host after deployment. |
 
 ## Uninstall-Server.ps1
@@ -107,7 +112,8 @@ Full parameter tables for every install/build/uninstall script, the `server-conf
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
 | `-ServerUrl` | `-` | HTTP endpoint to embed in the client startup script. Mandatory. |
-| `-Token` | `-` | Ingestion token to embed in the client startup script. Optional. |
+| `-Token` | `-` | Ingestion token to embed in the client startup script. **Not recommended for a real GPO rollout** - `Install-ClientGpo.cmd` is deployed to SYSVOL, readable by every authenticated domain user, so this value is effectively public for as long as the package stays rolled out. Prefer `-EnrollmentToken`. Optional. |
+| `-EnrollmentToken` | `-` | Bootstrap secret embedded in the client startup script instead of `-Token` - the deployed client calls `POST /api/v1/client/enroll` with it to obtain its own real per-machine ingestion token, so the value exposed on SYSVOL is narrow and revocable rather than the same shared token every other client relies on. Optional. See `docs/threat-model.md`. |
 | `-IntervalHours` | `6` | Collection interval in hours to embed in the client startup script (1-24). |
 | `-OutputPath` | `-` | Output folder for the package. Default: `dist\gpo-client`. |
 | `-ClientNet35Path` | `-` | Path to the prebuilt .NET 3.5 client executable. Triggers a build if omitted. |
@@ -139,7 +145,8 @@ Full parameter tables for every install/build/uninstall script, the `server-conf
 | Parameter | Default | Description |
 | --------- | ------- | ----------- |
 | `-ServerUrl` | `-` | HTTP endpoint that receives client JSON reports. Mandatory. |
-| `-Token` | `-` | Ingestion token sent in `X-Inventory-Token`. Optional. |
+| `-Token` | `-` | Ingestion token sent in `X-Inventory-Token`. Falls back to the `WIL_INGESTION_TOKEN` environment variable when not supplied. Optional. |
+| `-EnrollmentToken` | `-` | Bootstrap secret for `POST /api/v1/client/enroll`, used instead of `-Token` to obtain a real per-machine token on first contact. Falls back to the `WIL_ENROLLMENT_TOKEN` environment variable when not supplied. Optional. |
 | `-IntervalHours` | `6` | Collection interval in hours (1-24). |
 | `-SoftwareCheckIntervalHours` | `6` | How often the client polls for assigned software-distribution jobs (1-24). Separate timer from `-IntervalHours`; emitted as `--software-check-interval-hours` in the service command line. |
 | `-InstallPath` | `-` | Installation folder for the client service. Default: `C:\ProgramData\WindowsInventoryLite\client-data`. |
@@ -180,6 +187,7 @@ Both password- and key-based pushes require `plink.exe`/`pscp.exe` (PuTTY) in `d
 - `InstallLogRetentionDays`: default retention period for WinRM client action logs. Default: `30`, range 1-3650.
 - `StaleHours`: hours after which a report counts as stale. Default: `48`. Adjustable on the dashboard Settings > Server page (Inventory section).
 - `Token`: optional shared token sent in `X-Inventory-Token`.
+- `EnrollmentToken`: optional bootstrap secret `POST /api/v1/client/enroll` checks against, for a GPO-deployed client to obtain its own per-machine ingestion token on first contact. Never auto-generated. Adjustable (view configured-state, regenerate) on Settings > Server > Enrollment Token.
 - `RequireIngestionToken`: whether the ingestion endpoints reject requests without a matching token. Default: `true` once a `Token` is configured, unless explicitly overridden.
 - `PreviousToken` and `PreviousTokenExpiresUtc`: the prior ingestion token and when it stops being accepted, set automatically by a token regeneration - not admin-editable directly. See `TokenOverlapHours` below.
 - `TokenOverlapHours`: how long the previous token keeps working after `POST /api/v1/server/ingestion-token/regenerate`, so an already-deployed client has a window to pick up the new one via its inventory ack before the old one stops working. Default: `24`, range 0-168 (`0` restores the old immediate-cutover behavior). Adjustable on Settings > Server > Ingestion Token.
@@ -219,7 +227,7 @@ Both password- and key-based pushes require `plink.exe`/`pscp.exe` (PuTTY) in `d
 - `WindowsUpdateInstallWindowJitterMinutes`: how long after the window opens admission probability ramps from 0% to 100%, so a fleet checking in around the same moment doesn't converge on installing at the exact same instant. Default: `30`, range 0-1440.
 - `ThirdPartySoftwareInstallWindowEnabled`, `ThirdPartySoftwareInstallWindowStartUtc`/`ThirdPartySoftwareInstallWindowEndUtc`, `ThirdPartySoftwareInstallWindowJitterMinutes`: same shape as the three `WindowsUpdateInstallWindow*` keys above, gating third-party-software catalog jobs independently. Defaults: `false`; `02:00`/`04:00`; `30` (range 0-1440). Adjustable on Settings > Windows.
 - Upgrading an existing deployment: each of the four `WindowsUpdateInstallWindow*` keys falls back to its old pre-split combined key (`SoftwareInstallWindowEnabled`, `SoftwareInstallWindowStartUtc`, `SoftwareInstallWindowEndUtc`, `SoftwareInstallWindowJitterMinutes` respectively) when the new key is absent from `server-config.json`, so an admin's previously-configured window is preserved on the windowsUpdate side. `ThirdPartySoftwareInstallWindow*` has no such fallback - that pipeline did not exist before the split - and always starts disabled at its own hardcoded defaults.
-- `EnableWindowsClientSelfUpdate` and `EnableLinuxClientSelfUpdate`: server-side opt-ins that make each platform's inventory ack include an `update` field whenever a reporting client's version doesn't match the currently-built package. Both default `false`. These only control whether the server *advertises* an update - the client-side `-RequireHttpsSelfUpdate`/`-RequireSignedSelfUpdate` (Windows) and `--require-https-self-update`/`--require-signed-self-update` (Linux) enforcement flags are separate, client-side, install-time settings, not server-config.json keys, and are documented under `Install-Client.ps1`/`Install-ClientDebianSSH.ps1`'s own sections and `docs/threat-model.md`.
+- `EnableWindowsClientSelfUpdate` and `EnableLinuxClientSelfUpdate`: server-side opt-ins that make each platform's inventory ack include an `update` field whenever a reporting client's version doesn't match the currently-built package. Both default `false`. These only control whether the server *advertises* an update - the client-side `-RequireHttpsSelfUpdate`/`-AllowHttpSelfUpdateFallback`/`-RequireSignedSelfUpdate` (Windows) and `--require-https-self-update`/`--require-signed-self-update` (Linux) enforcement flags are separate, client-side, install-time settings, not server-config.json keys, and are documented under `Install-Client.ps1`/`Install-ClientDebianSSH.ps1`'s own sections, `docs/self-update-signing.md`, and `docs/threat-model.md`. The Windows client's `update` field also includes `httpsPort` whenever `UseHttps` is on (`BuildWindowsClientUpdateInfo`) - lets a client whose own `ServerUrl` is still `http://` opportunistically retry its self-update download over `https://` on that port; see `docs/self-update-signing.md`'s "Turning on enforcement" section.
 - `ShowUsbStorageIndicator`: whether the dashboard shows the USB-storage tile/badge/CSV column at all. Default: `true`. Display-only - the client always still collects and reports USB-storage presence regardless of this setting. Adjustable on Settings > Server > Inventory.
 - `SoftwareRepositoryPath`: UNC path or local directory holding the software-distribution share. Clients read installers from `<path>\windows-updates\` and `<path>\third-party-software\`; the server scans the same two subfolders for discovery candidates. Empty by default, which disables the feature. Adjustable on Software > Settings.
 - `SoftwareRepositoryUsername` and `SoftwareRepositoryPassword`: optional credentials the client impersonates to read that share. `SoftwareRepositoryPassword` is DPAPI-encrypted at rest, like `WebPassword`/`Token`/`AdPassword`. Left empty, the client falls back to its own service identity. Note that the password is returned in plaintext to any client holding a valid ingestion token - see `docs/threat-model.md`.

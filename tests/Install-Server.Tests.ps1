@@ -303,3 +303,37 @@ Describe 'Committed Linux client prebuilt binary stays in sync with Build-LinuxC
         $committedVersion | Should -Be $scriptDefaultVersion -Because 'the committed prebuilt binary must be rebuilt and recommitted whenever Build-LinuxClient.ps1''s default -Version changes, or machines without Go will silently keep shipping an old client'
     }
 }
+
+# Reproduces a real, user-reported bug: "Just refresh" (re-running the
+# installer with no parameters at all) threw
+# "Cannot validate argument on parameter 'EnrollmentToken'. The argument is
+# null or empty" on every server that had never configured an
+# EnrollmentToken - which is most of them, since enrollment is opt-in.
+# Root cause: PowerShell re-validates a parameter's own attributes on EVERY
+# assignment to that variable within the script, not just at initial
+# binding. -EnrollmentToken is reassigned further down to the saved config
+# value (`$EnrollmentToken = $savedEnrollmentToken`), which is routinely
+# empty/absent - unlike -Token, there is no auto-generate fallback to
+# guarantee a non-empty result here (see Resolve-InstallToken above, which
+# is exactly why -Token's own [ValidateNotNullOrEmpty()] never hits this).
+# A behavioral Pester test would need to invoke the real param block, which
+# Install-Server.ps1 cannot safely support (no dot-source guard - see this
+# file's own opening comment) - this is a structural AST check instead,
+# directly on the shipped param() block, so re-adding the attribute to this
+# one parameter fails the test immediately regardless of how it happens.
+Describe 'Windows Inventory Lite Install-Server EnrollmentToken parameter attributes' {
+    It 'does NOT have [ValidateNotNullOrEmpty()] on -EnrollmentToken (it is routinely reassigned to an empty value on a parameterless refresh)' {
+        $scriptPath = Join-Path -Path (Split-Path -Parent $PSScriptRoot) -ChildPath 'src\Install-Server.ps1'
+        $scriptContent = Get-Content -LiteralPath $scriptPath -Raw
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($scriptContent, [ref]$tokens, [ref]$errors)
+
+        $paramBlock = $ast.ParamBlock
+        $enrollmentTokenParam = $paramBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'EnrollmentToken' }
+        $enrollmentTokenParam | Should -Not -BeNullOrEmpty -Because 'the -EnrollmentToken parameter should still exist in Install-Server.ps1''s param() block'
+
+        $validationAttributeNames = $enrollmentTokenParam.Attributes | Where-Object { $_ -is [System.Management.Automation.Language.AttributeAst] } | ForEach-Object { $_.TypeName.Name }
+        $validationAttributeNames | Should -Not -Contain 'ValidateNotNullOrEmpty'
+    }
+}

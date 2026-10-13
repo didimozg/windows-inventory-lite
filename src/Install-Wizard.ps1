@@ -622,6 +622,16 @@ $installClientQuestions = @(
     @{ Name = 'SoftwareCheckIntervalHours'; Prompt = 'Software distribution check interval in hours'; Type = 'Int'; Default = '6'; Mandatory = $false }
     @{ Name = 'InstallPath'; Prompt = 'Client install path (leave blank for default)'; Type = 'String'; Mandatory = $false }
     @{ Name = 'NoRun'; Prompt = 'Skip starting the service immediately after install'; Type = 'Switch' }
+
+    # Self-update security posture - install-time only, never changed
+    # remotely by the server (see ClientOptions.RequireHttpsForSelfUpdate's
+    # own comment in WindowsInventoryLiteClient.cs for why). Recommended on
+    # once the server has a real certificate and a real signing key are in
+    # place; both default off so an unattended/scripted install is never
+    # silently blocked by a prompt it doesn't expect.
+    @{ Name = 'RequireHttpsSelfUpdate'; Prompt = 'Require HTTPS for client self-update (recommended once the server has a certificate - protects against a MITM pushing a fake update over plain HTTP)'; Type = 'Switch' }
+    @{ Name = 'AllowHttpSelfUpdateFallback'; Prompt = 'If HTTPS is required but not available right now, fall back to HTTP instead of refusing to update (useful when the server has no certificate yet - ignored unless the option above is set)'; Type = 'Switch' }
+    @{ Name = 'RequireSignedSelfUpdate'; Prompt = 'Require a verified digital signature for client self-update (recommended - see docs/self-update-signing.md to set up signing first, or self-update will never apply once this is on)'; Type = 'Switch' }
 )
 
 $installServerQuestions = @(
@@ -676,6 +686,14 @@ $installClientWinRMQuestions = @(
     @{ Name = 'CredentialPassword'; Prompt = 'Credential password (leave blank to use current user context)'; Type = 'SecureString'; Mandatory = $false; BindAsSecureString = $true }
     @{ Name = 'AddToTrustedHosts'; Prompt = 'Add target computers to WinRM TrustedHosts (needed for non-domain-joined or workgroup targets)'; Type = 'Switch' }
     @{ Name = 'Force'; Prompt = 'Overwrite an already-installed client on the target machines'; Type = 'Switch' }
+
+    # Self-update security posture - install-time only, forwarded to each
+    # target over WinRM. Mirrors $installClientQuestions's own entries for
+    # the local-install flow; see that array's comment for why both
+    # HTTPS-related flags default off.
+    @{ Name = 'RequireHttpsSelfUpdate'; Prompt = 'Require HTTPS for client self-update (recommended once the server has a certificate - protects against a MITM pushing a fake update over plain HTTP)'; Type = 'Switch' }
+    @{ Name = 'AllowHttpSelfUpdateFallback'; Prompt = 'If HTTPS is required but not available right now, fall back to HTTP instead of refusing to update (useful when the server has no certificate yet - ignored unless the option above is set)'; Type = 'Switch' }
+    @{ Name = 'RequireSignedSelfUpdate'; Prompt = 'Require a verified digital signature for client self-update (recommended - see docs/self-update-signing.md to set up signing first, or self-update will never apply once this is on)'; Type = 'Switch' }
 )
 
 $uninstallServerQuestions = @(

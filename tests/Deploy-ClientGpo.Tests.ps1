@@ -37,6 +37,78 @@ Describe 'Windows Inventory Lite Deploy-ClientGpo client-data layout' {
         }
     }
 
+    It 'falls back to WIL_ENROLLMENT_TOKEN when -EnrollmentToken is not supplied' {
+        $originalToken = $env:WIL_ENROLLMENT_TOKEN
+        try {
+            $env:WIL_ENROLLMENT_TOKEN = 'enrollment-token-from-environment'
+            . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory'
+            $EnrollmentToken | Should -Be 'enrollment-token-from-environment'
+        }
+        finally {
+            if ($null -eq $originalToken) {
+                Remove-Item Env:\WIL_ENROLLMENT_TOKEN -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:WIL_ENROLLMENT_TOKEN = $originalToken
+            }
+            . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory'
+        }
+    }
+
+    It 'prefers an explicit -EnrollmentToken over WIL_ENROLLMENT_TOKEN' {
+        $originalToken = $env:WIL_ENROLLMENT_TOKEN
+        try {
+            $env:WIL_ENROLLMENT_TOKEN = 'enrollment-token-from-environment'
+            . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory' -EnrollmentToken 'explicit-enrollment-token'
+            $EnrollmentToken | Should -Be 'explicit-enrollment-token'
+        }
+        finally {
+            if ($null -eq $originalToken) {
+                Remove-Item Env:\WIL_ENROLLMENT_TOKEN -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:WIL_ENROLLMENT_TOKEN = $originalToken
+            }
+            . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory'
+        }
+    }
+
+    It 'Get-ServiceEnvironmentToken returns an empty string for WIL_ENROLLMENT_TOKEN when no Environment value is set' {
+        $registryRoot = 'TestRegistry:\Services'
+        $serviceName = 'FakeServiceNoEnrollmentToken'
+        New-Item -Path (Join-Path -Path $registryRoot -ChildPath $serviceName) -Force | Out-Null
+        Get-ServiceEnvironmentToken -ServiceName $serviceName -VariableName 'WIL_ENROLLMENT_TOKEN' -ServiceRegistryRoot $registryRoot | Should -Be ''
+    }
+
+    It 'Set-ServiceEnvironmentToken writes both the ingestion and enrollment tokens as separate Environment lines, independently readable' {
+        $registryRoot = 'TestRegistry:\Services'
+        $serviceName = 'FakeServiceBothTokens'
+        New-Item -Path (Join-Path -Path $registryRoot -ChildPath $serviceName) -Force | Out-Null
+        Set-ServiceEnvironmentToken -ServiceName $serviceName -SharedToken 'shared-abc' -EnrollmentToken 'enroll-xyz' -ServiceRegistryRoot $registryRoot
+        Get-ServiceEnvironmentToken -ServiceName $serviceName -VariableName 'WIL_INGESTION_TOKEN' -ServiceRegistryRoot $registryRoot | Should -Be 'shared-abc'
+        Get-ServiceEnvironmentToken -ServiceName $serviceName -VariableName 'WIL_ENROLLMENT_TOKEN' -ServiceRegistryRoot $registryRoot | Should -Be 'enroll-xyz'
+    }
+
+    # Regression coverage for a real bug found during review: the full
+    # reinstall path (any version mismatch - every package upgrade, or a
+    # self-updated client) deletes and recreates the whole service key via
+    # sc.exe, wiping its Environment value - including a client's own
+    # self-learned per-machine ingestion token, which this script's own
+    # -Token parameter never knows about in the EnrollmentToken-only flow.
+    # Resolve-TokenForRedeploy is the pure decision both the "already
+    # current" branch and the full-reinstall branch now share.
+    It 'Resolve-TokenForRedeploy prefers an explicit token over the currently stored one' {
+        Resolve-TokenForRedeploy -ExplicitToken 'explicit-token' -CurrentlyStoredToken 'learned-token' | Should -Be 'explicit-token'
+    }
+
+    It 'Resolve-TokenForRedeploy preserves the currently stored token when no explicit token is supplied' {
+        Resolve-TokenForRedeploy -ExplicitToken '' -CurrentlyStoredToken 'learned-token' | Should -Be 'learned-token'
+    }
+
+    It 'Resolve-TokenForRedeploy returns empty when neither an explicit nor a stored token exists' {
+        Resolve-TokenForRedeploy -ExplicitToken '' -CurrentlyStoredToken '' | Should -Be ''
+    }
+
     It 'prefers an explicit -Token over WIL_INGESTION_TOKEN' {
         $originalToken = $env:WIL_INGESTION_TOKEN
         try {
@@ -75,6 +147,16 @@ Describe 'Windows Inventory Lite Deploy-ClientGpo client-data layout' {
     It 'Get-DesiredServiceCommand never embeds the ingestion token on the command line' {
         $command = Get-DesiredServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
         $command | Should -Not -Match '--token'
+    }
+
+    It 'Get-DesiredServiceCommand appends --allow-http-self-update-fallback when the switch is set' {
+        $command = Get-DesiredServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log' -AllowHttpSelfUpdateFallback
+        $command | Should -Match '--allow-http-self-update-fallback'
+    }
+
+    It 'Get-DesiredServiceCommand omits --allow-http-self-update-fallback when the switch is not set' {
+        $command = Get-DesiredServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
+        $command | Should -Not -Match '--allow-http-self-update-fallback'
     }
 
     It 'Get-DesiredServiceCommand differs between the legacy bare-root path and the new client-data path, so an already-installed client is detected as needing reinstall' {

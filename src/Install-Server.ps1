@@ -88,6 +88,30 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$Token,
 
+    # The server-side bootstrap secret POST /api/v1/client/enroll checks
+    # against - passed straight through to New-ClientGpoPackage.ps1 (as its
+    # own -EnrollmentToken) when -ClientServerUrl also generates a GPO
+    # package, so the value embedded in Install-ClientGpo.cmd matches what
+    # this server actually expects. Unlike -Token, never auto-generated
+    # when omitted: enrollment is an opt-in deployment pattern, not this
+    # project's always-on ingestion security posture, so a blank value
+    # here (meaning "not using enrollment") is a normal, expected state.
+    #
+    # Deliberately NO [ValidateNotNullOrEmpty()] here, unlike every other
+    # optional secret parameter above - PowerShell re-validates a
+    # parameter's own attributes on EVERY assignment to that variable
+    # within the script, not just at initial binding, and this one is
+    # reassigned further down to the saved config value (which is
+    # routinely empty/absent, since enrollment is opt-in and most installs
+    # never configure it - unlike $Token, there is no auto-generate
+    # fallback to guarantee a non-empty result). Confirmed live: the
+    # reassignment threw ValidationMetadataException on every "Just
+    # refresh" run with no EnrollmentToken ever configured. Mirrors the
+    # identical, already-correct reasoning for this same parameter in
+    # Deploy-ClientGpo.ps1.
+    [Parameter()]
+    [string]$EnrollmentToken,
+
     [Parameter()]
     [ValidateNotNullOrEmpty()]
     [string]$WebUsername,
@@ -680,6 +704,14 @@ if ($savedToken) {
 }
 $Token = Resolve-InstallToken -ExplicitToken $Token -SavedToken $savedToken
 
+$savedEnrollmentToken = Get-ConfigValue -Config $existingConfig -Name 'EnrollmentToken'
+if ($savedEnrollmentToken) {
+    $savedEnrollmentToken = Unprotect-Secret -StoredValue $savedEnrollmentToken
+}
+if (-not $EnrollmentToken) {
+    $EnrollmentToken = $savedEnrollmentToken
+}
+
 if (-not $PSBoundParameters.ContainsKey('WebUsername')) {
     $savedWebUsername = Get-ConfigValue -Config $existingConfig -Name 'WebUsername'
     if ($savedWebUsername) {
@@ -1086,7 +1118,20 @@ if ($ClientServerUrl) {
         ClientNet35Path = $ClientNet35ExecutablePath
         ClientNet40Path = $ClientNet40ExecutablePath
     }
-    if ($Token) {
+    if ($EnrollmentToken) {
+        $gpoPackageParams.EnrollmentToken = $EnrollmentToken
+    }
+    elseif ($Token) {
+        # Deliberately NOT both: the Windows client only ever attempts
+        # enrollment while its own Token is still empty
+        # (TryEnrollIfNeededCore), so a package embedding a real -Token
+        # alongside -EnrollmentToken would make EnrollmentToken silently
+        # inert - the client would never call POST /api/v1/client/enroll
+        # at all, leaving the real shared Token sitting in Install-ClientGpo.cmd
+        # exactly as before. $Token here is this server's own operational
+        # ingestion token (Resolve-InstallToken always auto-generates one),
+        # not necessarily what the admin wants embedded in a SYSVOL-exposed
+        # file, so it is only forwarded when EnrollmentToken is not in use.
         $gpoPackageParams.Token = $Token
     }
     if ($PackageSharePath) {
@@ -1191,6 +1236,7 @@ $config.ClientPackagePath       = $ClientPackagePath
 $config.LinuxClientPackagePath  = $LinuxClientPackagePath
 $config.InstallLogRetentionDays = $InstallLogRetentionDays
 $config.Token                   = Protect-Secret -PlainText $Token
+$config.EnrollmentToken         = Protect-Secret -PlainText $EnrollmentToken
 $config.WebUsername             = $WebUsername
 $config.WebPassword             = Protect-Secret -PlainText $WebPassword
 $config.UseHttps                = if ($UseHttps) { 'true' } else { 'false' }

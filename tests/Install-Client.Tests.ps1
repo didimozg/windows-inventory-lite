@@ -15,6 +15,10 @@ Describe 'Windows Inventory Lite Install-Client client-data layout' {
         { . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory' -InstallPath 'C:\wil%WINDIR%' } | Should -Throw '*InstallPath*'
     }
 
+    It 'rejects a shell-unsafe EnrollmentToken' {
+        { . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory' -EnrollmentToken 'abc&calc.exe' } | Should -Throw '*EnrollmentToken*'
+    }
+
     It 'accepts a safe InstallPath' {
         { . $script:ScriptPath -ServerUrl 'https://example.local/api/v1/inventory' -InstallPath 'C:\ProgramData\WindowsInventoryLite\client-data' } | Should -Not -Throw
     }
@@ -58,6 +62,16 @@ Describe 'Windows Inventory Lite Install-Client client-data layout' {
         $command | Should -Not -Match '--require-signed-self-update'
     }
 
+    It 'Get-ClientServiceCommand appends --allow-http-self-update-fallback when the switch is set' {
+        $command = Get-ClientServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharePath '' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log' -AllowHttpSelfUpdateFallback
+        $command | Should -Match '--allow-http-self-update-fallback'
+    }
+
+    It 'Get-ClientServiceCommand omits --allow-http-self-update-fallback when the switch is not set' {
+        $command = Get-ClientServiceCommand -ServicePath 'C:\x\WindowsInventoryLiteClient.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SharePath '' -OutputDirectory 'C:\x' -DebugLogPath 'C:\x\_logs\debug-client.log'
+        $command | Should -Not -Match '--allow-http-self-update-fallback'
+    }
+
     It 'Set-ServiceEnvironmentToken writes WIL_INGESTION_TOKEN to the Environment value' {
         # TestRegistry: is a Pester-managed scratch registry key, torn down
         # automatically after this test - real HKLM\SYSTEM is never touched.
@@ -86,6 +100,32 @@ Describe 'Windows Inventory Lite Install-Client client-data layout' {
             $environment = $item.Environment
         }
         $environment | Should -BeNullOrEmpty
+    }
+
+    It 'Set-ServiceEnvironmentToken writes WIL_ENROLLMENT_TOKEN alongside WIL_INGESTION_TOKEN as separate Environment lines' {
+        $registryRoot = 'TestRegistry:\Services'
+        $serviceName = 'FakeServiceBothTokens'
+        New-Item -Path (Join-Path -Path $registryRoot -ChildPath $serviceName) -Force | Out-Null
+        Set-ServiceEnvironmentToken -ServiceName $serviceName -SharedToken 'abc123' -EnrollmentToken 'enroll-xyz' -ServiceRegistryRoot $registryRoot
+        $environment = (Get-ItemProperty -LiteralPath (Join-Path -Path $registryRoot -ChildPath $serviceName) -Name 'Environment').Environment
+        $environment | Should -Contain 'WIL_INGESTION_TOKEN=abc123'
+        $environment | Should -Contain 'WIL_ENROLLMENT_TOKEN=enroll-xyz'
+    }
+
+    It 'Set-ServiceEnvironmentToken writes only WIL_ENROLLMENT_TOKEN when no shared token is supplied' {
+        $registryRoot = 'TestRegistry:\Services'
+        $serviceName = 'FakeServiceEnrollmentOnly'
+        New-Item -Path (Join-Path -Path $registryRoot -ChildPath $serviceName) -Force | Out-Null
+        Set-ServiceEnvironmentToken -ServiceName $serviceName -SharedToken '' -EnrollmentToken 'enroll-only' -ServiceRegistryRoot $registryRoot
+        $environment = (Get-ItemProperty -LiteralPath (Join-Path -Path $registryRoot -ChildPath $serviceName) -Name 'Environment').Environment
+        $environment | Should -Contain 'WIL_ENROLLMENT_TOKEN=enroll-only'
+        # Not `-Not -Contain 'WIL_INGESTION_TOKEN='` - that compares against
+        # the bare prefix with nothing after it, which a real
+        # "WIL_INGESTION_TOKEN=<value>" line (always non-empty when written
+        # at all) could never exactly equal either way, making the check
+        # vacuously true regardless of whether the line was actually
+        # omitted. Match the prefix with a wildcard instead.
+        ($environment | Where-Object { $_ -like 'WIL_INGESTION_TOKEN=*' }) | Should -BeNullOrEmpty
     }
 
     It 'Set-RestrictedServiceRegistryKeyAcl removes BUILTIN\Users and grants only Administrators+SYSTEM' {

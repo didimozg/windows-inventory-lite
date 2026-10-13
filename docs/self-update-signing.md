@@ -76,16 +76,48 @@ server configuration needed.
 
 ## Turning on enforcement
 
-Both flags are client-side, install-time switches, off by default:
+All three flags are client-side, install-time switches, off by default
+(the server can never change what a client enforces - see
+`ClientOptions.RequireHttpsForSelfUpdate`'s own comment in
+`WindowsInventoryLiteClient.cs` for why):
 
 ```
---require-https-self-update    Refuse to self-update unless ServerUrl is https
---require-signed-self-update   Refuse to self-update unless a valid signature is advertised
+--require-https-self-update            Require https for self-update, re-checked on every attempt
+--allow-http-self-update-fallback      If https isn't available right now, fall back to http instead of refusing (ignored unless the flag above is set)
+--require-signed-self-update           Refuse to self-update unless a valid signature is advertised
 ```
 
-Set via `Install-Client.ps1 -RequireHttpsSelfUpdate -RequireSignedSelfUpdate`
-or the equivalent GPO deployment switches. Turning on
-`--require-signed-self-update` before ANY release has been signed with
-the real key will permanently block self-update for that client until
-a signed release is published - deploy the flag only after your first
-signed release is already in `ClientPackagePath`/`LinuxClientPackagePath`.
+`--require-https-self-update` is evaluated fresh on every self-update
+attempt (Windows client, since 0.18.0), not fixed once against the
+client's own `ServerUrl` at install time: if `ServerUrl` is `http://`
+but the server's ack advertises an active `httpsPort` (the server has a
+certificate, whether or not it existed when this client was deployed),
+the client retries the download over `https://` on that port instead -
+so a fleet rolled out before a certificate existed starts using HTTPS
+automatically the moment the server gets one, with no per-machine
+reconfiguration needed. If no `httpsPort` is advertised, or the
+opportunistic `https://` attempt itself fails (an invalid or
+self-signed certificate - this client never overrides .NET's default
+certificate validation, so that failure is a real TLS rejection, not a
+formality), `--allow-http-self-update-fallback` decides what happens
+next: unset, the client refuses (today's original "require" meaning);
+set, it falls back to plain `http://` instead, matching how self-update
+already behaves with neither flag set - useful for a deployment that
+may never get a certificate (a lab, an isolated segment) without giving
+up the "prefer encryption when it's available" benefit everywhere else.
+
+Set via `Install-Client.ps1 -RequireHttpsSelfUpdate -AllowHttpSelfUpdateFallback -RequireSignedSelfUpdate`,
+`Install-Wizard.ps1` (asks for all three directly), or the equivalent
+GPO deployment switches. Turning on `--require-signed-self-update`
+before ANY release has been signed with the real key will permanently
+block self-update for that client until a signed release is published
+- deploy the flag only after your first signed release is already in
+`ClientPackagePath`/`LinuxClientPackagePath`.
+
+**Linux client scope note**: the opportunistic-HTTPS/fallback behavior
+above is Windows-client-only as of this writing. The Linux client
+(`linux-client/selfupdate.go`) still only has the original static
+`--require-https-self-update`/`--require-signed-self-update` pair with
+no dynamic httpsPort retry or fallback option - out of scope for this
+round, left as a known gap for whoever picks up Linux self-update
+parity next.

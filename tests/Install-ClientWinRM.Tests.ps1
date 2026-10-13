@@ -121,4 +121,51 @@ Describe 'Windows Inventory Lite Install-ClientWinRM safety guard' {
             }
         }
     }
+
+    # The three self-update security flags mirror Deploy-ClientGpo.ps1's own
+    # -RequireHttpsSelfUpdate/-AllowHttpSelfUpdateFallback/-RequireSignedSelfUpdate
+    # switches - RemoteDeployScriptBlock only needs to forward them onto the
+    # remote Deploy-ClientGpo.ps1 invocation it constructs, each only when true,
+    # matching the existing -ForceInstall/-Force pattern.
+    It 'RemoteDeployScriptBlock omits all three self-update switches when none are requested' {
+        try {
+            New-Item -Path 'function:powershell.exe' -Value { $script:capturedArguments = $args; $global:LASTEXITCODE = 0 } -Force | Out-Null
+            & $script:RemoteDeployScriptBlock -DeployPath 'C:\deploy\Install-Client.ps1' -ClientPath 'C:\deploy\client.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SoftwareHours 6 -SharedToken '' -ForceInstall $false -RequireHttps $false -AllowHttpFallback $false -RequireSigned $false
+        }
+        finally {
+            Remove-Item -Path 'function:powershell.exe' -ErrorAction SilentlyContinue
+        }
+
+        $script:capturedArguments | Should -Not -Contain '-RequireHttpsSelfUpdate'
+        $script:capturedArguments | Should -Not -Contain '-AllowHttpSelfUpdateFallback'
+        $script:capturedArguments | Should -Not -Contain '-RequireSignedSelfUpdate'
+    }
+
+    It 'RemoteDeployScriptBlock includes each self-update switch only when requested' {
+        try {
+            New-Item -Path 'function:powershell.exe' -Value { $script:capturedArguments = $args; $global:LASTEXITCODE = 0 } -Force | Out-Null
+            & $script:RemoteDeployScriptBlock -DeployPath 'C:\deploy\Install-Client.ps1' -ClientPath 'C:\deploy\client.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SoftwareHours 6 -SharedToken '' -ForceInstall $false -RequireHttps $true -AllowHttpFallback $true -RequireSigned $true
+        }
+        finally {
+            Remove-Item -Path 'function:powershell.exe' -ErrorAction SilentlyContinue
+        }
+
+        $script:capturedArguments | Should -Contain '-RequireHttpsSelfUpdate'
+        $script:capturedArguments | Should -Contain '-AllowHttpSelfUpdateFallback'
+        $script:capturedArguments | Should -Contain '-RequireSignedSelfUpdate'
+    }
+
+    It 'RemoteDeployScriptBlock defaults all three self-update switches to off when not supplied' {
+        try {
+            New-Item -Path 'function:powershell.exe' -Value { $script:capturedArguments = $args; $global:LASTEXITCODE = 0 } -Force | Out-Null
+            & $script:RemoteDeployScriptBlock -DeployPath 'C:\deploy\Install-Client.ps1' -ClientPath 'C:\deploy\client.exe' -Url 'https://example.local/api/v1/inventory' -Hours 6 -SoftwareHours 6 -SharedToken '' -ForceInstall $false
+        }
+        finally {
+            Remove-Item -Path 'function:powershell.exe' -ErrorAction SilentlyContinue
+        }
+
+        $script:capturedArguments | Should -Not -Contain '-RequireHttpsSelfUpdate'
+        $script:capturedArguments | Should -Not -Contain '-AllowHttpSelfUpdateFallback'
+        $script:capturedArguments | Should -Not -Contain '-RequireSignedSelfUpdate'
+    }
 }

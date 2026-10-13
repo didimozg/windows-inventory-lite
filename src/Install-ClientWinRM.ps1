@@ -52,6 +52,23 @@ param(
     [Parameter()]
     [switch]$Force,
 
+    # Self-update security posture - install-time only, forwarded straight
+    # through to the remote Deploy-ClientGpo.ps1 invocation, which already
+    # supports all three (see its own -RequireHttpsSelfUpdate/
+    # -AllowHttpSelfUpdateFallback/-RequireSignedSelfUpdate). Never changed
+    # remotely by the server afterward - see ClientOptions.RequireHttpsForSelfUpdate's
+    # own comment in WindowsInventoryLiteClient.cs for why. Both HTTPS-related
+    # flags default off so an unattended/scripted push is never silently
+    # blocked by a requirement it doesn't expect.
+    [Parameter()]
+    [switch]$RequireHttpsSelfUpdate,
+
+    [Parameter()]
+    [switch]$AllowHttpSelfUpdateFallback,
+
+    [Parameter()]
+    [switch]$RequireSignedSelfUpdate,
+
     [Parameter()]
     [switch]$KeepRemotePackage
 )
@@ -172,7 +189,7 @@ function Invoke-RemoteDeploy {
         [string]$RemoteClientPath
     )
 
-    Invoke-Command -Session $Session -ScriptBlock $script:RemoteDeployScriptBlock -ArgumentList $RemoteDeployPath, $RemoteClientPath, $ServerUrl, $IntervalHours, $SoftwareCheckIntervalHours, $Token, ([bool]$Force)
+    Invoke-Command -Session $Session -ScriptBlock $script:RemoteDeployScriptBlock -ArgumentList $RemoteDeployPath, $RemoteClientPath, $ServerUrl, $IntervalHours, $SoftwareCheckIntervalHours, $Token, ([bool]$Force), ([bool]$RequireHttpsSelfUpdate), ([bool]$AllowHttpSelfUpdateFallback), ([bool]$RequireSignedSelfUpdate)
 }
 
 # Defined as its own script-scope scriptblock (not inline at the
@@ -190,7 +207,10 @@ $script:RemoteDeployScriptBlock = {
         [int]$Hours,
         [int]$SoftwareHours,
         [string]$SharedToken,
-        [bool]$ForceInstall
+        [bool]$ForceInstall,
+        [bool]$RequireHttps,
+        [bool]$AllowHttpFallback,
+        [bool]$RequireSigned
     )
 
     $arguments = @(
@@ -211,6 +231,15 @@ $script:RemoteDeployScriptBlock = {
 
     if ($ForceInstall) {
         $arguments += '-Force'
+    }
+    if ($RequireHttps) {
+        $arguments += '-RequireHttpsSelfUpdate'
+    }
+    if ($AllowHttpFallback) {
+        $arguments += '-AllowHttpSelfUpdateFallback'
+    }
+    if ($RequireSigned) {
+        $arguments += '-RequireSignedSelfUpdate'
     }
 
     # Set as an environment variable on this process rather than passed as

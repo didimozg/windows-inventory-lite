@@ -294,7 +294,7 @@
   }
 
   function loadSettingsSubviewData(subview) {
-    if (subview === 'server') { loadServerSettings(); loadIngestionTokenStatus(); loadOutboundProxySettings(); }
+    if (subview === 'server') { loadServerSettings(); loadIngestionTokenStatus(); loadEnrollmentTokenStatus(); loadClientTokens(); loadOutboundProxySettings(); }
     if (subview === 'windows') { loadWindowsSettings(); loadWsusCabStatus(); loadWsusDownloadSchedule(); }
     if (subview === 'linux') { loadLinuxSettings(); }
     if (subview === 'credentials') { loadClientUpdateCredentials(); loadSoftwareRepositoryCredentials(); loadLinuxUpdateCredentials(); loadLinuxSshToolsStatus(); }
@@ -764,7 +764,16 @@
     if (!firstRow) return null;
     const rowHeight = firstRow.offsetHeight;
     if (!rowHeight) return null;
-    const available = window.innerHeight - tbody.getBoundingClientRect().top - PAGER_RESERVE_PX;
+    // Clamped to 0: getBoundingClientRect().top is viewport-relative and
+    // goes negative once the page is scrolled past the table - e.g. the
+    // user expanded a row's details (state.expandedDetails survives a
+    // re-render, see renderFilteredClientsTable) and scrolled down to read
+    // them. Left unclamped, a poll-triggered re-render firing at that
+    // moment inflates "available" by however far the page is scrolled,
+    // which can produce a page size large enough to fit the entire fleet
+    // on one page until the user scrolls back near the top.
+    const top = Math.max(0, tbody.getBoundingClientRect().top);
+    const available = window.innerHeight - top - PAGER_RESERVE_PX;
     return Math.max(MIN_PAGE_SIZE, Math.floor(available / rowHeight));
   }
 
@@ -2655,10 +2664,29 @@
         if (data.cmdServerUrl) byId('pkgServerUrl').value = data.cmdServerUrl;
         if (data.cmdIntervalHours) byId('pkgIntervalHours').value = data.cmdIntervalHours;
         byId('pkgSharePath').value = data.cmdPackageSharePath || '';
+        applyPackageTokenModeToForm(data);
       })
       .catch(error => {
         byId('pkgStatus').textContent = `Package status unavailable: ${error.message}`;
       });
+  }
+
+  // Shared by loadPackageStatus (initial page load) and savePackageConfig's
+  // own success handler (POST /api/v1/client-package/configure returns this
+  // same status shape) - both need the checkbox/hint to reflect whichever
+  // token mode the package actually ended up in, not just the summary line
+  // renderPackageStatus already covers.
+  function applyPackageTokenModeToForm(data) {
+    byId('pkgUseEnrollmentToken').checked = !!data.cmdUsesEnrollmentToken;
+    byId('pkgUseEnrollmentToken').disabled = !data.enrollmentTokenConfigured && !data.cmdUsesEnrollmentToken;
+    // Fixed, hardcoded strings only (no server-supplied data interpolated) -
+    // innerHTML is safe here and needed to keep the <code> styling the
+    // static markup originally had.
+    byId('pkgTokenModeHint').innerHTML = data.cmdUsesEnrollmentToken
+      ? 'This package uses the Enrollment Token - the deployed client calls the server once to obtain its own real per-machine token, instead of the shared ingestion token ever being embedded here. The client installs to <code>%ProgramData%\\WindowsInventoryLite\\client-data</code>.'
+      : data.enrollmentTokenConfigured
+        ? 'This package embeds the server\'s current shared ingestion token in plaintext - readable by every domain computer if deployed via SYSVOL. Check "Use Enrollment Token" above for a narrower, revocable alternative. The client installs to <code>%ProgramData%\\WindowsInventoryLite\\client-data</code>.'
+        : 'This package embeds the server\'s current shared ingestion token in plaintext - readable by every domain computer if deployed via SYSVOL. Set an Enrollment Token (Settings > Server) for a narrower, revocable alternative. The client installs to <code>%ProgramData%\\WindowsInventoryLite\\client-data</code>.';
   }
 
   function loadLinuxPackageStatus() {
@@ -2738,6 +2766,7 @@
     const serverUrl = byId('pkgServerUrl').value.trim();
     const intervalHours = parseInt(byId('pkgIntervalHours').value, 10) || 6;
     const packageSharePath = byId('pkgSharePath').value.trim();
+    const useEnrollmentToken = byId('pkgUseEnrollmentToken').checked;
     if (!serverUrl) { window.alert('Enter server URL.'); return; }
 
     byId('pkgSaveButton').disabled = true;
@@ -2747,7 +2776,7 @@
       method: 'POST',
       cache: 'no-store',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ serverUrl, intervalHours, packageSharePath })
+      body: JSON.stringify({ serverUrl, intervalHours, packageSharePath, useEnrollmentToken })
     })
       .then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -2756,6 +2785,7 @@
       .then(data => {
         state.packageStatus = data;
         renderPackageStatus(data);
+        applyPackageTokenModeToForm(data);
         showPkgMessage('Configuration saved.', false);
       })
       .catch(error => {
@@ -3343,6 +3373,16 @@
       }
     }
     setStatusDot('statusCertDot', 'statusCertDetail', certOn, certDetail);
+
+    // Both reachable at once means the dashboard and its credentials are
+    // still servable unencrypted on the HTTP port - deliberate and
+    // supported (see docs/threat-model.md's HTTP-recovery guidance), but an
+    // admin who turned HTTPS on expecting HTTP to now be moot should see
+    // that it is not.
+    byId('statusHttpCleartextWarning').classList.toggle('hidden', !(httpOn && httpsOn));
+    if (httpOn && httpsOn) {
+      byId('statusHttpCleartextPort').textContent = data.port;
+    }
   }
 
   function saveInventorySettings() {
@@ -3831,6 +3871,105 @@
       });
   }
 
+  function loadEnrollmentTokenStatus() {
+    fetch('/api/v1/server/enrollment-token', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        byId('enrollmentTokenStatusText').textContent = data.configured
+          ? 'A token is configured - a GPO-deployed client with no ingestion token yet can enroll with it.'
+          : 'No token configured - GPO enrollment is unavailable until one is set via Regenerate.';
+        byId('enrollmentTokenValue').value = data.token || '';
+      })
+      .catch(error => {
+        byId('enrollmentTokenStatusText').textContent = `Status unavailable: ${error.message}`;
+      });
+  }
+
+  // Deliberately does NOT use showSavedMessage - same reasoning as
+  // regenerateIngestionToken: showSavedMessage auto-hides after 30s and its
+  // isError (red) styling would be semantically wrong for a successful
+  // generation, so this sets the message classes directly instead. The
+  // value is also visible in the "Current token" field above (populated by
+  // loadEnrollmentTokenStatus below) for as long as the admin stays on
+  // this page.
+  function regenerateEnrollmentToken() {
+    const confirmed = window.confirm('Regenerate the enrollment token? Any not-yet-enrolled GPO package still has the OLD value baked in and must be rebuilt (New-ClientGpoPackage.ps1 -EnrollmentToken) before it can enroll. Already-enrolled clients are unaffected - they already have their own real per-machine token. This cannot be undone.');
+    if (!confirmed) return;
+
+    byId('enrollmentTokenRegenerateButton').disabled = true;
+
+    fetch('/api/v1/server/enrollment-token/regenerate', { method: 'POST', cache: 'no-store' })
+      .then(response => {
+        if (response.ok) {
+          return response.json().then(data => ({ ok: true, data }));
+        }
+        return response.json()
+          .catch(() => null)
+          .then(data => ({ ok: false, data, statusText: response.statusText }));
+      })
+      .then(({ ok, data, statusText }) => {
+        if (!ok) throw new Error((data && data.error) || statusText || 'Regenerate failed');
+        const messageEl = byId('enrollmentTokenMessage');
+        messageEl.textContent = `Token regenerated: ${data.token}`;
+        messageEl.className = 'pkg-message';
+        loadEnrollmentTokenStatus();
+      })
+      .catch(error => {
+        showSavedMessage(byId('enrollmentTokenMessage'), `Regenerate failed: ${error.message}`, true);
+      })
+      .finally(() => {
+        byId('enrollmentTokenRegenerateButton').disabled = false;
+      });
+  }
+
+  function loadClientTokens() {
+    fetch('/api/v1/client-tokens', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(data => {
+        state.clientTokens = data.tokens || [];
+        renderClientTokens();
+      })
+      .catch(error => {
+        byId('clientTokensBody').innerHTML = `<tr><td colspan="3" class="empty">Per-machine tokens are not available: ${escapeHtml(error.message)}</td></tr>`;
+      });
+  }
+
+  function renderClientTokens() {
+    const items = state.clientTokens || [];
+    const rows = items.map(entry => `<tr>
+      <td>${escapeHtml(entry.computerName)}</td>
+      <td>${escapeHtmlOrEmpty(entry.issuedAtUtc)}</td>
+      <td><button class="danger-button-ghost" type="button" data-revoke-client-token="${escapeHtml(entry.computerName)}">Revoke</button></td>
+    </tr>`);
+
+    byId('clientTokensBody').innerHTML = rows.join('') || '<tr><td colspan="3" class="empty">No machine has enrolled yet.</td></tr>';
+
+    document.querySelectorAll('[data-revoke-client-token]').forEach(button => {
+      button.addEventListener('click', () => revokeClientToken(button.dataset.revokeClientToken));
+    });
+  }
+
+  function revokeClientToken(computerName) {
+    const confirmed = window.confirm(`Revoke the per-machine token for ${computerName}? It will stop authenticating immediately. The machine can re-enroll and receive a fresh token as long as the enrollment token is still configured.`);
+    if (!confirmed) return;
+
+    fetch(`/api/v1/client-tokens/${encodeURIComponent(computerName)}`, { method: 'DELETE', cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        state.clientTokens = (state.clientTokens || []).filter(entry => entry.computerName !== computerName);
+        renderClientTokens();
+      })
+      .catch(error => {
+        window.alert(`Failed to revoke token: ${error.message}`);
+      });
+  }
+
   // Deliberately reads/writes the general settings endpoint, not
   // /api/v1/server/admin-password - that endpoint's Save (changeAdminPassword
   // below) unconditionally requires re-entering the current password and a
@@ -4007,7 +4146,7 @@
         renderDashboardTiles();
       })
       .catch(error => {
-        byId('licensesBody').innerHTML = `<tr><td colspan="7" class="empty">Licenses are not available: ${escapeHtml(error.message)}</td></tr>`;
+        byId('licensesBody').innerHTML = `<tr><td colspan="8" class="empty">Licenses are not available: ${escapeHtml(error.message)}</td></tr>`;
       });
   }
 
@@ -4016,6 +4155,7 @@
     const items = applySort(state.licenses, l => licenseSortValue(l, sortKey), sortDir);
     const rows = items.map(license => {
       const computers = license.computers || [];
+      const detectedComputers = license.detectedComputers || [];
       const licenseId = safeId(license.id);
 
       return `<tr>
@@ -4024,15 +4164,19 @@
       <td>${escapeHtmlOrEmpty(license.license)}</td>
       <td>${escapeHtmlOrEmpty(license.comment)}</td>
       <td>${computers.length}</td>
+      <td><button class="link-button" type="button" data-license-detected="${licenseId}">${detectedComputers.length}</button></td>
       <td><button class="edit-button" type="button" data-edit-license="${escapeHtml(license.id)}">Edit</button></td>
       <td><button class="danger-button-ghost" type="button" data-delete-license="${escapeHtml(license.id)}">Delete</button></td>
     </tr>
     <tr class="details-row hidden" data-license-computers-details="${licenseId}">
-      <td colspan="7"><div class="details"><ul class="computer-list">${computers.map(c => `<li>${escapeHtml(c)}</li>`).join('') || '<li class="empty">No computers linked.</li>'}</ul></div></td>
+      <td colspan="8"><div class="details"><ul class="computer-list">${computers.map(c => `<li>${escapeHtml(c)}</li>`).join('') || '<li class="empty">No computers linked.</li>'}</ul></div></td>
+    </tr>
+    <tr class="details-row hidden" data-license-detected-details="${licenseId}">
+      <td colspan="8"><div class="details"><ul class="computer-list">${detectedComputers.map(c => `<li>${escapeHtml(c)}</li>`).join('') || '<li class="empty">No client currently reports this exact name + key.</li>'}</ul></div></td>
     </tr>`;
     });
 
-    byId('licensesBody').innerHTML = rows.join('') || '<tr><td colspan="7" class="empty">No license records.</td></tr>';
+    byId('licensesBody').innerHTML = rows.join('') || '<tr><td colspan="8" class="empty">No license records.</td></tr>';
 
     document.querySelectorAll('[data-edit-license]').forEach(button => {
       button.addEventListener('click', () => openLicenseForm(button.dataset.editLicense));
@@ -4046,6 +4190,12 @@
         if (row) row.classList.toggle('hidden');
       });
     });
+    document.querySelectorAll('[data-license-detected]').forEach(button => {
+      button.addEventListener('click', () => {
+        const row = document.querySelector(`[data-license-detected-details="${button.dataset.licenseDetected}"]`);
+        if (row) row.classList.toggle('hidden');
+      });
+    });
   }
 
   function openLicenseForm(licenseId, prefill) {
@@ -4056,7 +4206,20 @@
     byId('licenseKey').value = license ? license.license || '' : (prefill && prefill.license) || '';
     byId('licenseComment').value = license ? license.comment || '' : '';
     byId('licenseComputerInput').value = '';
-    state.licenseFormComputers = license ? (license.computers || []).slice() : ((prefill && prefill.computers) || []).slice();
+    // When editing an existing record found via a License-Keys match
+    // (addLicenseKeyToCatalog), prefill.computers is the CURRENT live list of
+    // every machine reporting this exact key - union it into the record's own
+    // saved list instead of discarding it, so re-clicking "Add to licenses"
+    // after a new machine starts reporting the same key actually picks up
+    // that machine instead of silently doing nothing. Never removes a
+    // computer the admin added by hand that isn't currently auto-detected.
+    // openLicenseForSoftware never passes prefill.computers, so this is a
+    // no-op for that entry point.
+    const existingComputers = license ? (license.computers || []) : [];
+    const prefillComputers = (prefill && prefill.computers) || [];
+    state.licenseFormComputers = license
+      ? existingComputers.concat(prefillComputers.filter(c => !existingComputers.includes(c)))
+      : prefillComputers.slice();
     byId('licenseMessage').className = 'pkg-message hidden';
     updateVersionDatalist();
     renderLicenseComputerChips();
@@ -4080,6 +4243,17 @@
   function findLicenseForSoftware(name) {
     const key = value => (value || '').trim().toLowerCase();
     return state.licenses.find(l => key(l.name) === key(name)) || null;
+  }
+
+  // Matched by name AND key, unlike findLicenseForSoftware - a Licenses >
+  // Keys product name (e.g. "Microsoft Windows 10 Pro") commonly has several
+  // DIFFERENT real keys across different machine groups (one per volume
+  // license / retail key / KMS host), so matching by name alone would open
+  // an unrelated existing record for editing and silently discard the new
+  // key and computer list instead of creating a new catalog entry for it.
+  function findLicenseForProductAndKey(name, licenseKey) {
+    const norm = value => (value || '').trim().toLowerCase();
+    return state.licenses.find(l => norm(l.name) === norm(name) && norm(l.license) === norm(licenseKey)) || null;
   }
 
   // Entry point from the Software table: jump to Licenses and open the
@@ -6090,17 +6264,23 @@
     const tableRows = pageItems.map(group => {
       const kmsBadge = group.isKms ? ' <span class="usb-badge" title="This key matches a known Microsoft Generic Volume License Key (GVLK), not a unique retail/MAK key">KMS</span>' : '';
       const primary = group.members[0];
+      // Plain list, no per-row action - matches how Inventory > Hardware/
+      // Software present a grouped row's member machines. Deleting is a
+      // whole-group action (the button below), not a per-machine one.
       const clientItems = group.members.map(member => `<li>
           ${escapeHtml(member.computer)} <small class="mono">${escapeHtml(member.source)}</small>
-          <button class="link-button" type="button" data-delete-license-key data-client-id="${escapeHtml(member.computer)}" data-license-key-index="${member.index}">Delete</button>
         </li>`).join('');
+      const membersJson = escapeHtml(JSON.stringify(group.members.map(member => ({ computer: member.computer, index: member.index }))));
       return `<tr>
         <td>${escapeHtml(group.product)}${kmsBadge}</td>
         <td>
           <button class="link-button" type="button" data-reveal-license-key data-client-id="${escapeHtml(primary.computer)}" data-license-key-index="${primary.index}">•••••• (show)</button>
         </td>
         <td><ul class="license-key-clients">${clientItems}</ul></td>
-        <td><button class="export-button" type="button" data-add-license-key data-client-id="${escapeHtml(primary.computer)}" data-license-key-index="${primary.index}">Add to licenses</button></td>
+        <td>
+          <button class="export-button" type="button" data-add-license-key data-client-id="${escapeHtml(primary.computer)}" data-license-key-index="${primary.index}">Add to licenses</button>
+          <button class="danger-button-ghost" type="button" data-delete-license-key-group data-product="${escapeHtml(group.product)}" data-members="${membersJson}">Delete</button>
+        </td>
       </tr>`;
     });
 
@@ -6110,43 +6290,57 @@
     renderPager('licensesKeysPager', 'licensesKeys', page, totalPages, () => renderLicensesKeysTable());
   }
 
-  function deleteLicenseKey(computerName, index) {
-    if (!computerName) return;
-    const confirmed = window.confirm(`Delete this collected license key for ${computerName}? If the same key is still detectable on that machine, it will be collected again on its next report.`);
+  // Deletes the whole key-group's record in one action - every member
+  // machine's own collected entry for this exact key - rather than one
+  // machine at a time, matching how Add to licenses already treats the
+  // group as a single unit. Each member is a different computer, so
+  // deleting by (computer, index) for every member in parallel is safe:
+  // no two members ever share a computer, so one delete can never shift
+  // the index another in-flight delete in this same batch depends on.
+  function deleteLicenseKeyGroup(members, product) {
+    if (!members || !members.length) return;
+    const names = members.map(member => member.computer).join(', ');
+    const confirmed = window.confirm(`Delete this collected license key (${product}) from all ${members.length} machine(s) that report it - ${names}? Any machine that can still detect it will collect it again on its next report.`);
     if (!confirmed) return;
 
-    fetch(`/api/v1/clients/${encodeURIComponent(computerName)}/license-keys/${index}`, {
-      method: 'DELETE',
-      cache: 'no-store'
-    })
-      .then(response => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const client = state.clients.find(c => c.computerName === computerName);
+    Promise.all(members.map(member =>
+      fetch(`/api/v1/clients/${encodeURIComponent(member.computer)}/license-keys/${member.index}`, {
+        method: 'DELETE',
+        cache: 'no-store'
+      }).then(response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status} for ${member.computer}`);
+        const client = state.clients.find(c => c.computerName === member.computer);
         if (client && Array.isArray(client.licenses)) {
-          client.licenses.splice(index, 1);
+          client.licenses.splice(member.index, 1);
         }
-        // state.revealedLicenseKeys[computerName] is keyed by POSITION in
-        // this client's own licenses array (see its own comment at the
-        // reveal handler) - every entry after the deleted one just shifted
-        // down by one, so the stale cached array would show the WRONG
-        // product's real key at those positions on the very next reveal
-        // (or "Add to licenses", which reads this same cache first).
-        // Dropping it forces a fresh fetch.
-        delete state.revealedLicenseKeys[computerName];
+        // Same reasoning as the single-delete case this replaces: the
+        // revealed-key cache is keyed by position in this client's own
+        // licenses array, so a deletion anywhere in it invalidates the
+        // whole cached array for that computer, not just this one entry.
+        delete state.revealedLicenseKeys[member.computer];
+      })
+    ))
+      .then(() => {
         renderLicensesKeysTable();
       })
       .catch(error => {
-        window.alert(`Failed to delete license key: ${error.message}`);
+        // Some deletes in the batch may have already succeeded (and were
+        // already spliced into state.clients above) before one failed -
+        // re-render so the table reflects that partial result instead of
+        // silently showing stale rows for machines that were in fact removed.
+        window.alert(`Failed to delete one or more license keys: ${error.message}`);
+        renderLicensesKeysTable();
       });
   }
 
   // Jumps to Licenses > Catalog and opens the Add/Edit form prefilled with
   // a detected key's product/key/client list - same navigate-then-open
   // shape as openLicenseForSoftware (Software table's own "License"
-  // button). Matched by product name first: a product that already has a
-  // catalog entry opens that EXISTING record for editing, untouched by the
-  // prefill, rather than silently creating a duplicate - identical to how
-  // openLicenseForSoftware already treats an existing match.
+  // button), but matched by product name AND key (findLicenseForProductAndKey)
+  // rather than name alone - two different real keys commonly share the
+  // same product name here (one per volume license / retail key / KMS
+  // host), and matching by name alone would silently reopen an unrelated
+  // existing record instead of creating a new one for this key.
   function addLicenseKeyToCatalog(product, key, computers) {
     setView('licenses', 'catalog');
     fetch('/api/v1/licenses', { cache: 'no-store' })
@@ -6157,7 +6351,7 @@
       .then(data => {
         state.licenses = data.licenses || [];
         renderLicenses();
-        const existing = findLicenseForSoftware(product);
+        const existing = findLicenseForProductAndKey(product, key);
         openLicenseForm(existing ? existing.id : null, { name: product, license: key, computers });
       })
       .catch(error => {
@@ -6843,9 +7037,15 @@
       return;
     }
 
-    const deleteLicenseKeyBtn = e.target.closest('[data-delete-license-key]');
-    if (deleteLicenseKeyBtn) {
-      deleteLicenseKey(deleteLicenseKeyBtn.dataset.clientId, Number(deleteLicenseKeyBtn.dataset.licenseKeyIndex));
+    const deleteLicenseKeyGroupBtn = e.target.closest('[data-delete-license-key-group]');
+    if (deleteLicenseKeyGroupBtn) {
+      let members = [];
+      try {
+        members = JSON.parse(deleteLicenseKeyGroupBtn.dataset.members);
+      } catch (error) {
+        members = [];
+      }
+      deleteLicenseKeyGroup(members, deleteLicenseKeyGroupBtn.dataset.product);
       return;
     }
 
@@ -7298,6 +7498,7 @@
   byId('adminPasswordSaveButton').addEventListener('click', changeAdminPassword);
   byId('loginLockoutSaveButton').addEventListener('click', saveLoginLockoutSettings);
   byId('ingestionTokenRegenerateButton').addEventListener('click', regenerateIngestionToken);
+  byId('enrollmentTokenRegenerateButton').addEventListener('click', regenerateEnrollmentToken);
   byId('linuxCredsSaveButton').addEventListener('click', saveLinuxUpdateCredentials);
   byId('linuxCredsClearButton').addEventListener('click', clearLinuxUpdateCredentials);
   byId('linuxSshKeyUploadButton').addEventListener('click', uploadLinuxSshKey);

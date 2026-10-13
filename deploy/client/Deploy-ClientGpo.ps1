@@ -19,6 +19,15 @@ param(
     [Parameter()]
     [string]$Token,
 
+    # Same no-[ValidateNotNullOrEmpty()] reasoning as -Token above - this is
+    # reassigned further down from WIL_ENROLLMENT_TOKEN when not supplied
+    # directly. Lets a GPO-deployed client (Install-ClientGpo.cmd, via
+    # New-ClientGpoPackage.ps1) obtain its own real per-machine ingestion
+    # token on first contact instead of embedding the real shared -Token in
+    # a SYSVOL-readable .cmd file - see EnrollClient/docs/threat-model.md.
+    [Parameter()]
+    [string]$EnrollmentToken,
+
     [Parameter()]
     [ValidateRange(1, 24)]
     [int]$IntervalHours = 6,
@@ -44,6 +53,9 @@ param(
 
     [Parameter()]
     [switch]$RequireHttpsSelfUpdate,
+
+    [Parameter()]
+    [switch]$AllowHttpSelfUpdateFallback,
 
     [Parameter()]
     [switch]$RequireSignedSelfUpdate
@@ -83,9 +95,13 @@ function Test-BatchSafeValue {
 if (-not $Token) {
     $Token = $env:WIL_INGESTION_TOKEN
 }
+if (-not $EnrollmentToken) {
+    $EnrollmentToken = $env:WIL_ENROLLMENT_TOKEN
+}
 
 Test-BatchSafeValue -Value $ServerUrl -FieldName 'ServerUrl'
 Test-BatchSafeValue -Value $Token -FieldName 'Token'
+Test-BatchSafeValue -Value $EnrollmentToken -FieldName 'EnrollmentToken'
 Test-BatchSafeValue -Value $InstallPath -FieldName 'InstallPath'
 
 $ServiceName = 'WindowsInventoryLiteClient'
@@ -256,6 +272,7 @@ function Get-DesiredServiceCommand {
         [string]$OutputDirectory,
         [string]$DebugLogPath,
         [switch]$RequireHttpsSelfUpdate,
+        [switch]$AllowHttpSelfUpdateFallback,
         [switch]$RequireSignedSelfUpdate
     )
 
@@ -273,6 +290,9 @@ function Get-DesiredServiceCommand {
     if ($RequireHttpsSelfUpdate) {
         $command += ' --require-https-self-update'
     }
+    if ($AllowHttpSelfUpdateFallback) {
+        $command += ' --allow-http-self-update-fallback'
+    }
     if ($RequireSignedSelfUpdate) {
         $command += ' --require-signed-self-update'
     }
@@ -289,9 +309,39 @@ function Get-DesiredServiceCommand {
 # -ServiceRegistryRoot defaults to the real Services key but is overridable
 # so Pester can point this at a scratch HKCU key instead of writing into
 # live HKLM\SYSTEM\CurrentControlSet\Services during a test run.
+# Pure, directly-testable decision shared by both redeploy paths below (the
+# "already current" branch and the full reinstall branch, which deletes and
+# recreates the whole service key via sc.exe): what ingestion token value
+# should end up written to WIL_INGESTION_TOKEN. An explicit -Token always
+# wins; otherwise whatever is CURRENTLY stored is preserved - never replaced
+# with an empty value just because -Token happened to be omitted this run.
+# This is what keeps a client's own self-learned per-machine ingestion
+# token (ApplyLearnedIngestionToken on the client side, via enrollment)
+# alive across every future redeploy run that doesn't pass -Token - a
+# version-mismatch (every package upgrade, or a client that has since
+# self-updated past the package version) goes through the full-reinstall
+# branch, which deletes the Environment value entirely before recreating
+# it, so the caller must read the current value back BEFORE that delete and
+# pass it in here.
+function Resolve-TokenForRedeploy {
+    param(
+        [string]$ExplicitToken,
+        [string]$CurrentlyStoredToken
+    )
+    if ($ExplicitToken) {
+        return $ExplicitToken
+    }
+    return $CurrentlyStoredToken
+}
+
 function Get-ServiceEnvironmentToken {
     param(
         [string]$ServiceName,
+        # Defaults to the shared ingestion token's variable name so every
+        # existing caller (and the Pester suite) keeps working unchanged;
+        # the "already current" redeploy check below also reads
+        # WIL_ENROLLMENT_TOKEN through this same function.
+        [string]$VariableName = 'WIL_INGESTION_TOKEN',
         [string]$ServiceRegistryRoot = 'HKLM:\SYSTEM\CurrentControlSet\Services'
     )
 
@@ -313,21 +363,29 @@ function Get-ServiceEnvironmentToken {
     if (-not $environment) {
         return ''
     }
+    $prefix = $VariableName + '='
     foreach ($line in $environment) {
-        if ($line -like 'WIL_INGESTION_TOKEN=*') {
-            return $line.Substring('WIL_INGESTION_TOKEN='.Length)
+        if ($line -like ($prefix + '*')) {
+            return $line.Substring($prefix.Length)
         }
     }
     return ''
 }
 
-# Writes the ingestion token into the service's own registry Environment
-# value (a REG_MULTI_SZ the Service Control Manager injects into the process
-# environment at start) instead of the service command line - see
-# Get-DesiredServiceCommand's comment above for why.
+# Writes the ingestion token and/or enrollment token into the service's own
+# registry Environment value (a REG_MULTI_SZ the Service Control Manager
+# injects into the process environment at start) instead of the service
+# command line - see Get-DesiredServiceCommand's comment above for why.
 # HKLM\SYSTEM\CurrentControlSet\Services\<name> subkeys inherit
 # BUILTIN\Users: ReadKey from their parent by default (verified live) - the
 # separate Set-RestrictedServiceRegistryKeyAcl call below closes this.
+#
+# Writes exactly what it is told - -SharedToken/-EnrollmentToken empty means
+# "no such line", not "preserve whatever is there now". A caller that needs
+# to preserve an already-learned value (see the "already current" branch
+# below, which must never blindly wipe a real per-machine token the client
+# learned for itself via enrollment) is responsible for reading the current
+# value first and passing it back through unchanged.
 function Set-ServiceEnvironmentToken {
     param(
         [Parameter(Mandatory = $true)]
@@ -335,12 +393,21 @@ function Set-ServiceEnvironmentToken {
 
         [string]$SharedToken,
 
+        [string]$EnrollmentToken,
+
         [string]$ServiceRegistryRoot = 'HKLM:\SYSTEM\CurrentControlSet\Services'
     )
 
     $servicePath = Join-Path -Path $ServiceRegistryRoot -ChildPath $ServiceName
+    $environmentLines = @()
     if ($SharedToken) {
-        Set-ItemProperty -LiteralPath $servicePath -Name 'Environment' -Value @('WIL_INGESTION_TOKEN=' + $SharedToken) -Type MultiString
+        $environmentLines += ('WIL_INGESTION_TOKEN=' + $SharedToken)
+    }
+    if ($EnrollmentToken) {
+        $environmentLines += ('WIL_ENROLLMENT_TOKEN=' + $EnrollmentToken)
+    }
+    if ($environmentLines.Count -gt 0) {
+        Set-ItemProperty -LiteralPath $servicePath -Name 'Environment' -Value $environmentLines -Type MultiString
     }
     else {
         Remove-ItemProperty -LiteralPath $servicePath -Name 'Environment' -ErrorAction SilentlyContinue
@@ -537,7 +604,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     # at best, an unnecessary forced service stop/reinstall at worst.
     # $null (same as before) when no exe exists yet - the fresh-install case.
     $installedVersion = Get-ExeVersion -Path $servicePath
-    $desiredCommand = Get-DesiredServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SoftwareHours $SoftwareCheckIntervalHours -OutputDirectory $InstallPath -DebugLogPath $debugLogPath -RequireHttpsSelfUpdate:$RequireHttpsSelfUpdate -RequireSignedSelfUpdate:$RequireSignedSelfUpdate
+    $desiredCommand = Get-DesiredServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SoftwareHours $SoftwareCheckIntervalHours -OutputDirectory $InstallPath -DebugLogPath $debugLogPath -RequireHttpsSelfUpdate:$RequireHttpsSelfUpdate -AllowHttpSelfUpdateFallback:$AllowHttpSelfUpdateFallback -RequireSignedSelfUpdate:$RequireSignedSelfUpdate
     $currentCommand = Get-ServiceBinaryPath
     $serviceExists = Test-ServiceExists
     $needsInstall = $Force -or (-not $serviceExists) -or ($packageVersion -ne $installedVersion) -or ($currentCommand -ne $desiredCommand)
@@ -548,12 +615,26 @@ if ($MyInvocation.InvocationName -ne '.') {
 
     if (-not $needsInstall) {
         Write-DeployLog "Client service is already current."
-        # The token lives in the registry Environment value, not the binPath=
+        # The token(s) live in the registry Environment value, not the binPath=
         # command compared above, so a token-only rotation would otherwise go
         # unnoticed here and never reach the service.
-        if ((Get-ServiceEnvironmentToken -ServiceName $ServiceName) -ne [string]$Token) {
-            Write-DeployLog "Updating ingestion token for existing service."
-            Set-ServiceEnvironmentToken -ServiceName $ServiceName -SharedToken $Token
+        #
+        # The ingestion token is only ever overwritten here when -Token was
+        # explicitly supplied and differs from what's stored - never merely
+        # because -Token was left unset. A client deployed with -EnrollmentToken
+        # instead learns its own real per-machine ingestion token on first
+        # contact and persists it into this exact WIL_INGESTION_TOKEN value
+        # (ApplyLearnedIngestionToken); comparing that learned value against
+        # an always-empty $Token on every subsequent redeploy would otherwise
+        # wipe it out on every single run.
+        $currentIngestionToken = Get-ServiceEnvironmentToken -ServiceName $ServiceName -VariableName 'WIL_INGESTION_TOKEN'
+        $currentEnrollmentToken = Get-ServiceEnvironmentToken -ServiceName $ServiceName -VariableName 'WIL_ENROLLMENT_TOKEN'
+        $ingestionTokenToWrite = Resolve-TokenForRedeploy -ExplicitToken $Token -CurrentlyStoredToken $currentIngestionToken
+        $ingestionTokenChanged = $ingestionTokenToWrite -ne $currentIngestionToken
+        $enrollmentTokenChanged = $currentEnrollmentToken -ne [string]$EnrollmentToken
+        if ($ingestionTokenChanged -or $enrollmentTokenChanged) {
+            Write-DeployLog "Updating token(s) for existing service."
+            Set-ServiceEnvironmentToken -ServiceName $ServiceName -SharedToken $ingestionTokenToWrite -EnrollmentToken $EnrollmentToken
             Set-RestrictedServiceRegistryKeyAcl -ServiceName $ServiceName
         }
         $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
@@ -579,6 +660,20 @@ if ($MyInvocation.InvocationName -ne '.') {
         Remove-Item -LiteralPath $legacyInstallPath -Recurse -Force
     }
 
+    # Read back BEFORE the service key is deleted below - this path (any
+    # version mismatch: every package upgrade, or a client that has since
+    # self-updated past the package version) deletes and recreates the
+    # whole service key via sc.exe, which wipes its Environment value
+    # entirely. Without reading this back first, an enrolled client's real
+    # per-machine token (never known to this script's own $Token, which
+    # stays empty in the EnrollmentToken-only flow) would be silently lost
+    # on every such redeploy, forcing a fresh enrollment it never needed.
+    # Safe to call even when the service does not exist yet (fresh
+    # install) - Get-ServiceEnvironmentToken returns '' for a key that was
+    # never there, which Resolve-TokenForRedeploy then correctly falls
+    # through to $Token (also empty in that case) for.
+    $preservedIngestionToken = Resolve-TokenForRedeploy -ExplicitToken $Token -CurrentlyStoredToken (Get-ServiceEnvironmentToken -ServiceName $ServiceName -VariableName 'WIL_INGESTION_TOKEN')
+
     if ($serviceExists) {
         Write-DeployLog "Updating existing client service."
         Invoke-ServiceControl -Arguments @('stop', $ServiceName) -FailureMessage 'Failed to stop existing service.' -AllowedExitCodes @(0, 1062) | Out-Null
@@ -593,7 +688,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     $installedVersion = $packageVersion
 
     Invoke-ServiceCreate -ServiceName $ServiceName -BinPath $desiredCommand -DisplayName 'Windows Inventory Lite' -FailureMessage 'Failed to create service.' | Out-Null
-    Set-ServiceEnvironmentToken -ServiceName $ServiceName -SharedToken $Token
+    Set-ServiceEnvironmentToken -ServiceName $ServiceName -SharedToken $preservedIngestionToken -EnrollmentToken $EnrollmentToken
     Set-RestrictedServiceRegistryKeyAcl -ServiceName $ServiceName
     Invoke-ServiceControl -Arguments @('description', $ServiceName, "Collects Windows, Office, activation, and software inventory for Windows Inventory Lite. Version $installedVersion.") -FailureMessage 'Failed to set service description.' | Out-Null
     Invoke-ServiceControl -Arguments @('start', $ServiceName) -FailureMessage 'Failed to start service.' | Out-Null

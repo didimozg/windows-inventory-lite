@@ -17,6 +17,10 @@ Describe 'Windows Inventory Lite New-ClientGpoPackage batch-injection guard' {
     It 'rejects a PackageSharePath containing a line break' {
         { & $script:ScriptPath -ServerUrl 'https://server/api/v1/inventory' -PackageSharePath "\\share`nmalicious" -OutputPath (Join-Path -Path $TestDrive -ChildPath 'pkg3') -ClientNet35Path 'C:\does-not-exist-35.exe' -ClientNet40Path 'C:\does-not-exist-40.exe' } | Should -Throw '*PackageSharePath*'
     }
+
+    It 'rejects an EnrollmentToken containing an embedded double quote' {
+        { & $script:ScriptPath -ServerUrl 'https://server/api/v1/inventory' -EnrollmentToken 'x" & calc.exe & rem "' -OutputPath (Join-Path -Path $TestDrive -ChildPath 'pkg4') -ClientNet35Path 'C:\does-not-exist-35.exe' -ClientNet40Path 'C:\does-not-exist-40.exe' } | Should -Throw '*EnrollmentToken*'
+    }
 }
 
 Describe 'Windows Inventory Lite New-ClientGpoPackage generated .cmd content' {
@@ -71,5 +75,50 @@ Describe 'Windows Inventory Lite New-ClientGpoPackage generated .cmd content' {
         $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
         $sids = $acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]) }
         $sids | Should -Contain $currentUser
+    }
+
+    # -EnrollmentToken (0.95.0) replaces -Token for a real GPO rollout - see
+    # docs/threat-model.md. Embedded the same way -Token already is, as its
+    # own -EnrollmentToken "..." fragment on the ARGS line.
+    It 'embeds -EnrollmentToken in the generated .cmd ARGS line when supplied' {
+        $outputPath = Join-Path -Path $TestDrive -ChildPath 'pkg-enroll'
+        & $script:ScriptPath -ServerUrl 'https://server/api/v1/inventory' -EnrollmentToken 'bootstrap-secret' -OutputPath $outputPath -ClientNet35Path $script:FakeClientNet35Path -ClientNet40Path $script:FakeClientNet40Path
+
+        $cmdContent = Get-Content -LiteralPath (Join-Path -Path $outputPath -ChildPath 'Install-ClientGpo.cmd') -Raw
+        $cmdContent | Should -Match '-EnrollmentToken "bootstrap-secret"'
+    }
+
+    It 'omits -EnrollmentToken from the generated .cmd ARGS line when not supplied' {
+        $outputPath = Join-Path -Path $TestDrive -ChildPath 'pkg-no-enroll'
+        & $script:ScriptPath -ServerUrl 'https://server/api/v1/inventory' -OutputPath $outputPath -ClientNet35Path $script:FakeClientNet35Path -ClientNet40Path $script:FakeClientNet40Path
+
+        $cmdContent = Get-Content -LiteralPath (Join-Path -Path $outputPath -ChildPath 'Install-ClientGpo.cmd') -Raw
+        $cmdContent | Should -Not -Match '-EnrollmentToken'
+    }
+
+    # Still technically supported (a deliberate admin choice), but a client
+    # starting with a real -Token never calls POST /api/v1/client/enroll
+    # (TryEnrollIfNeededCore returns immediately once Token is non-empty), so
+    # -EnrollmentToken has no effect whenever -Token is also embedded - this
+    # must be loudly warned about, not silently accepted.
+    It 'can embed both -Token and -EnrollmentToken together when both are supplied, but warns that EnrollmentToken will have no effect' {
+        $outputPath = Join-Path -Path $TestDrive -ChildPath 'pkg-both-tokens'
+        $warnings = & $script:ScriptPath -ServerUrl 'https://server/api/v1/inventory' -Token 'real-secret-token' -EnrollmentToken 'bootstrap-secret' -OutputPath $outputPath -ClientNet35Path $script:FakeClientNet35Path -ClientNet40Path $script:FakeClientNet40Path 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
+
+        $cmdContent = Get-Content -LiteralPath (Join-Path -Path $outputPath -ChildPath 'Install-ClientGpo.cmd') -Raw
+        $cmdContent | Should -Match '-Token "real-secret-token"'
+        $cmdContent | Should -Match '-EnrollmentToken "bootstrap-secret"'
+        $warnings | Should -Not -BeNullOrEmpty
+        # Using the WarningRecord's own .Message, not `Out-String` - that
+        # pipes through PowerShell's console formatter, which wraps long
+        # warning text to the host width and can split a word (e.g. "never")
+        # across the inserted line break, breaking a -Match on it.
+        ($warnings | ForEach-Object { $_.Message }) -join ' ' | Should -Match 'never call POST /api/v1/client/enroll'
+    }
+
+    It 'does not warn when only -EnrollmentToken is supplied' {
+        $outputPath = Join-Path -Path $TestDrive -ChildPath 'pkg-enroll-only-no-warn'
+        $warnings = & $script:ScriptPath -ServerUrl 'https://server/api/v1/inventory' -EnrollmentToken 'bootstrap-secret' -OutputPath $outputPath -ClientNet35Path $script:FakeClientNet35Path -ClientNet40Path $script:FakeClientNet40Path 3>&1 | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }
+        $warnings | Should -BeNullOrEmpty
     }
 }

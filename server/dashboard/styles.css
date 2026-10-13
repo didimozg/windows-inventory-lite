@@ -1530,6 +1530,21 @@ tr.usb-row td {
   border-radius: 1px;
 }
 
+/* Reuses the existing USB-badge/.tile-alert amber rather than inventing a
+   new color - same "needs attention, not an error" visual language. Own
+   margin-top (not relying on .status-grid's bottom margin, which it has
+   none of) so it never sits flush against the grid above it regardless of
+   which element happens to be last. */
+.status-warning {
+  margin-top: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border-left: 3px solid var(--usb-border);
+  background: var(--usb-bg);
+  color: var(--usb-text);
+  font-size: var(--font-size-xs);
+  border-radius: 4px;
+}
+
 .hw-section {
   margin-bottom: 24px;
 }

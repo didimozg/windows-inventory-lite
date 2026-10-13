@@ -10,6 +10,21 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$Token,
 
+    # Preferred over -Token for this script specifically: Install-ClientGpo.cmd
+    # is deployed to SYSVOL, which any authenticated domain user can read, so
+    # whatever secret ends up on its ARGS line is effectively public on the
+    # domain for as long as the package stays rolled out. -Token still works
+    # (for an environment not yet using enrollment, or deliberately choosing
+    # not to), but a fresh deployment should use -EnrollmentToken instead: the
+    # deployed client calls POST /api/v1/client/enroll with it to obtain its
+    # own real per-machine token on first contact, so the value that ends up
+    # exposed on SYSVOL is a narrow bootstrap secret, not the same shared
+    # token every other client and integration also relies on. See
+    # EnrollClient/docs/threat-model.md.
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$EnrollmentToken,
+
     [Parameter()]
     [ValidateRange(1, 24)]
     [int]$IntervalHours = 6,
@@ -67,6 +82,7 @@ function Test-BatchSafeValue {
 
 Test-BatchSafeValue -Value $ServerUrl -FieldName 'ServerUrl'
 Test-BatchSafeValue -Value $Token -FieldName 'Token'
+Test-BatchSafeValue -Value $EnrollmentToken -FieldName 'EnrollmentToken'
 Test-BatchSafeValue -Value $PackageSharePath -FieldName 'PackageSharePath'
 
 # Set-RestrictedFileAcl (dot-sourced from WilAclCommon.ps1 above) restricts
@@ -151,8 +167,21 @@ $lines = @(
 )
 
 if ($Token) {
+    # A client only ever attempts enrollment while its own Token is still
+    # empty (Deploy-ClientGpo.ps1/Install-Client.ps1's -EnrollmentToken
+    # handling, TryEnrollIfNeededCore on the client) - embedding both here
+    # means the shared Token wins at install time and EnrollmentToken is
+    # silently never used, defeating the reason to pass it at all.
+    if ($EnrollmentToken) {
+        Write-Warning "Both -Token and -EnrollmentToken were supplied - the generated package's client will start with a real Token and will never call POST /api/v1/client/enroll, so -EnrollmentToken has no effect. Pass only -EnrollmentToken to actually close the SYSVOL plaintext-token exposure (see docs/threat-model.md)."
+    }
     $escapedToken = $Token.Replace('%', '%%')
     $lines += 'set ARGS=%ARGS% -Token "' + $escapedToken + '"'
+}
+
+if ($EnrollmentToken) {
+    $escapedEnrollmentToken = $EnrollmentToken.Replace('%', '%%')
+    $lines += 'set ARGS=%ARGS% -EnrollmentToken "' + $escapedEnrollmentToken + '"'
 }
 
 $lines += ''

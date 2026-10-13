@@ -14,6 +14,17 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$Token,
 
+    # A separate, narrowly-scoped bootstrap secret for a GPO-deployed
+    # client that has no real Token yet - the client calls POST
+    # /api/v1/client/enroll with this to obtain its own real per-machine
+    # Token on first contact, instead of the real shared Token ever being
+    # embedded in a GPO-distributed, SYSVOL-readable .cmd file. Ignored
+    # if -Token is also supplied (a real Token always wins). See
+    # EnrollClient/docs/threat-model.md.
+    [Parameter()]
+    [ValidateNotNullOrEmpty()]
+    [string]$EnrollmentToken,
+
     [Parameter()]
     [ValidateRange(1, 24)]
     [int]$IntervalHours = 6,
@@ -39,6 +50,9 @@ param(
 
     [Parameter()]
     [switch]$RequireHttpsSelfUpdate,
+
+    [Parameter()]
+    [switch]$AllowHttpSelfUpdateFallback,
 
     [Parameter()]
     [switch]$RequireSignedSelfUpdate
@@ -81,6 +95,7 @@ function Test-BatchSafeValue {
 }
 Test-BatchSafeValue -Value $ServerUrl -FieldName 'ServerUrl'
 Test-BatchSafeValue -Value $Token -FieldName 'Token'
+Test-BatchSafeValue -Value $EnrollmentToken -FieldName 'EnrollmentToken'
 Test-BatchSafeValue -Value $ServerSharePath -FieldName 'ServerSharePath'
 Test-BatchSafeValue -Value $InstallPath -FieldName 'InstallPath'
 
@@ -194,6 +209,7 @@ function Get-ClientServiceCommand {
         [string]$OutputDirectory,
         [string]$DebugLogPath,
         [switch]$RequireHttpsSelfUpdate,
+        [switch]$AllowHttpSelfUpdateFallback,
         [switch]$RequireSignedSelfUpdate
     )
 
@@ -212,6 +228,9 @@ function Get-ClientServiceCommand {
     $command += ' --debug-log-path "' + (ConvertTo-ServiceArgValue $DebugLogPath) + '"'
     if ($RequireHttpsSelfUpdate) {
         $command += ' --require-https-self-update'
+    }
+    if ($AllowHttpSelfUpdateFallback) {
+        $command += ' --allow-http-self-update-fallback'
     }
     if ($RequireSignedSelfUpdate) {
         $command += ' --require-signed-self-update'
@@ -246,12 +265,26 @@ function Set-ServiceEnvironmentToken {
 
         [string]$SharedToken,
 
+        # Written alongside WIL_INGESTION_TOKEN as its own Environment line
+        # - the client reads it only once, to enroll and obtain a real
+        # per-machine token, then persists that real token itself (see
+        # ApplyLearnedIngestionToken on the client side) without ever
+        # needing this value again.
+        [string]$EnrollmentToken,
+
         [string]$ServiceRegistryRoot = 'HKLM:\SYSTEM\CurrentControlSet\Services'
     )
 
     $servicePath = Join-Path -Path $ServiceRegistryRoot -ChildPath $ServiceName
+    $environmentLines = @()
     if ($SharedToken) {
-        Set-ItemProperty -LiteralPath $servicePath -Name 'Environment' -Value @('WIL_INGESTION_TOKEN=' + $SharedToken) -Type MultiString
+        $environmentLines += ('WIL_INGESTION_TOKEN=' + $SharedToken)
+    }
+    if ($EnrollmentToken) {
+        $environmentLines += ('WIL_ENROLLMENT_TOKEN=' + $EnrollmentToken)
+    }
+    if ($environmentLines.Count -gt 0) {
+        Set-ItemProperty -LiteralPath $servicePath -Name 'Environment' -Value $environmentLines -Type MultiString
     }
     else {
         Remove-ItemProperty -LiteralPath $servicePath -Name 'Environment' -ErrorAction SilentlyContinue
@@ -425,10 +458,10 @@ if ($MyInvocation.InvocationName -ne '.') {
     # abort mid-install with no way back except a fresh reinstall.
     $clientVersion = (& $servicePath --version 2>$null | Select-Object -First 1)
 
-    $serviceCommand = Get-ClientServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SoftwareHours $SoftwareCheckIntervalHours -SharePath $ServerSharePath -OutputDirectory $InstallPath -DebugLogPath $debugLogPath -RequireHttpsSelfUpdate:$RequireHttpsSelfUpdate -RequireSignedSelfUpdate:$RequireSignedSelfUpdate
+    $serviceCommand = Get-ClientServiceCommand -ServicePath $servicePath -Url $ServerUrl -Hours $IntervalHours -SoftwareHours $SoftwareCheckIntervalHours -SharePath $ServerSharePath -OutputDirectory $InstallPath -DebugLogPath $debugLogPath -RequireHttpsSelfUpdate:$RequireHttpsSelfUpdate -AllowHttpSelfUpdateFallback:$AllowHttpSelfUpdateFallback -RequireSignedSelfUpdate:$RequireSignedSelfUpdate
 
     Invoke-ServiceCreate -ServiceName $serviceName -BinPath $serviceCommand -DisplayName 'Windows Inventory Lite' -FailureMessage "Failed to create service. Run PowerShell as Administrator." | Out-Null
-    Set-ServiceEnvironmentToken -ServiceName $serviceName -SharedToken $Token
+    Set-ServiceEnvironmentToken -ServiceName $serviceName -SharedToken $Token -EnrollmentToken $EnrollmentToken
     Set-RestrictedServiceRegistryKeyAcl -ServiceName $serviceName
     Invoke-ServiceControl -Arguments @('description', $serviceName, "Collects Windows, Office, activation, and software inventory for Windows Inventory Lite. Version $clientVersion.") -FailureMessage "Failed to set service description." | Out-Null
     Write-Host "Service created: $serviceName"

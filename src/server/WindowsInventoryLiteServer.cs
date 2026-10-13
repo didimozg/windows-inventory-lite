@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "0.92.2";
+        internal const string ProductVersion = "1.0.0";
 
         private static int Main(string[] args)
         {
@@ -179,6 +179,14 @@ namespace WindowsInventoryLite
         public int LinuxUpdateScheduleIntervalHours;
         public string LinuxUpdateScheduleLastRunUtc;
         public string Token;
+        // Low-privilege, narrowly-scoped bootstrap credential, separate from
+        // Token - accepted ONLY by POST /api/v1/client/enroll (see
+        // EnrollClient), never for inventory ingestion or any other
+        // endpoint. Lets a GPO-distributed client obtain a real, usable
+        // per-machine token on first contact without the real shared Token
+        // ever having to be embedded in a SYSVOL-readable file. See
+        // docs/threat-model.md.
+        public string EnrollmentToken;
         public string WebUsername;
         public string WebPassword;
         // Dashboard-only (Settings > Admin password > Login lockout), no
@@ -527,6 +535,10 @@ namespace WindowsInventoryLite
                 {
                     options.Token = args[++i];
                 }
+                else if (key == "--enrollment-token" && i + 1 < args.Length)
+                {
+                    options.EnrollmentToken = args[++i];
+                }
                 else if (key == "--web-username" && i + 1 < args.Length)
                 {
                     options.WebUsername = args[++i];
@@ -644,6 +656,10 @@ namespace WindowsInventoryLite
                 if (String.IsNullOrEmpty(options.Token))
                 {
                     options.Token = SecretProtector.Unprotect(GetConfigString(config, "Token"));
+                }
+                if (String.IsNullOrEmpty(options.EnrollmentToken))
+                {
+                    options.EnrollmentToken = SecretProtector.Unprotect(GetConfigString(config, "EnrollmentToken"));
                 }
                 options.RequireIngestionToken = ResolveRequireIngestionToken(GetConfigString(config, "RequireIngestionToken"), !String.IsNullOrEmpty(options.Token));
                 if (String.IsNullOrEmpty(options.WebUsername))
@@ -1412,6 +1428,32 @@ namespace WindowsInventoryLite
         private volatile string lastScheduledUpdateJobId;
         private volatile string lastScheduledLinuxUpdateJobId;
         private readonly object licensesLock = new object();
+        private readonly object clientTokensLock = new object();
+        // Lazily-built, invalidated on every SaveClientTokens call (enroll,
+        // revoke) - maps each stored per-machine token's own PLAINTEXT value
+        // to its computerName, so IsPerMachineTokenValid's lookup is one
+        // dictionary probe instead of a full-list decrypt-and-compare scan.
+        // Found and fixed as a real resource-exhaustion path during review,
+        // before this shipped: every request from an enrolled client takes
+        // that fallback path (it never holds the shared token), so the
+        // previous linear-scan-plus-DPAPI-decrypt-per-record cost was paid
+        // on every single one of those requests, serialized under
+        // clientTokensLock - an attacker able to enroll a large number of
+        // fake computerNames (the already-accepted residual risk of holding
+        // EnrollmentToken) could make that cost arbitrarily large.
+        //
+        // Looking up by the plaintext value in a Dictionary (ordinal string
+        // hashing, not FixedTimeEquals) trades strict constant-time
+        // comparison for O(1) lookup - a deliberate choice given these are
+        // 256-bit values from GenerateRandomToken (RandomNumberGenerator):
+        // .NET randomizes string hash seeding per process by default, and
+        // engineering a practical timing attack against a hash-bucket lookup
+        // over that large a token space is not a realistic threat here,
+        // unlike the single fixed shared Token comparison (which still uses
+        // FixedTimeEquals, since that one DOES get compared against the same
+        // fixed value on every single request - a meaningfully different
+        // exposure).
+        private Dictionary<string, string> clientTokenIndex;
         private readonly object licenseKeySourcesLock = new object();
         private readonly object windowsUpdatesLock = new object();
         private readonly object wsusKbDownloadTriggerLock = new object();
@@ -2632,6 +2674,13 @@ namespace WindowsInventoryLite
                     {
                         SendSoftwareRepositoryConnectionInfo(stream, request);
                     }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/client/enroll")
+                    {
+                        // Authenticated by its own EnrollmentToken check inside EnrollClient,
+                        // not by IsWebRequestAuthorized below - a GPO-deployed client calling
+                        // this has no dashboard session and never will.
+                        EnrollClient(stream, request);
+                    }
                     else if (request.Method == "GET" && request.Path.StartsWith("/api/v1/client-package/update-download", StringComparison.OrdinalIgnoreCase))
                     {
                         DownloadClientPackageUpdate(stream, request);
@@ -2853,6 +2902,14 @@ namespace WindowsInventoryLite
                     {
                         RegenerateIngestionToken(stream, request);
                     }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/server/enrollment-token")
+                    {
+                        SendEnrollmentTokenStatus(stream);
+                    }
+                    else if (request.Method == "POST" && request.Path == "/api/v1/server/enrollment-token/regenerate")
+                    {
+                        RegenerateEnrollmentToken(stream, request);
+                    }
                     else if (request.Method == "GET" && request.Path == "/api/v1/server/ingestion-rejections")
                     {
                         SendIngestionRejectionLog(stream);
@@ -2868,6 +2925,14 @@ namespace WindowsInventoryLite
                     else if (request.Method == "DELETE" && request.Path == "/api/v1/server/debug-log")
                     {
                         ClearDebugLog(stream);
+                    }
+                    else if (request.Method == "GET" && request.Path == "/api/v1/client-tokens")
+                    {
+                        SendClientTokens(stream);
+                    }
+                    else if (request.Method == "DELETE" && request.Path.StartsWith("/api/v1/client-tokens/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        DeleteClientToken(stream, request);
                     }
                     else if (request.Method == "GET" && request.Path == "/api/v1/licenses")
                     {
@@ -3178,6 +3243,35 @@ namespace WindowsInventoryLite
             {
                 return null;
             }
+            // Lets a client whose own ServerUrl is still http (installed
+            // before a certificate existed) opportunistically retry its
+            // self-update download over https instead, on whichever port
+            // HTTPS is actually listening on right now - without this, a
+            // client deployed pre-HTTPS would need its ServerUrl manually
+            // reconfigured on every machine before --require-https-self-update
+            // could ever work for it again. Omitted entirely when HTTPS isn't
+            // active, matching every other optional ack field's own
+            // absent-means-unavailable convention. This does NOT let a
+            // compromised server weaken a client's own security posture -
+            // whether a client enforces or merely prefers HTTPS, and whether
+            // it's allowed to fall back to http at all, stays a client-side,
+            // install-time choice (see ClientOptions.RequireHttpsForSelfUpdate's
+            // own comment) - a forged value here just makes the opportunistic
+            // TLS attempt fail closed, the same as it would against any other
+            // untrusted endpoint.
+            // httpsSlot.Running, not options.UseHttps - the config flag can
+            // be true while the listener itself never actually bound (no
+            // certificate configured yet, a bind failure logged at startup,
+            // etc; see Start()/ApplySlotState). Advertising a port nothing
+            // is listening on would send every opportunistic-HTTPS self-update
+            // attempt into a guaranteed connection failure every single
+            // cycle instead of correctly falling back (or refusing,
+            // depending on --allow-http-self-update-fallback) the same way
+            // "no httpsPort advertised at all" already does.
+            if (httpsSlot.Running)
+            {
+                updateInfo["httpsPort"] = options.HttpsPort;
+            }
             // Also emit the old shared "version" key, alongside the correct
             // per-target ones above - a real regression, caught live against
             // a real fleet client still on the client build that shipped
@@ -3213,7 +3307,7 @@ namespace WindowsInventoryLite
         private void ReceiveInventory(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            if (IsClientTokenRejected(options.RequireIngestionToken, token))
             {
                 RecordIngestionRejection(request, "windows-inventory", ResolveIngestionRejectionReason(token));
                 DebugLogger.Log(options, "Client", "Rejected inventory report: invalid or missing token");
@@ -3373,10 +3467,10 @@ namespace WindowsInventoryLite
             // SendThirdPartySoftwareJobs. A
             // caller with no valid token still gets its report accepted; it
             // just never receives this catalog.
-            if (!IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            if (!IsClientTokenRejected(true, token))
             {
                 ackResponse["licenseKeySources"] = BuildLicenseKeySourcesForClientResponse();
-                if (AuthenticatedWithPreviousToken(token, options.Token))
+                if (AuthenticatedWithPreviousToken(token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
                 {
                     configResponse["ingestionToken"] = options.Token;
                 }
@@ -3426,7 +3520,7 @@ namespace WindowsInventoryLite
             // open. Passing true also makes IsIngestionTokenRejected fail
             // closed when no Token is configured at all, so an unconfigured
             // server rejects instead of publishing the credential.
-            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            if (IsClientTokenRejected(true, token))
             {
                 RecordIngestionRejection(request, "software-repository-connection", ResolveIngestionRejectionReason(token));
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -3451,7 +3545,7 @@ namespace WindowsInventoryLite
             // for any computer name the caller names, which is a map of what
             // is about to be executed where; that is not covered by the
             // low-sensitivity risk model that toggle was designed around.
-            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            if (IsClientTokenRejected(true, token))
             {
                 RecordIngestionRejection(request, "windows-update-jobs", ResolveIngestionRejectionReason(token));
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -3531,7 +3625,7 @@ namespace WindowsInventoryLite
             // for any computer name the caller names, which is a map of what
             // is about to be executed where; that is not covered by the
             // low-sensitivity risk model that toggle was designed around.
-            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            if (IsClientTokenRejected(true, token))
             {
                 RecordIngestionRejection(request, "third-party-software-jobs", ResolveIngestionRejectionReason(token));
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -3840,7 +3934,7 @@ namespace WindowsInventoryLite
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
             // Same unconditional gate as ReceiveSoftwareJobResults - this
             // writes into the same fleet-wide attempt-history log.
-            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            if (IsClientTokenRejected(true, token))
             {
                 RecordIngestionRejection(request, "software-job-start", ResolveIngestionRejectionReason(token));
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -3903,7 +3997,7 @@ namespace WindowsInventoryLite
             // attempt-history log, so leaving it open lets anyone who can
             // reach the port forge or flood the only record an admin has of
             // what actually ran where.
-            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            if (IsClientTokenRejected(true, token))
             {
                 RecordIngestionRejection(request, "software-job-results", ResolveIngestionRejectionReason(token));
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -4042,7 +4136,7 @@ namespace WindowsInventoryLite
         private void ReceiveWsusScanResults(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            if (IsClientTokenRejected(true, token))
             {
                 RecordIngestionRejection(request, "wsus-scan-results", ResolveIngestionRejectionReason(token));
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -4907,7 +5001,7 @@ namespace WindowsInventoryLite
         private void ReceiveLinuxInventory(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            if (IsClientTokenRejected(options.RequireIngestionToken, token))
             {
                 RecordIngestionRejection(request, "linux-inventory", ResolveIngestionRejectionReason(token));
                 DebugLogger.Log(options, "Client", "Rejected Linux inventory report: invalid or missing token");
@@ -4998,9 +5092,9 @@ namespace WindowsInventoryLite
             // unauthenticated (no or garbage token) request while a real
             // token stays configured; without this guard that caller would
             // receive the real, current secret token in this field.
-            if (!IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            if (!IsClientTokenRejected(true, token))
             {
-                if (AuthenticatedWithPreviousToken(token, options.Token))
+                if (AuthenticatedWithPreviousToken(token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
                 {
                     configResponse["ingestionToken"] = options.Token;
                 }
@@ -5028,7 +5122,7 @@ namespace WindowsInventoryLite
         private void ReceiveLinuxServiceStatus(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (IsIngestionTokenRejected(options.RequireIngestionToken, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            if (IsClientTokenRejected(options.RequireIngestionToken, token))
             {
                 RecordIngestionRejection(request, "linux-service-status", ResolveIngestionRejectionReason(token));
                 DebugLogger.Log(options, "Client", "Rejected Linux service-status report: invalid or missing token");
@@ -8309,7 +8403,13 @@ namespace WindowsInventoryLite
                 string right = value.Substring(dash + 1);
                 IPAddress leftAddress;
                 IPAddress rightAddress;
-                if (IPAddress.TryParse(left, out leftAddress))
+                // Require a dot in the side(s) expected to be a dotted-quad before
+                // calling IPAddress.TryParse - .NET Framework's legacy parser also
+                // accepts a bare non-dotted number (e.g. "5" -> 0.0.0.5), which would
+                // otherwise let a plain hyphenated hostname like "5-10" silently
+                // expand into a run of bogus 0.0.0.x addresses instead of being
+                // treated as one target.
+                if (left.IndexOf('.') >= 0 && IPAddress.TryParse(left, out leftAddress))
                 {
                     string[] leftParts = left.Split('.');
                     int start;
@@ -8329,7 +8429,7 @@ namespace WindowsInventoryLite
                     }
                 }
 
-                if (IPAddress.TryParse(left, out leftAddress) && IPAddress.TryParse(right, out rightAddress))
+                if (left.IndexOf('.') >= 0 && right.IndexOf('.') >= 0 && IPAddress.TryParse(left, out leftAddress) && IPAddress.TryParse(right, out rightAddress))
                 {
                     byte[] lb = leftAddress.GetAddressBytes();
                     byte[] rb = rightAddress.GetAddressBytes();
@@ -9358,15 +9458,28 @@ namespace WindowsInventoryLite
             return true;
         }
 
-        // A request that reached here already passed IsIngestionTokenRejected
-        // (i.e. it was accepted) - if it doesn't match the CURRENT token, the
-        // only other way IsIngestionTokenRejected returns false is a match on
-        // PreviousToken, so "not current" is a sound proxy for "used the
-        // previous, still-in-its-overlap-window token" without needing
-        // IsIngestionTokenRejected itself to report which branch matched.
-        private static bool AuthenticatedWithPreviousToken(string suppliedToken, string configuredToken)
+        // Used by ReceiveInventory/ReceiveLinuxInventory to decide whether to
+        // hand the caller the current token in its ack (so an already-deployed
+        // client picks up a just-regenerated token via its own next report,
+        // instead of needing per-machine reconfiguration). Must check the
+        // actual PreviousToken directly, by value - NOT infer "used the
+        // previous token" from "didn't match the current one". That inference
+        // used to be sound back when the only two ways past the caller's own
+        // token-acceptance check were "matches current" or "matches previous"
+        // (IsIngestionTokenRejected's only two accept branches). It stopped
+        // being sound once IsClientTokenRejected added a THIRD accept path -
+        // a per-machine enrollment token, which never equals options.Token
+        // either. Without this direct check, a client authenticated with its
+        // own per-machine token would satisfy "not current" and be handed the
+        // real shared Token in its ack - permanently overwriting its
+        // per-machine token with the shared one on its very next report,
+        // defeating the whole point of per-machine tokens.
+        private static bool AuthenticatedWithPreviousToken(string suppliedToken, string previousToken, DateTime? previousTokenExpiresUtc)
         {
-            return !FixedTimeEquals(suppliedToken, configuredToken);
+            return !String.IsNullOrEmpty(previousToken)
+                && previousTokenExpiresUtc.HasValue
+                && DateTime.UtcNow < previousTokenExpiresUtc.Value
+                && FixedTimeEquals(suppliedToken, previousToken);
         }
 
         private static bool IsStateChangingMethod(string method)
@@ -9581,7 +9694,12 @@ namespace WindowsInventoryLite
                         if (!license.ContainsKey("key")) continue;
                         string decryptedKey = SecretProtector.Unprotect(Convert.ToString(license["key"]));
                         if (String.IsNullOrEmpty(decryptedKey)) continue;
-                        string product = GetStringValue(license, "product") ?? "";
+                        // Trimmed so incidental whitespace in one machine's
+                        // registry-sourced key/product text doesn't silently
+                        // prevent it from grouping with an otherwise-identical
+                        // key reported by another machine.
+                        decryptedKey = decryptedKey.Trim();
+                        string product = (GetStringValue(license, "product") ?? "").Trim();
                         string groupKey = product + "\u001f" + decryptedKey;
                         List<string> computers;
                         if (!groups.TryGetValue(groupKey, out computers))
@@ -9679,7 +9797,8 @@ namespace WindowsInventoryLite
                                 string decryptedKeyForGrouping = SecretProtector.Unprotect(Convert.ToString(license["key"]));
                                 if (!String.IsNullOrEmpty(decryptedKeyForGrouping))
                                 {
-                                    string entryProduct = GetStringValue(license, "product") ?? "";
+                                    decryptedKeyForGrouping = decryptedKeyForGrouping.Trim();
+                                    string entryProduct = (GetStringValue(license, "product") ?? "").Trim();
                                     string groupKey = entryProduct + "\u001f" + decryptedKeyForGrouping;
                                     List<string> sharedWith;
                                     if (sharedActivationKeyGroups.TryGetValue(groupKey, out sharedWith) && sharedWith.Count > 1)
@@ -10701,6 +10820,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 result["cmdServerUrl"] = cmdSettings.ContainsKey("serverUrl") ? (object)cmdSettings["serverUrl"] : null;
                 result["cmdIntervalHours"] = cmdSettings.ContainsKey("intervalHours") ? (object)cmdSettings["intervalHours"] : (object)"6";
                 result["cmdToken"] = cmdSettings.ContainsKey("token") ? (object)cmdSettings["token"] : null;
+                // Never the enrollment token's own value - same "admin
+                // doesn't need to see it here" reasoning as everywhere else
+                // on this API; just whether the package currently embeds one
+                // instead of the shared Token (drives the dashboard's
+                // "Use Enrollment Token" checkbox state).
+                result["cmdUsesEnrollmentToken"] = cmdSettings.ContainsKey("enrollmentToken");
                 result["cmdPackageSharePath"] = cmdSettings.ContainsKey("packageSharePath") ? (object)cmdSettings["packageSharePath"] : null;
             }
             else
@@ -10714,8 +10839,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 result["cmdServerUrl"] = null;
                 result["cmdIntervalHours"] = "6";
                 result["cmdToken"] = null;
+                result["cmdUsesEnrollmentToken"] = false;
                 result["cmdPackageSharePath"] = null;
             }
+            result["enrollmentTokenConfigured"] = !String.IsNullOrEmpty(options.EnrollmentToken);
 
             SendJson(stream, serializer.Serialize(result));
         }
@@ -10744,7 +10871,23 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return;
             }
             string serverUrl = Convert.ToString(payload.ContainsKey("serverUrl") ? payload["serverUrl"] : "");
-            string token = ResolveEffectiveToken(Convert.ToString(payload.ContainsKey("token") ? payload["token"] : ""), options.Token);
+            // Mutually exclusive: a client only ever attempts enrollment
+            // while its own Token is still empty (TryEnrollIfNeededCore), so
+            // a package can only usefully embed one or the other - never
+            // both. Default (useEnrollmentToken absent/false) keeps today's
+            // exact behavior: embed the live shared ingestion token.
+            bool useEnrollmentToken = payload.ContainsKey("useEnrollmentToken") && Convert.ToBoolean(payload["useEnrollmentToken"]);
+            string token = useEnrollmentToken ? null : ResolveEffectiveToken(Convert.ToString(payload.ContainsKey("token") ? payload["token"] : ""), options.Token);
+            string enrollmentToken = null;
+            if (useEnrollmentToken)
+            {
+                if (String.IsNullOrEmpty(options.EnrollmentToken))
+                {
+                    SendText(stream, "{\"error\":\"No enrollment token is configured yet - set one on Settings > Server > Enrollment Token first.\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                enrollmentToken = options.EnrollmentToken;
+            }
             // Only when the GPO startup script and the package files (client
             // exes, Deploy-ClientGpo.ps1) are deployed to different
             // locations - e.g. the script runs from SYSVOL but the files
@@ -10776,7 +10919,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             string[] cmdLines;
             try
             {
-                cmdLines = GenerateCmdLines(serverUrl, token, intervalHours, packageSharePath);
+                cmdLines = GenerateCmdLines(serverUrl, token, intervalHours, packageSharePath, enrollmentToken);
             }
             catch (ArgumentException ex)
             {
@@ -10786,10 +10929,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
             string cmdPath = Path.Combine(options.ClientPackagePath, "Install-ClientGpo.cmd");
             File.WriteAllLines(cmdPath, cmdLines, Encoding.ASCII);
-            // Holds the ingestion token in plaintext (GenerateCmdLines embeds
-            // it in a "set ARGS=... -Token '<value>'" line) - same reasoning
-            // as ConfigureLinuxClientPackage's wil-linux-client.env/
-            // linux-package-settings.json calls.
+            // Holds a secret in plaintext (GenerateCmdLines embeds it in a
+            // "set ARGS=... -Token/-EnrollmentToken '<value>'" line) - same
+            // reasoning as ConfigureLinuxClientPackage's
+            // wil-linux-client.env/linux-package-settings.json calls.
             ApplyRestrictedConfigAcl(cmdPath);
 
             string deployInBin = Path.Combine(Path.GetDirectoryName(options.WinRmInstallerPath), "Deploy-ClientGpo.ps1");
@@ -10863,7 +11006,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         private void DownloadClientPackageUpdate(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            if (IsClientTokenRejected(true, token))
             {
                 RecordIngestionRejection(request, "client-package-update-download", ResolveIngestionRejectionReason(token));
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -10909,7 +11052,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         private void DownloadLinuxClientPackageUpdate(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            if (IsClientTokenRejected(true, token))
             {
                 RecordIngestionRejection(request, "linux-client-package-update-download", ResolveIngestionRejectionReason(token));
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -10935,7 +11078,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         private void DownloadWsusCab(Stream stream, RequestContext request)
         {
             string token = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
-            if (IsIngestionTokenRejected(true, token, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            if (IsClientTokenRejected(true, token))
             {
                 RecordIngestionRejection(request, "wsus-cab-download", ResolveIngestionRejectionReason(token));
                 SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
@@ -12659,6 +12802,19 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
 
             Dictionary<string, string> updates = new Dictionary<string, string>();
+            // Every field below queues its real mutation here instead of applying
+            // it immediately, and the queue only runs once EVERY field in this
+            // request - including the HTTPS/HTTP bind attempts further down,
+            // physically relocated to run last - has validated/applied
+            // successfully. Previously a later field's validation failure could
+            // leave an earlier field's value already changed in memory (via
+            // options.X) with nothing persisted to config.json, reverting
+            // silently on the next restart. Validation itself still runs in the
+            // exact same order/position as before (so which error wins when
+            // multiple fields are invalid in one request is unchanged) - only
+            // the moment each field's value actually takes effect moves to the
+            // end.
+            List<Action> pendingApply = new List<Action>();
 
             if (payload.ContainsKey("staleHours"))
             {
@@ -12668,8 +12824,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     SendText(stream, "{\"error\":\"staleHours must be between 1 and 8760\"}", "application/json; charset=utf-8", 400);
                     return;
                 }
-                options.StaleHours = staleHours;
-                updates["StaleHours"] = staleHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                pendingApply.Add(() =>
+                {
+                    options.StaleHours = staleHours;
+                    updates["StaleHours"] = staleHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
             }
 
             if (payload.ContainsKey("installLogRetentionDays"))
@@ -12680,8 +12839,11 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     SendText(stream, "{\"error\":\"installLogRetentionDays must be between 1 and 3650\"}", "application/json; charset=utf-8", 400);
                     return;
                 }
-                options.InstallLogRetentionDays = installLogRetentionDays;
-                updates["InstallLogRetentionDays"] = installLogRetentionDays.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                pendingApply.Add(() =>
+                {
+                    options.InstallLogRetentionDays = installLogRetentionDays;
+                    updates["InstallLogRetentionDays"] = installLogRetentionDays.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
             }
 
             // HTTP and HTTPS are validated together, not field-by-field, because
@@ -12789,8 +12951,554 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 }
             }
 
-            // HTTPS is applied before HTTP, not just validated before HTTP -
-            // deliberately, and in this order for a reason: the dashboard's
+            // HTTPS/HTTP are not applied here - their actual bind attempts are
+            // physically relocated to the end of this function (see the comment
+            // there) since ApplySlotState is the one operation in this whole
+            // endpoint that can only discover failure by actually trying it
+            // against the live listeners. Deferring it until every other field
+            // has already validated means a failed bind is still the last thing
+            // that can go wrong, exactly as before, but no other field's value
+            // can be silently applied-then-lost if THIS fails.
+
+            if (payload.ContainsKey("hstsEnabled"))
+            {
+                bool hstsEnabled = Convert.ToBoolean(payload["hstsEnabled"]);
+                pendingApply.Add(() =>
+                {
+                    options.HstsEnabled = hstsEnabled;
+                    updates["HstsEnabled"] = options.HstsEnabled ? "true" : "false";
+                });
+            }
+            if (payload.ContainsKey("enableWindowsClientSelfUpdate"))
+            {
+                bool enableWindowsClientSelfUpdate = Convert.ToBoolean(payload["enableWindowsClientSelfUpdate"]);
+                pendingApply.Add(() =>
+                {
+                    options.EnableWindowsClientSelfUpdate = enableWindowsClientSelfUpdate;
+                    updates["EnableWindowsClientSelfUpdate"] = options.EnableWindowsClientSelfUpdate ? "true" : "false";
+                });
+            }
+            if (payload.ContainsKey("autoCreateWindowsUpdateCatalogEntries"))
+            {
+                bool autoCreateWindowsUpdateCatalogEntries = Convert.ToBoolean(payload["autoCreateWindowsUpdateCatalogEntries"]);
+                pendingApply.Add(() =>
+                {
+                    options.AutoCreateWindowsUpdateCatalogEntries = autoCreateWindowsUpdateCatalogEntries;
+                    updates["AutoCreateWindowsUpdateCatalogEntries"] = options.AutoCreateWindowsUpdateCatalogEntries ? "true" : "false";
+                });
+            }
+            if (payload.ContainsKey("autoCreateOnlyCriticalKbs"))
+            {
+                bool autoCreateOnlyCriticalKbs = Convert.ToBoolean(payload["autoCreateOnlyCriticalKbs"]);
+                pendingApply.Add(() =>
+                {
+                    options.AutoCreateOnlyCriticalKbs = autoCreateOnlyCriticalKbs;
+                    updates["AutoCreateOnlyCriticalKbs"] = options.AutoCreateOnlyCriticalKbs ? "true" : "false";
+                });
+            }
+            if (payload.ContainsKey("enableLinuxClientSelfUpdate"))
+            {
+                bool enableLinuxClientSelfUpdate = Convert.ToBoolean(payload["enableLinuxClientSelfUpdate"]);
+                pendingApply.Add(() =>
+                {
+                    options.EnableLinuxClientSelfUpdate = enableLinuxClientSelfUpdate;
+                    updates["EnableLinuxClientSelfUpdate"] = options.EnableLinuxClientSelfUpdate ? "true" : "false";
+                });
+            }
+
+            if (payload.ContainsKey("showUsbStorageIndicator"))
+            {
+                bool showUsbStorageIndicator = Convert.ToBoolean(payload["showUsbStorageIndicator"]);
+                pendingApply.Add(() =>
+                {
+                    options.ShowUsbStorageIndicator = showUsbStorageIndicator;
+                    updates["ShowUsbStorageIndicator"] = options.ShowUsbStorageIndicator ? "true" : "false";
+                });
+            }
+
+            if (payload.ContainsKey("hstsMaxAgeHours"))
+            {
+                int hstsMaxAgeHours;
+                if (!Int32.TryParse(Convert.ToString(payload["hstsMaxAgeHours"]), out hstsMaxAgeHours) || hstsMaxAgeHours < 1 || hstsMaxAgeHours > 8760)
+                {
+                    SendText(stream, "{\"error\":\"hstsMaxAgeHours must be between 1 and 8760\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.HstsMaxAgeHours = hstsMaxAgeHours;
+                    updates["HstsMaxAgeHours"] = hstsMaxAgeHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("adSyncEnabled") || payload.ContainsKey("adDescriptionSyncEnabled") || payload.ContainsKey("adSyncMode") || payload.ContainsKey("adSyncIntervalHours")
+                || payload.ContainsKey("adDomain") || payload.ContainsKey("adUseServiceIdentity") || payload.ContainsKey("adUsername") || payload.ContainsKey("adPassword")
+                || payload.ContainsKey("adComputerImportOUs"))
+            {
+                bool adSyncEnabled = payload.ContainsKey("adSyncEnabled") ? Convert.ToBoolean(payload["adSyncEnabled"]) : options.AdSyncEnabled;
+                bool adDescriptionSyncEnabled = payload.ContainsKey("adDescriptionSyncEnabled") ? Convert.ToBoolean(payload["adDescriptionSyncEnabled"]) : options.AdDescriptionSyncEnabled;
+
+                string adSyncMode = payload.ContainsKey("adSyncMode") ? Convert.ToString(payload["adSyncMode"]) : options.AdSyncMode;
+                if (adSyncMode != "on-report" && adSyncMode != "timer")
+                {
+                    SendText(stream, "{\"error\":\"adSyncMode must be 'on-report' or 'timer'\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+
+                int adSyncIntervalHours = options.AdSyncIntervalHours;
+                if (payload.ContainsKey("adSyncIntervalHours"))
+                {
+                    if (!Int32.TryParse(Convert.ToString(payload["adSyncIntervalHours"]), out adSyncIntervalHours) || adSyncIntervalHours < 1 || adSyncIntervalHours > 8760)
+                    {
+                        SendText(stream, "{\"error\":\"adSyncIntervalHours must be between 1 and 8760\"}", "application/json; charset=utf-8", 400);
+                        return;
+                    }
+                }
+
+                string adDomain = payload.ContainsKey("adDomain") ? Convert.ToString(payload["adDomain"]) : options.AdDomain;
+                bool adUseServiceIdentity = payload.ContainsKey("adUseServiceIdentity") ? Convert.ToBoolean(payload["adUseServiceIdentity"]) : options.AdUseServiceIdentity;
+                string adUsername = payload.ContainsKey("adUsername") ? Convert.ToString(payload["adUsername"]) : options.AdUsername;
+                // Blank/omitted password on save means "keep the existing
+                // one" - the dashboard never pre-fills a password field with
+                // the real stored value, so treating blank as "no change"
+                // is the only way to edit other AD fields without being
+                // forced to re-type the password every time.
+                string adPassword = payload.ContainsKey("adPassword") && !String.IsNullOrEmpty(Convert.ToString(payload["adPassword"]))
+                    ? Convert.ToString(payload["adPassword"])
+                    : options.AdPassword;
+
+                if (adSyncEnabled && !adUseServiceIdentity && (String.IsNullOrEmpty(adUsername) || String.IsNullOrEmpty(adPassword)))
+                {
+                    SendText(stream, "{\"error\":\"AD username and password are required when not using the service account identity.\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+
+                string adComputerImportOUs = payload.ContainsKey("adComputerImportOUs") ? Convert.ToString(payload["adComputerImportOUs"]) : options.AdComputerImportOUs;
+                foreach (string organizationalUnitDn in ParseAdComputerImportOUs(adComputerImportOUs))
+                {
+                    if (!IsValidOrganizationalUnitDn(organizationalUnitDn))
+                    {
+                        SendJsonError(stream, "Each line of adComputerImportOUs must be a Distinguished Name (e.g. OU=Workstations,DC=example,DC=com) with no '/' character: '" + organizationalUnitDn + "'", 400);
+                        return;
+                    }
+                }
+
+                pendingApply.Add(() =>
+                {
+                    options.AdSyncEnabled = adSyncEnabled;
+                    options.AdDescriptionSyncEnabled = adDescriptionSyncEnabled;
+                    options.AdSyncMode = adSyncMode;
+                    options.AdSyncIntervalHours = adSyncIntervalHours;
+                    options.AdDomain = adDomain;
+                    options.AdUseServiceIdentity = adUseServiceIdentity;
+                    options.AdUsername = adUsername;
+                    options.AdPassword = adPassword;
+                    options.AdComputerImportOUs = adComputerImportOUs;
+                    ReconfigureAdSyncTimer();
+
+                    updates["AdSyncEnabled"] = options.AdSyncEnabled ? "true" : "false";
+                    updates["AdDescriptionSyncEnabled"] = options.AdDescriptionSyncEnabled ? "true" : "false";
+                    updates["AdSyncMode"] = options.AdSyncMode;
+                    updates["AdSyncIntervalHours"] = options.AdSyncIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    updates["AdDomain"] = options.AdDomain ?? "";
+                    updates["AdUseServiceIdentity"] = options.AdUseServiceIdentity ? "true" : "false";
+                    updates["AdUsername"] = options.AdUsername ?? "";
+                    updates["AdPassword"] = options.AdPassword ?? "";
+                    updates["AdComputerImportOUs"] = options.AdComputerImportOUs ?? "";
+                });
+            }
+
+            if (payload.ContainsKey("preferredLinuxSubnet"))
+            {
+                string preferredLinuxSubnet = Convert.ToString(payload["preferredLinuxSubnet"]).Trim();
+                if (!IsValidCidr(preferredLinuxSubnet))
+                {
+                    SendText(stream, "{\"error\":\"preferredLinuxSubnet must be blank or a valid IPv4 CIDR block, e.g. 192.168.1.0/24\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.PreferredLinuxSubnet = preferredLinuxSubnet;
+                    updates["PreferredLinuxSubnet"] = options.PreferredLinuxSubnet;
+                });
+            }
+
+            if (payload.ContainsKey("linuxDefaultIntervalHours"))
+            {
+                int linuxDefaultIntervalHours;
+                if (!Int32.TryParse(Convert.ToString(payload["linuxDefaultIntervalHours"]), out linuxDefaultIntervalHours) || linuxDefaultIntervalHours < 1 || linuxDefaultIntervalHours > 24)
+                {
+                    SendText(stream, "{\"error\":\"linuxDefaultIntervalHours must be between 1 and 24\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.LinuxDefaultIntervalHours = linuxDefaultIntervalHours;
+                    updates["LinuxDefaultIntervalHours"] = linuxDefaultIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("linuxDefaultStatusIntervalMinutes"))
+            {
+                int linuxDefaultStatusIntervalMinutes;
+                if (!Int32.TryParse(Convert.ToString(payload["linuxDefaultStatusIntervalMinutes"]), out linuxDefaultStatusIntervalMinutes) || linuxDefaultStatusIntervalMinutes < 1 || linuxDefaultStatusIntervalMinutes > 1440)
+                {
+                    SendText(stream, "{\"error\":\"linuxDefaultStatusIntervalMinutes must be between 1 and 1440\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.LinuxDefaultStatusIntervalMinutes = linuxDefaultStatusIntervalMinutes;
+                    updates["LinuxDefaultStatusIntervalMinutes"] = linuxDefaultStatusIntervalMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("windowsDefaultIntervalHours"))
+            {
+                int windowsDefaultIntervalHours;
+                if (!Int32.TryParse(Convert.ToString(payload["windowsDefaultIntervalHours"]), out windowsDefaultIntervalHours) || windowsDefaultIntervalHours < 1 || windowsDefaultIntervalHours > 24)
+                {
+                    SendText(stream, "{\"error\":\"windowsDefaultIntervalHours must be between 1 and 24\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.WindowsDefaultIntervalHours = windowsDefaultIntervalHours;
+                    updates["WindowsDefaultIntervalHours"] = windowsDefaultIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("windowsUpdateCheckIntervalHours"))
+            {
+                int windowsUpdateCheckIntervalHours;
+                if (!Int32.TryParse(Convert.ToString(payload["windowsUpdateCheckIntervalHours"]), out windowsUpdateCheckIntervalHours) || windowsUpdateCheckIntervalHours < 1 || windowsUpdateCheckIntervalHours > 24)
+                {
+                    SendText(stream, "{\"error\":\"windowsUpdateCheckIntervalHours must be between 1 and 24\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.WindowsUpdateCheckIntervalHours = windowsUpdateCheckIntervalHours;
+                    updates["WindowsUpdateCheckIntervalHours"] = windowsUpdateCheckIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("thirdPartySoftwareCheckIntervalHours"))
+            {
+                int thirdPartySoftwareCheckIntervalHours;
+                if (!Int32.TryParse(Convert.ToString(payload["thirdPartySoftwareCheckIntervalHours"]), out thirdPartySoftwareCheckIntervalHours) || thirdPartySoftwareCheckIntervalHours < 1 || thirdPartySoftwareCheckIntervalHours > 24)
+                {
+                    SendText(stream, "{\"error\":\"thirdPartySoftwareCheckIntervalHours must be between 1 and 24\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.ThirdPartySoftwareCheckIntervalHours = thirdPartySoftwareCheckIntervalHours;
+                    updates["ThirdPartySoftwareCheckIntervalHours"] = thirdPartySoftwareCheckIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("wsusScanMaxAgeDays"))
+            {
+                int wsusScanMaxAgeDays;
+                if (!Int32.TryParse(Convert.ToString(payload["wsusScanMaxAgeDays"]), out wsusScanMaxAgeDays) || wsusScanMaxAgeDays < 1 || wsusScanMaxAgeDays > 90)
+                {
+                    SendText(stream, "{\"error\":\"wsusScanMaxAgeDays must be between 1 and 90\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.WsusScanMaxAgeDays = wsusScanMaxAgeDays;
+                    updates["WsusScanMaxAgeDays"] = wsusScanMaxAgeDays.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("windowsUpdateInstallWindowEnabled"))
+            {
+                bool windowsUpdateInstallWindowEnabled = Convert.ToBoolean(payload["windowsUpdateInstallWindowEnabled"]);
+                string windowsUpdateInstallWindowStartUtc = payload.ContainsKey("windowsUpdateInstallWindowStartUtc") ? Convert.ToString(payload["windowsUpdateInstallWindowStartUtc"]) : options.WindowsUpdateInstallWindowStartUtc;
+                string windowsUpdateInstallWindowEndUtc = payload.ContainsKey("windowsUpdateInstallWindowEndUtc") ? Convert.ToString(payload["windowsUpdateInstallWindowEndUtc"]) : options.WindowsUpdateInstallWindowEndUtc;
+                int windowsUpdateInstallWindowJitterMinutes = options.WindowsUpdateInstallWindowJitterMinutes;
+                if (payload.ContainsKey("windowsUpdateInstallWindowJitterMinutes") && (!Int32.TryParse(Convert.ToString(payload["windowsUpdateInstallWindowJitterMinutes"]), out windowsUpdateInstallWindowJitterMinutes) || windowsUpdateInstallWindowJitterMinutes < 0 || windowsUpdateInstallWindowJitterMinutes > 1440))
+                {
+                    SendText(stream, "{\"error\":\"windowsUpdateInstallWindowJitterMinutes must be between 0 and 1440\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                // Format validation only when the restriction is actually
+                // being enabled - an admin turning it off must never be
+                // blocked by stale/blank time fields left over from before.
+                TimeSpan parsedWindowsUpdateWindowStart, parsedWindowsUpdateWindowEnd;
+                if (windowsUpdateInstallWindowEnabled && (!TryParseTimeOfDay(windowsUpdateInstallWindowStartUtc, out parsedWindowsUpdateWindowStart) || !TryParseTimeOfDay(windowsUpdateInstallWindowEndUtc, out parsedWindowsUpdateWindowEnd)))
+                {
+                    SendText(stream, "{\"error\":\"windowsUpdateInstallWindowStartUtc and windowsUpdateInstallWindowEndUtc must be in 'HH:mm' format\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.WindowsUpdateInstallWindowEnabled = windowsUpdateInstallWindowEnabled;
+                    options.WindowsUpdateInstallWindowStartUtc = windowsUpdateInstallWindowStartUtc;
+                    options.WindowsUpdateInstallWindowEndUtc = windowsUpdateInstallWindowEndUtc;
+                    options.WindowsUpdateInstallWindowJitterMinutes = windowsUpdateInstallWindowJitterMinutes;
+                    updates["WindowsUpdateInstallWindowEnabled"] = windowsUpdateInstallWindowEnabled ? "true" : "false";
+                    updates["WindowsUpdateInstallWindowStartUtc"] = windowsUpdateInstallWindowStartUtc ?? "";
+                    updates["WindowsUpdateInstallWindowEndUtc"] = windowsUpdateInstallWindowEndUtc ?? "";
+                    updates["WindowsUpdateInstallWindowJitterMinutes"] = windowsUpdateInstallWindowJitterMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("thirdPartySoftwareInstallWindowEnabled"))
+            {
+                bool thirdPartySoftwareInstallWindowEnabled = Convert.ToBoolean(payload["thirdPartySoftwareInstallWindowEnabled"]);
+                string thirdPartySoftwareInstallWindowStartUtc = payload.ContainsKey("thirdPartySoftwareInstallWindowStartUtc") ? Convert.ToString(payload["thirdPartySoftwareInstallWindowStartUtc"]) : options.ThirdPartySoftwareInstallWindowStartUtc;
+                string thirdPartySoftwareInstallWindowEndUtc = payload.ContainsKey("thirdPartySoftwareInstallWindowEndUtc") ? Convert.ToString(payload["thirdPartySoftwareInstallWindowEndUtc"]) : options.ThirdPartySoftwareInstallWindowEndUtc;
+                int thirdPartySoftwareInstallWindowJitterMinutes = options.ThirdPartySoftwareInstallWindowJitterMinutes;
+                if (payload.ContainsKey("thirdPartySoftwareInstallWindowJitterMinutes") && (!Int32.TryParse(Convert.ToString(payload["thirdPartySoftwareInstallWindowJitterMinutes"]), out thirdPartySoftwareInstallWindowJitterMinutes) || thirdPartySoftwareInstallWindowJitterMinutes < 0 || thirdPartySoftwareInstallWindowJitterMinutes > 1440))
+                {
+                    SendText(stream, "{\"error\":\"thirdPartySoftwareInstallWindowJitterMinutes must be between 0 and 1440\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                // Format validation only when the restriction is actually
+                // being enabled - an admin turning it off must never be
+                // blocked by stale/blank time fields left over from before.
+                TimeSpan parsedThirdPartyWindowStart, parsedThirdPartyWindowEnd;
+                if (thirdPartySoftwareInstallWindowEnabled && (!TryParseTimeOfDay(thirdPartySoftwareInstallWindowStartUtc, out parsedThirdPartyWindowStart) || !TryParseTimeOfDay(thirdPartySoftwareInstallWindowEndUtc, out parsedThirdPartyWindowEnd)))
+                {
+                    SendText(stream, "{\"error\":\"thirdPartySoftwareInstallWindowStartUtc and thirdPartySoftwareInstallWindowEndUtc must be in 'HH:mm' format\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.ThirdPartySoftwareInstallWindowEnabled = thirdPartySoftwareInstallWindowEnabled;
+                    options.ThirdPartySoftwareInstallWindowStartUtc = thirdPartySoftwareInstallWindowStartUtc;
+                    options.ThirdPartySoftwareInstallWindowEndUtc = thirdPartySoftwareInstallWindowEndUtc;
+                    options.ThirdPartySoftwareInstallWindowJitterMinutes = thirdPartySoftwareInstallWindowJitterMinutes;
+                    updates["ThirdPartySoftwareInstallWindowEnabled"] = thirdPartySoftwareInstallWindowEnabled ? "true" : "false";
+                    updates["ThirdPartySoftwareInstallWindowStartUtc"] = thirdPartySoftwareInstallWindowStartUtc ?? "";
+                    updates["ThirdPartySoftwareInstallWindowEndUtc"] = thirdPartySoftwareInstallWindowEndUtc ?? "";
+                    updates["ThirdPartySoftwareInstallWindowJitterMinutes"] = thirdPartySoftwareInstallWindowJitterMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("tokenOverlapHours"))
+            {
+                int tokenOverlapHours;
+                if (!Int32.TryParse(Convert.ToString(payload["tokenOverlapHours"]), out tokenOverlapHours) || tokenOverlapHours < 0 || tokenOverlapHours > 168)
+                {
+                    SendText(stream, "{\"error\":\"tokenOverlapHours must be between 0 and 168\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.TokenOverlapHours = tokenOverlapHours;
+                    updates["TokenOverlapHours"] = tokenOverlapHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("linuxDefaultInstallPath"))
+            {
+                string linuxDefaultInstallPath = Convert.ToString(payload["linuxDefaultInstallPath"]).Trim();
+                if (!IsValidLinuxInstallPath(linuxDefaultInstallPath))
+                {
+                    SendText(stream, "{\"error\":\"linuxDefaultInstallPath must be a real subdirectory under /opt/ (e.g. /opt/windows-inventory-lite), with no '.' or '..' path segment, since this value is used in a remote 'rm -rf' during uninstall\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.LinuxDefaultInstallPath = linuxDefaultInstallPath;
+                    updates["LinuxDefaultInstallPath"] = linuxDefaultInstallPath;
+                });
+            }
+
+            if (payload.ContainsKey("loginLockoutThreshold"))
+            {
+                int loginLockoutThreshold;
+                if (!Int32.TryParse(Convert.ToString(payload["loginLockoutThreshold"]), out loginLockoutThreshold) || loginLockoutThreshold < 0 || loginLockoutThreshold > 1000)
+                {
+                    SendText(stream, "{\"error\":\"loginLockoutThreshold must be between 0 and 1000 (0 disables lockout)\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.LoginLockoutThreshold = loginLockoutThreshold;
+                    updates["LoginLockoutThreshold"] = loginLockoutThreshold.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("loginLockoutWindowMinutes"))
+            {
+                int loginLockoutWindowMinutes;
+                if (!Int32.TryParse(Convert.ToString(payload["loginLockoutWindowMinutes"]), out loginLockoutWindowMinutes) || loginLockoutWindowMinutes < 1 || loginLockoutWindowMinutes > 1440)
+                {
+                    SendText(stream, "{\"error\":\"loginLockoutWindowMinutes must be between 1 and 1440\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.LoginLockoutWindowMinutes = loginLockoutWindowMinutes;
+                    updates["LoginLockoutWindowMinutes"] = loginLockoutWindowMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("loginLockoutDurationMinutes"))
+            {
+                int loginLockoutDurationMinutes;
+                if (!Int32.TryParse(Convert.ToString(payload["loginLockoutDurationMinutes"]), out loginLockoutDurationMinutes) || loginLockoutDurationMinutes < 1 || loginLockoutDurationMinutes > 1440)
+                {
+                    SendText(stream, "{\"error\":\"loginLockoutDurationMinutes must be between 1 and 1440\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.LoginLockoutDurationMinutes = loginLockoutDurationMinutes;
+                    updates["LoginLockoutDurationMinutes"] = loginLockoutDurationMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("sessionLifetimeHours"))
+            {
+                int sessionLifetimeHours;
+                if (!Int32.TryParse(Convert.ToString(payload["sessionLifetimeHours"]), out sessionLifetimeHours) || sessionLifetimeHours < 1 || sessionLifetimeHours > 720)
+                {
+                    SendText(stream, "{\"error\":\"sessionLifetimeHours must be between 1 and 720\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.SessionLifetimeHours = sessionLifetimeHours;
+                    updates["SessionLifetimeHours"] = sessionLifetimeHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("ingestionRejectionLogRetentionDays"))
+            {
+                int ingestionRejectionLogRetentionDays;
+                if (!Int32.TryParse(Convert.ToString(payload["ingestionRejectionLogRetentionDays"]), out ingestionRejectionLogRetentionDays) || ingestionRejectionLogRetentionDays < 1 || ingestionRejectionLogRetentionDays > 3650)
+                {
+                    SendText(stream, "{\"error\":\"ingestionRejectionLogRetentionDays must be between 1 and 3650\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.IngestionRejectionLogRetentionDays = ingestionRejectionLogRetentionDays;
+                    updates["IngestionRejectionLogRetentionDays"] = ingestionRejectionLogRetentionDays.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("ingestionRejectionLogMaxEntries"))
+            {
+                int ingestionRejectionLogMaxEntries;
+                if (!Int32.TryParse(Convert.ToString(payload["ingestionRejectionLogMaxEntries"]), out ingestionRejectionLogMaxEntries) || ingestionRejectionLogMaxEntries < 100 || ingestionRejectionLogMaxEntries > 100000)
+                {
+                    SendText(stream, "{\"error\":\"ingestionRejectionLogMaxEntries must be between 100 and 100000\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.IngestionRejectionLogMaxEntries = ingestionRejectionLogMaxEntries;
+                    updates["IngestionRejectionLogMaxEntries"] = ingestionRejectionLogMaxEntries.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("softwareJobAttemptLogRetentionDays"))
+            {
+                int softwareJobAttemptLogRetentionDays;
+                if (!Int32.TryParse(Convert.ToString(payload["softwareJobAttemptLogRetentionDays"]), out softwareJobAttemptLogRetentionDays) || softwareJobAttemptLogRetentionDays < 1 || softwareJobAttemptLogRetentionDays > 3650)
+                {
+                    SendText(stream, "{\"error\":\"softwareJobAttemptLogRetentionDays must be between 1 and 3650\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.SoftwareJobAttemptLogRetentionDays = softwareJobAttemptLogRetentionDays;
+                    updates["SoftwareJobAttemptLogRetentionDays"] = softwareJobAttemptLogRetentionDays.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("softwareJobAttemptLogMaxEntries"))
+            {
+                int softwareJobAttemptLogMaxEntries;
+                if (!Int32.TryParse(Convert.ToString(payload["softwareJobAttemptLogMaxEntries"]), out softwareJobAttemptLogMaxEntries) || softwareJobAttemptLogMaxEntries < 100 || softwareJobAttemptLogMaxEntries > 100000)
+                {
+                    SendText(stream, "{\"error\":\"softwareJobAttemptLogMaxEntries must be between 100 and 100000\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.SoftwareJobAttemptLogMaxEntries = softwareJobAttemptLogMaxEntries;
+                    updates["SoftwareJobAttemptLogMaxEntries"] = softwareJobAttemptLogMaxEntries.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("debugLogEnabled"))
+            {
+                // The log path is deliberately not settable from here - it
+                // stays CLI/config-only, so this endpoint can't be used to
+                // make the server write an arbitrary file path.
+                bool debugLogEnabled = Convert.ToBoolean(payload["debugLogEnabled"]);
+                pendingApply.Add(() =>
+                {
+                    options.DebugLogEnabled = debugLogEnabled;
+                    updates["DebugLogEnabled"] = options.DebugLogEnabled ? "true" : "false";
+                });
+            }
+
+            if (payload.ContainsKey("debugLogRetentionDays"))
+            {
+                int debugLogRetentionDays;
+                if (!Int32.TryParse(Convert.ToString(payload["debugLogRetentionDays"]), out debugLogRetentionDays) || debugLogRetentionDays < 1 || debugLogRetentionDays > 3650)
+                {
+                    SendText(stream, "{\"error\":\"debugLogRetentionDays must be between 1 and 3650\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.DebugLogRetentionDays = debugLogRetentionDays;
+                    updates["DebugLogRetentionDays"] = debugLogRetentionDays.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("debugLogMaxSizeMb"))
+            {
+                double debugLogMaxSizeMb;
+                string debugLogMaxSizeText = Convert.ToString(payload["debugLogMaxSizeMb"]);
+                if (!Double.TryParse(debugLogMaxSizeText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out debugLogMaxSizeMb) && !Double.TryParse(debugLogMaxSizeText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.CurrentCulture, out debugLogMaxSizeMb))
+                {
+                    SendText(stream, "{\"error\":\"debugLogMaxSizeMb must be between 1 and 100\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                if (debugLogMaxSizeMb < 1 || debugLogMaxSizeMb > 100)
+                {
+                    SendText(stream, "{\"error\":\"debugLogMaxSizeMb must be between 1 and 100\"}", "application/json; charset=utf-8", 400);
+                    return;
+                }
+                pendingApply.Add(() =>
+                {
+                    options.DebugLogMaxSizeMb = debugLogMaxSizeMb;
+                    updates["DebugLogMaxSizeMb"] = debugLogMaxSizeMb.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                });
+            }
+
+            if (payload.ContainsKey("requireIngestionToken"))
+            {
+                pendingApply.Add(() =>
+                {
+                    options.RequireIngestionToken = desiredRequireIngestionToken;
+                    updates["RequireIngestionToken"] = options.RequireIngestionToken ? "true" : "false";
+                });
+            }
+
+            // Relocated here from right after the HTTPS/HTTP validation above -
+            // deliberately the LAST thing in this function that can still fail
+            // (ApplySlotState can only discover a bind failure by actually
+            // attempting it, so it can never be made into a pure up-front check
+            // the way every other field's validation already is). Every other
+            // field in this request has now fully validated and is queued in
+            // pendingApply but NOT YET applied, so if either bind attempt below
+            // fails and returns, nothing from this request has changed
+            // anywhere - not even in memory.
+            //
+            // HTTPS is still applied before HTTP, not just validated before HTTP
+            // - deliberately, and in this order for a reason: the dashboard's
             // Server Settings form always submits port/enableHttp/useHttps/
             // httpsPort together in one request, so "turn HTTPS on and turn
             // HTTP off" is a single call with both blocks active. ApplySlotState
@@ -12848,436 +13556,26 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 updates["EnableHttp"] = options.EnableHttp ? "true" : "false";
             }
 
-            if (payload.ContainsKey("hstsEnabled"))
+            // Everything above this point either returned early (nothing
+            // changed) or only queued its mutation - this is the one point in
+            // the function where every field in the request is known-good.
+            // Wrapped in configFileLock (reentrant - SaveServerConfigValues
+            // takes the same lock again internally for its own file write) so
+            // two concurrent settings saves (two admin tabs, a double-submit)
+            // can no longer interleave their options.X mutations with each
+            // other; the whole "mutate options + persist" sequence for one
+            // request now runs as one atomic unit from the other's point of view.
+            lock (configFileLock)
             {
-                options.HstsEnabled = Convert.ToBoolean(payload["hstsEnabled"]);
-                updates["HstsEnabled"] = options.HstsEnabled ? "true" : "false";
-            }
-            if (payload.ContainsKey("enableWindowsClientSelfUpdate"))
-            {
-                options.EnableWindowsClientSelfUpdate = Convert.ToBoolean(payload["enableWindowsClientSelfUpdate"]);
-                updates["EnableWindowsClientSelfUpdate"] = options.EnableWindowsClientSelfUpdate ? "true" : "false";
-            }
-            if (payload.ContainsKey("autoCreateWindowsUpdateCatalogEntries"))
-            {
-                options.AutoCreateWindowsUpdateCatalogEntries = Convert.ToBoolean(payload["autoCreateWindowsUpdateCatalogEntries"]);
-                updates["AutoCreateWindowsUpdateCatalogEntries"] = options.AutoCreateWindowsUpdateCatalogEntries ? "true" : "false";
-            }
-            if (payload.ContainsKey("autoCreateOnlyCriticalKbs"))
-            {
-                options.AutoCreateOnlyCriticalKbs = Convert.ToBoolean(payload["autoCreateOnlyCriticalKbs"]);
-                updates["AutoCreateOnlyCriticalKbs"] = options.AutoCreateOnlyCriticalKbs ? "true" : "false";
-            }
-            if (payload.ContainsKey("enableLinuxClientSelfUpdate"))
-            {
-                options.EnableLinuxClientSelfUpdate = Convert.ToBoolean(payload["enableLinuxClientSelfUpdate"]);
-                updates["EnableLinuxClientSelfUpdate"] = options.EnableLinuxClientSelfUpdate ? "true" : "false";
-            }
-
-            if (payload.ContainsKey("showUsbStorageIndicator"))
-            {
-                options.ShowUsbStorageIndicator = Convert.ToBoolean(payload["showUsbStorageIndicator"]);
-                updates["ShowUsbStorageIndicator"] = options.ShowUsbStorageIndicator ? "true" : "false";
-            }
-
-            if (payload.ContainsKey("hstsMaxAgeHours"))
-            {
-                int hstsMaxAgeHours;
-                if (!Int32.TryParse(Convert.ToString(payload["hstsMaxAgeHours"]), out hstsMaxAgeHours) || hstsMaxAgeHours < 1 || hstsMaxAgeHours > 8760)
+                foreach (Action apply in pendingApply)
                 {
-                    SendText(stream, "{\"error\":\"hstsMaxAgeHours must be between 1 and 8760\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.HstsMaxAgeHours = hstsMaxAgeHours;
-                updates["HstsMaxAgeHours"] = hstsMaxAgeHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("adSyncEnabled") || payload.ContainsKey("adDescriptionSyncEnabled") || payload.ContainsKey("adSyncMode") || payload.ContainsKey("adSyncIntervalHours")
-                || payload.ContainsKey("adDomain") || payload.ContainsKey("adUseServiceIdentity") || payload.ContainsKey("adUsername") || payload.ContainsKey("adPassword")
-                || payload.ContainsKey("adComputerImportOUs"))
-            {
-                bool adSyncEnabled = payload.ContainsKey("adSyncEnabled") ? Convert.ToBoolean(payload["adSyncEnabled"]) : options.AdSyncEnabled;
-                bool adDescriptionSyncEnabled = payload.ContainsKey("adDescriptionSyncEnabled") ? Convert.ToBoolean(payload["adDescriptionSyncEnabled"]) : options.AdDescriptionSyncEnabled;
-
-                string adSyncMode = payload.ContainsKey("adSyncMode") ? Convert.ToString(payload["adSyncMode"]) : options.AdSyncMode;
-                if (adSyncMode != "on-report" && adSyncMode != "timer")
-                {
-                    SendText(stream, "{\"error\":\"adSyncMode must be 'on-report' or 'timer'\"}", "application/json; charset=utf-8", 400);
-                    return;
+                    apply();
                 }
 
-                int adSyncIntervalHours = options.AdSyncIntervalHours;
-                if (payload.ContainsKey("adSyncIntervalHours"))
+                if (updates.Count > 0)
                 {
-                    if (!Int32.TryParse(Convert.ToString(payload["adSyncIntervalHours"]), out adSyncIntervalHours) || adSyncIntervalHours < 1 || adSyncIntervalHours > 8760)
-                    {
-                        SendText(stream, "{\"error\":\"adSyncIntervalHours must be between 1 and 8760\"}", "application/json; charset=utf-8", 400);
-                        return;
-                    }
+                    SaveServerConfigValues(updates);
                 }
-
-                string adDomain = payload.ContainsKey("adDomain") ? Convert.ToString(payload["adDomain"]) : options.AdDomain;
-                bool adUseServiceIdentity = payload.ContainsKey("adUseServiceIdentity") ? Convert.ToBoolean(payload["adUseServiceIdentity"]) : options.AdUseServiceIdentity;
-                string adUsername = payload.ContainsKey("adUsername") ? Convert.ToString(payload["adUsername"]) : options.AdUsername;
-                // Blank/omitted password on save means "keep the existing
-                // one" - the dashboard never pre-fills a password field with
-                // the real stored value, so treating blank as "no change"
-                // is the only way to edit other AD fields without being
-                // forced to re-type the password every time.
-                string adPassword = payload.ContainsKey("adPassword") && !String.IsNullOrEmpty(Convert.ToString(payload["adPassword"]))
-                    ? Convert.ToString(payload["adPassword"])
-                    : options.AdPassword;
-
-                if (adSyncEnabled && !adUseServiceIdentity && (String.IsNullOrEmpty(adUsername) || String.IsNullOrEmpty(adPassword)))
-                {
-                    SendText(stream, "{\"error\":\"AD username and password are required when not using the service account identity.\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-
-                string adComputerImportOUs = payload.ContainsKey("adComputerImportOUs") ? Convert.ToString(payload["adComputerImportOUs"]) : options.AdComputerImportOUs;
-                foreach (string organizationalUnitDn in ParseAdComputerImportOUs(adComputerImportOUs))
-                {
-                    if (!IsValidOrganizationalUnitDn(organizationalUnitDn))
-                    {
-                        SendJsonError(stream, "Each line of adComputerImportOUs must be a Distinguished Name (e.g. OU=Workstations,DC=example,DC=com) with no '/' character: '" + organizationalUnitDn + "'", 400);
-                        return;
-                    }
-                }
-
-                options.AdSyncEnabled = adSyncEnabled;
-                options.AdDescriptionSyncEnabled = adDescriptionSyncEnabled;
-                options.AdSyncMode = adSyncMode;
-                options.AdSyncIntervalHours = adSyncIntervalHours;
-                options.AdDomain = adDomain;
-                options.AdUseServiceIdentity = adUseServiceIdentity;
-                options.AdUsername = adUsername;
-                options.AdPassword = adPassword;
-                options.AdComputerImportOUs = adComputerImportOUs;
-                ReconfigureAdSyncTimer();
-
-                updates["AdSyncEnabled"] = options.AdSyncEnabled ? "true" : "false";
-                updates["AdDescriptionSyncEnabled"] = options.AdDescriptionSyncEnabled ? "true" : "false";
-                updates["AdSyncMode"] = options.AdSyncMode;
-                updates["AdSyncIntervalHours"] = options.AdSyncIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                updates["AdDomain"] = options.AdDomain ?? "";
-                updates["AdUseServiceIdentity"] = options.AdUseServiceIdentity ? "true" : "false";
-                updates["AdUsername"] = options.AdUsername ?? "";
-                updates["AdPassword"] = options.AdPassword ?? "";
-                updates["AdComputerImportOUs"] = options.AdComputerImportOUs ?? "";
-            }
-
-            if (payload.ContainsKey("preferredLinuxSubnet"))
-            {
-                string preferredLinuxSubnet = Convert.ToString(payload["preferredLinuxSubnet"]).Trim();
-                if (!IsValidCidr(preferredLinuxSubnet))
-                {
-                    SendText(stream, "{\"error\":\"preferredLinuxSubnet must be blank or a valid IPv4 CIDR block, e.g. 192.168.1.0/24\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.PreferredLinuxSubnet = preferredLinuxSubnet;
-                updates["PreferredLinuxSubnet"] = options.PreferredLinuxSubnet;
-            }
-
-            if (payload.ContainsKey("linuxDefaultIntervalHours"))
-            {
-                int linuxDefaultIntervalHours;
-                if (!Int32.TryParse(Convert.ToString(payload["linuxDefaultIntervalHours"]), out linuxDefaultIntervalHours) || linuxDefaultIntervalHours < 1 || linuxDefaultIntervalHours > 24)
-                {
-                    SendText(stream, "{\"error\":\"linuxDefaultIntervalHours must be between 1 and 24\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.LinuxDefaultIntervalHours = linuxDefaultIntervalHours;
-                updates["LinuxDefaultIntervalHours"] = linuxDefaultIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("linuxDefaultStatusIntervalMinutes"))
-            {
-                int linuxDefaultStatusIntervalMinutes;
-                if (!Int32.TryParse(Convert.ToString(payload["linuxDefaultStatusIntervalMinutes"]), out linuxDefaultStatusIntervalMinutes) || linuxDefaultStatusIntervalMinutes < 1 || linuxDefaultStatusIntervalMinutes > 1440)
-                {
-                    SendText(stream, "{\"error\":\"linuxDefaultStatusIntervalMinutes must be between 1 and 1440\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.LinuxDefaultStatusIntervalMinutes = linuxDefaultStatusIntervalMinutes;
-                updates["LinuxDefaultStatusIntervalMinutes"] = linuxDefaultStatusIntervalMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("windowsDefaultIntervalHours"))
-            {
-                int windowsDefaultIntervalHours;
-                if (!Int32.TryParse(Convert.ToString(payload["windowsDefaultIntervalHours"]), out windowsDefaultIntervalHours) || windowsDefaultIntervalHours < 1 || windowsDefaultIntervalHours > 24)
-                {
-                    SendText(stream, "{\"error\":\"windowsDefaultIntervalHours must be between 1 and 24\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.WindowsDefaultIntervalHours = windowsDefaultIntervalHours;
-                updates["WindowsDefaultIntervalHours"] = windowsDefaultIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("windowsUpdateCheckIntervalHours"))
-            {
-                int windowsUpdateCheckIntervalHours;
-                if (!Int32.TryParse(Convert.ToString(payload["windowsUpdateCheckIntervalHours"]), out windowsUpdateCheckIntervalHours) || windowsUpdateCheckIntervalHours < 1 || windowsUpdateCheckIntervalHours > 24)
-                {
-                    SendText(stream, "{\"error\":\"windowsUpdateCheckIntervalHours must be between 1 and 24\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.WindowsUpdateCheckIntervalHours = windowsUpdateCheckIntervalHours;
-                updates["WindowsUpdateCheckIntervalHours"] = windowsUpdateCheckIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("thirdPartySoftwareCheckIntervalHours"))
-            {
-                int thirdPartySoftwareCheckIntervalHours;
-                if (!Int32.TryParse(Convert.ToString(payload["thirdPartySoftwareCheckIntervalHours"]), out thirdPartySoftwareCheckIntervalHours) || thirdPartySoftwareCheckIntervalHours < 1 || thirdPartySoftwareCheckIntervalHours > 24)
-                {
-                    SendText(stream, "{\"error\":\"thirdPartySoftwareCheckIntervalHours must be between 1 and 24\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.ThirdPartySoftwareCheckIntervalHours = thirdPartySoftwareCheckIntervalHours;
-                updates["ThirdPartySoftwareCheckIntervalHours"] = thirdPartySoftwareCheckIntervalHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("wsusScanMaxAgeDays"))
-            {
-                int wsusScanMaxAgeDays;
-                if (!Int32.TryParse(Convert.ToString(payload["wsusScanMaxAgeDays"]), out wsusScanMaxAgeDays) || wsusScanMaxAgeDays < 1 || wsusScanMaxAgeDays > 90)
-                {
-                    SendText(stream, "{\"error\":\"wsusScanMaxAgeDays must be between 1 and 90\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.WsusScanMaxAgeDays = wsusScanMaxAgeDays;
-                updates["WsusScanMaxAgeDays"] = wsusScanMaxAgeDays.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("windowsUpdateInstallWindowEnabled"))
-            {
-                bool windowsUpdateInstallWindowEnabled = Convert.ToBoolean(payload["windowsUpdateInstallWindowEnabled"]);
-                string windowsUpdateInstallWindowStartUtc = payload.ContainsKey("windowsUpdateInstallWindowStartUtc") ? Convert.ToString(payload["windowsUpdateInstallWindowStartUtc"]) : options.WindowsUpdateInstallWindowStartUtc;
-                string windowsUpdateInstallWindowEndUtc = payload.ContainsKey("windowsUpdateInstallWindowEndUtc") ? Convert.ToString(payload["windowsUpdateInstallWindowEndUtc"]) : options.WindowsUpdateInstallWindowEndUtc;
-                int windowsUpdateInstallWindowJitterMinutes = options.WindowsUpdateInstallWindowJitterMinutes;
-                if (payload.ContainsKey("windowsUpdateInstallWindowJitterMinutes") && (!Int32.TryParse(Convert.ToString(payload["windowsUpdateInstallWindowJitterMinutes"]), out windowsUpdateInstallWindowJitterMinutes) || windowsUpdateInstallWindowJitterMinutes < 0 || windowsUpdateInstallWindowJitterMinutes > 1440))
-                {
-                    SendText(stream, "{\"error\":\"windowsUpdateInstallWindowJitterMinutes must be between 0 and 1440\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                // Format validation only when the restriction is actually
-                // being enabled - an admin turning it off must never be
-                // blocked by stale/blank time fields left over from before.
-                TimeSpan parsedWindowsUpdateWindowStart, parsedWindowsUpdateWindowEnd;
-                if (windowsUpdateInstallWindowEnabled && (!TryParseTimeOfDay(windowsUpdateInstallWindowStartUtc, out parsedWindowsUpdateWindowStart) || !TryParseTimeOfDay(windowsUpdateInstallWindowEndUtc, out parsedWindowsUpdateWindowEnd)))
-                {
-                    SendText(stream, "{\"error\":\"windowsUpdateInstallWindowStartUtc and windowsUpdateInstallWindowEndUtc must be in 'HH:mm' format\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.WindowsUpdateInstallWindowEnabled = windowsUpdateInstallWindowEnabled;
-                options.WindowsUpdateInstallWindowStartUtc = windowsUpdateInstallWindowStartUtc;
-                options.WindowsUpdateInstallWindowEndUtc = windowsUpdateInstallWindowEndUtc;
-                options.WindowsUpdateInstallWindowJitterMinutes = windowsUpdateInstallWindowJitterMinutes;
-                updates["WindowsUpdateInstallWindowEnabled"] = windowsUpdateInstallWindowEnabled ? "true" : "false";
-                updates["WindowsUpdateInstallWindowStartUtc"] = windowsUpdateInstallWindowStartUtc ?? "";
-                updates["WindowsUpdateInstallWindowEndUtc"] = windowsUpdateInstallWindowEndUtc ?? "";
-                updates["WindowsUpdateInstallWindowJitterMinutes"] = windowsUpdateInstallWindowJitterMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("thirdPartySoftwareInstallWindowEnabled"))
-            {
-                bool thirdPartySoftwareInstallWindowEnabled = Convert.ToBoolean(payload["thirdPartySoftwareInstallWindowEnabled"]);
-                string thirdPartySoftwareInstallWindowStartUtc = payload.ContainsKey("thirdPartySoftwareInstallWindowStartUtc") ? Convert.ToString(payload["thirdPartySoftwareInstallWindowStartUtc"]) : options.ThirdPartySoftwareInstallWindowStartUtc;
-                string thirdPartySoftwareInstallWindowEndUtc = payload.ContainsKey("thirdPartySoftwareInstallWindowEndUtc") ? Convert.ToString(payload["thirdPartySoftwareInstallWindowEndUtc"]) : options.ThirdPartySoftwareInstallWindowEndUtc;
-                int thirdPartySoftwareInstallWindowJitterMinutes = options.ThirdPartySoftwareInstallWindowJitterMinutes;
-                if (payload.ContainsKey("thirdPartySoftwareInstallWindowJitterMinutes") && (!Int32.TryParse(Convert.ToString(payload["thirdPartySoftwareInstallWindowJitterMinutes"]), out thirdPartySoftwareInstallWindowJitterMinutes) || thirdPartySoftwareInstallWindowJitterMinutes < 0 || thirdPartySoftwareInstallWindowJitterMinutes > 1440))
-                {
-                    SendText(stream, "{\"error\":\"thirdPartySoftwareInstallWindowJitterMinutes must be between 0 and 1440\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                // Format validation only when the restriction is actually
-                // being enabled - an admin turning it off must never be
-                // blocked by stale/blank time fields left over from before.
-                TimeSpan parsedThirdPartyWindowStart, parsedThirdPartyWindowEnd;
-                if (thirdPartySoftwareInstallWindowEnabled && (!TryParseTimeOfDay(thirdPartySoftwareInstallWindowStartUtc, out parsedThirdPartyWindowStart) || !TryParseTimeOfDay(thirdPartySoftwareInstallWindowEndUtc, out parsedThirdPartyWindowEnd)))
-                {
-                    SendText(stream, "{\"error\":\"thirdPartySoftwareInstallWindowStartUtc and thirdPartySoftwareInstallWindowEndUtc must be in 'HH:mm' format\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.ThirdPartySoftwareInstallWindowEnabled = thirdPartySoftwareInstallWindowEnabled;
-                options.ThirdPartySoftwareInstallWindowStartUtc = thirdPartySoftwareInstallWindowStartUtc;
-                options.ThirdPartySoftwareInstallWindowEndUtc = thirdPartySoftwareInstallWindowEndUtc;
-                options.ThirdPartySoftwareInstallWindowJitterMinutes = thirdPartySoftwareInstallWindowJitterMinutes;
-                updates["ThirdPartySoftwareInstallWindowEnabled"] = thirdPartySoftwareInstallWindowEnabled ? "true" : "false";
-                updates["ThirdPartySoftwareInstallWindowStartUtc"] = thirdPartySoftwareInstallWindowStartUtc ?? "";
-                updates["ThirdPartySoftwareInstallWindowEndUtc"] = thirdPartySoftwareInstallWindowEndUtc ?? "";
-                updates["ThirdPartySoftwareInstallWindowJitterMinutes"] = thirdPartySoftwareInstallWindowJitterMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("tokenOverlapHours"))
-            {
-                int tokenOverlapHours;
-                if (!Int32.TryParse(Convert.ToString(payload["tokenOverlapHours"]), out tokenOverlapHours) || tokenOverlapHours < 0 || tokenOverlapHours > 168)
-                {
-                    SendText(stream, "{\"error\":\"tokenOverlapHours must be between 0 and 168\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.TokenOverlapHours = tokenOverlapHours;
-                updates["TokenOverlapHours"] = tokenOverlapHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("linuxDefaultInstallPath"))
-            {
-                string linuxDefaultInstallPath = Convert.ToString(payload["linuxDefaultInstallPath"]).Trim();
-                if (!IsValidLinuxInstallPath(linuxDefaultInstallPath))
-                {
-                    SendText(stream, "{\"error\":\"linuxDefaultInstallPath must be a real subdirectory under /opt/ (e.g. /opt/windows-inventory-lite), with no '.' or '..' path segment, since this value is used in a remote 'rm -rf' during uninstall\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.LinuxDefaultInstallPath = linuxDefaultInstallPath;
-                updates["LinuxDefaultInstallPath"] = linuxDefaultInstallPath;
-            }
-
-            if (payload.ContainsKey("loginLockoutThreshold"))
-            {
-                int loginLockoutThreshold;
-                if (!Int32.TryParse(Convert.ToString(payload["loginLockoutThreshold"]), out loginLockoutThreshold) || loginLockoutThreshold < 0 || loginLockoutThreshold > 1000)
-                {
-                    SendText(stream, "{\"error\":\"loginLockoutThreshold must be between 0 and 1000 (0 disables lockout)\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.LoginLockoutThreshold = loginLockoutThreshold;
-                updates["LoginLockoutThreshold"] = loginLockoutThreshold.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("loginLockoutWindowMinutes"))
-            {
-                int loginLockoutWindowMinutes;
-                if (!Int32.TryParse(Convert.ToString(payload["loginLockoutWindowMinutes"]), out loginLockoutWindowMinutes) || loginLockoutWindowMinutes < 1 || loginLockoutWindowMinutes > 1440)
-                {
-                    SendText(stream, "{\"error\":\"loginLockoutWindowMinutes must be between 1 and 1440\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.LoginLockoutWindowMinutes = loginLockoutWindowMinutes;
-                updates["LoginLockoutWindowMinutes"] = loginLockoutWindowMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("loginLockoutDurationMinutes"))
-            {
-                int loginLockoutDurationMinutes;
-                if (!Int32.TryParse(Convert.ToString(payload["loginLockoutDurationMinutes"]), out loginLockoutDurationMinutes) || loginLockoutDurationMinutes < 1 || loginLockoutDurationMinutes > 1440)
-                {
-                    SendText(stream, "{\"error\":\"loginLockoutDurationMinutes must be between 1 and 1440\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.LoginLockoutDurationMinutes = loginLockoutDurationMinutes;
-                updates["LoginLockoutDurationMinutes"] = loginLockoutDurationMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("sessionLifetimeHours"))
-            {
-                int sessionLifetimeHours;
-                if (!Int32.TryParse(Convert.ToString(payload["sessionLifetimeHours"]), out sessionLifetimeHours) || sessionLifetimeHours < 1 || sessionLifetimeHours > 720)
-                {
-                    SendText(stream, "{\"error\":\"sessionLifetimeHours must be between 1 and 720\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.SessionLifetimeHours = sessionLifetimeHours;
-                updates["SessionLifetimeHours"] = sessionLifetimeHours.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("ingestionRejectionLogRetentionDays"))
-            {
-                int ingestionRejectionLogRetentionDays;
-                if (!Int32.TryParse(Convert.ToString(payload["ingestionRejectionLogRetentionDays"]), out ingestionRejectionLogRetentionDays) || ingestionRejectionLogRetentionDays < 1 || ingestionRejectionLogRetentionDays > 3650)
-                {
-                    SendText(stream, "{\"error\":\"ingestionRejectionLogRetentionDays must be between 1 and 3650\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.IngestionRejectionLogRetentionDays = ingestionRejectionLogRetentionDays;
-                updates["IngestionRejectionLogRetentionDays"] = ingestionRejectionLogRetentionDays.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("ingestionRejectionLogMaxEntries"))
-            {
-                int ingestionRejectionLogMaxEntries;
-                if (!Int32.TryParse(Convert.ToString(payload["ingestionRejectionLogMaxEntries"]), out ingestionRejectionLogMaxEntries) || ingestionRejectionLogMaxEntries < 100 || ingestionRejectionLogMaxEntries > 100000)
-                {
-                    SendText(stream, "{\"error\":\"ingestionRejectionLogMaxEntries must be between 100 and 100000\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.IngestionRejectionLogMaxEntries = ingestionRejectionLogMaxEntries;
-                updates["IngestionRejectionLogMaxEntries"] = ingestionRejectionLogMaxEntries.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("softwareJobAttemptLogRetentionDays"))
-            {
-                int softwareJobAttemptLogRetentionDays;
-                if (!Int32.TryParse(Convert.ToString(payload["softwareJobAttemptLogRetentionDays"]), out softwareJobAttemptLogRetentionDays) || softwareJobAttemptLogRetentionDays < 1 || softwareJobAttemptLogRetentionDays > 3650)
-                {
-                    SendText(stream, "{\"error\":\"softwareJobAttemptLogRetentionDays must be between 1 and 3650\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.SoftwareJobAttemptLogRetentionDays = softwareJobAttemptLogRetentionDays;
-                updates["SoftwareJobAttemptLogRetentionDays"] = softwareJobAttemptLogRetentionDays.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("softwareJobAttemptLogMaxEntries"))
-            {
-                int softwareJobAttemptLogMaxEntries;
-                if (!Int32.TryParse(Convert.ToString(payload["softwareJobAttemptLogMaxEntries"]), out softwareJobAttemptLogMaxEntries) || softwareJobAttemptLogMaxEntries < 100 || softwareJobAttemptLogMaxEntries > 100000)
-                {
-                    SendText(stream, "{\"error\":\"softwareJobAttemptLogMaxEntries must be between 100 and 100000\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.SoftwareJobAttemptLogMaxEntries = softwareJobAttemptLogMaxEntries;
-                updates["SoftwareJobAttemptLogMaxEntries"] = softwareJobAttemptLogMaxEntries.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("debugLogEnabled"))
-            {
-                // The log path is deliberately not settable from here - it
-                // stays CLI/config-only, so this endpoint can't be used to
-                // make the server write an arbitrary file path.
-                options.DebugLogEnabled = Convert.ToBoolean(payload["debugLogEnabled"]);
-                updates["DebugLogEnabled"] = options.DebugLogEnabled ? "true" : "false";
-            }
-
-            if (payload.ContainsKey("debugLogRetentionDays"))
-            {
-                int debugLogRetentionDays;
-                if (!Int32.TryParse(Convert.ToString(payload["debugLogRetentionDays"]), out debugLogRetentionDays) || debugLogRetentionDays < 1 || debugLogRetentionDays > 3650)
-                {
-                    SendText(stream, "{\"error\":\"debugLogRetentionDays must be between 1 and 3650\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.DebugLogRetentionDays = debugLogRetentionDays;
-                updates["DebugLogRetentionDays"] = debugLogRetentionDays.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("debugLogMaxSizeMb"))
-            {
-                double debugLogMaxSizeMb;
-                string debugLogMaxSizeText = Convert.ToString(payload["debugLogMaxSizeMb"]);
-                if (!Double.TryParse(debugLogMaxSizeText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out debugLogMaxSizeMb) && !Double.TryParse(debugLogMaxSizeText, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.CurrentCulture, out debugLogMaxSizeMb))
-                {
-                    SendText(stream, "{\"error\":\"debugLogMaxSizeMb must be between 1 and 100\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                if (debugLogMaxSizeMb < 1 || debugLogMaxSizeMb > 100)
-                {
-                    SendText(stream, "{\"error\":\"debugLogMaxSizeMb must be between 1 and 100\"}", "application/json; charset=utf-8", 400);
-                    return;
-                }
-                options.DebugLogMaxSizeMb = debugLogMaxSizeMb;
-                updates["DebugLogMaxSizeMb"] = debugLogMaxSizeMb.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            }
-
-            if (payload.ContainsKey("requireIngestionToken"))
-            {
-                options.RequireIngestionToken = desiredRequireIngestionToken;
-                updates["RequireIngestionToken"] = options.RequireIngestionToken ? "true" : "false";
-            }
-
-            if (updates.Count > 0)
-            {
-                SaveServerConfigValues(updates);
             }
 
             SendServerSettings(stream);
@@ -13497,6 +13795,36 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     System.Diagnostics.EventLogEntryType.Information);
             }
             catch { }
+
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["token"] = newToken;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        private void SendEnrollmentTokenStatus(Stream stream)
+        {
+            Dictionary<string, object> result = new Dictionary<string, object>();
+            result["configured"] = !String.IsNullOrEmpty(options.EnrollmentToken);
+            result["token"] = options.EnrollmentToken;
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            SendJson(stream, serializer.Serialize(result));
+        }
+
+        // No PreviousToken/overlap concept here, unlike RegenerateIngestionToken -
+        // EnrollmentToken only ever authenticates the one-shot POST /api/v1/client/enroll
+        // call a GPO-deployed client makes before it has a real token, it is never
+        // presented again afterwards, so there is no live client mid-rollout to keep
+        // accepting an old value for. Regenerating it immediately invalidates any
+        // not-yet-enrolled copy still sitting in a stale GPO .cmd - by design, since
+        // that is the whole point of being able to revoke a leaked bootstrap secret.
+        private void RegenerateEnrollmentToken(Stream stream, RequestContext request)
+        {
+            string newToken = GenerateRandomToken();
+            Dictionary<string, string> updates = new Dictionary<string, string>();
+            updates["EnrollmentToken"] = newToken;
+            SaveServerConfigValues(updates);
+            options.EnrollmentToken = newToken;
 
             Dictionary<string, object> result = new Dictionary<string, object>();
             result["token"] = newToken;
@@ -13900,7 +14228,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // ConfigureCertificate here and Install-Server.ps1's own import
         // step), so there is nothing to encrypt for it.
         private static readonly HashSet<string> EncryptedConfigKeys = new HashSet<string>(
-            new[] { "AdPassword", "WebPassword", "Token", "ClientUpdatePassword", "LinuxUpdatePassword", "SoftwareRepositoryPassword", "PreviousToken", "OutboundProxyPassword" },
+            new[] { "AdPassword", "WebPassword", "Token", "EnrollmentToken", "ClientUpdatePassword", "LinuxUpdatePassword", "SoftwareRepositoryPassword", "PreviousToken", "OutboundProxyPassword" },
             StringComparer.Ordinal);
 
         private void SaveServerConfigValues(Dictionary<string, string> updates)
@@ -14757,6 +15085,303 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return LoadJsonRecordList(GetLicensesFilePath());
         }
 
+        // Per-machine tokens issued via POST /api/v1/client/enroll (see
+        // EnrollClient) - a GPO-distributed client's real, usable ingestion
+        // credential, obtained without the shared Token ever having to be
+        // embedded in the SYSVOL-readable Install-ClientGpo.cmd. Same
+        // subfolder-under-DataPath/ACL-restricted-on-write convention as
+        // _licenses/_certificates.
+        private string GetClientTokensDirectory()
+        {
+            return Path.Combine(options.DataPath, "_tokens");
+        }
+
+        private string GetClientTokensFilePath()
+        {
+            return Path.Combine(GetClientTokensDirectory(), "client-tokens.json");
+        }
+
+        private List<Dictionary<string, object>> LoadClientTokens()
+        {
+            return LoadJsonRecordList(GetClientTokensFilePath());
+        }
+
+        private void SaveClientTokens(List<Dictionary<string, object>> tokens)
+        {
+            string directory = GetClientTokensDirectory();
+            if (!Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            string json = serializer.Serialize(tokens);
+            string path = GetClientTokensFilePath();
+            // Same temp-file-ACL-before-content idiom as
+            // SaveServerConfigValues/SaveLinuxKnownHosts/SaveLicenses - the
+            // ACL is restricted on a blank temp file BEFORE any token
+            // content is written into it, not after.
+            string tempPath = path + ".tmp";
+            File.WriteAllText(tempPath, "", new UTF8Encoding(false));
+            if (!ApplyRestrictedConfigAcl(tempPath))
+            {
+                throw new UnauthorizedAccessException("Could not restrict the temp client-tokens file's ACL before writing content into it - refusing to write '" + tempPath + "' with an unconfirmed ACL.");
+            }
+            File.WriteAllText(tempPath, json, new UTF8Encoding(false));
+            if (File.Exists(path))
+            {
+                File.Replace(tempPath, path, null);
+            }
+            else
+            {
+                File.Move(tempPath, path);
+            }
+            ApplyRestrictedConfigAcl(path);
+            // Invalidate rather than update in place - every caller already
+            // has the fresh `tokens` list in hand, but rebuilding from it
+            // directly would duplicate IsPerMachineTokenValid's own
+            // decrypt-and-populate logic. The next lookup rebuilds lazily,
+            // keeping the cost at "once per change" instead of "once per
+            // request" either way (see the index's own declaration comment).
+            clientTokenIndex = null;
+        }
+
+        // Accepts either the shared ingestion token (current or, within its
+        // overlap window, previous - IsIngestionTokenRejected's own existing
+        // logic, unchanged) OR a still-valid per-machine token issued via
+        // POST /api/v1/client/enroll. The per-machine lookup only ever runs
+        // once the shared-token check has already failed, so a directly-
+        // installed client still on the shared token costs exactly what it
+        // did before this existed - but every ENROLLED client authenticates
+        // every request through the per-machine path (it never holds the
+        // shared token at all), so that path's own cost matters just as
+        // much in practice; see clientTokenIndex's own declaration comment.
+        private bool IsClientTokenRejected(bool requireIngestionToken, string suppliedToken)
+        {
+            if (!IsIngestionTokenRejected(requireIngestionToken, suppliedToken, options.Token, options.PreviousToken, ParseUtcOrNull(options.PreviousTokenExpiresUtc)))
+            {
+                return false;
+            }
+            return !IsPerMachineTokenValid(suppliedToken);
+        }
+
+        private bool IsPerMachineTokenValid(string suppliedToken)
+        {
+            if (String.IsNullOrEmpty(suppliedToken))
+            {
+                return false;
+            }
+            lock (clientTokensLock)
+            {
+                if (clientTokenIndex == null)
+                {
+                    clientTokenIndex = new Dictionary<string, string>(StringComparer.Ordinal);
+                    foreach (Dictionary<string, object> record in LoadClientTokens())
+                    {
+                        string decrypted = SecretProtector.Unprotect(GetStringValue(record, "token"));
+                        if (!String.IsNullOrEmpty(decrypted))
+                        {
+                            clientTokenIndex[decrypted] = GetStringValue(record, "computerName");
+                        }
+                    }
+                }
+                return clientTokenIndex.ContainsKey(suppliedToken);
+            }
+        }
+
+        // Lets a GPO-distributed client, bootstrapped with only the
+        // low-privilege EnrollmentToken, obtain a real per-machine ingestion
+        // token on first contact - the real token never has to be embedded
+        // in Install-ClientGpo.cmd (a SYSVOL-readable file) at all.
+        // EnrollmentToken is accepted ONLY here - never for inventory
+        // ingestion or any other endpoint.
+        //
+        // Re-enrolling an ALREADY-enrolled computerName always issues (and
+        // stores) a brand-new token, replacing the old one - never returns
+        // the existing value unchanged. An earlier version of this endpoint
+        // was idempotent-by-return specifically so a lost response or a
+        // retried request could never orphan a machine without a valid
+        // token; that reasoning still holds (a retry just needs to end up
+        // with SOME valid, usable token - it never actually used the value
+        // from a response it never received), but it had a real security
+        // cost: anyone holding EnrollmentToken (the same SYSVOL exposure
+        // this feature exists to close) could silently obtain an
+        // ALREADY-ACTIVE machine's real, live token just by guessing or
+        // knowing its computerName - invisible to the admin, since no new
+        // row appears and the existing row's own value never changes.
+        // Rotating instead converts that silent theft into loud, detectable
+        // disruption: the real machine's own next report starts failing
+        // auth (401) until it notices and re-enrolls on its own - see
+        // CollectAndSave's own auth-failure handling, which clears
+        // options.Token and retries enrollment specifically to make this
+        // self-healing rather than a standing outage. This mirrors how
+        // regenerating the SHARED ingestion token already works in this
+        // project ("every already-installed client will stop reporting
+        // until reconfigured" - RegenerateIngestionToken's own dashboard
+        // warning) - rotation-causes-disruption is an accepted, existing
+        // part of this project's security model, not a new risk class.
+        private void EnrollClient(Stream stream, RequestContext request)
+        {
+            string suppliedToken = request.Headers.ContainsKey("x-inventory-token") ? request.Headers["x-inventory-token"] : null;
+            if (String.IsNullOrEmpty(options.EnrollmentToken) || !FixedTimeEquals(suppliedToken, options.EnrollmentToken))
+            {
+                RecordIngestionRejection(request, "client-enroll", ResolveIngestionRejectionReason(suppliedToken));
+                SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
+                return;
+            }
+
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> payload;
+            try
+            {
+                payload = serializer.Deserialize<Dictionary<string, object>>(request.Body);
+                if (payload == null)
+                {
+                    throw new ArgumentException("empty body");
+                }
+            }
+            catch
+            {
+                SendText(stream, "{\"error\":\"invalid request body\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string computerName = GetStringValue(payload, "computerName");
+            if (String.IsNullOrEmpty(computerName))
+            {
+                SendText(stream, "{\"error\":\"computerName is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+            if (IsReportIdentifierTooLong(computerName))
+            {
+                SendText(stream, "{\"error\":\"computerName is too long\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            string issuedToken = GenerateRandomToken();
+            bool isNewEnrollment;
+            lock (clientTokensLock)
+            {
+                List<Dictionary<string, object>> tokens = LoadClientTokens();
+                int existingIndex = -1;
+                for (int i = 0; i < tokens.Count; i++)
+                {
+                    if (String.Equals(GetStringValue(tokens[i], "computerName"), computerName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        existingIndex = i;
+                        break;
+                    }
+                }
+
+                isNewEnrollment = existingIndex < 0;
+                bool encryptedSuccessfully;
+                Dictionary<string, object> record = new Dictionary<string, object>();
+                record["computerName"] = computerName;
+                record["token"] = SecretProtector.Protect(issuedToken, options, "client enrollment token", out encryptedSuccessfully);
+                record["issuedAtUtc"] = DateTime.UtcNow.ToString("o");
+                if (!encryptedSuccessfully)
+                {
+                    secretEncryptionDegraded = true;
+                }
+                if (isNewEnrollment)
+                {
+                    tokens.Add(record);
+                }
+                else
+                {
+                    tokens[existingIndex] = record;
+                }
+                SaveClientTokens(tokens);
+            }
+
+            DebugLogger.Log(options, "Enroll", (isNewEnrollment ? "Issued a new" : "Rotated the") + " per-machine ingestion token for '" + DebugLogger.SanitizeForLog(computerName) + "'.");
+
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["token"] = issuedToken;
+            SendJson(stream, serializer.Serialize(response));
+        }
+
+        private void SendClientTokens(Stream stream)
+        {
+            List<Dictionary<string, object>> tokens;
+            lock (clientTokensLock)
+            {
+                tokens = LoadClientTokens();
+            }
+            // Never includes the real token value itself - an admin
+            // reviewing this list needs to know WHICH machines have
+            // enrolled, not what their credentials are. Unlike the shared
+            // Token (intentionally readable via GET /api/v1/server/
+            // ingestion-token, see docs/threat-model.md), a per-machine
+            // token has no legitimate reason to ever be displayed back.
+            ArrayList redacted = new ArrayList();
+            foreach (Dictionary<string, object> record in tokens)
+            {
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["computerName"] = GetStringValue(record, "computerName");
+                entry["issuedAtUtc"] = GetStringValue(record, "issuedAtUtc");
+                redacted.Add(entry);
+            }
+            JavaScriptSerializer serializer = CreateJsonSerializer();
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response["tokens"] = redacted;
+            SendJson(stream, serializer.Serialize(response));
+        }
+
+        private static string ExtractClientTokenComputerName(string path)
+        {
+            return ExtractIdFromPath(path, "/api/v1/client-tokens/");
+        }
+
+        // Revokes one machine's per-machine token - it immediately stops
+        // being accepted (IsClientTokenRejected/IsPerMachineTokenValid read
+        // the file fresh on every fallback check, no cache to invalidate).
+        // Does not affect the shared Token or any OTHER machine's own
+        // per-machine token. A revoked machine that still has
+        // EnrollmentToken configured can simply re-enroll and receive a
+        // fresh token - this endpoint is for removing a stale or suspected-
+        // compromised entry, not a permanent per-machine ban.
+        private void DeleteClientToken(Stream stream, RequestContext request)
+        {
+            // ExtractClientTokenComputerName (via ExtractIdFromPath) already
+            // URL-decodes and trims - a second Uri.UnescapeDataString here
+            // double-decoded any computerName containing a literal '%' escape
+            // sequence (e.g. an attacker-enrolled "%56ICTIM-PC" would decode
+            // to "VICTIM-PC" and silently revoke the wrong machine's token),
+            // and the trim meant a name with leading/trailing whitespace
+            // could never be revoked from the dashboard at all.
+            string computerName = ExtractClientTokenComputerName(request.Path);
+            if (String.IsNullOrEmpty(computerName))
+            {
+                SendText(stream, "{\"error\":\"computerName is required\"}", "application/json; charset=utf-8", 400);
+                return;
+            }
+
+            lock (clientTokensLock)
+            {
+                List<Dictionary<string, object>> tokens = LoadClientTokens();
+                int indexToRemove = -1;
+                for (int i = 0; i < tokens.Count; i++)
+                {
+                    if (String.Equals(GetStringValue(tokens[i], "computerName"), computerName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        indexToRemove = i;
+                        break;
+                    }
+                }
+                if (indexToRemove < 0)
+                {
+                    SendText(stream, "{\"error\":\"no token found for that computer name\"}", "application/json; charset=utf-8", 404);
+                    return;
+                }
+                tokens.RemoveAt(indexToRemove);
+                SaveClientTokens(tokens);
+            }
+
+            DebugLogger.Log(options, "Enroll", "Revoked the per-machine ingestion token for '" + DebugLogger.SanitizeForLog(computerName) + "'.");
+            SendText(stream, "{\"status\":\"ok\"}", "application/json; charset=utf-8", 200);
+        }
+
         private void SaveLicenses(List<Dictionary<string, object>> licenses)
         {
             string directory = GetLicensesDirectory();
@@ -14767,13 +15392,36 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
             JavaScriptSerializer serializer = CreateJsonSerializer();
             string json = serializer.Serialize(licenses);
-            File.WriteAllText(GetLicensesFilePath(), json, new UTF8Encoding(false));
+            string path = GetLicensesFilePath();
             // Licenses can hold real product keys (see index.html's "License
-            // type, key, or note" field hint) - restrict the same way
-            // server-config.json already is, reapplied on every write so the
-            // file can't drift back to an inherited (broader) ACL if it's
-            // ever deleted and recreated.
-            ApplyRestrictedConfigAcl(GetLicensesFilePath());
+            // type, key, or note" field hint). Same temp-file-ACL-before-
+            // content idiom as SaveServerConfigValues/SaveLinuxKnownHosts:
+            // restrict the temp file's ACL BEFORE any content is written
+            // into it, rather than writing the real content first and
+            // restricting only the final path - writing-then-restricting
+            // left the content briefly readable under the containing
+            // directory's inherited (broader) ACL for the whole window
+            // between the write and the restrict call.
+            string tempPath = path + ".tmp";
+            File.WriteAllText(tempPath, "", new UTF8Encoding(false));
+            if (!ApplyRestrictedConfigAcl(tempPath))
+            {
+                throw new UnauthorizedAccessException("Could not restrict the temp licenses file's ACL before writing content into it - refusing to write '" + tempPath + "' with an unconfirmed ACL.");
+            }
+            File.WriteAllText(tempPath, json, new UTF8Encoding(false));
+            if (File.Exists(path))
+            {
+                File.Replace(tempPath, path, null);
+            }
+            else
+            {
+                File.Move(tempPath, path);
+            }
+            // Reapplied on the final path too, same as SaveLinuxKnownHosts -
+            // so the file can't drift back to an inherited (broader) ACL if
+            // it's ever deleted and recreated, and as a backstop in case
+            // File.Replace/Move didn't preserve the temp file's own ACL.
+            ApplyRestrictedConfigAcl(path);
         }
 
         private static string ExtractLicenseId(string path)
@@ -14823,11 +15471,29 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             // value (no "dpapi:" prefix) returns it unchanged, so an
             // un-migrated record from before this fix reads back exactly as
             // it did before, and gets encrypted on its next save.
+            //
+            // detectedComputers is a purely computed, never-persisted field -
+            // the live set of machines CURRENTLY reporting this exact
+            // (name, license) pair, via the same BuildSharedActivationKeyGroups
+            // grouping and the same (product, key) matching convention the
+            // dashboard's own findLicenseForProductAndKey already uses for
+            // "Add to licenses" (case-insensitive, trimmed). Deliberately
+            // separate from the admin-owned, static `computers` field: a
+            // machine appearing here does NOT get written into `computers`
+            // just by existing, and a machine that stops reporting the key
+            // simply stops appearing here on the next load - no prune logic,
+            // no risk of silently overwriting an admin's manual edits.
+            Dictionary<string, List<string>> sharedActivationKeyGroups = BuildSharedActivationKeyGroups();
             List<Dictionary<string, object>> decryptedLicenses = new List<Dictionary<string, object>>(licenses.Count);
             foreach (Dictionary<string, object> license in licenses)
             {
                 Dictionary<string, object> decrypted = new Dictionary<string, object>(license);
-                decrypted["license"] = SecretProtector.Unprotect(GetStringValue(license, "license"));
+                string decryptedKey = SecretProtector.Unprotect(GetStringValue(license, "license"));
+                decrypted["license"] = decryptedKey;
+
+                string groupKey = (GetStringValue(license, "name") ?? "").Trim() + "\u001f" + (decryptedKey ?? "").Trim();
+                List<string> detectedComputers;
+                decrypted["detectedComputers"] = sharedActivationKeyGroups.TryGetValue(groupKey, out detectedComputers) ? detectedComputers : new List<string>();
                 decryptedLicenses.Add(decrypted);
             }
 
@@ -16049,7 +16715,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 ProcessStartInfo psi = new ProcessStartInfo();
                 psi.FileName = "expand.exe";
-                psi.Arguments = "-F:*-pkgProperties.txt \"" + fullFilePath + "\" \"" + tempDir + "\"";
+                psi.Arguments = "-F:*-pkgProperties.txt " + QuoteArgument(fullFilePath) + " " + QuoteArgument(tempDir);
                 psi.UseShellExecute = false;
                 psi.RedirectStandardOutput = true;
                 psi.RedirectStandardError = true;
@@ -16488,6 +17154,17 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                             settings["token"] = t.Substring(start, end - start).Replace("%%", "%");
                     }
                 }
+                else if (t.StartsWith("set ARGS=%ARGS% -EnrollmentToken", StringComparison.OrdinalIgnoreCase))
+                {
+                    int idx = t.IndexOf("-EnrollmentToken \"");
+                    if (idx >= 0)
+                    {
+                        int start = idx + 18;
+                        int end = t.IndexOf('"', start);
+                        if (end > start)
+                            settings["enrollmentToken"] = t.Substring(start, end - start).Replace("%%", "%");
+                    }
+                }
                 else if (t.StartsWith("set PACKAGE_ROOT=", StringComparison.OrdinalIgnoreCase))
                 {
                     string value = t.Substring(17).Replace("%%", "%");
@@ -16591,11 +17268,12 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
-        private static string[] GenerateCmdLines(string serverUrl, string token, int intervalHours, string packageSharePath)
+        private static string[] GenerateCmdLines(string serverUrl, string token, int intervalHours, string packageSharePath, string enrollmentToken)
         {
             ValidateBatchSafe(serverUrl, "serverUrl");
             ValidateBatchSafe(token, "token");
             ValidateBatchSafe(packageSharePath, "packageSharePath");
+            ValidateBatchSafe(enrollmentToken, "enrollmentToken");
 
             string escapedUrl = serverUrl.Replace("%", "%%");
             string packageRoot = String.IsNullOrEmpty(packageSharePath)
@@ -16612,8 +17290,15 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             lines.Add("set WAIT_SECONDS=90");
             lines.Add("");
             lines.Add("set ARGS=-ServerUrl \"%SERVER_URL%\" -IntervalHours %INTERVAL_HOURS%");
+            // Mutually exclusive by construction here (ConfigureClientPackage's
+            // own caller only ever passes one non-empty) - a client only ever
+            // attempts enrollment while its own Token is still empty
+            // (TryEnrollIfNeededCore), so embedding both would make
+            // enrollmentToken silently inert.
             if (!String.IsNullOrEmpty(token))
                 lines.Add("set ARGS=%ARGS% -Token \"" + token.Replace("%", "%%") + "\"");
+            if (!String.IsNullOrEmpty(enrollmentToken))
+                lines.Add("set ARGS=%ARGS% -EnrollmentToken \"" + enrollmentToken.Replace("%", "%%") + "\"");
             lines.Add("");
             lines.Add(":WAIT_PACKAGE");
             lines.Add("if exist \"%DEPLOY_SCRIPT%\" goto RUN_DEPLOY");
@@ -17114,6 +17799,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ExpandInstallTarget expands a short IPv4 range", TestExpandInstallTargetShortRange);
             allPassed &= SelfTestCheck(output, "ExpandInstallTarget expands a full IPv4 range", TestExpandInstallTargetFullRange);
             allPassed &= SelfTestCheck(output, "ExpandInstallTarget passes through a single hostname", TestExpandInstallTargetHostname);
+            allPassed &= SelfTestCheck(output, "ExpandInstallTarget does not misparse a bare numeric-hyphen hostname as an IP range", TestExpandInstallTargetBareNumericHyphenHostnameNotMisparsedAsIpRange);
             allPassed &= SelfTestCheck(output, "ExpandInstallTargets de-duplicates and splits on separators", TestExpandInstallTargetsDedup);
             allPassed &= SelfTestCheck(output, "AppendJobIfTargeted includes matching computer only", TestAppendJobIfTargetedIncludesMatchingComputerOnly);
             allPassed &= SelfTestCheck(output, "AppendJobIfTargeted excludes disabled entries", TestAppendJobIfTargetedExcludesDisabledEntries);
@@ -17158,6 +17844,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "SendLogoutResult removes the session from the server-side store", TestSendLogoutResultRemovesSessionFromStore);
             allPassed &= SelfTestCheck(output, "SendLogoutResult is idempotent when no session cookie is present", TestSendLogoutResultIsIdempotentWithNoSessionCookie);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings validates sessionLifetimeHours is between 1 and 720", TestConfigureServerSettingsValidatesSessionLifetimeHours);
+            allPassed &= SelfTestCheck(output, "ConfigureServerSettings does not partially apply an earlier valid field when a later field in the same request fails validation", TestConfigureServerSettingsDoesNotPartiallyApplyWhenALaterFieldFailsValidation);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips softwareJobAttemptLogRetentionDays/MaxEntries", TestConfigureServerSettingsRoundTripsSoftwareJobAttemptLogRetention);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips windowsDefaultIntervalHours/windowsUpdateCheckIntervalHours/tokenOverlapHours", TestConfigureServerSettingsRoundTripsWindowsDefaultsAndTokenOverlap);
             allPassed &= SelfTestCheck(output, "ConfigureServerSettings round-trips wsusScanMaxAgeDays", TestConfigureServerSettingsRoundTripsWsusScanMaxAgeDays);
@@ -17276,6 +17963,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "TryResolveAdSyncCredentials rejects when the saved AD account is incomplete", TestTryResolveAdSyncCredentialsRejectsWhenSavedAccountIncomplete);
             allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' default package root", TestParseCmdSettingsDefaultPackageRoot);
             allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips GenerateCmdLines' custom package share path", TestParseCmdSettingsCustomPackageSharePath);
+            allPassed &= SelfTestCheck(output, "ParseCmdSettings round-trips an embedded enrollmentToken and reports no 'token' key alongside it", TestParseCmdSettingsRoundTripsEnrollmentToken);
+            allPassed &= SelfTestCheck(output, "ConfigureClientPackage embeds -EnrollmentToken instead of the shared Token when useEnrollmentToken is requested", TestConfigureClientPackageEmbedsEnrollmentTokenInsteadOfSharedTokenWhenRequested);
+            allPassed &= SelfTestCheck(output, "ConfigureClientPackage rejects a useEnrollmentToken request with 400 when no EnrollmentToken is configured, writing no .cmd at all", TestConfigureClientPackageRejectsEnrollmentTokenRequestWhenNoneConfigured);
             allPassed &= SelfTestCheck(output, "ResolveAdDescriptionSyncEnabled uses the explicit config value when present", TestResolveAdDescriptionSyncEnabledUsesExplicitConfigValue);
             allPassed &= SelfTestCheck(output, "ResolveAdDescriptionSyncEnabled migrates from AdSyncEnabled when the config key is absent", TestResolveAdDescriptionSyncEnabledMigratesFromAdSyncEnabledWhenUnset);
             allPassed &= SelfTestCheck(output, "ResolveRequireIngestionToken uses the explicit config value when present", TestResolveRequireIngestionTokenUsesExplicitConfigValue);
@@ -17289,14 +17979,18 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected accepts the previous token within its overlap window", TestIsIngestionTokenRejectedAcceptsPreviousTokenWithinOverlapWindow);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected rejects the previous token once its overlap window expires", TestIsIngestionTokenRejectedRejectsPreviousTokenAfterOverlapExpires);
             allPassed &= SelfTestCheck(output, "IsIngestionTokenRejected rejects an unrelated token even during an active overlap window", TestIsIngestionTokenRejectedRejectsUnrelatedTokenEvenDuringOverlapWindow);
-            allPassed &= SelfTestCheck(output, "AuthenticatedWithPreviousToken distinguishes the current token from any other accepted one", TestAuthenticatedWithPreviousTokenDetectsNonCurrentToken);
+            allPassed &= SelfTestCheck(output, "AuthenticatedWithPreviousToken matches PreviousToken directly, never by inferring from 'not current' (regression: must not match a per-machine token)", TestAuthenticatedWithPreviousTokenMatchesPreviousTokenDirectly);
             allPassed &= SelfTestCheck(output, "ReceiveInventory's ack includes a config object with the current Windows defaults", TestReceiveInventoryIncludesConfigWithCurrentDefaults);
             allPassed &= SelfTestCheck(output, "ReceiveInventory's ack includes the new token when the request authenticated with the previous one", TestReceiveInventoryIncludesNewTokenWhenAuthenticatedWithPreviousToken);
+            allPassed &= SelfTestCheck(output, "ReceiveInventory never hands the real shared Token to a client authenticated with its own per-machine enrollment token", TestReceiveInventoryNeverLeaksSharedTokenToPerMachineTokenClient);
             allPassed &= SelfTestCheck(output, "ReceiveInventory omits update when EnableWindowsClientSelfUpdate is false", TestReceiveInventoryOmitsUpdateWhenSelfUpdateDisabled);
             allPassed &= SelfTestCheck(output, "ReceiveInventory includes update with a sha256 when the reported version differs and self-update is enabled", TestReceiveInventoryIncludesUpdateWhenVersionDiffersAndEnabled);
             allPassed &= SelfTestCheck(output, "ReceiveInventory advertises separate, correctly-matched sha256 hashes for net35 and net40", TestReceiveInventoryAdvertisesSeparateHashesPerTarget);
             allPassed &= SelfTestCheck(output, "BuildWindowsClientUpdateInfo includes a sigNet40 field when a .sig sidecar file exists next to the net40 exe", TestBuildWindowsClientUpdateInfoIncludesSignatureWhenSidecarExists);
             allPassed &= SelfTestCheck(output, "BuildWindowsClientUpdateInfo omits sigNet40 when no .sig sidecar file exists", TestBuildWindowsClientUpdateInfoOmitsSignatureWhenNoSidecarExists);
+            allPassed &= SelfTestCheck(output, "BuildWindowsClientUpdateInfo includes httpsPort when UseHttps is true", TestBuildWindowsClientUpdateInfoIncludesHttpsPortWhenHttpsEnabled);
+            allPassed &= SelfTestCheck(output, "BuildWindowsClientUpdateInfo omits httpsPort when UseHttps is false", TestBuildWindowsClientUpdateInfoOmitsHttpsPortWhenHttpsDisabled);
+            allPassed &= SelfTestCheck(output, "BuildWindowsClientUpdateInfo omits httpsPort when UseHttps is true but the listener never actually bound", TestBuildWindowsClientUpdateInfoOmitsHttpsPortWhenListenerNeverBound);
             allPassed &= SelfTestCheck(output, "ReceiveInventory omits update (and its GetExeVersion/hash cost) for an anonymous caller when RequireIngestionToken is off", TestReceiveInventoryOmitsUpdateForAnonymousCallerWhenTokenNotRequired);
             allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate rejects a request with no ingestion token", TestDownloadClientPackageUpdateRejectsMissingToken);
             allPassed &= SelfTestCheck(output, "DownloadClientPackageUpdate rejects an invalid target value with 400", TestDownloadClientPackageUpdateRejectsInvalidTarget);
@@ -17333,6 +18027,32 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "RecordAttemptOutcome never locks out when the threshold is 0 (disabled)", TestRecordAttemptOutcomeNeverLocksOutWhenThresholdIsZero);
             allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized's recorded failures and IsBasicAuthLockedOut's read are wired together and scoped per-IP", TestIsWebRequestAuthorizedLocksOutAfterRepeatedFailures);
             allPassed &= SelfTestCheck(output, "BuildHstsHeaderOrEmpty only adds Strict-Transport-Security when enabled AND the stream is TLS", TestBuildHstsHeaderOrEmpty);
+            allPassed &= SelfTestCheck(output, "EvaluateCertificateRisks flags a null certificate as 'no certificate configured'", TestEvaluateCertificateRisksNullCertificate);
+            allPassed &= SelfTestCheck(output, "EvaluateCertificateRisks reports no risks for a healthy certificate", TestEvaluateCertificateRisksHealthyCertificateHasNoRisks);
+            allPassed &= SelfTestCheck(output, "EvaluateCertificateRisks flags an expired certificate", TestEvaluateCertificateRisksFlagsExpiredCertificate);
+            allPassed &= SelfTestCheck(output, "EvaluateCertificateRisks flags a not-yet-valid certificate", TestEvaluateCertificateRisksFlagsNotYetValidCertificate);
+            allPassed &= SelfTestCheck(output, "EvaluateCertificateRisks flags a certificate with no Subject Alternative Name", TestEvaluateCertificateRisksFlagsMissingSubjectAlternativeName);
+            allPassed &= SelfTestCheck(output, "EvaluateCertificateRisks flags a certificate with a key under 2048 bits", TestEvaluateCertificateRisksFlagsWeakKey);
+            allPassed &= SelfTestCheck(output, "EvaluateCertificateRisks flags a certificate with no private key", TestEvaluateCertificateRisksFlagsNoPrivateKey);
+            allPassed &= SelfTestCheck(output, "ParseCertificateUpload rejects a malformed request body", TestParseCertificateUploadRejectsInvalidJson);
+            allPassed &= SelfTestCheck(output, "ParseCertificateUpload requires pfxBase64", TestParseCertificateUploadRequiresPfxBase64);
+            allPassed &= SelfTestCheck(output, "ParseCertificateUpload rejects invalid base64", TestParseCertificateUploadRejectsInvalidBase64);
+            allPassed &= SelfTestCheck(output, "ParseCertificateUpload rejects a payload over the 1 MB cap", TestParseCertificateUploadRejectsOversizedPayload);
+            allPassed &= SelfTestCheck(output, "ParseCertificateUpload accepts a valid small payload and round-trips its fields", TestParseCertificateUploadAcceptsValidPayload);
+            allPassed &= SelfTestCheck(output, "ImportCertificateIntoStore rejects corrupt bytes without touching the certificate store", TestImportCertificateIntoStoreRejectsCorruptBytes);
+            allPassed &= SelfTestCheck(output, "ImportCertificateIntoStore rejects a PFX opened with the wrong password", TestImportCertificateIntoStoreRejectsWrongPassword);
+            allPassed &= SelfTestCheck(output, "ImportCertificateIntoStore rejects a certificate with no private key before ever opening the store", TestImportCertificateIntoStoreRejectsCertificateWithNoPrivateKey);
+            allPassed &= SelfTestCheck(output, "StoreUploadedCertificate hot-swaps serverCertificate when HTTPS is on and the certificate has no risks", TestStoreUploadedCertificateHotSwapsWhenHttpsOnAndNoRisks);
+            allPassed &= SelfTestCheck(output, "StoreUploadedCertificate never hot-swaps a risky certificate, even with HTTPS on", TestStoreUploadedCertificateDoesNotHotSwapWhenRisksPresent);
+            allPassed &= SelfTestCheck(output, "StoreUploadedCertificate never hot-swaps while HTTPS is off", TestStoreUploadedCertificateDoesNotHotSwapWhenHttpsOff);
+            allPassed &= SelfTestCheck(output, "StoreUploadedCertificate appends a certificate history entry", TestStoreUploadedCertificateAppendsHistoryEntry);
+            allPassed &= SelfTestCheck(output, "ConfigureCertificate returns 400 for an invalid request body", TestConfigureCertificateReturns400ForInvalidBody);
+            allPassed &= SelfTestCheck(output, "ConfigureCertificate returns 400 for corrupt PFX bytes and never sets CertificateThumbprint", TestConfigureCertificateReturns400ForCorruptPfxBytes);
+            allPassed &= SelfTestCheck(output, "DeleteConfiguredCertificate returns 400 when no certificate is configured", TestDeleteConfiguredCertificateReturns400WhenNoneConfigured);
+            allPassed &= SelfTestCheck(output, "DeleteConfiguredCertificate clears config and turns off HTTPS when the configured thumbprint is not found in the store", TestDeleteConfiguredCertificateClearsConfigWhenThumbprintNotFoundInStore);
+            allPassed &= SelfTestCheck(output, "BuildCertificateStatusPayload reports certificatePresent=false with nothing configured", TestBuildCertificateStatusPayloadReflectsNoCertificateConfigured);
+            allPassed &= SelfTestCheck(output, "BuildCertificateStatusPayload reflects the actively-serving certificate's details and risks", TestBuildCertificateStatusPayloadReflectsActiveServerCertificate);
+            allPassed &= SelfTestCheck(output, "BuildCertificateStatusPayload falls back to a thumbprint lookup and reports certificatePresent=false when it finds nothing", TestBuildCertificateStatusPayloadFallsBackToThumbprintLookupReturningNotPresentWhenMissing);
             allPassed &= SelfTestCheck(output, "ResolveIngestionRejectionReason distinguishes a missing token from a wrong one", TestResolveIngestionRejectionReason);
             allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries keeps everything under both caps", TestPruneIngestionRejectionEntriesUnderBothCaps);
             allPassed &= SelfTestCheck(output, "PruneIngestionRejectionEntries trims oldest-first over the count cap", TestPruneIngestionRejectionEntriesOverCountCap);
@@ -17372,6 +18092,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ReceiveInventory marks a license entry whose key matches a known GVLK with isKms=true", TestReceiveInventoryMarksKnownGvlkAsKms);
             allPassed &= SelfTestCheck(output, "ReceiveInventory does not mark a license entry whose key matches no known GVLK as KMS", TestReceiveInventoryDoesNotMarkUnknownKeyAsKms);
             allPassed &= SelfTestCheck(output, "LoadClientReports groups an identical decrypted activation key shared across clients and leaves a unique key ungrouped", TestLoadClientReportsGroupsSharedActivationKeyAcrossClients);
+            allPassed &= SelfTestCheck(output, "LoadClientReports still groups a shared activation key despite incidental whitespace on one side", TestLoadClientReportsGroupsSharedActivationKeyDespiteIncidentalWhitespace);
             allPassed &= SelfTestCheck(output, "ResolveEffectiveToken falls back to the live server token when the request supplies none", TestResolveEffectiveTokenFallsBackToLiveTokenWhenBlank);
             allPassed &= SelfTestCheck(output, "RequiresIngestionTokenRiskAcknowledgment only fires on an actual on-to-off transition without prior acknowledgment", TestRequiresIngestionTokenRiskAcknowledgmentOnlyWhenTurningEnforcementOff);
             allPassed &= SelfTestCheck(output, "ComputeAdSyncFields carries a manually-set Description forward when sync is disabled", TestComputeAdSyncFieldsCarriesDescriptionForwardWhenSyncDisabled);
@@ -17381,9 +18102,23 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ComputeStickyUsbStorage is true when newly reported, regardless of previous", TestComputeStickyUsbStorageTrueWhenNewlyReportedRegardlessOfPrevious);
             allPassed &= SelfTestCheck(output, "ComputeStickyUsbStorage treats a missing previous field as false, not a throw", TestComputeStickyUsbStorageTreatsMissingPreviousFieldAsFalse);
             allPassed &= SelfTestCheck(output, "SaveLicenses restricts licenses.json to Administrators+SYSTEM", TestSaveLicensesRestrictsFileAcl);
+            allPassed &= SelfTestCheck(output, "SaveLicenses restricts the temp file's ACL before writing content into it, no leftover .tmp file", TestSaveLicensesRestrictsTempFileBeforeWritingContent);
             allPassed &= SelfTestCheck(output, "CreateLicense DPAPI-encrypts the license field at rest - never written in plaintext", TestCreateLicenseEncryptsLicenseFieldAtRest);
             allPassed &= SelfTestCheck(output, "GET /api/v1/licenses decrypts the license field back to plaintext for display", TestSendLicensesDecryptsLicenseFieldForDisplay);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/licenses includes a live detectedComputers list matching a real client report, without writing it into the static computers field", TestSendLicensesIncludesDetectedComputersWhenAClientReportsMatchingKey);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/licenses' detectedComputers is empty for a purely manual record no client currently reports", TestSendLicensesDetectedComputersIsEmptyWhenNoClientReportsIt);
             allPassed &= SelfTestCheck(output, "GET /api/v1/licenses still reads a legacy pre-encryption plaintext license value unchanged", TestSendLicensesReadsLegacyPlaintextLicenseUnchanged);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/server/enrollment-token reflects configured-state and returns the real value", TestSendEnrollmentTokenStatusReflectsConfiguredState);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/server/enrollment-token/regenerate replaces and persists (encrypted) the EnrollmentToken", TestRegenerateEnrollmentTokenPersistsNewValue);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/client/enroll rejects a wrong or missing EnrollmentToken with 401", TestEnrollClientRejectsWrongOrMissingEnrollmentToken);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/client/enroll rejects a request with no computerName with 400", TestEnrollClientRejectsMissingComputerName);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/client/enroll rotates to a brand-new token on re-enrollment, invalidating the old one (not idempotent-by-return - see EnrollClient's own comment)", TestEnrollClientRotatesTokenOnReEnrollment);
+            allPassed &= SelfTestCheck(output, "IsClientTokenRejected accepts a per-machine token issued via enrollment, still rejects an unissued guess", TestIsClientTokenRejectedAcceptsPerMachineTokenAfterEnrollment);
+            allPassed &= SelfTestCheck(output, "The lazily-built per-machine token index handles multiple enrolled machines and invalidates correctly on revoke", TestIsPerMachineTokenValidIndexHandlesMultipleEnrolledMachines);
+            allPassed &= SelfTestCheck(output, "DELETE /api/v1/client-tokens/{computerName} revokes a per-machine token so it stops authenticating, 404s on a second revoke", TestDeleteClientTokenRevokesSoItNoLongerAuthenticates);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client-tokens lists computerName/issuedAtUtc per machine but never the raw token value", TestSendClientTokensNeverIncludesRawTokenValue);
+            allPassed &= SelfTestCheck(output, "DELETE /api/v1/client-tokens/{computerName} decodes the computerName only once, never revoking a different machine via a crafted '%' name", TestDeleteClientTokenDecodesComputerNameOnlyOnce);
+            allPassed &= SelfTestCheck(output, "SaveClientTokens writes client-tokens.json with no leftover .tmp file, round-trips via LoadClientTokens", TestSaveClientTokensRestrictsTempFileBeforeWritingContent);
             allPassed &= SelfTestCheck(output, "IsValidRegistryHiveName accepts only HKEY_LOCAL_MACHINE/HKEY_CURRENT_USER", TestIsValidRegistryHiveNameAcceptsOnlyKnownHives);
             allPassed &= SelfTestCheck(output, "IsValidRegistryPathOrValueName rejects control characters and oversized input", TestIsValidRegistryPathOrValueNameRejectsControlCharsAndOversizedInput);
             allPassed &= SelfTestCheck(output, "License key sources CRUD storage round-trips through disk", TestLicenseKeySourcesCrudRoundTrip);
@@ -17665,6 +18400,16 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         {
             ArrayList result = ExpandInstallTarget("workstation-01");
             string[] expected = new string[] { "workstation-01" };
+            return CompareStringLists(expected, result);
+        }
+
+        private static string TestExpandInstallTargetBareNumericHyphenHostnameNotMisparsedAsIpRange()
+        {
+            // Without a dot on each side, "5-10" must not be treated as the
+            // short-range form - .NET Framework's legacy IPAddress.TryParse
+            // would otherwise accept "5"/"10" as bare non-dotted addresses.
+            ArrayList result = ExpandInstallTarget("5-10");
+            string[] expected = new string[] { "5-10" };
             return CompareStringLists(expected, result);
         }
 
@@ -18763,6 +19508,75 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (options.SessionLifetimeHours != 24)
             {
                 return "expected options.SessionLifetimeHours to be updated to 24";
+            }
+
+            return null;
+        }
+
+        // Regression test for a real gap: ConfigureServerSettings used to
+        // apply each field to options.X as soon as THAT field's own
+        // validation passed, rather than validating the whole request before
+        // applying any of it - a request with an early valid field and a
+        // later invalid one left the early field changed in memory (options.X)
+        // with nothing persisted, reverting silently only on restart. Sends
+        // staleHours (valid, would have been applied immediately under the
+        // old code) together with hstsMaxAgeHours (invalid, fails later in
+        // the same request) and confirms staleHours was never applied at all.
+        private static string TestConfigureServerSettingsDoesNotPartiallyApplyWhenALaterFieldFailsValidation()
+        {
+            ServerOptions options = new ServerOptions();
+            options.WebUsername = "admin";
+            options.WebPassword = "secret";
+            options.EnableHttp = true;
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-atomicapply-" + Guid.NewGuid().ToString("N"));
+            InventoryServer server = new InventoryServer(options);
+            int originalStaleHours = options.StaleHours;
+
+            RequestContext request = new RequestContext();
+            request.Method = "POST";
+            request.Path = "/api/v1/server/settings";
+            request.Headers = new Dictionary<string, string>();
+            request.Body = "{\"staleHours\":5,\"hstsMaxAgeHours\":-1}";
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.ConfigureServerSettings(stream, request);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("400"))
+                {
+                    return "expected the invalid hstsMaxAgeHours to reject the whole request with 400, got: " + response;
+                }
+            }
+
+            if (options.StaleHours != originalStaleHours)
+            {
+                return "expected staleHours to NOT be applied when a later field in the same request fails validation, but options.StaleHours changed from " + originalStaleHours + " to " + options.StaleHours;
+            }
+
+            // Confirm the valid-only request DOES still apply, same two
+            // fields, proving this isn't just "staleHours never works".
+            RequestContext validRequest = new RequestContext();
+            validRequest.Method = "POST";
+            validRequest.Path = "/api/v1/server/settings";
+            validRequest.Headers = new Dictionary<string, string>();
+            validRequest.Body = "{\"staleHours\":5,\"hstsMaxAgeHours\":24}";
+
+            using (MemoryStream stream = new MemoryStream())
+            {
+                server.ConfigureServerSettings(stream, validRequest);
+                string response = Encoding.UTF8.GetString(stream.ToArray());
+                if (!response.Contains("200 OK"))
+                {
+                    return "expected a fully-valid request to succeed, got: " + response;
+                }
+            }
+            if (options.StaleHours != 5)
+            {
+                return "expected staleHours to be applied once the whole request validates, got " + options.StaleHours;
+            }
+            if (options.HstsMaxAgeHours != 24)
+            {
+                return "expected hstsMaxAgeHours to be applied once the whole request validates, got " + options.HstsMaxAgeHours;
             }
 
             return null;
@@ -21531,6 +22345,61 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
+        private static string TestLoadClientReportsGroupsSharedActivationKeyDespiteIncidentalWhitespace()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-sharedkeywhitespace-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                bool ignoredSuccess;
+
+                // Same key/product, but one machine's report carries incidental
+                // leading/trailing whitespace (e.g. from a registry decode
+                // quirk) - the two must still group together.
+                string[] keyTexts = new string[] { "T83GX", "  T83GX  " };
+                string[] productTexts = new string[] { "Windows 11 Pro", "Windows 11 Pro\t" };
+                for (int i = 0; i < 2; i++)
+                {
+                    Dictionary<string, object> report = new Dictionary<string, object>();
+                    report["computerName"] = "WS-PC-" + i;
+                    ArrayList licenses = new ArrayList();
+                    Dictionary<string, object> entry = new Dictionary<string, object>();
+                    entry["product"] = productTexts[i];
+                    entry["source"] = "Windows activation (partial)";
+                    entry["key"] = SecretProtector.Protect(keyTexts[i], options, "license key", out ignoredSuccess);
+                    licenses.Add(entry);
+                    report["licenses"] = licenses;
+                    File.WriteAllText(Path.Combine(options.DataPath, "WS-PC-" + i + ".json"), serializer.Serialize(report), Encoding.UTF8);
+                }
+
+                ArrayList clients = server.LoadClientReports();
+                if (clients.Count != 2)
+                {
+                    return "expected exactly 2 loaded client reports, got " + clients.Count;
+                }
+
+                foreach (object clientObj in clients)
+                {
+                    Dictionary<string, object> client = (Dictionary<string, object>)clientObj;
+                    string computerName = Convert.ToString(client["computerName"]);
+                    ArrayList redactedLicenses = client["licenses"] as ArrayList;
+                    Dictionary<string, object> redactedEntry = (Dictionary<string, object>)redactedLicenses[0];
+                    if (!redactedEntry.ContainsKey("sharedWith"))
+                    {
+                        return "expected " + computerName + "'s entry to have a sharedWith field despite incidental whitespace on one side";
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
         private static string TestBuildHstsHeaderOrEmpty()
         {
             ServerOptions options = new ServerOptions();
@@ -21569,6 +22438,622 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
 
             return null;
+        }
+
+        // Certificate import/risk-evaluation path - previously zero self-test
+        // coverage on an otherwise well-tested security surface. Tests that
+        // would require real LocalMachine\My store mutation
+        // (ImportCertificateIntoStore's/DeleteConfiguredCertificate's success
+        // paths, which need real elevation) are deliberately NOT covered
+        // here - a self-test must never install or remove a real certificate
+        // on whatever machine runs it. Only the pre-store-access failure
+        // paths and the store LOOKUP paths (read-only, safe unelevated) are
+        // exercised.
+
+        // Builds a self-signed, fully in-memory test certificate - never
+        // touches any X509Store. X509SubjectAlternativeNameBuilder is not
+        // available on every .NET Framework installation this project
+        // targets, so a SAN extension (when requested) is built from its raw
+        // ASN.1 DER bytes directly: a SEQUENCE containing one context-tag-2
+        // (dNSName) IA5String, the minimal valid encoding for one DNS name.
+        private static X509Certificate2 BuildTestCertificate(int keySizeBits, bool includeSan, DateTimeOffset notBefore, DateTimeOffset notAfter)
+        {
+            RSA rsa = RSA.Create(keySizeBits);
+            CertificateRequest request = new CertificateRequest("CN=wil-selftest", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            if (includeSan)
+            {
+                byte[] dnsNameBytes = Encoding.ASCII.GetBytes("wil-selftest.local");
+                byte[] generalName = new byte[2 + dnsNameBytes.Length];
+                generalName[0] = 0x82;
+                generalName[1] = (byte)dnsNameBytes.Length;
+                Array.Copy(dnsNameBytes, 0, generalName, 2, dnsNameBytes.Length);
+                byte[] sanValue = new byte[2 + generalName.Length];
+                sanValue[0] = 0x30;
+                sanValue[1] = (byte)generalName.Length;
+                Array.Copy(generalName, 0, sanValue, 2, generalName.Length);
+                request.CertificateExtensions.Add(new X509Extension("2.5.29.17", sanValue, false));
+            }
+            return request.CreateSelfSigned(notBefore, notAfter);
+        }
+
+        private static string TestEvaluateCertificateRisksNullCertificate()
+        {
+            List<string> risks = EvaluateCertificateRisks(null);
+            if (risks.Count != 1 || risks[0] != "No certificate is configured.")
+            {
+                return "expected exactly one risk ('No certificate is configured.') for a null certificate, got: " + String.Join(" | ", risks);
+            }
+            return null;
+        }
+
+        private static string TestEvaluateCertificateRisksHealthyCertificateHasNoRisks()
+        {
+            using (X509Certificate2 cert = BuildTestCertificate(2048, true, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365)))
+            {
+                List<string> risks = EvaluateCertificateRisks(cert);
+                if (risks.Count != 0)
+                {
+                    return "expected a healthy 2048-bit certificate with a SAN and a valid date range to have no risks, got: " + String.Join(" | ", risks);
+                }
+            }
+            return null;
+        }
+
+        private static string TestEvaluateCertificateRisksFlagsExpiredCertificate()
+        {
+            using (X509Certificate2 cert = BuildTestCertificate(2048, true, DateTimeOffset.UtcNow.AddDays(-30), DateTimeOffset.UtcNow.AddDays(-1)))
+            {
+                List<string> risks = EvaluateCertificateRisks(cert);
+                if (!risks.Exists(r => r.StartsWith("The certificate expired on ")))
+                {
+                    return "expected an expired certificate to be flagged, got: " + String.Join(" | ", risks);
+                }
+            }
+            return null;
+        }
+
+        private static string TestEvaluateCertificateRisksFlagsNotYetValidCertificate()
+        {
+            using (X509Certificate2 cert = BuildTestCertificate(2048, true, DateTimeOffset.UtcNow.AddDays(10), DateTimeOffset.UtcNow.AddDays(365)))
+            {
+                List<string> risks = EvaluateCertificateRisks(cert);
+                if (!risks.Exists(r => r.StartsWith("The certificate is not valid until ")))
+                {
+                    return "expected a not-yet-valid certificate to be flagged, got: " + String.Join(" | ", risks);
+                }
+            }
+            return null;
+        }
+
+        private static string TestEvaluateCertificateRisksFlagsMissingSubjectAlternativeName()
+        {
+            using (X509Certificate2 cert = BuildTestCertificate(2048, false, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365)))
+            {
+                List<string> risks = EvaluateCertificateRisks(cert);
+                if (!risks.Exists(r => r.Contains("Subject Alternative Name")))
+                {
+                    return "expected a certificate with no SAN to be flagged, got: " + String.Join(" | ", risks);
+                }
+            }
+            return null;
+        }
+
+        private static string TestEvaluateCertificateRisksFlagsWeakKey()
+        {
+            using (X509Certificate2 cert = BuildTestCertificate(1024, true, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365)))
+            {
+                List<string> risks = EvaluateCertificateRisks(cert);
+                if (!risks.Exists(r => r.Contains("1024 bits")))
+                {
+                    return "expected a 1024-bit certificate to be flagged as weak, got: " + String.Join(" | ", risks);
+                }
+            }
+            return null;
+        }
+
+        private static string TestEvaluateCertificateRisksFlagsNoPrivateKey()
+        {
+            using (X509Certificate2 original = BuildTestCertificate(2048, true, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365)))
+            {
+                byte[] publicOnlyBytes = original.Export(X509ContentType.Cert);
+                using (X509Certificate2 publicOnly = new X509Certificate2(publicOnlyBytes))
+                {
+                    if (publicOnly.HasPrivateKey)
+                    {
+                        return "test setup error: expected the public-only re-export to have no private key";
+                    }
+                    List<string> risks = EvaluateCertificateRisks(publicOnly);
+                    if (!risks.Exists(r => r.Contains("no private key available")))
+                    {
+                        return "expected a certificate with no private key to be flagged, got: " + String.Join(" | ", risks);
+                    }
+                }
+            }
+            return null;
+        }
+
+        private static string TestParseCertificateUploadRejectsInvalidJson()
+        {
+            CertificateUpload upload = ParseCertificateUpload("not json");
+            if (upload.Error != "invalid request body")
+            {
+                return "expected 'invalid request body' for malformed JSON, got: " + upload.Error;
+            }
+            return null;
+        }
+
+        private static string TestParseCertificateUploadRequiresPfxBase64()
+        {
+            CertificateUpload upload = ParseCertificateUpload("{\"password\":\"x\"}");
+            if (upload.Error != "pfxBase64 is required")
+            {
+                return "expected 'pfxBase64 is required' when pfxBase64 is missing, got: " + upload.Error;
+            }
+            return null;
+        }
+
+        private static string TestParseCertificateUploadRejectsInvalidBase64()
+        {
+            CertificateUpload upload = ParseCertificateUpload("{\"pfxBase64\":\"not-valid-base64!!!\"}");
+            if (upload.Error != "pfxBase64 is not valid base64")
+            {
+                return "expected 'pfxBase64 is not valid base64' for malformed base64, got: " + upload.Error;
+            }
+            return null;
+        }
+
+        private static string TestParseCertificateUploadRejectsOversizedPayload()
+        {
+            byte[] oversized = new byte[1024 * 1024 + 1];
+            string body = "{\"pfxBase64\":\"" + Convert.ToBase64String(oversized) + "\"}";
+            CertificateUpload upload = ParseCertificateUpload(body);
+            if (upload.Error != "certificate file must be between 1 byte and 1 MB")
+            {
+                return "expected the 1 MB cap to reject an oversized payload, got: " + upload.Error;
+            }
+            return null;
+        }
+
+        private static string TestParseCertificateUploadAcceptsValidPayload()
+        {
+            byte[] bytes = new byte[] { 1, 2, 3, 4, 5 };
+            string body = "{\"pfxBase64\":\"" + Convert.ToBase64String(bytes) + "\",\"password\":\"hunter2\"}";
+            CertificateUpload upload = ParseCertificateUpload(body);
+            if (upload.Error != null)
+            {
+                return "expected a valid small payload to parse without error, got: " + upload.Error;
+            }
+            if (upload.Password != "hunter2")
+            {
+                return "expected password to round-trip, got: " + upload.Password;
+            }
+            if (upload.PfxBytes == null || upload.PfxBytes.Length != 5)
+            {
+                return "expected PfxBytes to round-trip the 5 decoded bytes";
+            }
+            return null;
+        }
+
+        private static string TestImportCertificateIntoStoreRejectsCorruptBytes()
+        {
+            string error;
+            bool isServerError;
+            X509Certificate2 result = ImportCertificateIntoStore(new byte[] { 1, 2, 3, 4, 5 }, "x", out error, out isServerError);
+            if (result != null)
+            {
+                return "expected corrupt bytes to fail import";
+            }
+            if (error != "could not read the certificate file. Check the password and file format.")
+            {
+                return "expected the standard 'could not read' error, got: " + error;
+            }
+            if (isServerError)
+            {
+                return "expected a corrupt-file failure to be a client error (400), not a server error (500)";
+            }
+            return null;
+        }
+
+        private static string TestImportCertificateIntoStoreRejectsWrongPassword()
+        {
+            using (X509Certificate2 cert = BuildTestCertificate(2048, true, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365)))
+            {
+                byte[] pfxBytes = cert.Export(X509ContentType.Pfx, "correct-password");
+                string error;
+                bool isServerError;
+                X509Certificate2 result = ImportCertificateIntoStore(pfxBytes, "wrong-password", out error, out isServerError);
+                if (result != null)
+                {
+                    return "expected the wrong PFX password to fail import";
+                }
+                if (error != "could not read the certificate file. Check the password and file format.")
+                {
+                    return "expected the standard 'could not read' error for a wrong password, got: " + error;
+                }
+            }
+            return null;
+        }
+
+        private static string TestImportCertificateIntoStoreRejectsCertificateWithNoPrivateKey()
+        {
+            using (X509Certificate2 original = BuildTestCertificate(2048, true, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365)))
+            {
+                byte[] publicOnlyBytes = original.Export(X509ContentType.Cert);
+                string error;
+                bool isServerError;
+                X509Certificate2 result = ImportCertificateIntoStore(publicOnlyBytes, "", out error, out isServerError);
+                if (result != null)
+                {
+                    return "expected a certificate with no private key to fail import";
+                }
+                if (error != "the certificate file has no private key")
+                {
+                    return "expected the 'no private key' error, got: " + error;
+                }
+                if (isServerError)
+                {
+                    return "expected a no-private-key failure to be a client error (400), not a server error (500)";
+                }
+            }
+            return null;
+        }
+
+        private static string TestStoreUploadedCertificateHotSwapsWhenHttpsOnAndNoRisks()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-certstore-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            options.UseHttps = true;
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                using (X509Certificate2 cert = BuildTestCertificate(2048, true, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365)))
+                {
+                    server.StoreUploadedCertificate(cert, new List<string>());
+                    if (options.CertificateThumbprint != cert.Thumbprint)
+                    {
+                        return "expected CertificateThumbprint to be set to the uploaded certificate's thumbprint";
+                    }
+                    if (server.serverCertificate == null || server.serverCertificate.Thumbprint != cert.Thumbprint)
+                    {
+                        return "expected the certificate to be hot-swapped into serverCertificate when UseHttps is on and there are no risks";
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestStoreUploadedCertificateDoesNotHotSwapWhenRisksPresent()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-certstore-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            options.UseHttps = true;
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                using (X509Certificate2 cert = BuildTestCertificate(2048, true, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365)))
+                {
+                    List<string> risks = new List<string>();
+                    risks.Add("some risk");
+                    server.StoreUploadedCertificate(cert, risks);
+                    if (options.CertificateThumbprint != cert.Thumbprint)
+                    {
+                        return "expected CertificateThumbprint to still be persisted even when the certificate has risks";
+                    }
+                    if (server.serverCertificate != null)
+                    {
+                        return "expected a risky certificate to never be hot-swapped into serverCertificate, even with UseHttps on";
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestStoreUploadedCertificateDoesNotHotSwapWhenHttpsOff()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-certstore-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            options.UseHttps = false;
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                using (X509Certificate2 cert = BuildTestCertificate(2048, true, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365)))
+                {
+                    server.StoreUploadedCertificate(cert, new List<string>());
+                    if (server.serverCertificate != null)
+                    {
+                        return "expected no hot-swap while UseHttps is off, even with zero risks";
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestStoreUploadedCertificateAppendsHistoryEntry()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-certhistory-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                using (X509Certificate2 cert = BuildTestCertificate(2048, true, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365)))
+                {
+                    List<string> risks = new List<string>();
+                    risks.Add("test risk");
+                    server.StoreUploadedCertificate(cert, risks);
+
+                    List<Dictionary<string, object>> history = server.LoadCertificateHistory();
+                    if (history.Count != 1)
+                    {
+                        return "expected exactly one certificate history entry after one upload, got " + history.Count;
+                    }
+                    if (Convert.ToString(history[0]["thumbprint"]) != cert.Thumbprint)
+                    {
+                        return "expected the history entry's thumbprint to match the uploaded certificate";
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestConfigureCertificateReturns400ForInvalidBody()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-configurecert-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/server/certificate";
+                request.Headers = new Dictionary<string, string>();
+                request.RemoteAddress = IPAddress.Parse("127.0.0.1");
+                request.Body = "not json";
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ConfigureCertificate(stream, request);
+                    string response = Encoding.UTF8.GetString(stream.ToArray());
+                    if (!response.Contains("400"))
+                    {
+                        return "expected an invalid body to return 400, got: " + response;
+                    }
+                    if (!response.Contains("invalid request body"))
+                    {
+                        return "expected the response to carry ParseCertificateUpload's error message, got: " + response;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestConfigureCertificateReturns400ForCorruptPfxBytes()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-configurecert-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/server/certificate";
+                request.Headers = new Dictionary<string, string>();
+                request.RemoteAddress = IPAddress.Parse("127.0.0.1");
+                request.Body = "{\"pfxBase64\":\"" + Convert.ToBase64String(new byte[] { 1, 2, 3, 4, 5 }) + "\",\"password\":\"x\"}";
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ConfigureCertificate(stream, request);
+                    string response = Encoding.UTF8.GetString(stream.ToArray());
+                    if (!response.Contains("400"))
+                    {
+                        return "expected corrupt PFX bytes to return 400, got: " + response;
+                    }
+                    if (!response.Contains("could not read the certificate file"))
+                    {
+                        return "expected the response to carry ImportCertificateIntoStore's error message, got: " + response;
+                    }
+                }
+                if (options.CertificateThumbprint != null)
+                {
+                    return "expected a failed import to never set CertificateThumbprint";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestDeleteConfiguredCertificateReturns400WhenNoneConfigured()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-deletecert-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            options.CertificateThumbprint = null;
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DeleteConfiguredCertificate(stream);
+                    string response = Encoding.UTF8.GetString(stream.ToArray());
+                    if (!response.Contains("400"))
+                    {
+                        return "expected deleting with no certificate configured to return 400, got: " + response;
+                    }
+                    if (!response.Contains("no certificate is configured"))
+                    {
+                        return "expected the 'no certificate is configured' message, got: " + response;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestDeleteConfiguredCertificateClearsConfigWhenThumbprintNotFoundInStore()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-deletecert-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            // A fake thumbprint, guaranteed not to match anything in the real
+            // LocalMachine\My store - FindCertificateByThumbprint only ever
+            // READS that store (OpenFlags.ReadOnly), safe without elevation,
+            // and returning null here means the store.Remove branch is never
+            // reached, so this test never mutates the real certificate store.
+            options.CertificateThumbprint = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+            options.UseHttps = true;
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DeleteConfiguredCertificate(stream);
+                    string response = Encoding.UTF8.GetString(stream.ToArray());
+                    if (response.Contains("could not remove"))
+                    {
+                        return "did not expect a store-removal error when the thumbprint was never found in the store, got: " + response;
+                    }
+                }
+                if (options.CertificateThumbprint != null)
+                {
+                    return "expected CertificateThumbprint to be cleared";
+                }
+                if (options.UseHttps)
+                {
+                    return "expected UseHttps to be turned off when its certificate is deleted";
+                }
+                if (server.serverCertificate != null)
+                {
+                    return "expected serverCertificate to be cleared";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestBuildCertificateStatusPayloadReflectsNoCertificateConfigured()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-certstatus-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                Dictionary<string, object> payload = server.BuildCertificateStatusPayload();
+                if (!(payload["certificatePresent"] is bool) || (bool)payload["certificatePresent"])
+                {
+                    return "expected certificatePresent to be false with nothing configured";
+                }
+                if (payload["subject"] != null)
+                {
+                    return "expected subject to be null with no certificate configured";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestBuildCertificateStatusPayloadReflectsActiveServerCertificate()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-certstatus-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                using (X509Certificate2 cert = BuildTestCertificate(2048, true, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365)))
+                {
+                    server.serverCertificate = cert;
+                    Dictionary<string, object> payload = server.BuildCertificateStatusPayload();
+                    if (!(bool)payload["certificatePresent"])
+                    {
+                        return "expected certificatePresent to be true when serverCertificate is set";
+                    }
+                    if (Convert.ToString(payload["subject"]) != cert.Subject)
+                    {
+                        return "expected subject to match the active server certificate";
+                    }
+                    object risksObj = payload["risks"];
+                    int risksCount = (risksObj is List<string>) ? ((List<string>)risksObj).Count : ((ArrayList)risksObj).Count;
+                    if (risksCount != 0)
+                    {
+                        return "expected a healthy active certificate to report zero risks";
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestBuildCertificateStatusPayloadFallsBackToThumbprintLookupReturningNotPresentWhenMissing()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-certstatus-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            // Configured thumbprint, but serverCertificate (the actively-
+            // serving instance) is null and the thumbprint matches nothing
+            // in the real store - exercises the fallback lookup path
+            // (FindCertificateByThumbprint, read-only) without ever needing
+            // a real certificate to actually be present.
+            options.CertificateThumbprint = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                Dictionary<string, object> payload = server.BuildCertificateStatusPayload();
+                if ((bool)payload["certificatePresent"])
+                {
+                    return "expected certificatePresent to be false when the configured thumbprint matches nothing in the store";
+                }
+                if (Convert.ToString(payload["thumbprint"]) != options.CertificateThumbprint)
+                {
+                    return "expected the raw configured thumbprint to still be reported even though no matching certificate was found";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
         }
 
         private static string TestTryParsePortFromPrefix()
@@ -23084,7 +24569,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 try
                 {
-                    GenerateCmdLines(unsafeValue, null, 6, null);
+                    GenerateCmdLines(unsafeValue, null, 6, null, null);
                     return "expected serverUrl '" + unsafeValue + "' to be rejected, but GenerateCmdLines accepted it";
                 }
                 catch (ArgumentException)
@@ -23093,7 +24578,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 }
                 try
                 {
-                    GenerateCmdLines("https://server/api/v1/inventory", unsafeValue, 6, null);
+                    GenerateCmdLines("https://server/api/v1/inventory", unsafeValue, 6, null, null);
                     return "expected token '" + unsafeValue + "' to be rejected, but GenerateCmdLines accepted it";
                 }
                 catch (ArgumentException)
@@ -23102,8 +24587,17 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 }
                 try
                 {
-                    GenerateCmdLines("https://server/api/v1/inventory", null, 6, unsafeValue);
+                    GenerateCmdLines("https://server/api/v1/inventory", null, 6, unsafeValue, null);
                     return "expected packageSharePath '" + unsafeValue + "' to be rejected, but GenerateCmdLines accepted it";
+                }
+                catch (ArgumentException)
+                {
+                    // expected
+                }
+                try
+                {
+                    GenerateCmdLines("https://server/api/v1/inventory", null, 6, null, unsafeValue);
+                    return "expected enrollmentToken '" + unsafeValue + "' to be rejected, but GenerateCmdLines accepted it";
                 }
                 catch (ArgumentException)
                 {
@@ -23811,15 +25305,34 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return null;
         }
 
-        private static string TestAuthenticatedWithPreviousTokenDetectsNonCurrentToken()
+        private static string TestAuthenticatedWithPreviousTokenMatchesPreviousTokenDirectly()
         {
-            if (InventoryServer.AuthenticatedWithPreviousToken("current-token", "current-token"))
+            DateTime futureExpiry = DateTime.UtcNow.AddHours(1);
+            DateTime pastExpiry = DateTime.UtcNow.AddHours(-1);
+
+            if (!InventoryServer.AuthenticatedWithPreviousToken("old-token", "old-token", futureExpiry))
             {
-                return "expected false when the supplied token matches the current one";
+                return "expected true when the supplied token matches PreviousToken within its overlap window";
             }
-            if (!InventoryServer.AuthenticatedWithPreviousToken("old-token", "current-token"))
+            if (InventoryServer.AuthenticatedWithPreviousToken("old-token", "old-token", pastExpiry))
             {
-                return "expected true when the supplied token does not match the current one";
+                return "expected false once the previous token's overlap window has expired, even though the value still matches";
+            }
+            if (InventoryServer.AuthenticatedWithPreviousToken("old-token", "", futureExpiry))
+            {
+                return "expected false when no PreviousToken is configured at all";
+            }
+            // Regression test for a real bug: this function used to infer
+            // "used the previous token" from "didn't match the current one",
+            // which broke once IsClientTokenRejected added a third accept
+            // path (a per-machine enrollment token). A per-machine token
+            // never equals PreviousToken either, so it must never satisfy
+            // this check - doing so would hand the real shared Token to a
+            // client authenticated with its own per-machine token, silently
+            // overwriting it on the client's very next report.
+            if (InventoryServer.AuthenticatedWithPreviousToken("some-per-machine-token", "old-token", futureExpiry))
+            {
+                return "expected false for a value that matches neither PreviousToken nor anything else being checked here - a per-machine token must never be mistaken for the previous shared token";
             }
             return null;
         }
@@ -23892,6 +25405,68 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (responseText.IndexOf("\"ingestionToken\":\"new-token\"", StringComparison.Ordinal) < 0)
                 {
                     return "expected the ack's config object to include the new token when the request authenticated with the previous one, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        // Regression test for a real bug found during review: a client
+        // authenticated with its own per-machine enrollment token must NEVER
+        // receive the real shared Token in its ack. AuthenticatedWithPreviousToken
+        // used to infer "used the previous token" from "didn't match the
+        // current one" - true back when IsIngestionTokenRejected had only two
+        // accept branches, but IsClientTokenRejected added a third (a
+        // per-machine token), silently breaking that inference and handing
+        // the shared Token to any enrolled client on its very next report -
+        // permanently overwriting its per-machine token with the shared one
+        // and defeating the whole point of per-machine tokens.
+        private static string TestReceiveInventoryNeverLeaksSharedTokenToPerMachineTokenClient()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-no-token-leak-" + Guid.NewGuid().ToString("N"));
+            options.EnrollmentToken = "correct-bootstrap-secret";
+            options.Token = "the-real-shared-token-must-never-leak";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext enrollRequest = new RequestContext();
+                enrollRequest.Method = "POST";
+                enrollRequest.Path = "/api/v1/client/enroll";
+                enrollRequest.Headers = new Dictionary<string, string>();
+                enrollRequest.Headers["x-inventory-token"] = "correct-bootstrap-secret";
+                enrollRequest.Body = "{\"computerName\":\"ENROLLED-PC\"}";
+
+                string issuedToken;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.EnrollClient(stream, enrollRequest);
+                    string responseText = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream.ToArray()));
+                    Dictionary<string, object> response = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText);
+                    issuedToken = Convert.ToString(response["token"]);
+                }
+
+                RequestContext inventoryRequest = new RequestContext();
+                inventoryRequest.Method = "POST";
+                inventoryRequest.Headers = new Dictionary<string, string>();
+                inventoryRequest.Headers["x-inventory-token"] = issuedToken;
+                inventoryRequest.Body = "{\"computerName\":\"ENROLLED-PC\"}";
+
+                string ackResponseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveInventory(stream, inventoryRequest);
+                    ackResponseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (ackResponseText.IndexOf("the-real-shared-token-must-never-leak", StringComparison.Ordinal) >= 0)
+                {
+                    return "expected a client authenticated with its own per-machine token to never receive the real shared Token in its ack, got: " + ackResponseText;
                 }
                 return null;
             }
@@ -24256,6 +25831,143 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (updateInfo.ContainsKey("sigNet40"))
                 {
                     return "expected sigNet40 to be absent when no .sig sidecar file exists, got: " + updateInfo["sigNet40"];
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.ClientPackagePath, true); } catch { }
+            }
+        }
+
+        // Lets a client whose own ServerUrl is still http opportunistically
+        // retry its self-update download over https - see this field's own
+        // comment in BuildWindowsClientUpdateInfo and
+        // ClientOptions.RequireHttpsForSelfUpdate on the client side.
+        private static string TestBuildWindowsClientUpdateInfoIncludesHttpsPortWhenHttpsEnabled()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-httpsportpkg-" + Guid.NewGuid().ToString("N"));
+            options.ClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-httpsportclientpkg-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.ClientPackagePath);
+            options.UseHttps = true;
+            options.HttpsPort = 8443;
+            try
+            {
+                // See TestBuildWindowsClientUpdateInfoIncludesSignatureWhenSidecarExists's
+                // own comment for why a real, already-built client exe is
+                // copied here rather than a fake file or this test process's
+                // own exe.
+                string realNet40Path = Path.Combine(Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location), "WindowsInventoryLiteClient-net40.exe");
+                if (!File.Exists(realNet40Path))
+                {
+                    return null;
+                }
+                string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
+                File.Copy(realNet40Path, net40Path, true);
+
+                InventoryServer server = new InventoryServer(options);
+                // httpsPort is gated on the listener actually having bound
+                // (httpsSlot.Running), not merely on options.UseHttps - this
+                // test never calls server.Start(), so the real listener
+                // never binds; set the flag directly to exercise the
+                // "HTTPS really is up" case this function is meant to cover.
+                server.httpsSlot.Running = true;
+                System.Reflection.MethodInfo buildMethod = typeof(InventoryServer).GetMethod("BuildWindowsClientUpdateInfo", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Dictionary<string, object> updateInfo = (Dictionary<string, object>)buildMethod.Invoke(server, new object[] { "0.0.0-older-than-anything" });
+                if (updateInfo == null)
+                {
+                    return "expected a non-null update info dict when a real, newer-versioned package exists";
+                }
+                if (!updateInfo.ContainsKey("httpsPort") || Convert.ToInt32(updateInfo["httpsPort"]) != 8443)
+                {
+                    return "expected httpsPort to equal options.HttpsPort (8443) when UseHttps is true, got: " + (updateInfo.ContainsKey("httpsPort") ? updateInfo["httpsPort"] : "(missing)");
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.ClientPackagePath, true); } catch { }
+            }
+        }
+
+        private static string TestBuildWindowsClientUpdateInfoOmitsHttpsPortWhenHttpsDisabled()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-nohttpsportpkg-" + Guid.NewGuid().ToString("N"));
+            options.ClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-nohttpsportclientpkg-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.ClientPackagePath);
+            options.UseHttps = false;
+            try
+            {
+                string realNet40Path = Path.Combine(Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location), "WindowsInventoryLiteClient-net40.exe");
+                if (!File.Exists(realNet40Path))
+                {
+                    return null;
+                }
+                string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
+                File.Copy(realNet40Path, net40Path, true);
+
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo buildMethod = typeof(InventoryServer).GetMethod("BuildWindowsClientUpdateInfo", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Dictionary<string, object> updateInfo = (Dictionary<string, object>)buildMethod.Invoke(server, new object[] { "0.0.0-older-than-anything" });
+                if (updateInfo == null)
+                {
+                    return "expected a non-null update info dict when a real, newer-versioned package exists";
+                }
+                if (updateInfo.ContainsKey("httpsPort"))
+                {
+                    return "expected httpsPort to be absent when UseHttps is false, got: " + updateInfo["httpsPort"];
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.ClientPackagePath, true); } catch { }
+            }
+        }
+
+        // Regression test for a real bug found during review: httpsPort used
+        // to be gated on options.UseHttps alone - a config flag that can be
+        // true while the HTTPS listener itself never actually bound (no
+        // certificate configured yet, a bind failure at startup, etc). This
+        // covers exactly that gap: UseHttps=true but the listener never
+        // started (httpsSlot.Running left at its default false, matching a
+        // fresh InventoryServer that never called Start()).
+        private static string TestBuildWindowsClientUpdateInfoOmitsHttpsPortWhenListenerNeverBound()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-httpsnotrunning-" + Guid.NewGuid().ToString("N"));
+            options.ClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-httpsnotrunningclientpkg-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.ClientPackagePath);
+            options.UseHttps = true;
+            options.HttpsPort = 8443;
+            try
+            {
+                string realNet40Path = Path.Combine(Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location), "WindowsInventoryLiteClient-net40.exe");
+                if (!File.Exists(realNet40Path))
+                {
+                    return null;
+                }
+                string net40Path = Path.Combine(options.ClientPackagePath, "WindowsInventoryLiteClient-net40.exe");
+                File.Copy(realNet40Path, net40Path, true);
+
+                InventoryServer server = new InventoryServer(options);
+                System.Reflection.MethodInfo buildMethod = typeof(InventoryServer).GetMethod("BuildWindowsClientUpdateInfo", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                Dictionary<string, object> updateInfo = (Dictionary<string, object>)buildMethod.Invoke(server, new object[] { "0.0.0-older-than-anything" });
+                if (updateInfo == null)
+                {
+                    return "expected a non-null update info dict when a real, newer-versioned package exists";
+                }
+                if (updateInfo.ContainsKey("httpsPort"))
+                {
+                    return "expected httpsPort to be absent when UseHttps is true but the listener never actually bound, got: " + updateInfo["httpsPort"];
                 }
                 return null;
             }
@@ -25377,6 +27089,84 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
         }
 
+        // Same ordering regression this test's SaveServerConfigValues twin
+        // (TestSaveServerConfigValuesRestrictsTempFileBeforeWritingContent)
+        // covers: SaveLicenses used to write the real content to the temp
+        // file BEFORE restricting its ACL, leaving it briefly readable under
+        // the containing directory's inherited (broader) ACL. Handles both
+        // outcomes this non-elevated test process can hit, same as the
+        // config twin: if ApplyRestrictedConfigAcl itself fails here, the
+        // abandoned .tmp file must be empty (content is only ever written
+        // AFTER the ACL is confirmed restricted); if it succeeds, the .tmp
+        // file must be gone (renamed over the final path) and the final
+        // file's ACL must be restricted.
+        private static string TestSaveLicensesRestrictsTempFileBeforeWritingContent()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-license-acl-race-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+                List<Dictionary<string, object>> licenses = new List<Dictionary<string, object>>();
+                Dictionary<string, object> record = new Dictionary<string, object>();
+                record["name"] = "Test Software";
+                record["license"] = "SECRET-KEY-ORDERING-TEST";
+                licenses.Add(record);
+
+                string licensesPath = Path.Combine(dataPath, "_licenses", "licenses.json");
+                string tempPath = licensesPath + ".tmp";
+
+                bool deniedByAcl = false;
+                try
+                {
+                    server.SaveLicenses(licenses);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    deniedByAcl = true;
+                }
+
+                SecurityIdentifier usersSid = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+
+                if (deniedByAcl)
+                {
+                    if (!File.Exists(tempPath))
+                    {
+                        return null;
+                    }
+                    GrantCurrentUserAccessForTest(tempPath);
+                    if (File.ReadAllText(tempPath).Length != 0)
+                    {
+                        return "expected the abandoned .tmp file to be empty (ACL must be restricted before any license content is written), but it held content";
+                    }
+                    return null;
+                }
+
+                if (File.Exists(tempPath))
+                {
+                    return "expected the .tmp file to be gone after a successful save (renamed over the final path), but it still exists - the fix must not leave a stale temp file behind on the success path";
+                }
+                if (!File.Exists(licensesPath))
+                {
+                    return "expected licenses.json to exist after a successful save";
+                }
+                foreach (FileSystemAccessRule rule in File.GetAccessControl(licensesPath).GetAccessRules(true, false, typeof(SecurityIdentifier)))
+                {
+                    if (rule.IdentityReference is SecurityIdentifier && ((SecurityIdentifier)rule.IdentityReference) == usersSid)
+                    {
+                        return "expected licenses.json's final ACL to NOT grant BUILTIN\\Users any explicit rule - ApplyRestrictedConfigAcl should have replaced inherited permissions";
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
         // Regression coverage for a real gap: the curated Licenses catalog
         // used to write the "license" field (which the UI's own hint text
         // says can hold a real product key) straight to disk in plaintext,
@@ -25452,6 +27242,120 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (responseText.IndexOf("REAL-SECRET-KEY-67890", StringComparison.Ordinal) < 0)
                 {
                     return "expected GET /api/v1/licenses to return the real decrypted license value, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // Regression/feature coverage for the live "Detected" column
+        // (backlog: Licenses > Catalog's computer list didn't update
+        // automatically when a new client reports an already-catalogued
+        // key). detectedComputers is purely computed from
+        // BuildSharedActivationKeyGroups - this confirms the (name, license)
+        // matching convention actually lines up with what a real client
+        // report produces, and that a non-matching report contributes
+        // nothing.
+        private static string TestSendLicensesIncludesDetectedComputersWhenAClientReportsMatchingKey()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-licensedetected-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                bool ignoredSuccess;
+
+                RequestContext createRequest = new RequestContext();
+                createRequest.Method = "POST";
+                createRequest.Path = "/api/v1/licenses";
+                createRequest.Body = "{\"name\":\"Windows 11 Pro\",\"license\":\"T83GX\"}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo createMethod = typeof(InventoryServer).GetMethod("CreateLicense", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    createMethod.Invoke(server, new object[] { stream, createRequest });
+                }
+
+                Dictionary<string, object> report = new Dictionary<string, object>();
+                report["computerName"] = "DETECT-PC";
+                ArrayList licenses = new ArrayList();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["product"] = "Windows 11 Pro";
+                entry["source"] = "Windows activation (partial)";
+                entry["key"] = SecretProtector.Protect("T83GX", options, "license key", out ignoredSuccess);
+                licenses.Add(entry);
+                report["licenses"] = licenses;
+                File.WriteAllText(Path.Combine(dataPath, "DETECT-PC.json"), serializer.Serialize(report), Encoding.UTF8);
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo sendMethod = typeof(InventoryServer).GetMethod("SendLicenses", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    sendMethod.Invoke(server, new object[] { stream });
+                    responseText = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream.ToArray()));
+                }
+
+                Dictionary<string, object> response = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText);
+                ArrayList responseLicenses = (ArrayList)response["licenses"];
+                Dictionary<string, object> returnedLicense = (Dictionary<string, object>)responseLicenses[0];
+                ArrayList detectedComputers = (ArrayList)returnedLicense["detectedComputers"];
+                if (detectedComputers.Count != 1 || Convert.ToString(detectedComputers[0]) != "DETECT-PC")
+                {
+                    return "expected detectedComputers to contain exactly ['DETECT-PC'], got: " + responseText;
+                }
+                ArrayList staticComputers = returnedLicense.ContainsKey("computers") ? returnedLicense["computers"] as ArrayList : null;
+                if (staticComputers != null && staticComputers.Contains("DETECT-PC"))
+                {
+                    return "expected the live detection to NOT be written into the static, admin-owned computers field";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendLicensesDetectedComputersIsEmptyWhenNoClientReportsIt()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-licensenotdetected-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext createRequest = new RequestContext();
+                createRequest.Method = "POST";
+                createRequest.Path = "/api/v1/licenses";
+                createRequest.Body = "{\"name\":\"Some Manually Tracked Product\",\"license\":\"NO-REAL-CLIENT-REPORTS-THIS\"}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo createMethod = typeof(InventoryServer).GetMethod("CreateLicense", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    createMethod.Invoke(server, new object[] { stream, createRequest });
+                }
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    System.Reflection.MethodInfo sendMethod = typeof(InventoryServer).GetMethod("SendLicenses", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    sendMethod.Invoke(server, new object[] { stream });
+                    responseText = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream.ToArray()));
+                }
+
+                Dictionary<string, object> response = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText);
+                ArrayList responseLicenses = (ArrayList)response["licenses"];
+                Dictionary<string, object> returnedLicense = (Dictionary<string, object>)responseLicenses[0];
+                ArrayList detectedComputers = (ArrayList)returnedLicense["detectedComputers"];
+                if (detectedComputers.Count != 0)
+                {
+                    return "expected an empty detectedComputers list for a purely manual record no client reports, got: " + responseText;
                 }
                 return null;
             }
@@ -26455,6 +28359,582 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return null;
         }
 
+        private static string TestSendEnrollmentTokenStatusReflectsConfiguredState()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-enrolltoken-status-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendEnrollmentTokenStatus(stream);
+                    string responseText = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream.ToArray()));
+                    Dictionary<string, object> response = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText);
+                    if (!Convert.ToString(response["configured"]).Equals("False", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return "expected configured=false when EnrollmentToken is unset, got: " + responseText;
+                    }
+                }
+
+                options.EnrollmentToken = "a-bootstrap-secret";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendEnrollmentTokenStatus(stream);
+                    string responseText = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream.ToArray()));
+                    Dictionary<string, object> response = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText);
+                    if (!Convert.ToString(response["configured"]).Equals("True", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return "expected configured=true once EnrollmentToken is set, got: " + responseText;
+                    }
+                    if (Convert.ToString(response["token"]) != "a-bootstrap-secret")
+                    {
+                        return "expected the real EnrollmentToken value to be returned for display, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestRegenerateEnrollmentTokenPersistsNewValue()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-enrolltoken-regen-" + Guid.NewGuid().ToString("N"));
+            options.ConfigPath = Path.Combine(options.DataPath, "server-config.json");
+            options.EnrollmentToken = "original-bootstrap-secret";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Headers = new Dictionary<string, string>();
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.RegenerateEnrollmentToken(stream, request);
+                }
+
+                if (options.EnrollmentToken == "original-bootstrap-secret")
+                {
+                    return "expected EnrollmentToken to change after regenerate";
+                }
+                Dictionary<string, object> persistedConfig = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(options.ConfigPath, Encoding.UTF8));
+                string persisted = SecretProtector.Unprotect(Convert.ToString(persistedConfig["EnrollmentToken"]));
+                if (persisted != options.EnrollmentToken)
+                {
+                    return "expected the regenerated EnrollmentToken to be persisted (encrypted) to disk, matching the in-memory value";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestEnrollClientRejectsWrongOrMissingEnrollmentToken()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-enroll-authfail-" + Guid.NewGuid().ToString("N"));
+            options.EnrollmentToken = "correct-bootstrap-secret";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext wrongTokenRequest = new RequestContext();
+                wrongTokenRequest.Method = "POST";
+                wrongTokenRequest.Path = "/api/v1/client/enroll";
+                wrongTokenRequest.Headers = new Dictionary<string, string>();
+                wrongTokenRequest.Headers["x-inventory-token"] = "wrong-secret";
+                wrongTokenRequest.Body = "{\"computerName\":\"PC1\"}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.EnrollClient(stream, wrongTokenRequest);
+                    string responseText = Encoding.ASCII.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected 401 for a wrong EnrollmentToken, got: " + responseText;
+                    }
+                }
+
+                RequestContext noTokenRequest = new RequestContext();
+                noTokenRequest.Method = "POST";
+                noTokenRequest.Path = "/api/v1/client/enroll";
+                noTokenRequest.Headers = new Dictionary<string, string>();
+                noTokenRequest.Body = "{\"computerName\":\"PC1\"}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.EnrollClient(stream, noTokenRequest);
+                    string responseText = Encoding.ASCII.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected 401 when no x-inventory-token header is present at all, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestEnrollClientRejectsMissingComputerName()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-enroll-noname-" + Guid.NewGuid().ToString("N"));
+            options.EnrollmentToken = "correct-bootstrap-secret";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/client/enroll";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "correct-bootstrap-secret";
+                request.Body = "{}";
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.EnrollClient(stream, request);
+                    string responseText = Encoding.ASCII.GetString(stream.ToArray());
+                    if (responseText.IndexOf("400", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected 400 when computerName is missing from the enroll request body, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        // Regression test for a real security bug found during review:
+        // EnrollClient used to return the EXISTING token unchanged on
+        // re-enrollment, so anyone holding EnrollmentToken could silently
+        // obtain an already-active machine's real, live token just by
+        // knowing its computerName - invisible to the admin (no new row,
+        // the existing row's own value never changed). It now rotates: a
+        // second enrollment issues and stores a brand-new token, replacing
+        // the old one, so stealing-by-name actively breaks the real
+        // machine's connectivity instead of silently copying its credential.
+        private static string TestEnrollClientRotatesTokenOnReEnrollment()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-enroll-rotate-" + Guid.NewGuid().ToString("N"));
+            options.EnrollmentToken = "correct-bootstrap-secret";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/client/enroll";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "correct-bootstrap-secret";
+                request.Body = "{\"computerName\":\"ENROLL-PC\"}";
+
+                string firstIssuedToken;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.EnrollClient(stream, request);
+                    string responseText = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream.ToArray()));
+                    Dictionary<string, object> response = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText);
+                    firstIssuedToken = Convert.ToString(response["token"]);
+                    if (String.IsNullOrEmpty(firstIssuedToken))
+                    {
+                        return "expected a non-empty issued token on first enrollment, got: " + responseText;
+                    }
+                }
+
+                string secondIssuedToken;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.EnrollClient(stream, request);
+                    string responseText = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream.ToArray()));
+                    Dictionary<string, object> response = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText);
+                    secondIssuedToken = Convert.ToString(response["token"]);
+                    if (secondIssuedToken == firstIssuedToken)
+                    {
+                        return "expected re-enrolling the same computerName to mint a brand-new token, not return the existing one unchanged";
+                    }
+                }
+
+                if (!server.IsClientTokenRejected(true, firstIssuedToken))
+                {
+                    return "expected the first (now-rotated-away) token to stop authenticating once rotation issued a replacement";
+                }
+                if (server.IsClientTokenRejected(true, secondIssuedToken))
+                {
+                    return "expected the newly-rotated token to authenticate successfully";
+                }
+
+                List<Dictionary<string, object>> stored = server.LoadClientTokens();
+                if (stored.Count != 1)
+                {
+                    return "expected exactly one stored per-machine token record after two enrollments of the same computerName, got " + stored.Count;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestIsClientTokenRejectedAcceptsPerMachineTokenAfterEnrollment()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-permachine-accept-" + Guid.NewGuid().ToString("N"));
+            options.EnrollmentToken = "correct-bootstrap-secret";
+            options.Token = "shared-token-unrelated-to-enrollment";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Path = "/api/v1/client/enroll";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "correct-bootstrap-secret";
+                request.Body = "{\"computerName\":\"ENROLL-PC-2\"}";
+
+                string issuedToken;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.EnrollClient(stream, request);
+                    string responseText = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream.ToArray()));
+                    Dictionary<string, object> response = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText);
+                    issuedToken = Convert.ToString(response["token"]);
+                }
+
+                if (server.IsClientTokenRejected(true, options.Token))
+                {
+                    return "expected the shared token to still authenticate normally (sanity check for this test's premise)";
+                }
+                if (server.IsClientTokenRejected(true, issuedToken))
+                {
+                    return "expected the per-machine token issued via enrollment to authenticate real ingestion/software-job endpoints through IsClientTokenRejected";
+                }
+                if (!server.IsClientTokenRejected(true, "some-random-guess-not-issued-to-anyone"))
+                {
+                    return "expected a value that is neither the shared token nor any issued per-machine token to still be rejected";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        // Regression coverage for the clientTokenIndex optimization (review
+        // finding: the per-machine lookup used to be an unbounded linear
+        // scan, now a lazily-built Dictionary). Enrolls several machines
+        // before the index is ever built, confirming the build-from-disk
+        // path correctly populates every record, not just the first/last
+        // one, and that revoking one entry only invalidates that one entry's
+        // own token once the index rebuilds.
+        private static string TestIsPerMachineTokenValidIndexHandlesMultipleEnrolledMachines()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-permachine-index-" + Guid.NewGuid().ToString("N"));
+            options.EnrollmentToken = "correct-bootstrap-secret";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                string[] computerNames = { "INDEX-PC-A", "INDEX-PC-B", "INDEX-PC-C" };
+                List<string> issuedTokens = new List<string>();
+                foreach (string computerName in computerNames)
+                {
+                    RequestContext enrollRequest = new RequestContext();
+                    enrollRequest.Method = "POST";
+                    enrollRequest.Path = "/api/v1/client/enroll";
+                    enrollRequest.Headers = new Dictionary<string, string>();
+                    enrollRequest.Headers["x-inventory-token"] = "correct-bootstrap-secret";
+                    enrollRequest.Body = "{\"computerName\":\"" + computerName + "\"}";
+                    using (MemoryStream stream = new MemoryStream())
+                    {
+                        server.EnrollClient(stream, enrollRequest);
+                        string responseText = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream.ToArray()));
+                        Dictionary<string, object> response = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText);
+                        issuedTokens.Add(Convert.ToString(response["token"]));
+                    }
+                }
+
+                // Nothing has looked up a token yet, so the index is still
+                // unbuilt (null) going into this first check - exercises the
+                // "build from disk, every record" path in one shot.
+                for (int i = 0; i < computerNames.Length; i++)
+                {
+                    if (server.IsClientTokenRejected(true, issuedTokens[i]))
+                    {
+                        return "expected " + computerNames[i] + "'s own issued token to authenticate - the index build must include every enrolled record, not just the first or last one looked up";
+                    }
+                }
+
+                RequestContext deleteRequest = new RequestContext();
+                deleteRequest.Method = "DELETE";
+                deleteRequest.Path = "/api/v1/client-tokens/INDEX-PC-B";
+                deleteRequest.Headers = new Dictionary<string, string>();
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DeleteClientToken(stream, deleteRequest);
+                }
+
+                if (!server.IsClientTokenRejected(true, issuedTokens[1]))
+                {
+                    return "expected INDEX-PC-B's token to be rejected after revoke - the index must be invalidated and rebuilt, not keep serving a stale cached entry";
+                }
+                if (server.IsClientTokenRejected(true, issuedTokens[0]) || server.IsClientTokenRejected(true, issuedTokens[2]))
+                {
+                    return "expected INDEX-PC-A's and INDEX-PC-C's tokens to remain valid - revoking one machine must not invalidate its siblings when the index rebuilds";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestDeleteClientTokenRevokesSoItNoLongerAuthenticates()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-revoke-" + Guid.NewGuid().ToString("N"));
+            options.EnrollmentToken = "correct-bootstrap-secret";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext enrollRequest = new RequestContext();
+                enrollRequest.Method = "POST";
+                enrollRequest.Path = "/api/v1/client/enroll";
+                enrollRequest.Headers = new Dictionary<string, string>();
+                enrollRequest.Headers["x-inventory-token"] = "correct-bootstrap-secret";
+                enrollRequest.Body = "{\"computerName\":\"REVOKE-PC\"}";
+
+                string issuedToken;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.EnrollClient(stream, enrollRequest);
+                    string responseText = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream.ToArray()));
+                    Dictionary<string, object> response = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText);
+                    issuedToken = Convert.ToString(response["token"]);
+                }
+
+                if (server.IsClientTokenRejected(true, issuedToken))
+                {
+                    return "expected the freshly issued per-machine token to authenticate before revocation";
+                }
+
+                RequestContext deleteRequest = new RequestContext();
+                deleteRequest.Method = "DELETE";
+                deleteRequest.Path = "/api/v1/client-tokens/REVOKE-PC";
+                deleteRequest.Headers = new Dictionary<string, string>();
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DeleteClientToken(stream, deleteRequest);
+                    string responseText = Encoding.ASCII.GetString(stream.ToArray());
+                    if (responseText.IndexOf("200", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected 200 OK from DELETE /api/v1/client-tokens/REVOKE-PC, got: " + responseText;
+                    }
+                }
+
+                if (!server.IsClientTokenRejected(true, issuedToken))
+                {
+                    return "expected the revoked per-machine token to stop authenticating immediately after DeleteClientToken";
+                }
+
+                RequestContext deleteAgainRequest = new RequestContext();
+                deleteAgainRequest.Method = "DELETE";
+                deleteAgainRequest.Path = "/api/v1/client-tokens/REVOKE-PC";
+                deleteAgainRequest.Headers = new Dictionary<string, string>();
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DeleteClientToken(stream, deleteAgainRequest);
+                    string responseText = Encoding.ASCII.GetString(stream.ToArray());
+                    if (responseText.IndexOf("404", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected 404 when revoking a computerName with no stored token, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendClientTokensNeverIncludesRawTokenValue()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-tokenlist-redact-" + Guid.NewGuid().ToString("N"));
+            options.EnrollmentToken = "correct-bootstrap-secret";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext enrollRequest = new RequestContext();
+                enrollRequest.Method = "POST";
+                enrollRequest.Path = "/api/v1/client/enroll";
+                enrollRequest.Headers = new Dictionary<string, string>();
+                enrollRequest.Headers["x-inventory-token"] = "correct-bootstrap-secret";
+                enrollRequest.Body = "{\"computerName\":\"LIST-PC\"}";
+
+                string issuedToken;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.EnrollClient(stream, enrollRequest);
+                    string responseText = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream.ToArray()));
+                    Dictionary<string, object> response = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText);
+                    issuedToken = Convert.ToString(response["token"]);
+                }
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendClientTokens(stream);
+                    string responseText = ExtractHttpResponseBodyText(Encoding.UTF8.GetString(stream.ToArray()));
+                    if (responseText.IndexOf(issuedToken, StringComparison.Ordinal) >= 0)
+                    {
+                        return "expected GET /api/v1/client-tokens to never include the raw issued token value, got: " + responseText;
+                    }
+                    Dictionary<string, object> response = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(responseText);
+                    ArrayList tokens = (ArrayList)response["tokens"];
+                    if (tokens.Count != 1)
+                    {
+                        return "expected exactly one listed token record, got " + tokens.Count;
+                    }
+                    Dictionary<string, object> entry = (Dictionary<string, object>)tokens[0];
+                    if (Convert.ToString(entry["computerName"]) != "LIST-PC")
+                    {
+                        return "expected the listed record's computerName to be 'LIST-PC', got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        // Regression test for a real bug found during review: DeleteClientToken
+        // used to call Uri.UnescapeDataString a SECOND time on a computerName
+        // that ExtractClientTokenComputerName (via ExtractIdFromPath) had
+        // already decoded once. A computerName containing a literal '%'
+        // (enroll only validates length, not character set) - properly
+        // single-encoded as "%25" in the URL path - decoded correctly on the
+        // first pass but then got corrupted on the second: "%2556ICTIM-PC" in
+        // the path decodes once to "%56ICTIM-PC" (correct), but decoding that
+        // AGAIN reads "%56" as the hex escape for 'V', producing "VICTIM-PC" -
+        // silently revoking a different machine's real token while leaving
+        // the attacker's own record untouched.
+        private static string TestDeleteClientTokenDecodesComputerNameOnlyOnce()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-revoke-decode-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                List<Dictionary<string, object>> tokens = new List<Dictionary<string, object>>();
+                bool encrypted;
+                Dictionary<string, object> victimRecord = new Dictionary<string, object>();
+                victimRecord["computerName"] = "VICTIM-PC";
+                victimRecord["token"] = SecretProtector.Protect("victim-token", options, "client enrollment token", out encrypted);
+                tokens.Add(victimRecord);
+                Dictionary<string, object> percentNamedRecord = new Dictionary<string, object>();
+                percentNamedRecord["computerName"] = "%56ICTIM-PC";
+                percentNamedRecord["token"] = SecretProtector.Protect("percent-named-token", options, "client enrollment token", out encrypted);
+                tokens.Add(percentNamedRecord);
+                server.SaveClientTokens(tokens);
+
+                RequestContext deleteRequest = new RequestContext();
+                deleteRequest.Method = "DELETE";
+                // A single, correct URL-encoding of the literal computerName
+                // "%56ICTIM-PC" (its one '%' becomes "%25").
+                deleteRequest.Path = "/api/v1/client-tokens/%2556ICTIM-PC";
+                deleteRequest.Headers = new Dictionary<string, string>();
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.DeleteClientToken(stream, deleteRequest);
+                    string responseText = Encoding.ASCII.GetString(stream.ToArray());
+                    if (responseText.IndexOf("200", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected 200 OK revoking the exact (singly-decoded) '%56ICTIM-PC' record, got: " + responseText;
+                    }
+                }
+
+                List<Dictionary<string, object>> remaining = server.LoadClientTokens();
+                if (remaining.Count != 1 || Convert.ToString(remaining[0]["computerName"]) != "VICTIM-PC")
+                {
+                    return "expected only the '%56ICTIM-PC' record to be removed and 'VICTIM-PC' to survive untouched, got: " + String.Join(",", remaining.ConvertAll(r => Convert.ToString(r["computerName"])).ToArray());
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSaveClientTokensRestrictsTempFileBeforeWritingContent()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-tokens-acl-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                List<Dictionary<string, object>> tokens = new List<Dictionary<string, object>>();
+                Dictionary<string, object> record = new Dictionary<string, object>();
+                record["computerName"] = "ACL-PC";
+                bool encrypted;
+                record["token"] = SecretProtector.Protect("some-token-value", options, "client enrollment token", out encrypted);
+                record["issuedAtUtc"] = DateTime.UtcNow.ToString("o");
+                tokens.Add(record);
+
+                server.SaveClientTokens(tokens);
+
+                string finalPath = server.GetClientTokensFilePath();
+                string tempPath = finalPath + ".tmp";
+                if (File.Exists(tempPath))
+                {
+                    return "expected the .tmp file to be gone after a successful save (renamed over the final path), but it still exists";
+                }
+                if (!File.Exists(finalPath))
+                {
+                    return "expected client-tokens.json to exist after a successful save";
+                }
+
+                List<Dictionary<string, object>> reloaded = server.LoadClientTokens();
+                if (reloaded.Count != 1 || Convert.ToString(reloaded[0]["computerName"]) != "ACL-PC")
+                {
+                    return "expected the saved token record to round-trip through LoadClientTokens";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
         private static string TestSendLinuxSshToolsStatusReflectsFilePresence()
         {
             string scratchDir = Path.Combine(Path.GetTempPath(), "wil-sshtools-test-" + Guid.NewGuid().ToString("N"));
@@ -26884,7 +29364,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             string path = Path.GetTempFileName();
             try
             {
-                File.WriteAllLines(path, GenerateCmdLines("https://server/api/v1/inventory", null, 6, null), Encoding.ASCII);
+                File.WriteAllLines(path, GenerateCmdLines("https://server/api/v1/inventory", null, 6, null, null), Encoding.ASCII);
                 Dictionary<string, string> settings = ParseCmdSettings(path);
                 if (settings.ContainsKey("packageSharePath"))
                 {
@@ -26904,7 +29384,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             try
             {
                 string share = @"\\192.168.24.4\backup\gpo-client";
-                File.WriteAllLines(path, GenerateCmdLines("https://server/api/v1/inventory", null, 6, share), Encoding.ASCII);
+                File.WriteAllLines(path, GenerateCmdLines("https://server/api/v1/inventory", null, 6, share, null), Encoding.ASCII);
                 Dictionary<string, string> settings = ParseCmdSettings(path);
                 if (!settings.ContainsKey("packageSharePath") || settings["packageSharePath"] != share)
                 {
@@ -26916,6 +29396,109 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 File.Delete(path);
+            }
+        }
+
+        private static string TestParseCmdSettingsRoundTripsEnrollmentToken()
+        {
+            string path = Path.GetTempFileName();
+            try
+            {
+                File.WriteAllLines(path, GenerateCmdLines("https://server/api/v1/inventory", null, 6, null, "bootstrap-secret"), Encoding.ASCII);
+                Dictionary<string, string> settings = ParseCmdSettings(path);
+                if (!settings.ContainsKey("enrollmentToken") || settings["enrollmentToken"] != "bootstrap-secret")
+                {
+                    string actual = settings.ContainsKey("enrollmentToken") ? settings["enrollmentToken"] : "(missing)";
+                    return "expected enrollmentToken 'bootstrap-secret', got '" + actual + "'";
+                }
+                if (settings.ContainsKey("token"))
+                {
+                    return "expected no 'token' key when only enrollmentToken was embedded, got '" + settings["token"] + "'";
+                }
+                return null;
+            }
+            finally
+            {
+                File.Delete(path);
+            }
+        }
+
+        private static string TestConfigureClientPackageEmbedsEnrollmentTokenInsteadOfSharedTokenWhenRequested()
+        {
+            ServerOptions options = new ServerOptions();
+            options.ClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-pkg-enroll-" + Guid.NewGuid().ToString("N"));
+            options.Token = "the-shared-token-must-not-appear";
+            options.EnrollmentToken = "the-bootstrap-secret";
+            // ConfigureClientPackage also tries to copy Deploy-ClientGpo.ps1
+            // from next to WinRmInstallerPath if that source file happens to
+            // exist - Path.GetDirectoryName(null) is itself null and
+            // Path.Combine(null, ...) throws, so this must be non-null even
+            // though no such file will actually exist here.
+            options.WinRmInstallerPath = Path.Combine(options.ClientPackagePath, "does-not-exist", "Install-ClientWinRM.ps1");
+            Directory.CreateDirectory(options.ClientPackagePath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Headers = new Dictionary<string, string>();
+                request.Body = "{\"serverUrl\":\"https://server/api/v1/inventory\",\"useEnrollmentToken\":true}";
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ConfigureClientPackage(stream, request);
+                }
+
+                string cmdContent = File.ReadAllText(Path.Combine(options.ClientPackagePath, "Install-ClientGpo.cmd"));
+                if (cmdContent.IndexOf("the-shared-token-must-not-appear", StringComparison.Ordinal) >= 0)
+                {
+                    return "expected the shared Token to never appear in the generated .cmd when useEnrollmentToken is requested, got: " + cmdContent;
+                }
+                if (cmdContent.IndexOf("-EnrollmentToken \"the-bootstrap-secret\"", StringComparison.Ordinal) < 0)
+                {
+                    return "expected -EnrollmentToken \"the-bootstrap-secret\" in the generated .cmd, got: " + cmdContent;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.ClientPackagePath, true); } catch { }
+            }
+        }
+
+        private static string TestConfigureClientPackageRejectsEnrollmentTokenRequestWhenNoneConfigured()
+        {
+            ServerOptions options = new ServerOptions();
+            options.ClientPackagePath = Path.Combine(Path.GetTempPath(), "wil-selftest-pkg-enroll-missing-" + Guid.NewGuid().ToString("N"));
+            options.Token = "the-shared-token";
+            Directory.CreateDirectory(options.ClientPackagePath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                RequestContext request = new RequestContext();
+                request.Method = "POST";
+                request.Headers = new Dictionary<string, string>();
+                request.Body = "{\"serverUrl\":\"https://server/api/v1/inventory\",\"useEnrollmentToken\":true}";
+
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ConfigureClientPackage(stream, request);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("400", StringComparison.Ordinal) < 0)
+                    {
+                        return "expected 400 when useEnrollmentToken is requested but no EnrollmentToken is configured, got: " + responseText;
+                    }
+                }
+                string cmdPath = Path.Combine(options.ClientPackagePath, "Install-ClientGpo.cmd");
+                if (File.Exists(cmdPath))
+                {
+                    return "expected no .cmd to be written at all when the request is rejected";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.ClientPackagePath, true); } catch { }
             }
         }
 
