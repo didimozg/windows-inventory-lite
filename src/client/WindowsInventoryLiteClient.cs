@@ -449,7 +449,7 @@ namespace WindowsInventoryLite
                             continue;
                         }
 
-                        Dictionary<string, object> resultEntry = RunOneJob(job, InventoryCollector.HttpGetBytes);
+                        Dictionary<string, object> resultEntry = RunOneJob(job, InventoryCollector.DownloadToFileAndComputeSha256);
                         results.Add(resultEntry);
 
                         if (Convert.ToBoolean(resultEntry["success"]))
@@ -498,12 +498,16 @@ namespace WindowsInventoryLite
                 // internal rather than private - see the comment on the
                 // SoftwareJobRunner class for why.
                 //
-                // downloadBytes(url, token) matches
-                // InventoryCollector.HttpGetBytes's own signature exactly -
-                // production code passes HttpGetBytes directly, self-tests
-                // inject a fake returning in-memory bytes with no network
-                // I/O.
-                internal Dictionary<string, object> RunOneJob(Dictionary<string, object> job, Func<string, string, byte[]> downloadBytes)
+                // downloadToFileAndComputeSha256(url, token, destPath) matches
+                // InventoryCollector.DownloadToFileAndComputeSha256's own
+                // signature exactly - production code passes
+                // DownloadToFileAndComputeSha256 directly, self-tests inject a
+                // fake that writes to destPath and returns the hash of what
+                // it wrote, with no network I/O. Streaming straight to a
+                // file (instead of returning the whole body as a byte[]) is
+                // what lets this handle a multi-hundred-MB .msu/.cab without
+                // holding the entire file in memory at once.
+                internal Dictionary<string, object> RunOneJob(Dictionary<string, object> job, Func<string, string, string, string> downloadToFileAndComputeSha256)
                 {
                     string id = InventoryCollector.GetString(job, "id");
                     string catalogType = InventoryCollector.GetString(job, "catalogType");
@@ -521,14 +525,18 @@ namespace WindowsInventoryLite
                     string localCopyPath = null;
                     try
                     {
-                        byte[] downloadedBytes;
+                        string tempPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + Path.GetExtension(relativePath));
+                        localCopyPath = tempPath;
+
+                        string actualSha256;
                         try
                         {
                             string downloadUrl = InventoryCollector.ToSoftwareDownloadUrl(options.ServerUrl, catalogType, id);
-                            downloadedBytes = downloadBytes(downloadUrl, options.Token);
+                            actualSha256 = downloadToFileAndComputeSha256(downloadUrl, options.Token, tempPath);
                         }
                         catch (Exception ex)
                         {
+                            try { File.Delete(tempPath); } catch { }
                             resultEntry["success"] = false;
                             resultEntry["exitCode"] = -1;
                             resultEntry["errorMessage"] = "failed to download installer: " + ex.Message;
@@ -546,23 +554,15 @@ namespace WindowsInventoryLite
                         string expectedSha256 = InventoryCollector.GetString(job, "contentSha256");
                         if (!String.IsNullOrEmpty(expectedSha256))
                         {
-                            string actualSha256;
-                            using (SHA256 sha256 = SHA256.Create())
-                            {
-                                actualSha256 = BitConverter.ToString(sha256.ComputeHash(downloadedBytes)).Replace("-", "").ToLowerInvariant();
-                            }
                             if (!String.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
                             {
+                                try { File.Delete(tempPath); } catch { }
                                 resultEntry["success"] = false;
                                 resultEntry["exitCode"] = -1;
                                 resultEntry["errorMessage"] = "downloaded file content does not match the server's expected hash - refusing to run it";
                                 return resultEntry;
                             }
                         }
-
-                        string tempPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + Path.GetExtension(relativePath));
-                        localCopyPath = tempPath;
-                        File.WriteAllBytes(tempPath, downloadedBytes);
 
                         // UseShellExecute=false means CreateProcess loads
                         // FileName as a PE image, so only a real executable can
@@ -3212,6 +3212,7 @@ namespace WindowsInventoryLite
             allPassed &= SelfTestCheck(output, "ShouldClearTokenForReenrollment leaves Token alone for non-401 failures", TestShouldClearTokenForReenrollmentLeavesTokenAloneForNonAuthFailures);
             allPassed &= SelfTestCheck(output, "RunOneJob refuses to run the installer when downloaded content does not match the expected contentSha256", TestRunOneJobRefusesToRunWhenDownloadedContentDoesNotMatchExpectedHash);
             allPassed &= SelfTestCheck(output, "RunOneJob skips hash verification when the job carries no contentSha256", TestRunOneJobSkipsVerificationWhenJobHasNoContentSha256);
+            allPassed &= SelfTestCheck(output, "StreamToFileAndComputeSha256 writes the full source stream to the destination file and returns its correct SHA256 hash", TestStreamToFileAndComputeSha256WritesFileAndComputesCorrectHash);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns SignatureRequired when RequireSignatureForSelfUpdate is true and no signature was advertised", TestApplySelfUpdateFromServerCoreReturnsSignatureRequiredWhenMissing);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns SignatureMismatch when the advertised signature does not verify", TestApplySelfUpdateFromServerCoreReturnsSignatureMismatchForBadSignature);
             allPassed &= SelfTestCheck(output, "ApplySelfUpdateFromServerCore returns Applied when a genuinely valid RSA signature is provided and required", TestApplySelfUpdateFromServerCoreAppliesWithValidSignature);
@@ -4050,8 +4051,15 @@ namespace WindowsInventoryLite
             job["requiresReboot"] = false;
             job["contentSha256"] = "0000000000000000000000000000000000000000000000000000000000000000000000000000"; // 64 hex chars, deliberately wrong
 
-            byte[] tamperedContent = Encoding.UTF8.GetBytes("not what the server expects");
-            Dictionary<string, object> result = runner.RunOneJob(job, (url, token) => tamperedContent);
+            Dictionary<string, object> result = runner.RunOneJob(job, (url, token, destPath) =>
+            {
+                byte[] tamperedContent = Encoding.UTF8.GetBytes("not what the server expects");
+                File.WriteAllBytes(destPath, tamperedContent);
+                using (SHA256 sha256 = SHA256.Create())
+                {
+                    return BitConverter.ToString(sha256.ComputeHash(tamperedContent)).Replace("-", "").ToLowerInvariant();
+                }
+            });
 
             if (Convert.ToBoolean(result["success"]))
             {
@@ -4078,8 +4086,15 @@ namespace WindowsInventoryLite
             job["requiresReboot"] = false;
             job["contentSha256"] = "";
 
-            byte[] anyContent = Encoding.UTF8.GetBytes("anything, not verified");
-            Dictionary<string, object> result = runner.RunOneJob(job, (url, token) => anyContent);
+            Dictionary<string, object> result = runner.RunOneJob(job, (url, token, destPath) =>
+            {
+                byte[] anyContent = Encoding.UTF8.GetBytes("anything, not verified");
+                File.WriteAllBytes(destPath, anyContent);
+                using (SHA256 sha256 = SHA256.Create())
+                {
+                    return BitConverter.ToString(sha256.ComputeHash(anyContent)).Replace("-", "").ToLowerInvariant();
+                }
+            });
 
             // Must NOT fail for a hash reason when no contentSha256 is present -
             // it may still fail later (no real installer at the temp path, this
@@ -4093,6 +4108,56 @@ namespace WindowsInventoryLite
                 return "expected hash verification to be skipped when contentSha256 is empty, but got a hash-mismatch error";
             }
             return null;
+        }
+
+        // DownloadToFileAndComputeSha256 itself needs a real HTTP response
+        // to drive, which this self-test suite has no server for - so this
+        // exercises the streaming/hashing core it delegates to
+        // (StreamToFileAndComputeSha256) directly against a MemoryStream,
+        // proving the destination file ends up byte-for-byte identical to
+        // the source and the returned hash matches an independently
+        // computed one.
+        private static string TestStreamToFileAndComputeSha256WritesFileAndComputesCorrectHash()
+        {
+            byte[] content = Encoding.UTF8.GetBytes("content streamed through InventoryCollector.StreamToFileAndComputeSha256 for this self-test");
+            string expectedHash;
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                expectedHash = BitConverter.ToString(sha256.ComputeHash(content)).Replace("-", "").ToLowerInvariant();
+            }
+
+            string tempPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".tmp");
+            try
+            {
+                string actualHash;
+                using (MemoryStream sourceStream = new MemoryStream(content))
+                {
+                    actualHash = InventoryCollector.StreamToFileAndComputeSha256(sourceStream, tempPath);
+                }
+
+                if (!String.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    return "expected hash " + expectedHash + " but got " + actualHash;
+                }
+
+                byte[] writtenContent = File.ReadAllBytes(tempPath);
+                if (writtenContent.Length != content.Length)
+                {
+                    return "expected the destination file to contain " + content.Length + " bytes, found " + writtenContent.Length;
+                }
+                for (int i = 0; i < content.Length; i++)
+                {
+                    if (writtenContent[i] != content[i])
+                    {
+                        return "destination file content differs from the source stream at byte " + i;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { File.Delete(tempPath); } catch { }
+            }
         }
 
         private static string TestApplySelfUpdateFromServerCoreReturnsSignatureRequiredWhenMissing()
@@ -5543,6 +5608,76 @@ namespace WindowsInventoryLite
                         buffer.Write(readBuffer, 0, bytesRead);
                     }
                     return buffer.ToArray();
+                }
+            }
+        }
+
+        // Copies sourceStream to destPath in fixed-size chunks and hashes
+        // the same chunks incrementally (TransformBlock/TransformFinalBlock)
+        // instead of buffering the whole thing in a byte[]/MemoryStream
+        // first. Extracted out of DownloadToFileAndComputeSha256 below so it
+        // can be exercised by a self-test with a plain MemoryStream - this
+        // project has no built-in test HTTP server to drive the real
+        // download path end to end.
+        internal static string StreamToFileAndComputeSha256(Stream sourceStream, string destPath)
+        {
+            using (SHA256 sha256 = SHA256.Create())
+            using (FileStream fileStream = new FileStream(destPath, FileMode.Create, FileAccess.Write))
+            {
+                byte[] readBuffer = new byte[81920];
+                int bytesRead;
+                while ((bytesRead = sourceStream.Read(readBuffer, 0, readBuffer.Length)) > 0)
+                {
+                    fileStream.Write(readBuffer, 0, bytesRead);
+                    // Hash algorithms treat TransformBlock as a pass-through:
+                    // it copies inputCount bytes from inputBuffer to
+                    // outputBuffer unchanged while folding them into the
+                    // running hash, so reusing readBuffer as both is safe.
+                    sha256.TransformBlock(readBuffer, 0, bytesRead, readBuffer, 0);
+                }
+                sha256.TransformFinalBlock(new byte[0], 0, 0);
+                return BitConverter.ToString(sha256.Hash).Replace("-", "").ToLowerInvariant();
+            }
+        }
+
+        // Same request setup as HttpGetBytes (HTTPS/TLS, X-Inventory-Token
+        // header, status-code check) but streams the response body straight
+        // to destPath and returns its SHA256 hex hash, instead of returning
+        // the whole body as a byte[]. A Windows Update .msu/.cab job
+        // download can be 0.5-1.5 GB - routine content for this catalog, not
+        // an edge case - so HttpGetBytes's whole-body-in-memory approach
+        // (fine for the small self-update payload it exists for) would risk
+        // OutOfMemoryException here, and anything near 2 GB would not fit in
+        // a byte[]/MemoryStream at all. Timeout matches the server's own
+        // DownloadBytesFromUrl/PerformWsusCabDownload choice for large-file
+        // downloads (300000ms / 5 minutes), not HttpGetBytes's own 60000ms,
+        // which is sized for the small self-update payload.
+        internal static string DownloadToFileAndComputeSha256(string url, string token, string destPath)
+        {
+            if (url.StartsWith("https:", StringComparison.OrdinalIgnoreCase))
+            {
+                ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072;
+            }
+
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            request.Method = "GET";
+            request.Timeout = 300000;
+
+            if (!String.IsNullOrEmpty(token))
+            {
+                request.Headers["X-Inventory-Token"] = token;
+            }
+
+            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+            {
+                if ((int)response.StatusCode < 200 || (int)response.StatusCode >= 300)
+                {
+                    throw new InvalidOperationException("Server returned HTTP " + (int)response.StatusCode);
+                }
+
+                using (Stream responseStream = response.GetResponseStream())
+                {
+                    return StreamToFileAndComputeSha256(responseStream, destPath);
                 }
             }
         }
