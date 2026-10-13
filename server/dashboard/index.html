@@ -258,7 +258,7 @@
               <input id="enrollmentTokenValue" type="text" class="mono" readonly value="">
             </label>
             <p class="cert-hint">Bootstrap secret for a GPO-deployed client with no ingestion token yet - it calls the server once to obtain its own real per-machine token, instead of the shared ingestion token ever being embedded in <code>Install-ClientGpo.cmd</code> (readable by every domain computer on SYSVOL). Used by <code>New-ClientGpoPackage.ps1 -EnrollmentToken</code>.</p>
-            <div class="pkg-buttons">
+            <div id="enrollmentTokenButtons" class="pkg-buttons">
               <button id="enrollmentTokenRegenerateButton" class="danger-button" type="button">Regenerate</button>
             </div>
             <div id="enrollmentTokenMessage" class="pkg-message hidden"></div>

@@ -1982,19 +1982,23 @@ th.sort-desc::after {
 }
 
 /* Most .pkg-buttons sit at the END of their form (Save/Upload/Download),
-   so they never need bottom spacing of their own. Two places still have
+   so they never need bottom spacing of their own. A few places still have
    a .pkg-buttons block sitting BEFORE the next block instead of at the
    end of its own: the Certificate view's Delete button (before the
-   certificate file field) and History & Logs > System Logs' Debug Refresh button row
-   (before the <pre> log content block) - without a gap, both read as
-   belonging to the wrong section. Settings > Linux and Settings >
-   Windows used to need this override too, for a page-level Save button
-   sitting before the separate Linux/Windows Client update credentials
-   block - both pages now give every settings block its own Save button
-   inside that block instead, so the button is never followed by an
-   unrelated block anymore and neither selector belongs here any longer. */
+   certificate file field), History & Logs > System Logs' Debug Refresh button row
+   (before the <pre> log content block), and Settings > Server's Enrollment
+   Token Regenerate button (before the per-machine token .table-wrap, with
+   only a .pkg-message - hidden by default, so it contributes no space of
+   its own - in between) - without a gap, all three read as belonging to
+   the wrong section. Settings > Linux and Settings > Windows used to need
+   this override too, for a page-level Save button sitting before the
+   separate Linux/Windows Client update credentials block - both pages now
+   give every settings block its own Save button inside that block
+   instead, so the button is never followed by an unrelated block anymore
+   and neither selector belongs here any longer. */
 #certificateView > .pkg-buttons,
-#debugLogView > .pkg-buttons {
+#debugLogView > .pkg-buttons,
+#enrollmentTokenButtons {
   margin-bottom: 16px;
 }
 
