@@ -4119,7 +4119,20 @@ namespace WindowsInventoryLite
         // computed one.
         private static string TestStreamToFileAndComputeSha256WritesFileAndComputesCorrectHash()
         {
-            byte[] content = Encoding.UTF8.GetBytes("content streamed through InventoryCollector.StreamToFileAndComputeSha256 for this self-test");
+            // Deliberately larger than one read-buffer's worth (81920 bytes)
+            // so this actually exercises TransformBlock being called more
+            // than once - the exact scenario a real 0.5-1.5 GB Windows
+            // Update file hits and the one this whole streaming rewrite
+            // exists to make safe. A single-chunk fixture would pass even
+            // if hashing or write offsets were wrong across chunk
+            // boundaries. Content varies by position (not all-zero/
+            // repeating) so a boundary or offset bug can't hide behind a
+            // byte value that happens to repeat.
+            byte[] content = new byte[81920 * 2 + 37];
+            for (int i = 0; i < content.Length; i++)
+            {
+                content[i] = (byte)(i % 256);
+            }
             string expectedHash;
             using (SHA256 sha256 = SHA256.Create())
             {
