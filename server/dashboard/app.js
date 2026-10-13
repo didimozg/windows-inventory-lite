@@ -5652,6 +5652,7 @@
     state.page.clients = page;
 
     const rows = pageItems.map(client => {
+      try {
       const isWindows = clientPlatformLabel(client) === 'Windows';
       // Real identifier (not safeId()'s DOM-safe hash just below) - the
       // same raw value data-install-windows-updates-now/
@@ -5845,6 +5846,16 @@
           </div>
         </td>
       </tr>`;
+      } catch (err) {
+        // One client's report having an unexpected shape (missing/wrong-typed
+        // field) must not take down every other row - without this, a single
+        // malformed report throws inside Array.prototype.map and aborts the
+        // whole table (and, since render() calls this synchronously with no
+        // isolation of its own, every other dashboard section too).
+        console.error('Failed to render a client row - its report may have an unexpected shape', client, err);
+        const label = escapeHtml((client && (client.computerName || client.hostname)) || 'unknown');
+        return `<tr><td colspan="11" class="empty">Could not render ${label} - its report has an unexpected shape. See the browser console for details.</td></tr>`;
+      }
     });
 
     byId('inventoryBody').innerHTML = rows.join('') || '<tr><td colspan="11" class="empty">No matching inventory records.</td></tr>';
@@ -6517,16 +6528,30 @@
     });
   }
 
+  // Runs one render step, isolated: a throw inside fn() (e.g. a client
+  // report with an unexpected shape reaching a section render() hasn't
+  // already row-isolated itself) is logged and swallowed here instead of
+  // propagating out of render() - which would otherwise abort every
+  // later step in the same render() call, including the view-visibility
+  // toggles at its end, leaving the wrong panel on screen.
+  function renderSafely(label, fn) {
+    try {
+      fn();
+    } catch (err) {
+      console.error(`Dashboard render step "${label}" failed:`, err);
+    }
+  }
+
   function render() {
-    renderDashboardTiles();
-    renderSortHeaders();
-    renderFilteredClientsTable();
-    renderSoftwareTable(state.clients);
-    renderFilteredHardwarePage();
-    renderLicenses();
-    renderLicensesKeysTable();
-    renderIngestionRejectionsTable();
-    populateSoftwareDatalists();
+    renderSafely('dashboardTiles', renderDashboardTiles);
+    renderSafely('sortHeaders', renderSortHeaders);
+    renderSafely('clientsTable', renderFilteredClientsTable);
+    renderSafely('softwareTable', () => renderSoftwareTable(state.clients));
+    renderSafely('hardwarePage', renderFilteredHardwarePage);
+    renderSafely('licenses', renderLicenses);
+    renderSafely('licensesKeysTable', renderLicensesKeysTable);
+    renderSafely('ingestionRejectionsTable', renderIngestionRejectionsTable);
+    renderSafely('softwareDatalists', populateSoftwareDatalists);
     byId('dashboardView').classList.toggle('hidden', state.view !== 'dashboard');
     byId('clientsView').classList.toggle('hidden', state.view !== 'clients');
     byId('softwareView').classList.toggle('hidden', state.view !== 'software');

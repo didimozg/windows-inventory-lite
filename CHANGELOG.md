@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [1.0.4] - Dashboard fault isolation: one client's malformed report no longer breaks the whole page for every admin
+
+### Added
+
+- **`app.js` now isolates rendering failures instead of letting one bad report take down the entire dashboard.** Closes the second half of the external security audit's M4 finding: `render()` used to call its ~9 section renderers (dashboard tiles, Clients table, Software table, Hardware page, Licenses, ...) back to back with no isolation - a single client report with an unexpected field shape (wrong type, missing nested object) threw inside one of them and silently aborted every renderer after it in the same pass, including the view-visibility toggles at the end of `render()`, which could leave the wrong tab's panel on screen. A new `renderSafely(label, fn)` wraps each of those calls in its own try/catch, logging the failure to the console (`Dashboard render step "<label>" failed: ...`) instead of propagating it.
+- **The Clients table additionally isolates failures per row.** `renderClientsTable`'s per-client row-building logic (by far the richest, most client-controlled-data-dependent of the render steps) is wrapped in its own try/catch: a malformed report now renders as a single-column "Could not render &lt;name&gt; - its report has an unexpected shape. See the browser console for details." row instead of silently dropping every other, well-formed row below it in the same table.
+
+### Notes
+
+- Found live while verifying the fix: deliberately posting a report with `disks`/`ramModules` set to a string instead of an array reproduced the exact failure mode the audit described, and also surfaced two more, previously unknown throw sites sharing the same root cause - `getStorageTypeBreakdown` (Dashboard's storage chart) and `getDiskGroups` (Hardware page) both iterate `client.disks` the same unguarded way. Both are now caught by the `renderSafely` net around `render()`'s own call sequence (section-level isolation, not row-level, since neither is part of the Clients table) - not a hand-audit of all ~7.5k lines, which remains out of scope; see `docs/backlog.md` for what a fuller audit would still need to cover.
+- Verified against a real scratch server: two deliberately malformed reports (`disks`/`ramModules` as strings) sat alongside two well-formed ones; the two bad rows showed the fallback message, the two good rows and every other dashboard section (tiles, Hardware, Software) rendered normally, and the real stack traces landed in the console exactly as a real admin would see them.
+- No server-side or client-agent change - dashboard-only. Version bump is patch-only per this project's own standing rule.
+
 ## [1.0.3] - Authenticode verification for downloaded KB files, a report-filename collision warning, and the rest of the audit's Minor findings resolved
 
 ### Added
