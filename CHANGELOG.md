@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [1.0.5] - Auth-rejection self-tests for the 7 client-facing endpoints that had none
+
+### Added
+
+- **7 new self-tests, one per pre-admin-gate client endpoint that was never tested for its own auth-rejection path.** The external audit's Tests section noted that "about 40 of 90 handlers" lack coverage, named "endpoints with credentials" as a priority. Looking closer: every admin/dashboard route shares a single `IsWebRequestAuthorized` gate in `HandleClient` (already extensively tested independently - session cookies, Basic Auth, lockout, loopback-without-password, etc.), so the real gap was narrower and sharper than "90 routes" - it was the ~14 client-facing endpoints `HandleClient` dispatches *before* that gate, each hand-rolling its own token check rather than sharing one. 7 of those 14 already had a dedicated rejection test (`SendSoftwareDownload`, `DownloadClientPackageUpdate`, `DownloadLinuxClientPackageUpdate`, `DownloadWsusCab`, `ReceiveWsusScanResults`, `ReceiveSoftwareJobStart`, `EnrollClient`); the other 7 - `ReceiveInventory`, `ReceiveLinuxInventory`, `ReceiveLinuxServiceStatus`, `SendWindowsUpdateJobs`, `SendThirdPartySoftwareJobs`, `ReceiveSoftwareJobResults`, `SendSoftwareRepositoryConnectionInfo` - were called by dozens of existing self-tests for their data-handling behavior but never once for "what happens with no token or a wrong one." All 7 passed on the first run - this is new regression coverage, not a bug fix - but a future change to any of these handlers (or a new endpoint added in the same pre-gate spot) now has a test that fails loudly if the auth check gets dropped or miswired.
+
+### Notes
+
+- `ReceiveInventory`/`ReceiveLinuxInventory`/`ReceiveLinuxServiceStatus` gate on `options.RequireIngestionToken` (on by default once a `Token` is configured, off otherwise - a deliberate low-sensitivity exception for basic inventory submission, see `SendSoftwareRepositoryConnectionInfo`'s own code comment for why the others don't get this exception); their 3 new tests explicitly set `RequireIngestionToken = true` to exercise the rejection path meaningfully. The other 4 always require a valid token regardless of that setting (job assignments and the repository credential are not "low-sensitivity").
+- Server self-tests: 548 -> 555 (7 new, all passing). No other behavior changed. Client self-tests unchanged (83/83 both targets - no client code touched). Pester unaffected (no `.ps1` touched).
+- Still open from the audit's Tests section, not attempted this round: `app.js` has no automated tests at all (CI only checks syntax - see the `[1.0.4]` entry below for the one crash-related fix this round made there); the dashboard's own `ReadRequest` size/timeout limits and the admin-gated CRUD endpoints (license-key-sources, etc.) remain uncovered; the Windows client's own inventory-collection and installer-execution paths (timeout, kill, cleanup) remain uncovered.
+- Version: patch-only per this project's own standing rule.
+
 ## [1.0.4] - Dashboard fault isolation: one client's malformed report no longer breaks the whole page for every admin
 
 ### Added

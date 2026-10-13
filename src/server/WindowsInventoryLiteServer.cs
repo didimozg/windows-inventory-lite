@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "1.0.4";
+        internal const string ProductVersion = "1.0.5";
 
         private static int Main(string[] args)
         {
@@ -18439,6 +18439,25 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-download re-checks path confinement on read and returns 404 for a relativePath that escapes its catalog subfolder (e.g. a hand-edited or legacy entry)", TestSendSoftwareDownloadReturns404ForPathEscapingItsCatalogSubfolder);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-download streams a file larger than one copy buffer across multiple chunks without corruption", TestSendSoftwareDownloadStreamsLargeFileAcrossMultipleChunksWithoutCorruption);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-download returns a generic message on a 500, never the raw exception detail (e.g. a filesystem path)", TestSendSoftwareDownloadReturnsGenericMessageOn500WithoutLeakingFilesystemDetail);
+            // The external security audit's Tests section flagged that most
+            // pre-admin-gate client endpoints (everything handled before the
+            // single IsWebRequestAuthorized() check in HandleClient - see its
+            // own comment there) are exercised by many self-tests for their
+            // DATA behavior, but never for their own auth-rejection path,
+            // despite each hand-rolling its own token check rather than
+            // sharing one gate the way every admin/dashboard route does.
+            // These 7 close that gap for every pre-gate handler that didn't
+            // already have a dedicated rejection test (SendSoftwareDownload,
+            // DownloadClientPackageUpdate, DownloadLinuxClientPackageUpdate,
+            // DownloadWsusCab, ReceiveWsusScanResults, ReceiveSoftwareJobStart,
+            // and EnrollClient already did, each verified independently).
+            allPassed &= SelfTestCheck(output, "POST /api/v1/inventory rejects with 401 when RequireIngestionToken is on and the token is missing or wrong", TestReceiveInventoryRejectsWithoutValidTokenWhenRequired);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/linux/inventory rejects with 401 when RequireIngestionToken is on and the token is missing or wrong", TestReceiveLinuxInventoryRejectsWithoutValidTokenWhenRequired);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/linux/inventory/service-status rejects with 401 when RequireIngestionToken is on and the token is missing or wrong", TestReceiveLinuxServiceStatusRejectsWithoutValidTokenWhenRequired);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/windows-update-jobs requires a valid ingestion token unconditionally, rejects with 401 when missing/wrong", TestSendWindowsUpdateJobsRejectsWithoutValidToken);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/third-party-software-jobs requires a valid ingestion token unconditionally, rejects with 401 when missing/wrong", TestSendThirdPartySoftwareJobsRejectsWithoutValidToken);
+            allPassed &= SelfTestCheck(output, "POST /api/v1/client/software-jobs/results requires a valid ingestion token unconditionally, rejects with 401 when missing/wrong", TestReceiveSoftwareJobResultsRejectsWithoutValidToken);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-repository-connection requires a valid ingestion token unconditionally, rejects with 401 when missing/wrong", TestSendSoftwareRepositoryConnectionInfoRejectsWithoutValidToken);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall updates a target's stored clientVersion", TestPatchClientReportVersionAfterInstallUpdatesVersion);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall's lastInstalledAtUtc is cleared once a real report overwrites the file", TestPatchClientReportVersionAfterInstallFieldClearedByRealReport);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall is a no-op when the target has no stored report yet", TestPatchClientReportVersionAfterInstallMissingReport);
@@ -24869,6 +24888,353 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (wrongTokenResponseText.IndexOf("401", StringComparison.Ordinal) < 0)
                 {
                     return "expected a 401 response with a wrong token, got: " + wrongTokenResponseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        // The next 7 tests close the external security audit's "most
+        // pre-admin-gate endpoints have never had their own auth-rejection
+        // path tested" gap - see the registration comment above these
+        // tests' SelfTestCheck calls for the full context. Each follows the
+        // same shape as TestSendSoftwareDownloadRejectsWithoutValidToken
+        // just above: a missing token and a wrong token must both be
+        // rejected with 401, independent of whatever the handler does once
+        // past that check.
+        private static string TestReceiveInventoryRejectsWithoutValidTokenWhenRequired()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-inventoryauth-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            options.RequireIngestionToken = true;
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext noTokenRequest = new RequestContext();
+                noTokenRequest.Method = "POST";
+                noTokenRequest.Path = "/api/v1/inventory";
+                noTokenRequest.Headers = new Dictionary<string, string>();
+                noTokenRequest.Body = "{\"computerName\":\"TEST-PC\"}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveInventory(stream, noTokenRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401 Unauthorized", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 401 response with no token, got: " + responseText;
+                    }
+                }
+
+                RequestContext wrongTokenRequest = new RequestContext();
+                wrongTokenRequest.Method = "POST";
+                wrongTokenRequest.Path = "/api/v1/inventory";
+                wrongTokenRequest.Headers = new Dictionary<string, string>();
+                wrongTokenRequest.Headers["x-inventory-token"] = "wrong-token";
+                wrongTokenRequest.Body = "{\"computerName\":\"TEST-PC\"}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveInventory(stream, wrongTokenRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401 Unauthorized", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 401 response with a wrong token, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveLinuxInventoryRejectsWithoutValidTokenWhenRequired()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxinventoryauth-" + Guid.NewGuid().ToString("N"));
+            options.LinuxDataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxinventoryauth-data-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            options.RequireIngestionToken = true;
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.LinuxDataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext noTokenRequest = new RequestContext();
+                noTokenRequest.Method = "POST";
+                noTokenRequest.Path = "/api/v1/linux/inventory";
+                noTokenRequest.Headers = new Dictionary<string, string>();
+                noTokenRequest.Body = "{\"hostname\":\"test-linux\"}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveLinuxInventory(stream, noTokenRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401 Unauthorized", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 401 response with no token, got: " + responseText;
+                    }
+                }
+
+                RequestContext wrongTokenRequest = new RequestContext();
+                wrongTokenRequest.Method = "POST";
+                wrongTokenRequest.Path = "/api/v1/linux/inventory";
+                wrongTokenRequest.Headers = new Dictionary<string, string>();
+                wrongTokenRequest.Headers["x-inventory-token"] = "wrong-token";
+                wrongTokenRequest.Body = "{\"hostname\":\"test-linux\"}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveLinuxInventory(stream, wrongTokenRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401 Unauthorized", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 401 response with a wrong token, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.LinuxDataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveLinuxServiceStatusRejectsWithoutValidTokenWhenRequired()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxservicestatusauth-" + Guid.NewGuid().ToString("N"));
+            options.LinuxDataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-linuxservicestatusauth-data-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            options.RequireIngestionToken = true;
+            Directory.CreateDirectory(options.DataPath);
+            Directory.CreateDirectory(options.LinuxDataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext noTokenRequest = new RequestContext();
+                noTokenRequest.Method = "POST";
+                noTokenRequest.Path = "/api/v1/linux/inventory/service-status";
+                noTokenRequest.Headers = new Dictionary<string, string>();
+                noTokenRequest.Body = "{\"hostname\":\"test-linux\",\"services\":[]}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveLinuxServiceStatus(stream, noTokenRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401 Unauthorized", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 401 response with no token, got: " + responseText;
+                    }
+                }
+
+                RequestContext wrongTokenRequest = new RequestContext();
+                wrongTokenRequest.Method = "POST";
+                wrongTokenRequest.Path = "/api/v1/linux/inventory/service-status";
+                wrongTokenRequest.Headers = new Dictionary<string, string>();
+                wrongTokenRequest.Headers["x-inventory-token"] = "wrong-token";
+                wrongTokenRequest.Body = "{\"hostname\":\"test-linux\",\"services\":[]}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveLinuxServiceStatus(stream, wrongTokenRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401 Unauthorized", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 401 response with a wrong token, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+                try { Directory.Delete(options.LinuxDataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendWindowsUpdateJobsRejectsWithoutValidToken()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-winupdatejobsauth-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext noTokenRequest = new RequestContext();
+                noTokenRequest.Method = "GET";
+                noTokenRequest.Path = "/api/v1/client/windows-update-jobs?computerName=TEST-PC";
+                noTokenRequest.Headers = new Dictionary<string, string>();
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendWindowsUpdateJobs(stream, noTokenRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401 Unauthorized", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 401 response with no token, got: " + responseText;
+                    }
+                }
+
+                RequestContext wrongTokenRequest = new RequestContext();
+                wrongTokenRequest.Method = "GET";
+                wrongTokenRequest.Path = "/api/v1/client/windows-update-jobs?computerName=TEST-PC";
+                wrongTokenRequest.Headers = new Dictionary<string, string>();
+                wrongTokenRequest.Headers["x-inventory-token"] = "wrong-token";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendWindowsUpdateJobs(stream, wrongTokenRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401 Unauthorized", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 401 response with a wrong token, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendThirdPartySoftwareJobsRejectsWithoutValidToken()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-thirdpartyjobsauth-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext noTokenRequest = new RequestContext();
+                noTokenRequest.Method = "GET";
+                noTokenRequest.Path = "/api/v1/client/third-party-software-jobs?computerName=TEST-PC";
+                noTokenRequest.Headers = new Dictionary<string, string>();
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendThirdPartySoftwareJobs(stream, noTokenRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401 Unauthorized", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 401 response with no token, got: " + responseText;
+                    }
+                }
+
+                RequestContext wrongTokenRequest = new RequestContext();
+                wrongTokenRequest.Method = "GET";
+                wrongTokenRequest.Path = "/api/v1/client/third-party-software-jobs?computerName=TEST-PC";
+                wrongTokenRequest.Headers = new Dictionary<string, string>();
+                wrongTokenRequest.Headers["x-inventory-token"] = "wrong-token";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendThirdPartySoftwareJobs(stream, wrongTokenRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401 Unauthorized", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 401 response with a wrong token, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestReceiveSoftwareJobResultsRejectsWithoutValidToken()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-jobresultsauth-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext noTokenRequest = new RequestContext();
+                noTokenRequest.Method = "POST";
+                noTokenRequest.Path = "/api/v1/client/software-jobs/results";
+                noTokenRequest.Headers = new Dictionary<string, string>();
+                noTokenRequest.Body = "{}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveSoftwareJobResults(stream, noTokenRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401 Unauthorized", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 401 response with no token, got: " + responseText;
+                    }
+                }
+
+                RequestContext wrongTokenRequest = new RequestContext();
+                wrongTokenRequest.Method = "POST";
+                wrongTokenRequest.Path = "/api/v1/client/software-jobs/results";
+                wrongTokenRequest.Headers = new Dictionary<string, string>();
+                wrongTokenRequest.Headers["x-inventory-token"] = "wrong-token";
+                wrongTokenRequest.Body = "{}";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.ReceiveSoftwareJobResults(stream, wrongTokenRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401 Unauthorized", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 401 response with a wrong token, got: " + responseText;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendSoftwareRepositoryConnectionInfoRejectsWithoutValidToken()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-repoconnectionauth-" + Guid.NewGuid().ToString("N"));
+            options.Token = "real-token";
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+
+                RequestContext noTokenRequest = new RequestContext();
+                noTokenRequest.Method = "GET";
+                noTokenRequest.Path = "/api/v1/client/software-repository-connection";
+                noTokenRequest.Headers = new Dictionary<string, string>();
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareRepositoryConnectionInfo(stream, noTokenRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401 Unauthorized", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 401 response with no token, got: " + responseText;
+                    }
+                }
+
+                RequestContext wrongTokenRequest = new RequestContext();
+                wrongTokenRequest.Method = "GET";
+                wrongTokenRequest.Path = "/api/v1/client/software-repository-connection";
+                wrongTokenRequest.Headers = new Dictionary<string, string>();
+                wrongTokenRequest.Headers["x-inventory-token"] = "wrong-token";
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareRepositoryConnectionInfo(stream, wrongTokenRequest);
+                    string responseText = Encoding.UTF8.GetString(stream.ToArray());
+                    if (responseText.IndexOf("401 Unauthorized", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a 401 response with a wrong token, got: " + responseText;
+                    }
                 }
                 return null;
             }
