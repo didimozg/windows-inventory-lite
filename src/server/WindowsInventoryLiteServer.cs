@@ -12390,6 +12390,29 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             return Uri.UnescapeDataString(idPortion).Trim();
         }
 
+        // Pulled out of PerformWsusKbDownload so the entry-update logic is
+        // directly testable without a real network download. Found during
+        // the 2026-10-13 trust-hardening review: this call site used to
+        // update relativePath/updatedAt directly via SaveWindowsUpdates,
+        // bypassing UpdateSoftwareCatalogEntry (and its contentSha256
+        // recompute from Task 1) entirely - leaving a stale hash pinned to
+        // whatever content existed before this download, pointing at
+        // content that no longer matches the file on disk. Re-pins
+        // contentSha256 to the freshly-downloaded file here instead, so a
+        // WSUS-triggered re-download doesn't silently leave behind a hash
+        // that would cause every subsequent legitimate client download of
+        // this same entry to fail verification.
+        private static void ApplyWsusKbDownloadResultToEntry(List<Dictionary<string, object>> entries, string id, string relativePath, ServerOptions options)
+        {
+            Dictionary<string, object> entry = entries.Find(e => String.Equals(GetStringValue(e, "id"), id, StringComparison.OrdinalIgnoreCase));
+            if (entry != null)
+            {
+                entry["relativePath"] = relativePath;
+                entry["contentSha256"] = ComputeCatalogEntryContentSha256(options, relativePath) ?? "";
+                entry["updatedAt"] = DateTime.UtcNow.ToString("o");
+            }
+        }
+
         // The single real entry point the manual trigger below calls.
         // Records the attempt to the same WSUS Downloads log the cab
         // downloader uses (kind="kb", distinguishing it from kind="cab"
@@ -12442,13 +12465,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     lock (windowsUpdatesLock)
                     {
                         List<Dictionary<string, object>> entries = LoadWindowsUpdates();
-                        Dictionary<string, object> entry = entries.Find(e => String.Equals(GetStringValue(e, "id"), id, StringComparison.OrdinalIgnoreCase));
-                        if (entry != null)
-                        {
-                            entry["relativePath"] = result.RelativePath;
-                            entry["updatedAt"] = DateTime.UtcNow.ToString("o");
-                            SaveWindowsUpdates(entries);
-                        }
+                        ApplyWsusKbDownloadResultToEntry(entries, id, result.RelativePath, options);
+                        SaveWindowsUpdates(entries);
                     }
                 }
                 else
@@ -18372,6 +18390,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "IsAllowedWsusDownloadUrl rejects non-https, unrecognized hosts, a subdomain-confusion bypass attempt, file:// URLs, and malformed URLs", TestIsAllowedWsusDownloadUrlRejectsNonHttpsAndUnknownHosts);
             allPassed &= SelfTestCheck(output, "ComputeCatalogEntryContentSha256 hashes the real file content", TestComputeCatalogEntryContentSha256HashesRealFileContent);
             allPassed &= SelfTestCheck(output, "ComputeCatalogEntryContentSha256 returns null when the file is missing", TestComputeCatalogEntryContentSha256ReturnsNullWhenFileMissing);
+            allPassed &= SelfTestCheck(output, "ApplyWsusKbDownloadResultToEntry re-pins contentSha256 to the newly-downloaded file", TestApplyWsusKbDownloadResultToEntryRepinsContentSha256ToTheNewFile);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore succeeds and reports the deterministic windows-updates\\KB{n}{ext} relativePath", TestPerformWsusKbDownloadCoreSucceedsAndWritesUnderDeterministicName);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore rejects a path-traversal kbId without downloading or writing anything", TestPerformWsusKbDownloadCoreRejectsAPathTraversalKbIdWithoutDownloadingAnything);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore categorizes a non-ProtocolError WebException as 'network'", TestPerformWsusKbDownloadCoreCategorizesNetworkFailure);
@@ -31136,6 +31155,49 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return "expected null for a missing file, got: " + actual;
             }
             return null;
+        }
+
+        private static string TestApplyWsusKbDownloadResultToEntryRepinsContentSha256ToTheNewFile()
+        {
+            string tempRepo = Path.Combine(Path.GetTempPath(), "wil-wsuskb-repin-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(tempRepo, "windows-updates"));
+            string filePath = Path.Combine(tempRepo, "windows-updates", "KB2222222.exe");
+            byte[] newContent = Encoding.UTF8.GetBytes("freshly re-downloaded content");
+            File.WriteAllBytes(filePath, newContent);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.SoftwareRepositoryPath = tempRepo;
+
+                string expected;
+                using (SHA256 sha256 = SHA256.Create())
+                {
+                    expected = BitConverter.ToString(sha256.ComputeHash(newContent)).Replace("-", "").ToLowerInvariant();
+                }
+
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "entry-1";
+                entry["relativePath"] = @"windows-updates\KB2222222-old.exe";
+                entry["contentSha256"] = "stale-hash-from-before-the-redownload";
+                entries.Add(entry);
+
+                InventoryServer.ApplyWsusKbDownloadResultToEntry(entries, "entry-1", @"windows-updates\KB2222222.exe", options);
+
+                if ((string)entry["relativePath"] != @"windows-updates\KB2222222.exe")
+                {
+                    return "expected relativePath to be updated to the new file, got: " + entry["relativePath"];
+                }
+                if ((string)entry["contentSha256"] != expected)
+                {
+                    return "expected contentSha256 re-pinned to the new file's real hash '" + expected + "', got: " + entry["contentSha256"];
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(tempRepo, true);
+            }
         }
 
         private static string TestPerformWsusKbDownloadCoreRejectsAPathTraversalKbIdWithoutDownloadingAnything()
