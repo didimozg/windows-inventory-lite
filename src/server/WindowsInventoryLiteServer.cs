@@ -18304,6 +18304,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository preserves the last successful scan's candidates when a subsequent scan fails", TestScanSoftwareRepositoryPreservesCandidatesOnSubsequentFailure);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository flags every candidate sharing a duplicate detected KB with HasConflict=true, leaves a unique KB unflagged", TestScanSoftwareRepositoryFlagsConflictingKbCandidates);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository auto-creates a missingKb catalog entry when AutoCreateWindowsUpdateCatalogEntries is on, does not duplicate it on a second scan", TestScanSoftwareRepositoryAutoCreatesCatalogEntryWhenEnabled);
+            allPassed &= SelfTestCheck(output, "ScanSoftwareRepository's auto-created entry includes a contentSha256 matching the real detected file's hash (via the same CreateWindowsUpdate->CreateSoftwareCatalogEntry path a manual add uses)", TestScanSoftwareRepositoryAutoCreatedEntryIncludesContentSha256);
             allPassed &= SelfTestCheck(output, "Auto-create recognizes a legacy bare-digit catalog kbId as already covering a freshly-detected 'KB'-prefixed KB, does not create a duplicate", TestAutoCreateSkipsWhenAlreadyCataloguedUnderLegacyBareDigitKbId);
             allPassed &= SelfTestCheck(output, "Auto-create defaults a detected .exe candidate's arguments to '/S' instead of leaving them empty (a real production hang, not just interactive-install risk)", TestAutoCreateDefaultsExeArgumentsToSlashS);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository never auto-creates when the setting is off, a KB conflicts, or that KB already has any catalog entry (even disabled)", TestScanSoftwareRepositorySkipsAutoCreateWhenDisabledConflictedOrAlreadyCatalogued);
@@ -32776,6 +32777,58 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (jobsResponseText.IndexOf("KB5031354", StringComparison.OrdinalIgnoreCase) < 0)
                 {
                     return "expected the auto-created entry to actually target a real client reporting this exact KB missing, got: " + jobsResponseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // Regression test for the software-distribution trust hardening
+        // work: AutoCreateCatalogEntriesForDetectedKbs builds its createBody
+        // and routes it through the exact same CreateWindowsUpdate ->
+        // CreateSoftwareCatalogEntry path a manual "Add to catalog" click
+        // uses (see AutoCreateCatalogEntriesForDetectedKbs's own comment),
+        // which is where ComputeCatalogEntryContentSha256 is wired in. This
+        // confirms that existing wiring already covers the auto-create path
+        // too, with no separate hash computation needed here.
+        private static string TestScanSoftwareRepositoryAutoCreatedEntryIncludesContentSha256()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-share-scan-autocreate-sha256-test-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-share-scan-autocreate-sha256-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "windows-updates"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "third-party-software"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                byte[] content = Encoding.UTF8.GetBytes("auto-create content hash fixture");
+                File.WriteAllBytes(Path.Combine(shareRoot, "windows-updates", "kb5031355-fix.msu"), content);
+                string expectedHash;
+                using (SHA256 sha256 = SHA256.Create())
+                {
+                    expectedHash = BitConverter.ToString(sha256.ComputeHash(content)).Replace("-", "").ToLowerInvariant();
+                }
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                options.AutoCreateWindowsUpdateCatalogEntries = true;
+                options.Token = "test-token";
+                InventoryServer server = new InventoryServer(options);
+
+                server.ScanSoftwareRepository();
+
+                List<Dictionary<string, object>> stored = server.LoadWindowsUpdates();
+                if (stored.Count != 1)
+                {
+                    return "expected exactly one auto-created catalog entry, got " + stored.Count;
+                }
+                if (GetStringValue(stored[0], "contentSha256") != expectedHash)
+                {
+                    return "expected the auto-created entry's contentSha256 to match the real file's hash '" + expectedHash + "', got: " + GetStringValue(stored[0], "contentSha256");
                 }
                 return null;
             }
