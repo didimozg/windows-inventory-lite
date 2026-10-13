@@ -107,8 +107,10 @@ may never get a certificate (a lab, an isolated segment) without giving
 up the "prefer encryption when it's available" benefit everywhere else.
 
 Set via `Install-Client.ps1 -RequireHttpsSelfUpdate -AllowHttpSelfUpdateFallback -RequireSignedSelfUpdate`,
-`Install-Wizard.ps1` (asks for all three directly), or the equivalent
-GPO deployment switches. Turning on `--require-signed-self-update`
+`Install-Wizard.ps1` (asks for all three directly, for every
+deployment flow - local, GPO, and WinRM), or the equivalent GPO/WinRM
+deployment switches (`Deploy-ClientGpo.ps1`/`Install-ClientWinRM.ps1`
+accept the same three). Turning on `--require-signed-self-update`
 before ANY release has been signed with the real key will permanently
 block self-update for that client until a signed release is published
 - deploy the flag only after your first signed release is already in

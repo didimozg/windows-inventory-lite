@@ -71,6 +71,7 @@ Full parameter tables for every install/build/uninstall script, the `server-conf
 | `-ServerUrl` | `-` | HTTP endpoint that receives client JSON reports. Mandatory. |
 | `-Token` | `-` | Ingestion token sent in `X-Inventory-Token`. Optional. |
 | `-IntervalHours` | `6` | Collection interval in hours (1-24). |
+| `-SoftwareCheckIntervalHours` | `6` | How often the deployed client polls for assigned software-distribution jobs (1-24). Forwarded to the remote `Deploy-ClientGpo.ps1` invocation. |
 | `-PackagePath` | `-` | Local path to the GPO client package. Default: `dist\gpo-client`. |
 | `-RemotePackagePath` | `C:\ProgramData\WindowsInventoryLite\WinRMDeploy` | Temporary folder on the remote host for the package. |
 | `-Credential` | `-` | PSCredential for WinRM authentication. Optional. |

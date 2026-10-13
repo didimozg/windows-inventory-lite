@@ -214,7 +214,12 @@ Ingestion token always required on both, regardless of `RequireIngestionToken` -
 Accepts a Windows client's full inventory report as the request body (an arbitrary JSON object; the only field the server reads directly is `computerName`, used to name the stored file) and overwrites `{DataPath}/{computerName}.json` with it, after merging in the current AD-sync fields (`adDescription`, `adSyncStatus`, `adSyncedAt`) so a client's own report never has to know about AD sync. Before the file is written, every `licenses[].key` present in the body is replaced with its DPAPI-encrypted form (`SecretProtector.Protect`) - the client submits it in plaintext, the stored copy never is; see `GET /api/v1/clients/{computerName}/license-keys` below for the only way to read it back decrypted.
 
 - Auth: `X-Inventory-Token` header, checked against the configured token when `RequireIngestionToken` is on.
-- Response: `{"status": "ok", "licenseKeySources": [...]}` on success - `licenseKeySources` is the current admin-managed license key source catalog (see `GET /api/v1/license-key-sources` below), trimmed to just `product`/`registryHive`/`registryPath`/`valueName` per entry (no `id`/`createdAt`/`updatedAt`), piggybacked on every ingestion response so the client can cache it for its next collection cycle without a separate config-pull channel. `400 {"error": "invalid request body"}` if the body is not valid JSON.
+- Response on success: `{"status": "ok", "config": {...}, "forceImmediateWindowsUpdateCheck": bool, "forceImmediateThirdPartySoftwareCheck": bool, "licenseKeySources": [...]}`. `400 {"error": "invalid request body"}` if the body is not valid JSON.
+  - `config.intervalHours`/`config.windowsUpdateCheckIntervalHours`/`config.thirdPartySoftwareCheckIntervalHours` - current fleet-wide defaults, always present regardless of token validity (not sensitive).
+  - `forceImmediateWindowsUpdateCheck`/`forceImmediateThirdPartySoftwareCheck` - `true` once, for the one report that clears the matching per-computer flag an admin set via "Install now" (see the Agent Actions endpoints below) - the client acts on it immediately instead of waiting for its own poll interval. Always present, same low-sensitivity reasoning as the interval defaults above.
+  - `licenseKeySources` - the current admin-managed license key source catalog (see `GET /api/v1/license-key-sources` below), trimmed to just `product`/`registryHive`/`registryPath`/`valueName` per entry (no `id`/`createdAt`/`updatedAt`). Present only when the supplied token is a real, exact match (not merely accepted because `RequireIngestionToken` is off, and not a previous-token-overlap match) - a caller with no valid token still gets its report accepted and the fields above, just not this catalog.
+  - `config.ingestionToken` - the real current token in plaintext, present only on the one report where the client authenticated with the *previous* token during an overlap window (`PreviousToken`/`PreviousTokenExpiresUtc`, see Settings > Server > Ingestion Token), so the client learns and persists the rotated value. Never present otherwise.
+  - `config.update` - present only when `EnableWindowsClientSelfUpdate` is on, the token is a real exact match, and a newer client build exists (`BuildWindowsClientUpdateInfo`): `versionNet35`/`sha256Net35`/`sigNet35` and/or `versionNet40`/`sha256Net40`/`sigNet40` (whichever target build is present in `ClientPackagePath`; `sigNet35`/`sigNet40` only when a matching `.sig` file exists next to it - see `docs/self-update-signing.md`), a legacy `version` field (best-effort, kept only so a pre-split client build still understands the field), and `httpsPort` - the port HTTPS is actually bound on right now, present only when the HTTPS listener is genuinely running (not just enabled in config), letting a client installed before a certificate existed opportunistically retry its download over HTTPS.
 
 ```bash
 curl -X POST https://server:8443/api/v1/inventory \
@@ -227,7 +232,11 @@ curl -X POST https://server:8443/api/v1/inventory \
 
 Same behavior as `/api/v1/inventory`, for Linux clients: reads `hostname` from the body to name the stored file (`{LinuxDataPath}/{hostname}.json`), merges AD-sync fields, overwrites the file.
 
-- Auth and response shape: identical to `/api/v1/inventory`.
+- Auth: identical to `/api/v1/inventory`.
+- Response on success: `{"status": "ok", "config": {...}}` - simpler than the Windows endpoint's response, since the Linux client has no license-key catalog and no software-distribution force-check mechanism.
+  - `config.intervalHours`/`config.statusIntervalMinutes` - current fleet-wide defaults for the Linux client's two collection timers, always present.
+  - `config.ingestionToken` - same previous-token-overlap rotation case as `/api/v1/inventory`, present only then.
+  - `config.update` - present only when `EnableLinuxClientSelfUpdate` is on, the token is a real exact match, and a newer `wil-linux-client` binary exists in `LinuxClientPackagePath`: `version`, `sha256`, and `sig` (only when a matching `.sig` file exists). One binary for all Linux targets, so no `versionNet35`/`versionNet40` split and no `httpsPort` field - the Linux self-update path does not have the opportunistic-HTTPS-retry behavior the Windows client's does.
 
 ```bash
 curl -X POST https://server:8443/api/v1/linux/inventory \
