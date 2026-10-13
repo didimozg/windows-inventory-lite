@@ -3302,6 +3302,32 @@ namespace WindowsInventoryLite
             }
         }
 
+        // Computed once at an admin-trusted boundary (catalog save or auto-create),
+        // never recomputed on every job poll - see docs/superpowers/specs/
+        // 2026-10-13-software-distribution-trust-hardening-design.md Part 1 for
+        // why. Returns null (not an exception) when the file can't currently be
+        // read - a deliberate degrade, not a save-blocking failure, so an admin
+        // can still define a catalog entry before the file is actually uploaded.
+        internal static string ComputeCatalogEntryContentSha256(ServerOptions options, string relativePath)
+        {
+            if (String.IsNullOrEmpty(options.SoftwareRepositoryPath) || String.IsNullOrEmpty(relativePath))
+            {
+                return null;
+            }
+            try
+            {
+                return WithSoftwareRepositoryIdentity(options, delegate
+                {
+                    string fullPath = Path.Combine(options.SoftwareRepositoryPath, relativePath);
+                    return ComputeFileSha256(fullPath);
+                });
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         private static readonly string[] WsusScanFieldsToCarryForward = { "wsusMissingUpdates", "wsusScannedCabHash", "wsusScanAt", "wuServiceUnavailable" };
 
         private void ReceiveInventory(Stream stream, RequestContext request)
@@ -16299,6 +16325,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             record["id"] = Guid.NewGuid().ToString("N");
             record["name"] = name;
             record["relativePath"] = relativePath;
+            record["contentSha256"] = ComputeCatalogEntryContentSha256(options, relativePath) ?? "";
             record["arguments"] = arguments;
             record["requiresReboot"] = requiresReboot;
             record["enabled"] = enabled;
@@ -16401,6 +16428,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
 
                 record["name"] = name;
                 record["relativePath"] = relativePath;
+                record["contentSha256"] = ComputeCatalogEntryContentSha256(options, relativePath) ?? "";
                 record["arguments"] = arguments;
                 record["requiresReboot"] = requiresReboot;
                 record["enabled"] = enabled;
@@ -18341,6 +18369,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "BuildKbDownloadFileName falls back to .exe for a malformed URL rather than throwing", TestBuildKbDownloadFileNameFallsBackToExeForAMalformedUrl);
             allPassed &= SelfTestCheck(output, "IsAllowedWsusDownloadUrl accepts known Microsoft update-distribution hosts over https", TestIsAllowedWsusDownloadUrlAcceptsKnownMicrosoftHosts);
             allPassed &= SelfTestCheck(output, "IsAllowedWsusDownloadUrl rejects non-https, unrecognized hosts, a subdomain-confusion bypass attempt, file:// URLs, and malformed URLs", TestIsAllowedWsusDownloadUrlRejectsNonHttpsAndUnknownHosts);
+            allPassed &= SelfTestCheck(output, "ComputeCatalogEntryContentSha256 hashes the real file content", TestComputeCatalogEntryContentSha256HashesRealFileContent);
+            allPassed &= SelfTestCheck(output, "ComputeCatalogEntryContentSha256 returns null when the file is missing", TestComputeCatalogEntryContentSha256ReturnsNullWhenFileMissing);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore succeeds and reports the deterministic windows-updates\\KB{n}{ext} relativePath", TestPerformWsusKbDownloadCoreSucceedsAndWritesUnderDeterministicName);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore rejects a path-traversal kbId without downloading or writing anything", TestPerformWsusKbDownloadCoreRejectsAPathTraversalKbIdWithoutDownloadingAnything);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore categorizes a non-ProtocolError WebException as 'network'", TestPerformWsusKbDownloadCoreCategorizesNetworkFailure);
@@ -31062,6 +31092,47 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (result.SizeBytes != fakeContent.LongLength)
             {
                 return "expected SizeBytes to match the downloaded content length";
+            }
+            return null;
+        }
+
+        private static string TestComputeCatalogEntryContentSha256HashesRealFileContent()
+        {
+            string tempRepo = Path.Combine(Path.GetTempPath(), "wil-hash-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(tempRepo, "windows-updates"));
+            string filePath = Path.Combine(tempRepo, "windows-updates", "KB1111111.exe");
+            byte[] content = Encoding.UTF8.GetBytes("fake installer bytes");
+            File.WriteAllBytes(filePath, content);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.SoftwareRepositoryPath = tempRepo;
+                string expected;
+                using (SHA256 sha256 = SHA256.Create())
+                {
+                    expected = BitConverter.ToString(sha256.ComputeHash(content)).Replace("-", "").ToLowerInvariant();
+                }
+                string actual = InventoryServer.ComputeCatalogEntryContentSha256(options, @"windows-updates\KB1111111.exe");
+                if (actual != expected)
+                {
+                    return "expected hash '" + expected + "', got: " + actual;
+                }
+                return null;
+            }
+            finally
+            {
+                Directory.Delete(tempRepo, true);
+            }
+        }
+
+        private static string TestComputeCatalogEntryContentSha256ReturnsNullWhenFileMissing()
+        {
+            ServerOptions options = new ServerOptions();
+            options.SoftwareRepositoryPath = Path.Combine(Path.GetTempPath(), "wil-hash-test-nonexistent-" + Guid.NewGuid().ToString("N"));
+            string actual = InventoryServer.ComputeCatalogEntryContentSha256(options, @"windows-updates\KB1111111.exe");
+            if (actual != null)
+            {
+                return "expected null for a missing file, got: " + actual;
             }
             return null;
         }
