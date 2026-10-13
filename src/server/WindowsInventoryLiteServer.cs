@@ -3397,6 +3397,7 @@ namespace WindowsInventoryLite
             AdSyncFields adFields = ComputeAdSyncFields(computerName, previous);
             bool newlyReportedUsbStorage = inventory.ContainsKey("hasUsbStorage") && Convert.ToBoolean(inventory["hasUsbStorage"]);
             bool stickyUsbStorage = ComputeStickyUsbStorage(previous, newlyReportedUsbStorage);
+            WarnIfReportFilenameCollidesWithADifferentComputer(options, computerName, previous, path);
 
             lock (reportFileLock)
             {
@@ -4385,7 +4386,7 @@ namespace WindowsInventoryLite
                 string rejectionReason;
                 if (!String.IsNullOrEmpty(reportedDownloadUrl) && !IsAllowedWsusDownloadUrl(reportedDownloadUrl, out rejectionReason))
                 {
-                    DebugLogger.Log(options, "Client", "Dropped downloadUrl reported by '" + computerName + "' for a missing KB: " + rejectionReason);
+                    DebugLogger.Log(options, "Client", "Dropped downloadUrl reported by '" + DebugLogger.SanitizeForLog(computerName) + "' for a missing KB: " + rejectionReason);
                     missingUpdate["downloadUrl"] = "";
                 }
             }
@@ -10502,6 +10503,38 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
 
             return sanitized;
+        }
+
+        // SanitizeFileName collapses every character outside [A-Za-z0-9-_.]
+        // to a single '_', so two genuinely different computer names (e.g.
+        // "PC/01" and "PC:01", or "PC 01") can resolve to the identical
+        // stored report file - found by an external security review. One
+        // machine's inventory report would then silently overwrite the
+        // other's on every ingest, with no indication to the admin that
+        // two distinct machines are sharing one file. Detected here by
+        // comparing the incoming computerName against whatever computerName
+        // is already stored in the file this report is about to overwrite -
+        // previous is already loaded by the caller before this runs.
+        // Deliberately fail-open (still accept and overwrite): either name
+        // could be the "real" one, and refusing to accept a legitimate
+        // report is worse than a loud, visible warning an admin can act on
+        // by renaming one of the colliding machines.
+        private static void WarnIfReportFilenameCollidesWithADifferentComputer(ServerOptions options, string computerName, Dictionary<string, object> previous, string path)
+        {
+            string previousComputerName = GetStringValue(previous, "computerName");
+            if (String.IsNullOrEmpty(previousComputerName) || String.Equals(previousComputerName, computerName, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            string message = "Inventory report filename collision: '" + DebugLogger.SanitizeForLog(computerName) + "' and '" + DebugLogger.SanitizeForLog(previousComputerName)
+                + "' both sanitize to the same stored report file ('" + Path.GetFileName(path) + "') - one has just overwritten the other's inventory data. Rename one of these machines to avoid this.";
+            try
+            {
+                System.Diagnostics.EventLog.WriteEntry("WindowsInventoryLite", message, System.Diagnostics.EventLogEntryType.Warning);
+            }
+            catch { }
+            DebugLogger.Log(options, "Client", message);
         }
 
         private sealed class RequestContext
@@ -18191,6 +18224,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ExtractLicenseId decodes URL-encoded ids", TestExtractLicenseIdDecodesEscaping);
             allPassed &= SelfTestCheck(output, "SanitizeFileName escapes a reserved Windows device name", TestSanitizeFileNameReservedDeviceName);
             allPassed &= SelfTestCheck(output, "SanitizeFileName leaves a normal computer name untouched", TestSanitizeFileNameNormalName);
+            allPassed &= SelfTestCheck(output, "SanitizeFileName collapses different computer names to the same sanitized result (documents the known collision)", TestSanitizeFileNameDifferentComputerNamesCanCollide);
+            allPassed &= SelfTestCheck(output, "ReceiveInventory logs a warning when two different computerNames collide onto the same report filename", TestReceiveInventoryWarnsOnFilenameCollisionBetweenDifferentComputerNames);
             allPassed &= SelfTestCheck(output, "FixedTimeEquals matches identical strings and rejects everything else", TestFixedTimeEquals);
             allPassed &= SelfTestCheck(output, "IsWebRequestAuthorized restricts to loopback while Basic Auth is unconfigured", TestIsWebRequestAuthorizedRestrictsToLoopbackWhenUnconfigured);
             allPassed &= SelfTestCheck(output, "GetCookieValue parses a named cookie out of a raw Cookie header", TestGetCookieValueParsesNamedCookie);
@@ -19458,6 +19493,84 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return "expected an ordinary name to pass through unchanged, got '" + sanitized + "'";
             }
             return null;
+        }
+
+        // Documents the real, confirmed collision an external security
+        // review found: distinct computer names that only differ in a
+        // character SanitizeFileName treats as "not letter/digit/-/_/."
+        // all collapse to the same sanitized result. This is the exact
+        // fact WarnIfReportFilenameCollidesWithADifferentComputer exists to
+        // detect - if a future change to SanitizeFileName made these
+        // inputs stop colliding, that would be a silent, undetected
+        // behavior change this test is here to catch.
+        private static string TestSanitizeFileNameDifferentComputerNamesCanCollide()
+        {
+            string a = SanitizeFileName("PC/01");
+            string b = SanitizeFileName("PC:01");
+            string c = SanitizeFileName("PC 01");
+            if (a != b || b != c)
+            {
+                return "expected 'PC/01', 'PC:01', and 'PC 01' to all sanitize to the same filename (demonstrating the known collision), got '" + a + "', '" + b + "', '" + c + "'";
+            }
+            return null;
+        }
+
+        private static string TestReceiveInventoryWarnsOnFilenameCollisionBetweenDifferentComputerNames()
+        {
+            ServerOptions options = new ServerOptions();
+            options.DataPath = Path.Combine(Path.GetTempPath(), "wil-selftest-filename-collision-" + Guid.NewGuid().ToString("N"));
+            options.RequireIngestionToken = false;
+            options.DebugLogEnabled = true;
+            options.DebugLogRetentionDays = 7;
+            options.DebugLogMaxSizeMb = 10;
+            Directory.CreateDirectory(options.DataPath);
+            try
+            {
+                InventoryServer server = new InventoryServer(options);
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+
+                Dictionary<string, object> firstBody = new Dictionary<string, object>();
+                firstBody["computerName"] = "PC/01";
+                RequestContext firstRequest = new RequestContext();
+                firstRequest.Method = "POST";
+                firstRequest.Path = "/api/v1/inventory";
+                firstRequest.Headers = new Dictionary<string, string>();
+                firstRequest.Body = serializer.Serialize(firstBody);
+                using (MemoryStream firstStream = new MemoryStream())
+                {
+                    server.ReceiveInventory(firstStream, firstRequest);
+                }
+
+                // Different computerName, but SanitizeFileName collapses
+                // both to the same stored file - see
+                // TestSanitizeFileNameDifferentComputerNamesCanCollide.
+                Dictionary<string, object> secondBody = new Dictionary<string, object>();
+                secondBody["computerName"] = "PC:01";
+                RequestContext secondRequest = new RequestContext();
+                secondRequest.Method = "POST";
+                secondRequest.Path = "/api/v1/inventory";
+                secondRequest.Headers = new Dictionary<string, string>();
+                secondRequest.Body = serializer.Serialize(secondBody);
+                using (MemoryStream secondStream = new MemoryStream())
+                {
+                    server.ReceiveInventory(secondStream, secondRequest);
+                }
+
+                using (MemoryStream debugLogStream = new MemoryStream())
+                {
+                    server.SendDebugLog(debugLogStream);
+                    string response = Encoding.UTF8.GetString(debugLogStream.ToArray());
+                    if (response.IndexOf("filename collision", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        return "expected a filename-collision warning in the debug log after two different computerNames collided, got: " + response;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(options.DataPath, true); } catch { }
+            }
         }
 
         private static string TestFixedTimeEquals()
