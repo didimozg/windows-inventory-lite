@@ -4049,7 +4049,7 @@ namespace WindowsInventoryLite
             job["relativePath"] = @"windows-updates\KB1111111.exe";
             job["arguments"] = "";
             job["requiresReboot"] = false;
-            job["contentSha256"] = "0000000000000000000000000000000000000000000000000000000000000000000000000000"; // 64 hex chars, deliberately wrong
+            job["contentSha256"] = "0000000000000000000000000000000000000000000000000000000000000000000000000000"; // deliberately wrong - does not match the tampered content's real hash
 
             Dictionary<string, object> result = runner.RunOneJob(job, (url, token, destPath) =>
             {

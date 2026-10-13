@@ -3643,13 +3643,50 @@ namespace WindowsInventoryLite
             }
 
             string relativePath = GetStringValue(entry, "relativePath");
-            byte[] bytes;
+
+            if (String.IsNullOrEmpty(options.SoftwareRepositoryPath))
+            {
+                SendText(stream, "{\"error\":\"catalog entry's file was not found on disk\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+
+            // Confinement (no ../ traversal outside the catalog's own
+            // subfolder) is otherwise only enforced at catalog-SAVE time
+            // (IsValidCatalogRelativePath, in CreateSoftwareCatalogEntry/
+            // UpdateSoftwareCatalogEntry) - a legacy or hand-edited
+            // relativePath (e.g. edited directly in windows-updates.json)
+            // would never pass back through that check, so it is re-checked
+            // here, on every READ, before the file is ever opened.
+            // IsValidCatalogRelativePath's own check is root-agnostic (it
+            // validates the relationship between relativePath and
+            // spec.Subfolder against an internal dummy root), so the exact
+            // same helper applies unchanged against the real
+            // SoftwareRepositoryPath too.
+            if (!IsValidCatalogRelativePath(relativePath, spec.Subfolder))
+            {
+                SendText(stream, "{\"error\":\"catalog entry's file was not found on disk\"}", "application/json; charset=utf-8", 404);
+                return;
+            }
+
+            string fullPath = Path.Combine(options.SoftwareRepositoryPath, relativePath);
+            string fileName = Path.GetFileName(relativePath);
             try
             {
-                bytes = WithSoftwareRepositoryIdentity(options, delegate
+                WithSoftwareRepositoryIdentity(options, delegate
                 {
-                    string fullPath = Path.Combine(options.SoftwareRepositoryPath, relativePath);
-                    return File.ReadAllBytes(fullPath);
+                    // The file must be opened AND fully streamed to the
+                    // response from inside this delegate, not handed back
+                    // out of it - the impersonation context
+                    // WithSoftwareRepositoryIdentity establishes ends the
+                    // instant this delegate returns, so a FileStream handed
+                    // back out would read under the wrong identity (or fail
+                    // outright, for a configured repository credential) for
+                    // the remainder of the copy.
+                    using (FileStream fileStream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    {
+                        SendFileStream(stream, "application/octet-stream", fileName, fileStream, fileStream.Length);
+                    }
+                    return true;
                 });
             }
             catch (FileNotFoundException)
@@ -3672,13 +3709,15 @@ namespace WindowsInventoryLite
             catch (Exception ex)
             {
                 // Anything else (e.g. a configured repository identity that
-                // fails to log on, an inaccessible share) is a genuinely
-                // unexpected failure, not a routine "not found".
-                SendJsonError(stream, "Could not read the file for this catalog entry: " + ex.Message, 500);
+                // fails to log on, an inaccessible share, a path that is
+                // actually a directory) is a genuinely unexpected failure,
+                // not a routine "not found" - the real detail (which can
+                // include a UNC path or access-denied specifics) is logged
+                // server-side only; the caller gets a generic message.
+                DebugLogger.Log(options, "Error", "SendSoftwareDownload failed to read '" + fullPath + "': " + ex);
+                SendJsonError(stream, "Could not read the file for this catalog entry.", 500);
                 return;
             }
-
-            SendBytes(stream, bytes, "application/octet-stream", Path.GetFileName(relativePath));
         }
 
         private void SendWindowsUpdateJobs(Stream stream, RequestContext request)
@@ -17131,7 +17170,69 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 AutoCreateCatalogEntriesForDetectedKbs(result.WindowsUpdateCandidates);
             }
 
+            // Runs on every scan (both timer-driven and manually triggered,
+            // since both call ScanSoftwareRepository), independent of
+            // whether the share scan itself succeeded above - this is the
+            // backfill for every catalog entry that predates the
+            // contentSha256 content-integrity feature: on upgrade, EVERY
+            // pre-existing entry has contentSha256 = "" (there is no
+            // migration step), which would otherwise make content
+            // verification a silent no-op for the whole existing catalog
+            // until an admin happens to resave each entry by hand. This
+            // closes that gap automatically, no admin action required, as
+            // soon as the next scan runs. Gated on SoftwareRepositoryPath
+            // being configured at all, same as the rest of this function -
+            // ComputeCatalogEntryContentSha256 would just return null for
+            // every entry otherwise, so there is nothing useful to do, and
+            // skipping it here avoids touching the catalog files at all for
+            // a server that has never configured a repository.
+            if (!String.IsNullOrEmpty(options.SoftwareRepositoryPath))
+            {
+                BackfillMissingContentSha256(windowsUpdatesLock, LoadWindowsUpdates, SaveWindowsUpdates);
+                BackfillMissingContentSha256(thirdPartySoftwareLock, LoadThirdPartySoftware, SaveThirdPartySoftware);
+            }
+
             return result;
+        }
+
+        // For every entry in one catalog whose contentSha256 is currently
+        // empty, computes it from the real file via
+        // ComputeCatalogEntryContentSha256 and fills it in - but ONLY when
+        // it is missing. An already-present hash is never recomputed or
+        // re-pinned here: that is this whole feature's fail-closed point -
+        // if the backing file is overwritten in place outside of this
+        // app's own save/upload flow, every subsequent job for that entry
+        // should fail verification, not get silently re-pinned to match
+        // the new (possibly tampered) content. The whole catalog is loaded
+        // and saved once under its own lock (the same lock
+        // Create/UpdateSoftwareCatalogEntry already use for this catalog),
+        // and the file is only rewritten when at least one entry actually
+        // changed, so a scan that backfills nothing leaves the catalog
+        // file untouched.
+        private void BackfillMissingContentSha256(object catalogLock, Func<List<Dictionary<string, object>>> load, Action<List<Dictionary<string, object>>> save)
+        {
+            lock (catalogLock)
+            {
+                List<Dictionary<string, object>> entries = load();
+                bool changed = false;
+                foreach (Dictionary<string, object> entry in entries)
+                {
+                    if (!String.IsNullOrEmpty(GetStringValue(entry, "contentSha256")))
+                    {
+                        continue;
+                    }
+                    string hash = ComputeCatalogEntryContentSha256(options, GetStringValue(entry, "relativePath"));
+                    if (hash != null)
+                    {
+                        entry["contentSha256"] = hash;
+                        changed = true;
+                    }
+                }
+                if (changed)
+                {
+                    save(entries);
+                }
+            }
         }
 
         // Called once per scan when AutoCreateWindowsUpdateCatalogEntries is
@@ -18002,6 +18103,29 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             stream.Write(data, 0, data.Length);
         }
 
+        // Streaming counterpart to SendBytes, for responses too large to
+        // safely buffer into a single byte[] first - SendSoftwareDownload's
+        // own reason for existing (Windows cumulative-update files routinely
+        // run 0.5-1.5 GB; N concurrent downloads each buffering a whole file
+        // would each hold ~1 GB on the large object heap). Writes the
+        // identical header shape SendBytes does, then copies sourceStream to
+        // the response using the same fixed-size-chunk pattern
+        // DownloadBytesFromUrl already uses for the other end of a download,
+        // so at most one buffer's worth of the file is ever resident in
+        // memory at a time.
+        private void SendFileStream(Stream stream, string contentType, string filename, Stream sourceStream, long contentLength)
+        {
+            string header = "HTTP/1.1 200 OK\r\nContent-Type: " + contentType + "\r\nContent-Disposition: attachment; filename=\"" + filename + "\"\r\nContent-Length: " + contentLength + BuildSecurityHeaders(stream) + "\r\nConnection: close\r\n\r\n";
+            byte[] headerBytes = Encoding.ASCII.GetBytes(header);
+            stream.Write(headerBytes, 0, headerBytes.Length);
+            byte[] buffer = new byte[81920];
+            int read;
+            while ((read = sourceStream.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                stream.Write(buffer, 0, read);
+            }
+        }
+
         // Last-resort fallback, used only by SendDashboardFile when ContentPath
         // is missing the real file (e.g. a botched install that never copied
         // server\dashboard\* into place). Deliberately a minimal, old snapshot
@@ -18146,6 +18270,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-download returns 404 (not 500) for an unrecognized or missing catalogType", TestSendSoftwareDownloadReturns404ForUnrecognizedCatalogType);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-download returns 404 (not 500) when a valid catalog entry's file is missing from disk", TestSendSoftwareDownloadReturns404WhenCatalogEntryFileIsMissingFromDisk);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-download requires a valid ingestion token unconditionally, rejects with 401 when missing/wrong", TestSendSoftwareDownloadRejectsWithoutValidToken);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-download returns 404 when SoftwareRepositoryPath is unconfigured, instead of proceeding with a nonsensical path", TestSendSoftwareDownloadReturns404WhenSoftwareRepositoryPathIsUnconfigured);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-download re-checks path confinement on read and returns 404 for a relativePath that escapes its catalog subfolder (e.g. a hand-edited or legacy entry)", TestSendSoftwareDownloadReturns404ForPathEscapingItsCatalogSubfolder);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-download streams a file larger than one copy buffer across multiple chunks without corruption", TestSendSoftwareDownloadStreamsLargeFileAcrossMultipleChunksWithoutCorruption);
+            allPassed &= SelfTestCheck(output, "GET /api/v1/client/software-download returns a generic message on a 500, never the raw exception detail (e.g. a filesystem path)", TestSendSoftwareDownloadReturnsGenericMessageOn500WithoutLeakingFilesystemDetail);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall updates a target's stored clientVersion", TestPatchClientReportVersionAfterInstallUpdatesVersion);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall's lastInstalledAtUtc is cleared once a real report overwrites the file", TestPatchClientReportVersionAfterInstallFieldClearedByRealReport);
             allPassed &= SelfTestCheck(output, "PatchClientReportVersionAfterInstall is a no-op when the target has no stored report yet", TestPatchClientReportVersionAfterInstallMissingReport);
@@ -18483,6 +18611,8 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "Auto-create recognizes a legacy bare-digit catalog kbId as already covering a freshly-detected 'KB'-prefixed KB, does not create a duplicate", TestAutoCreateSkipsWhenAlreadyCataloguedUnderLegacyBareDigitKbId);
             allPassed &= SelfTestCheck(output, "Auto-create defaults a detected .exe candidate's arguments to '/S' instead of leaving them empty (a real production hang, not just interactive-install risk)", TestAutoCreateDefaultsExeArgumentsToSlashS);
             allPassed &= SelfTestCheck(output, "ScanSoftwareRepository never auto-creates when the setting is off, a KB conflicts, or that KB already has any catalog entry (even disabled)", TestScanSoftwareRepositorySkipsAutoCreateWhenDisabledConflictedOrAlreadyCatalogued);
+            allPassed &= SelfTestCheck(output, "ScanSoftwareRepository backfills contentSha256 for a pre-existing catalog entry that predates the content-integrity feature (empty hash on upgrade, no admin action needed)", TestScanSoftwareRepositoryBackfillsMissingContentSha256ForPreExistingEntries);
+            allPassed &= SelfTestCheck(output, "ScanSoftwareRepository's backfill never overwrites an already-present contentSha256, even if it no longer matches the real file (fail-closed, not a bug)", TestScanSoftwareRepositoryDoesNotOverwriteAnAlreadyPresentContentSha256);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates reports a catalog entry's real file size from the share, or null when the file no longer exists", TestSendWindowsUpdatesReportsRealFileSizeOrNullWhenMissing);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates resolves severity/targetedComputerNames for a legacy bare-digit catalog kbId against a real 'KB'-prefixed client report", TestSendWindowsUpdatesResolvesSeverityAndTargetsForLegacyBareDigitKbId);
             allPassed &= SelfTestCheck(output, "GET /api/v1/windows-updates reports severity and targetedComputerNames for a missingKb entry, respecting excludedComputers and AutoCreateOnlyCriticalKbs", TestSendWindowsUpdatesReportsSeverityAndTargetedComputersForMissingKbEntries);
@@ -24498,6 +24628,270 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             finally
             {
                 try { Directory.Delete(options.DataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendSoftwareDownloadReturns404WhenSoftwareRepositoryPathIsUnconfigured()
+        {
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-software-download-norepo-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                // Deliberately left unconfigured - must 404, not proceed
+                // with a nonsensical Path.Combine(string.Empty, relativePath).
+                options.SoftwareRepositoryPath = "";
+                options.Token = "real-token";
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "app-1";
+                entry["name"] = "Test App";
+                entry["relativePath"] = @"third-party-software\app-setup.exe";
+                entries.Add(entry);
+                server.SaveThirdPartySoftware(entries);
+
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client/software-download?catalogType=thirdPartySoftware&id=app-1";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "real-token";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareDownload(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("404", StringComparison.Ordinal) < 0)
+                {
+                    return "expected 404 when SoftwareRepositoryPath is unconfigured, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // Confinement (no ../ traversal outside the catalog's own
+        // subfolder) is otherwise only enforced at catalog-SAVE time
+        // (IsValidCatalogRelativePath). This proves it is re-checked on
+        // READ too, for a relativePath shaped exactly like one that could
+        // only have reached the catalog file some other way than through
+        // CreateSoftwareCatalogEntry/UpdateSoftwareCatalogEntry - a
+        // hand-edited windows-updates.json/third-party-software.json, or a
+        // legacy entry saved before that save-time check existed.
+        private static string TestSendSoftwareDownloadReturns404ForPathEscapingItsCatalogSubfolder()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-software-download-escape-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-software-download-escape-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "third-party-software"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                // A file genuinely outside the third-party-software
+                // subfolder - reachable only if the confinement re-check
+                // this test exists to prove is missing.
+                string secretPath = Path.Combine(shareRoot, "secret.txt");
+                File.WriteAllText(secretPath, "should never be served");
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                options.Token = "real-token";
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "escape-1";
+                entry["name"] = "Escaping Entry";
+                // Resolves OUTSIDE third-party-software/ when combined with
+                // the repository root - exactly the shape
+                // IsValidCatalogRelativePath already rejects at save time,
+                // simulated here as if it had reached the catalog file some
+                // other way (hand edit, pre-existing legacy entry).
+                entry["relativePath"] = @"third-party-software\..\secret.txt";
+                entries.Add(entry);
+                server.SaveThirdPartySoftware(entries);
+
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client/software-download?catalogType=thirdPartySoftware&id=escape-1";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "real-token";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareDownload(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("404", StringComparison.Ordinal) < 0)
+                {
+                    return "expected 404 for a relativePath that escapes its catalog subfolder, got: " + responseText;
+                }
+                if (responseText.IndexOf("should never be served", StringComparison.Ordinal) >= 0)
+                {
+                    return "expected the escaping file's content to never be served, but found it in the response";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // The exact risk the streaming rewrite exists to close:
+        // File.ReadAllBytes would have passed this test too (it never
+        // exercises more than one Read() call), so the key property this
+        // proves is that SendFileStream's own fixed-size-chunk copy loop
+        // is correct ACROSS chunk boundaries, not just for a single buffer.
+        private static string TestSendSoftwareDownloadStreamsLargeFileAcrossMultipleChunksWithoutCorruption()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-software-download-bigfile-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-software-download-bigfile-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "third-party-software"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                // Larger than SendFileStream's own 81920-byte copy buffer,
+                // and not a round multiple of it, so a correct
+                // implementation must loop more than once and still stop at
+                // the exact right byte.
+                byte[] expectedBytes = new byte[81920 * 2 + 37];
+                for (int i = 0; i < expectedBytes.Length; i++)
+                {
+                    expectedBytes[i] = (byte)(i % 256);
+                }
+                File.WriteAllBytes(Path.Combine(shareRoot, "third-party-software", "big-app.exe"), expectedBytes);
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                options.Token = "real-token";
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "big-app-1";
+                entry["name"] = "Big App";
+                entry["relativePath"] = @"third-party-software\big-app.exe";
+                entries.Add(entry);
+                server.SaveThirdPartySoftware(entries);
+
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client/software-download?catalogType=thirdPartySoftware&id=big-app-1";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "real-token";
+
+                byte[] responseBytes;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareDownload(stream, request);
+                    responseBytes = stream.ToArray();
+                }
+
+                string responseText = Encoding.ASCII.GetString(responseBytes);
+                int headerEnd = responseText.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+                if (headerEnd < 0)
+                {
+                    return "expected a header/body separator in the response";
+                }
+                if (responseText.IndexOf("Content-Length: " + expectedBytes.Length, StringComparison.Ordinal) < 0)
+                {
+                    return "expected Content-Length to equal the real file size " + expectedBytes.Length;
+                }
+                byte[] actualBody = new byte[responseBytes.Length - (headerEnd + 4)];
+                Array.Copy(responseBytes, headerEnd + 4, actualBody, 0, actualBody.Length);
+                if (actualBody.Length != expectedBytes.Length)
+                {
+                    return "expected the response body to be exactly the file's " + expectedBytes.Length + " bytes, got " + actualBody.Length + " bytes";
+                }
+                for (int i = 0; i < expectedBytes.Length; i++)
+                {
+                    if (actualBody[i] != expectedBytes[i])
+                    {
+                        return "streamed response body differs from the source file at byte " + i;
+                    }
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        private static string TestSendSoftwareDownloadReturnsGenericMessageOn500WithoutLeakingFilesystemDetail()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-software-download-500-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-software-download-500-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "third-party-software"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                // A directory sitting at the exact path a catalog entry's
+                // relativePath names, instead of a file - FileStream's own
+                // constructor throws UnauthorizedAccessException for this
+                // (not FileNotFoundException), landing in the generic
+                // "unexpected failure" branch this test checks: the real
+                // exception detail (which, for this exact case, includes
+                // this test's own temp directory's full path) must be
+                // logged server-side only, never handed to the caller.
+                string entryAsDirectory = Path.Combine(shareRoot, "third-party-software", "not-really-a-file.exe");
+                Directory.CreateDirectory(entryAsDirectory);
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                options.Token = "real-token";
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["id"] = "app-dir";
+                entry["name"] = "Directory Instead Of File";
+                entry["relativePath"] = @"third-party-software\not-really-a-file.exe";
+                entries.Add(entry);
+                server.SaveThirdPartySoftware(entries);
+
+                RequestContext request = new RequestContext();
+                request.Method = "GET";
+                request.Path = "/api/v1/client/software-download?catalogType=thirdPartySoftware&id=app-dir";
+                request.Headers = new Dictionary<string, string>();
+                request.Headers["x-inventory-token"] = "real-token";
+
+                string responseText;
+                using (MemoryStream stream = new MemoryStream())
+                {
+                    server.SendSoftwareDownload(stream, request);
+                    responseText = Encoding.UTF8.GetString(stream.ToArray());
+                }
+
+                if (responseText.IndexOf("500", StringComparison.Ordinal) < 0)
+                {
+                    return "expected a 500 for a catalog entry whose file path is actually a directory, got: " + responseText;
+                }
+                if (responseText.IndexOf(shareRoot, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return "expected the 500 response to never include the real filesystem path, got: " + responseText;
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
             }
         }
 
@@ -33550,6 +33944,116 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 if (Convert.ToBoolean(afterEnabledScan[0]["enabled"]))
                 {
                     return "expected the pre-existing disabled entry to remain untouched (still disabled), auto-creation must never modify an entry it did not create";
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // Proves the real upgrade scenario the backfill exists to close:
+        // on upgrade, EVERY pre-existing catalog entry has
+        // contentSha256 = "" (no migration step ever ran), so this entry
+        // is saved directly (bypassing CreateWindowsUpdate/
+        // UpdateWindowsUpdate, which would already compute it) to simulate
+        // exactly that pre-upgrade shape.
+        private static string TestScanSoftwareRepositoryBackfillsMissingContentSha256ForPreExistingEntries()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-share-scan-backfill-test-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-share-scan-backfill-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "windows-updates"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "third-party-software"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                byte[] content = Encoding.UTF8.GetBytes("pre-existing entry content for backfill test");
+                File.WriteAllBytes(Path.Combine(shareRoot, "windows-updates", "kb-preexisting.msu"), content);
+                string expectedHash;
+                using (SHA256 sha256 = SHA256.Create())
+                {
+                    expectedHash = BitConverter.ToString(sha256.ComputeHash(content)).Replace("-", "").ToLowerInvariant();
+                }
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                InventoryServer server = new InventoryServer(options);
+
+                List<Dictionary<string, object>> preExisting = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entryWithoutHash = new Dictionary<string, object>();
+                entryWithoutHash["id"] = "pre-existing-no-hash";
+                entryWithoutHash["name"] = "Pre-existing entry with no hash yet";
+                entryWithoutHash["relativePath"] = @"windows-updates\kb-preexisting.msu";
+                entryWithoutHash["contentSha256"] = "";
+                entryWithoutHash["targetMode"] = "static";
+                entryWithoutHash["enabled"] = true;
+                preExisting.Add(entryWithoutHash);
+                server.SaveWindowsUpdates(preExisting);
+
+                server.ScanSoftwareRepository();
+
+                List<Dictionary<string, object>> afterScan = server.LoadWindowsUpdates();
+                if (afterScan.Count != 1)
+                {
+                    return "expected the backfill scan to leave exactly one windowsUpdate entry, got " + afterScan.Count;
+                }
+                if (GetStringValue(afterScan[0], "contentSha256") != expectedHash)
+                {
+                    return "expected the pre-existing entry's contentSha256 to be backfilled to the real file's hash '" + expectedHash + "', got: " + GetStringValue(afterScan[0], "contentSha256");
+                }
+                return null;
+            }
+            finally
+            {
+                try { Directory.Delete(shareRoot, true); } catch { }
+                try { Directory.Delete(dataPath, true); } catch { }
+            }
+        }
+
+        // The backfill's fail-closed point: it must only fill in a MISSING
+        // hash, never recompute/re-pin one that is already present - even
+        // if that hash no longer matches the real file (simulating an
+        // external overwrite of the catalog's backing file in place). This
+        // is deliberate: re-pinning here would silently defeat the whole
+        // point of pinning a hash in the first place.
+        private static string TestScanSoftwareRepositoryDoesNotOverwriteAnAlreadyPresentContentSha256()
+        {
+            string shareRoot = Path.Combine(Path.GetTempPath(), "wil-share-scan-nobackfill-test-" + Guid.NewGuid().ToString("N"));
+            string dataPath = Path.Combine(Path.GetTempPath(), "wil-share-scan-nobackfill-data-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "windows-updates"));
+            Directory.CreateDirectory(Path.Combine(shareRoot, "third-party-software"));
+            Directory.CreateDirectory(dataPath);
+            try
+            {
+                File.WriteAllText(Path.Combine(shareRoot, "windows-updates", "kb-existing-hash.msu"), "current real file content");
+
+                ServerOptions options = new ServerOptions();
+                options.DataPath = dataPath;
+                options.SoftwareRepositoryPath = shareRoot;
+                InventoryServer server = new InventoryServer(options);
+
+                const string stalePinnedHash = "stale0000000000000000000000000000000000000000000000000000000000";
+                List<Dictionary<string, object>> preExisting = new List<Dictionary<string, object>>();
+                Dictionary<string, object> entryWithHash = new Dictionary<string, object>();
+                entryWithHash["id"] = "already-pinned";
+                entryWithHash["name"] = "Already has a pinned hash";
+                entryWithHash["relativePath"] = @"windows-updates\kb-existing-hash.msu";
+                // Deliberately NOT the real current file's hash.
+                entryWithHash["contentSha256"] = stalePinnedHash;
+                entryWithHash["targetMode"] = "static";
+                entryWithHash["enabled"] = true;
+                preExisting.Add(entryWithHash);
+                server.SaveWindowsUpdates(preExisting);
+
+                server.ScanSoftwareRepository();
+
+                List<Dictionary<string, object>> afterScan = server.LoadWindowsUpdates();
+                if (GetStringValue(afterScan[0], "contentSha256") != stalePinnedHash)
+                {
+                    return "expected an already-present contentSha256 to be left untouched by the backfill, got: " + GetStringValue(afterScan[0], "contentSha256");
                 }
                 return null;
             }
