@@ -3941,6 +3941,7 @@ namespace WindowsInventoryLite
             job["updatedAt"] = GetStringValue(entry, "updatedAt");
             job["catalogType"] = catalogType;
             job["relativePath"] = GetStringValue(entry, "relativePath");
+            job["contentSha256"] = GetStringValue(entry, "contentSha256");
             job["arguments"] = GetStringValue(entry, "arguments");
             job["requiresReboot"] = entry.ContainsKey("requiresReboot") && Convert.ToBoolean(entry["requiresReboot"]);
             jobs.Add(job);
@@ -17894,6 +17895,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "AppendJobIfTargeted excludes disabled entries", TestAppendJobIfTargetedExcludesDisabledEntries);
             allPassed &= SelfTestCheck(output, "AppendJobIfTargeted excludes a computer named in excludedComputers even when the KB is reported missing, does not affect other computers", TestAppendJobIfTargetedRespectsExcludedComputers);
             allPassed &= SelfTestCheck(output, "AppendJobIfTargeted only targets a machine reporting Critical severity when restrictToCriticalOnly is true, targets normally when false", TestAppendJobIfTargetedRestrictsToCriticalSeverityWhenEnabled);
+            allPassed &= SelfTestCheck(output, "AppendJobIfTargeted carries the entry's contentSha256 into the job object", TestAppendJobIfTargetedIncludesContentSha256);
             allPassed &= SelfTestCheck(output, "GET /api/v1/client/windows-update-jobs targets a real client despite a legacy bare-digit catalog kbId", TestSendWindowsUpdateJobsTargetsRealClientDespiteLegacyBareDigitCatalogKbId);
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate/UpdateWindowsUpdate persist excludedComputers", TestCreateAndUpdateWindowsUpdatePersistExcludedComputers);
             allPassed &= SelfTestCheck(output, "CreateWindowsUpdate rejects an IP address in targets and, identically, in excludedComputers", TestCreateWindowsUpdateRejectsIpAddressInTargetsAndExcludedComputers);
@@ -18835,6 +18837,30 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (jobs.Count != 0)
             {
                 return "expected a disabled entry to never be assigned, even to a listed target";
+            }
+            return null;
+        }
+
+        private static string TestAppendJobIfTargetedIncludesContentSha256()
+        {
+            ArrayList jobs = new ArrayList();
+            Dictionary<string, object> entry = new Dictionary<string, object>();
+            entry["id"] = "entry-1";
+            entry["updatedAt"] = "2026-01-01T00:00:00Z";
+            entry["enabled"] = true;
+            entry["targets"] = "PC-01";
+            entry["relativePath"] = @"windows-updates\KB1111111.exe";
+            entry["contentSha256"] = "abc123";
+
+            AppendJobIfTargeted(jobs, entry, "windowsUpdate", "PC-01", null, false);
+            if (jobs.Count != 1)
+            {
+                return "expected PC-01 (a listed target) to receive this job";
+            }
+            Dictionary<string, object> job = (Dictionary<string, object>)jobs[0];
+            if (!job.ContainsKey("contentSha256") || (string)job["contentSha256"] != "abc123")
+            {
+                return "expected contentSha256 'abc123' in the job object, got: " + (job.ContainsKey("contentSha256") ? (string)job["contentSha256"] : "<missing>");
             }
             return null;
         }
