@@ -15346,6 +15346,17 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 return;
             }
 
+            if (options.AdSyncEnabled)
+            {
+                AdLookupResult adResult = AdLookupService.LookupComputerDescription(computerName, options);
+                if (!ShouldAllowEnrollment(options.AdSyncEnabled, adResult.Status))
+                {
+                    RecordIngestionRejection(request, "client-enroll", "computer '" + DebugLogger.SanitizeForLog(computerName) + "' has no matching AD computer object");
+                    SendText(stream, "Unauthorized", "text/plain; charset=utf-8", 401);
+                    return;
+                }
+            }
+
             string issuedToken = GenerateRandomToken();
             bool isNewEnrollment;
             lock (clientTokensLock)
@@ -15387,6 +15398,21 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             Dictionary<string, object> response = new Dictionary<string, object>();
             response["token"] = issuedToken;
             SendJson(stream, serializer.Serialize(response));
+        }
+
+        // Pure branch extracted out of EnrollClient so it's directly testable
+        // without a real AD lookup - mirrors why ShouldClearTokenForReenrollment
+        // (client) and similar decisions in this project are their own injectable
+        // functions. "error" (AD unreachable) deliberately returns true (allow) -
+        // see the design doc's own reasoning: a transient AD outage must not
+        // become a denial-of-service against legitimate first-contact enrollment.
+        internal static bool ShouldAllowEnrollment(bool adSyncEnabled, string adLookupStatus)
+        {
+            if (!adSyncEnabled)
+            {
+                return true;
+            }
+            return adLookupStatus != "not-found";
         }
 
         private void SendClientTokens(Stream stream)
@@ -18204,6 +18230,10 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/enroll rejects a wrong or missing EnrollmentToken with 401", TestEnrollClientRejectsWrongOrMissingEnrollmentToken);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/enroll rejects a request with no computerName with 400", TestEnrollClientRejectsMissingComputerName);
             allPassed &= SelfTestCheck(output, "POST /api/v1/client/enroll rotates to a brand-new token on re-enrollment, invalidating the old one (not idempotent-by-return - see EnrollClient's own comment)", TestEnrollClientRotatesTokenOnReEnrollment);
+            allPassed &= SelfTestCheck(output, "ShouldAllowEnrollment allows enrollment when AdSyncEnabled is false, regardless of AD lookup status", TestShouldAllowEnrollmentAllowsWhenAdSyncDisabled);
+            allPassed &= SelfTestCheck(output, "ShouldAllowEnrollment rejects enrollment for a computerName not found in AD when AdSyncEnabled is true", TestShouldAllowEnrollmentRejectsWhenComputerNotInAd);
+            allPassed &= SelfTestCheck(output, "ShouldAllowEnrollment fails OPEN (allows) when the AD lookup itself errors, not fail closed", TestShouldAllowEnrollmentAllowsOnAdErrorFailOpen);
+            allPassed &= SelfTestCheck(output, "ShouldAllowEnrollment allows enrollment for a real, found AD computer object", TestShouldAllowEnrollmentAllowsWhenFoundInAd);
             allPassed &= SelfTestCheck(output, "IsClientTokenRejected accepts a per-machine token issued via enrollment, still rejects an unissued guess", TestIsClientTokenRejectedAcceptsPerMachineTokenAfterEnrollment);
             allPassed &= SelfTestCheck(output, "The lazily-built per-machine token index handles multiple enrolled machines and invalidates correctly on revoke", TestIsPerMachineTokenValidIndexHandlesMultipleEnrolledMachines);
             allPassed &= SelfTestCheck(output, "DELETE /api/v1/client-tokens/{computerName} revokes a per-machine token so it stops authenticating, 404s on a second revoke", TestDeleteClientTokenRevokesSoItNoLongerAuthenticates);
@@ -28711,6 +28741,42 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             {
                 try { Directory.Delete(options.DataPath, true); } catch { }
             }
+        }
+
+        private static string TestShouldAllowEnrollmentAllowsWhenAdSyncDisabled()
+        {
+            if (!InventoryServer.ShouldAllowEnrollment(false, "not-found"))
+            {
+                return "expected enrollment to be allowed when AdSyncEnabled is false, regardless of AD lookup status";
+            }
+            return null;
+        }
+
+        private static string TestShouldAllowEnrollmentRejectsWhenComputerNotInAd()
+        {
+            if (InventoryServer.ShouldAllowEnrollment(true, "not-found"))
+            {
+                return "expected enrollment to be rejected for a computer not found in AD when AdSyncEnabled is true";
+            }
+            return null;
+        }
+
+        private static string TestShouldAllowEnrollmentAllowsOnAdErrorFailOpen()
+        {
+            if (!InventoryServer.ShouldAllowEnrollment(true, "error"))
+            {
+                return "expected enrollment to fail OPEN (allowed) when the AD lookup itself errors, not fail closed";
+            }
+            return null;
+        }
+
+        private static string TestShouldAllowEnrollmentAllowsWhenFoundInAd()
+        {
+            if (!InventoryServer.ShouldAllowEnrollment(true, "ok"))
+            {
+                return "expected enrollment to be allowed for a real, found AD computer object";
+            }
+            return null;
         }
 
         private static string TestIsClientTokenRejectedAcceptsPerMachineTokenAfterEnrollment()
