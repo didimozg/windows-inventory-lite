@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "1.0.2";
+        internal const string ProductVersion = "1.0.3";
 
         private static int Main(string[] args)
         {
@@ -1710,6 +1710,111 @@ namespace WindowsInventoryLite
         public InventoryServer(ServerOptions options)
         {
             this.options = options;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WintrustFileInfo
+        {
+            public uint cbStruct;
+            public string pcwszFilePath;
+            public IntPtr hFile;
+            public IntPtr pgKnownSubject;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WintrustData
+        {
+            public uint cbStruct;
+            public IntPtr pPolicyCallbackData;
+            public IntPtr pSIPClientData;
+            public uint dwUIChoice;
+            public uint fdwRevocationChecks;
+            public uint dwUnionChoice;
+            public IntPtr pFile;
+            public uint dwStateAction;
+            public IntPtr hWVTStateData;
+            public IntPtr pwszURLReference;
+            public uint dwProvFlags;
+            public uint dwUIContext;
+            public IntPtr pSignatureSettings;
+        }
+
+        [DllImport("wintrust.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern int WinVerifyTrust(IntPtr hwnd, ref Guid pgActionID, ref WintrustData pWVTData);
+
+        private const uint WtdUiNone = 2;
+        private const uint WtdRevokeNone = 0;
+        private const uint WtdChoiceFile = 1;
+        private const uint WtdStateActionVerify = 1;
+        private const uint WtdStateActionClose = 2;
+
+        // Verifies a currently chain-trusted Authenticode signature on a
+        // real file - the same check Windows' own "Digital Signatures"
+        // property page and WinVerifyTrust-based tooling (signtool verify,
+        // SmartScreen) perform. Deliberately NOT the weaker, managed-only
+        // X509Certificate.CreateFromSignedFile, which only extracts
+        // whatever certificate happens to be embedded in a file without
+        // confirming the signature's digest actually covers that file's
+        // real bytes - a known, documented pitfall of that API (a signed
+        // blob copied from one file onto a different, malicious one would
+        // still "succeed" there). WinVerifyTrust needs a real file path,
+        // not an in-memory buffer, so this writes to a throwaway temp file
+        // first - kbId path-traversal and repository confinement do not
+        // apply here, this never touches the real software-repository
+        // path. Revocation checking is deliberately off (WTD_REVOKE_NONE):
+        // this server does not guarantee reliable outbound access to a
+        // CRL/OCSP responder (the same proxy-aware, sometimes-restricted
+        // outbound path already documented for the cab/KB download
+        // itself), and a revocation CHECK failing for a network reason
+        // must not be indistinguishable from a genuinely invalid
+        // signature - that would fail closed for the wrong reason.
+        internal static bool VerifyAuthenticodeSignature(byte[] fileBytes)
+        {
+            string tempPath = Path.Combine(Path.GetTempPath(), "wil-authenticode-check-" + Guid.NewGuid().ToString("N") + ".bin");
+            try
+            {
+                File.WriteAllBytes(tempPath, fileBytes);
+
+                WintrustFileInfo fileInfo = new WintrustFileInfo();
+                fileInfo.cbStruct = (uint)Marshal.SizeOf(typeof(WintrustFileInfo));
+                fileInfo.pcwszFilePath = tempPath;
+                fileInfo.hFile = IntPtr.Zero;
+                fileInfo.pgKnownSubject = IntPtr.Zero;
+
+                IntPtr fileInfoPtr = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WintrustFileInfo)));
+                try
+                {
+                    Marshal.StructureToPtr(fileInfo, fileInfoPtr, false);
+
+                    WintrustData trustData = new WintrustData();
+                    trustData.cbStruct = (uint)Marshal.SizeOf(typeof(WintrustData));
+                    trustData.dwUIChoice = WtdUiNone;
+                    trustData.fdwRevocationChecks = WtdRevokeNone;
+                    trustData.dwUnionChoice = WtdChoiceFile;
+                    trustData.pFile = fileInfoPtr;
+                    trustData.dwStateAction = WtdStateActionVerify;
+
+                    Guid actionGuid = new Guid("00AAC56B-CD44-11d0-8CC2-00C04FC295EE");
+                    int result = WinVerifyTrust(IntPtr.Zero, ref actionGuid, ref trustData);
+
+                    trustData.dwStateAction = WtdStateActionClose;
+                    WinVerifyTrust(IntPtr.Zero, ref actionGuid, ref trustData);
+
+                    return result == 0;
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(fileInfoPtr);
+                }
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                try { File.Delete(tempPath); } catch { }
+            }
         }
 
         [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -12274,7 +12379,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // shape exactly - every I/O boundary is an injected delegate so
         // the sequencing and error-phase disambiguation is fully
         // self-tested without any real network/disk access.
-        internal static WsusKbDownloadResult PerformWsusKbDownloadCore(string kbId, string downloadUrl, Func<string, byte[]> downloadBytes, Action<string, byte[]> writeBytes)
+        internal static WsusKbDownloadResult PerformWsusKbDownloadCore(string kbId, string downloadUrl, Func<string, byte[]> downloadBytes, Func<byte[], bool> verifyAuthenticodeSignature, Action<string, byte[]> writeBytes)
         {
             // BuildKbDownloadFileName below concatenates the normalized kbId
             // straight into a relative file path with no sanitization of its
@@ -12325,6 +12430,30 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     Success = false,
                     ErrorCategory = "badResponse",
                     ErrorMessage = "Downloaded content is too small to be a real update installer (" + actualLength + " bytes)"
+                };
+            }
+
+            // Unlike wsusscn2.cab (a continuously-updated live feed with no
+            // fixed released version to pin a reference hash against - see
+            // the cab download path's own self-tests and backlog note), an
+            // individual KB .exe/.msu has fixed, versioned content. HTTPS +
+            // the host allowlist (IsAllowedWsusDownloadUrl) already bound
+            // WHERE this came from; this additionally verifies WHAT it is -
+            // a currently chain-trusted Authenticode signature, checked the
+            // same way Windows' own "Digital Signatures" property page and
+            // WinVerifyTrust-based tooling does, not the weaker (and
+            // spoofable) X509Certificate.CreateFromSignedFile, which only
+            // extracts an embedded certificate without confirming its
+            // signature actually covers this file's real content. Found by
+            // an external security review as the still-open remaining half
+            // of an already-partially-accepted WSUS-content-verification gap.
+            if (!verifyAuthenticodeSignature(bytes))
+            {
+                return new WsusKbDownloadResult
+                {
+                    Success = false,
+                    ErrorCategory = "invalidSignature",
+                    ErrorMessage = "Downloaded content does not have a valid, trusted Authenticode signature - refusing to distribute it."
                 };
             }
 
@@ -12630,6 +12759,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                     kbId,
                     downloadUrl,
                     url => DownloadBytesFromUrl(url, 300000, (bytesReceived, totalBytes) => UpdateWsusKbDownloadProgress(id, bytesReceived, totalBytes)),
+                    VerifyAuthenticodeSignature,
                     (relativePath, bytes) => WithSoftwareRepositoryIdentity(options, () =>
                     {
                         string fullPath = Path.Combine(options.SoftwareRepositoryPath, relativePath);
@@ -18715,6 +18845,9 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "ComputeCatalogEntryContentSha256 returns null when the file is missing", TestComputeCatalogEntryContentSha256ReturnsNullWhenFileMissing);
             allPassed &= SelfTestCheck(output, "ApplyWsusKbDownloadResultToEntry re-pins contentSha256 to the newly-downloaded file", TestApplyWsusKbDownloadResultToEntryRepinsContentSha256ToTheNewFile);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore succeeds and reports the deterministic windows-updates\\KB{n}{ext} relativePath", TestPerformWsusKbDownloadCoreSucceedsAndWritesUnderDeterministicName);
+            allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore rejects an invalid Authenticode signature without ever writing the file", TestPerformWsusKbDownloadCoreRejectsAnInvalidAuthenticodeSignatureWithoutWriting);
+            allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore proceeds to write when the Authenticode signature is valid", TestPerformWsusKbDownloadCoreProceedsWhenAuthenticodeSignatureIsValid);
+            allPassed &= SelfTestCheck(output, "VerifyAuthenticodeSignature (real WinVerifyTrust call) returns false for unsigned content", TestVerifyAuthenticodeSignatureReturnsFalseForUnsignedContent);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore rejects a path-traversal kbId without downloading or writing anything", TestPerformWsusKbDownloadCoreRejectsAPathTraversalKbIdWithoutDownloadingAnything);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore categorizes a non-ProtocolError WebException as 'network'", TestPerformWsusKbDownloadCoreCategorizesNetworkFailure);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore categorizes a ProtocolError WebException as 'badResponse'", TestPerformWsusKbDownloadCoreCategorizesProtocolErrorAsBadResponse);
@@ -32095,6 +32228,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 "KB5029497",
                 "http://example.com/vstor_redist_hash.exe",
                 url => fakeContent,
+                bytes => true,
                 (relativePath, bytes) => { writtenPath = relativePath; writtenBytes = bytes; });
 
             if (!result.Success)
@@ -32112,6 +32246,69 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (result.SizeBytes != fakeContent.LongLength)
             {
                 return "expected SizeBytes to match the downloaded content length";
+            }
+            return null;
+        }
+
+        private static string TestPerformWsusKbDownloadCoreRejectsAnInvalidAuthenticodeSignatureWithoutWriting()
+        {
+            byte[] fakeContent = new byte[2048];
+            bool verifyCalledWithDownloadedBytes = false;
+            bool writeCalled = false;
+            InventoryServer.WsusKbDownloadResult result = InventoryServer.PerformWsusKbDownloadCore(
+                "KB1111111",
+                "http://example.com/x.exe",
+                url => fakeContent,
+                bytes => { verifyCalledWithDownloadedBytes = ReferenceEquals(bytes, fakeContent); return false; },
+                (relativePath, bytes) => { writeCalled = true; });
+
+            if (result.Success || result.ErrorCategory != "invalidSignature")
+            {
+                return "expected an 'invalidSignature' failure when the signature check fails, got success=" + result.Success + " category=" + result.ErrorCategory;
+            }
+            if (!verifyCalledWithDownloadedBytes)
+            {
+                return "expected the signature verifier to be called with the exact downloaded bytes";
+            }
+            if (writeCalled)
+            {
+                return "expected the write delegate to never run when the signature check fails";
+            }
+            return null;
+        }
+
+        // Exercises the REAL WinVerifyTrust P/Invoke call (not an injected
+        // fake) against real, unsigned bytes - the other tests above all
+        // inject a fake verifier, so none of them would catch a struct-
+        // marshaling mistake in VerifyAuthenticodeSignature itself. A
+        // garbage/unsigned file is a real negative case this call can
+        // safely run against without needing a real signed binary on disk
+        // in this environment, and proves the P/Invoke boundary itself
+        // doesn't throw or crash the process - only that it returns false.
+        private static string TestVerifyAuthenticodeSignatureReturnsFalseForUnsignedContent()
+        {
+            byte[] unsignedContent = Encoding.UTF8.GetBytes("definitely not a signed PE file");
+            bool result = InventoryServer.VerifyAuthenticodeSignature(unsignedContent);
+            if (result)
+            {
+                return "expected false for unsigned, non-PE content, got true";
+            }
+            return null;
+        }
+
+        private static string TestPerformWsusKbDownloadCoreProceedsWhenAuthenticodeSignatureIsValid()
+        {
+            byte[] fakeContent = new byte[2048];
+            InventoryServer.WsusKbDownloadResult result = InventoryServer.PerformWsusKbDownloadCore(
+                "KB1111111",
+                "http://example.com/x.exe",
+                url => fakeContent,
+                bytes => true,
+                (relativePath, bytes) => { });
+
+            if (!result.Success)
+            {
+                return "expected success when the signature check passes, got error: [" + result.ErrorCategory + "] " + result.ErrorMessage;
             }
             return null;
         }
@@ -32208,6 +32405,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
                 "KB..\\..\\..\\Windows\\System32\\evil",
                 "http://example.com/x.exe",
                 url => { downloadCalled = true; return new byte[2048]; },
+                bytes => true,
                 (relativePath, bytes) => { writeCalled = true; });
 
             if (result.Success || result.ErrorCategory != "invalidKbId")
@@ -32226,6 +32424,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             InventoryServer.WsusKbDownloadResult result = InventoryServer.PerformWsusKbDownloadCore(
                 "KB1111111", "http://example.com/x.exe",
                 url => { throw new WebException("boom", WebExceptionStatus.ConnectFailure); },
+                bytes => true,
                 (relativePath, bytes) => { });
             if (result.Success || result.ErrorCategory != "network")
             {
@@ -32239,6 +32438,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             InventoryServer.WsusKbDownloadResult result = InventoryServer.PerformWsusKbDownloadCore(
                 "KB1111111", "http://example.com/x.exe",
                 url => { throw new WebException("boom", null, WebExceptionStatus.ProtocolError, null); },
+                bytes => true,
                 (relativePath, bytes) => { });
             if (result.Success || result.ErrorCategory != "badResponse")
             {
@@ -32252,6 +32452,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             InventoryServer.WsusKbDownloadResult result = InventoryServer.PerformWsusKbDownloadCore(
                 "KB1111111", "http://example.com/x.exe",
                 url => new byte[10],
+                bytes => true,
                 (relativePath, bytes) => { throw new InvalidOperationException("should never be called for a too-small download"); });
             if (result.Success || result.ErrorCategory != "badResponse")
             {
@@ -32266,6 +32467,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             InventoryServer.WsusKbDownloadResult result = InventoryServer.PerformWsusKbDownloadCore(
                 "KB1111111", "http://example.com/x.exe",
                 url => fakeContent,
+                bytes => true,
                 (relativePath, bytes) => { throw new IOException("disk full"); });
             if (result.Success || result.ErrorCategory != "diskWrite")
             {
