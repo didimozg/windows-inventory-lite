@@ -6,6 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 **Versioning note:** as of 2026-07-18, the client agent (`WindowsInventoryLiteClient.cs`) tracks its own version independently of the server/dashboard version below. The client version only changes when client-supported functionality itself changes (new inventory fields, new client-side behavior) - server-side fixes and dashboard changes do not bump it, so a server update does not mark already-deployed clients as outdated and force a reinstall. The client version was reset to `0.2.0` at this point; entries above `0.16.7` in this file describe the server/dashboard only unless a client change is explicitly called out.
 
+## [1.0.1] - Fixed an SSRF redirect bypass, a path-traversal input, and an unescaped XSS field, found by an external security review
+
+### Fixed
+
+- **`DownloadBytesFromUrl`'s WSUS download path followed HTTP redirects, bypassing `IsAllowedWsusDownloadUrl`'s host allowlist** (the 0.92.2 SSRF fix) - the allowlist only validated the original URL, never each redirect hop, so a response from an allowed host issuing a 3xx could transparently redirect the fetch to any other host, including an internal/private address. Fixed by disabling `AllowAutoRedirect` and explicitly rejecting any 3xx response instead of following it.
+- **`BuildKbDownloadFileName` never validated `kbId`'s character content before concatenating it into a relative file path** - a `kbId` containing `..\` could in principle escape the intended `windows-updates\` subdirectory. Not reachable via automatic KB detection (`ExtractKbFromFilename` already regex-constrains a detected kbId to digits), only via a manually-typed catalog entry field - fixed as defense in depth regardless: `PerformWsusKbDownloadCore` now rejects any kbId that isn't digits-only (after an optional `KB` prefix) before any network call or file write.
+- **`app.js`'s RAM module-count label interpolated a client-reported field (`c.ramModules.length`) without escaping it**, the one unescaped value in an otherwise-consistently-escaped template - a malicious or compromised client could report a non-array `ramModules` value whose own `.length` property injected HTML into every admin's dashboard. CSP already blocks script execution, so this was content/HTML injection rather than full XSS. Fixed by wrapping it in the same `escapeHtml()` every other value in the function already uses.
+
+### Notes
+
+- Found via an external security audit the user pasted into this session; every claim was independently verified against the actual code (not taken at face value) before fixing anything. See `docs/backlog.md`'s "External security audit" entry and `docs/threat-model.md`'s "Main Risks" section for the full write-up, including several findings confirmed as real but already-known/documented, and several needing more design work before they can be fixed (connection-count limiting, Event Log flood throttling, a read-only software-repository account, per-job sha256 verification) - tracked there, not fixed in this round.
+- Server self-tests: 521 -> 522 (1 new, covering the kbId path-traversal rejection). Full suite re-verified against the real build: 522/522 self-tests, 222/222 Pester, and the XSS fix live-verified via Playwright on a scratch server (seeded a real `ramModules` array, confirmed correct rendering with no regression).
+
 ## [1.0.0] - First stable release: WinRM deployment closes the last self-update gap
 
 ### Added

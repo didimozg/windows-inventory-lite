@@ -24,7 +24,7 @@ namespace WindowsInventoryLite
     internal sealed class Program
     {
         private const string ServiceName = "WindowsInventoryLite";
-        internal const string ProductVersion = "1.0.0";
+        internal const string ProductVersion = "1.0.1";
 
         private static int Main(string[] args)
         {
@@ -12057,6 +12057,28 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
         // self-tested without any real network/disk access.
         internal static WsusKbDownloadResult PerformWsusKbDownloadCore(string kbId, string downloadUrl, Func<string, byte[]> downloadBytes, Action<string, byte[]> writeBytes)
         {
+            // BuildKbDownloadFileName below concatenates the normalized kbId
+            // straight into a relative file path with no sanitization of its
+            // own - a kbId containing "..\" or "/" would let a download
+            // escape the intended windows-updates\ subdirectory of the
+            // software repository. kbId detected automatically from a
+            // discovered file is already regex-constrained to digits
+            // (ExtractKbFromFilename: "kb(\d{6,7})"), but a manually-typed
+            // catalog entry's kbId field has no such constraint today -
+            // reject anything that isn't digits-only (after an optional
+            // leading "KB"/"kb") before it ever reaches a path or a network
+            // call, rather than trusting every caller to have validated it.
+            string normalizedForValidation = NormalizeKbId(kbId);
+            if (String.IsNullOrEmpty(normalizedForValidation) || !Regex.IsMatch(normalizedForValidation, "^\\d+$"))
+            {
+                return new WsusKbDownloadResult
+                {
+                    Success = false,
+                    ErrorCategory = "invalidKbId",
+                    ErrorMessage = "kbId must be \"KB\" followed by digits only."
+                };
+            }
+
             byte[] bytes;
             try
             {
@@ -12138,30 +12160,51 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             }
             request.Timeout = timeoutMs;
             request.ReadWriteTimeout = timeoutMs;
+            // IsAllowedWsusDownloadUrl's caller-side host allowlist only ever
+            // validates this one, original URL - HttpWebRequest's own default
+            // (AllowAutoRedirect = true) would otherwise transparently follow
+            // a 3xx response to ANY host, including an internal/private
+            // address, without that host ever passing the allowlist. This is
+            // the real residual bypass of the SSRF fix the allowlist exists
+            // for, not a hypothetical one - a response from an allowed host
+            // that issues a redirect is exactly the shape of request this
+            // method cannot tell apart from a legitimate one otherwise. With
+            // AllowAutoRedirect off, a 3xx response is returned here (not
+            // thrown, unlike a 4xx/5xx) and explicitly rejected below instead
+            // of its body ever being read.
+            request.AllowAutoRedirect = false;
             IWebProxy proxy = BuildOutboundProxy();
             if (proxy != null)
             {
                 request.Proxy = proxy;
             }
             using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
-            using (Stream responseStream = response.GetResponseStream())
-            using (MemoryStream memoryStream = new MemoryStream())
             {
-                long totalBytes = response.ContentLength;
-                byte[] buffer = new byte[81920];
-                long bytesRead = 0;
-                int read;
-                while ((read = responseStream.Read(buffer, 0, buffer.Length)) > 0)
+                int statusCode = (int)response.StatusCode;
+                if (statusCode >= 300 && statusCode < 400)
                 {
-                    bytesRead += read;
-                    if (bytesRead > MaxDownloadBytes)
-                    {
-                        throw new InvalidOperationException("Download exceeded the maximum allowed size of " + MaxDownloadBytes + " bytes.");
-                    }
-                    memoryStream.Write(buffer, 0, read);
-                    onProgress(bytesRead, totalBytes);
+                    throw new InvalidOperationException("Server responded with a redirect (" + statusCode + ") instead of the file - refusing to follow it to an unvalidated host.");
                 }
-                return memoryStream.ToArray();
+
+                using (Stream responseStream = response.GetResponseStream())
+                using (MemoryStream memoryStream = new MemoryStream())
+                {
+                    long totalBytes = response.ContentLength;
+                    byte[] buffer = new byte[81920];
+                    long bytesRead = 0;
+                    int read;
+                    while ((read = responseStream.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        bytesRead += read;
+                        if (bytesRead > MaxDownloadBytes)
+                        {
+                            throw new InvalidOperationException("Download exceeded the maximum allowed size of " + MaxDownloadBytes + " bytes.");
+                        }
+                        memoryStream.Write(buffer, 0, read);
+                        onProgress(bytesRead, totalBytes);
+                    }
+                    return memoryStream.ToArray();
+                }
             }
         }
 
@@ -18299,6 +18342,7 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             allPassed &= SelfTestCheck(output, "IsAllowedWsusDownloadUrl accepts known Microsoft update-distribution hosts over https", TestIsAllowedWsusDownloadUrlAcceptsKnownMicrosoftHosts);
             allPassed &= SelfTestCheck(output, "IsAllowedWsusDownloadUrl rejects non-https, unrecognized hosts, a subdomain-confusion bypass attempt, file:// URLs, and malformed URLs", TestIsAllowedWsusDownloadUrlRejectsNonHttpsAndUnknownHosts);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore succeeds and reports the deterministic windows-updates\\KB{n}{ext} relativePath", TestPerformWsusKbDownloadCoreSucceedsAndWritesUnderDeterministicName);
+            allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore rejects a path-traversal kbId without downloading or writing anything", TestPerformWsusKbDownloadCoreRejectsAPathTraversalKbIdWithoutDownloadingAnything);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore categorizes a non-ProtocolError WebException as 'network'", TestPerformWsusKbDownloadCoreCategorizesNetworkFailure);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore categorizes a ProtocolError WebException as 'badResponse'", TestPerformWsusKbDownloadCoreCategorizesProtocolErrorAsBadResponse);
             allPassed &= SelfTestCheck(output, "PerformWsusKbDownloadCore categorizes a suspiciously small download as 'badResponse' without attempting to write it", TestPerformWsusKbDownloadCoreCategorizesTinyDownloadAsBadResponse);
@@ -31018,6 +31062,27 @@ document.getElementById('loginForm').addEventListener('submit', function (event)
             if (result.SizeBytes != fakeContent.LongLength)
             {
                 return "expected SizeBytes to match the downloaded content length";
+            }
+            return null;
+        }
+
+        private static string TestPerformWsusKbDownloadCoreRejectsAPathTraversalKbIdWithoutDownloadingAnything()
+        {
+            bool downloadCalled = false;
+            bool writeCalled = false;
+            InventoryServer.WsusKbDownloadResult result = InventoryServer.PerformWsusKbDownloadCore(
+                "KB..\\..\\..\\Windows\\System32\\evil",
+                "http://example.com/x.exe",
+                url => { downloadCalled = true; return new byte[2048]; },
+                (relativePath, bytes) => { writeCalled = true; });
+
+            if (result.Success || result.ErrorCategory != "invalidKbId")
+            {
+                return "expected an 'invalidKbId' failure for a path-traversal kbId, got success=" + result.Success + " category=" + result.ErrorCategory;
+            }
+            if (downloadCalled || writeCalled)
+            {
+                return "expected an invalid kbId to be rejected before any download or write was attempted";
             }
             return null;
         }

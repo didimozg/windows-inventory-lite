@@ -6482,7 +6482,7 @@
     const ramRows = ramPageItems.map(g => {
         const id = safeId('ram:' + g.totalMb);
         const detailsHidden = state.expandedDetails.has('hw:' + id) ? '' : 'hidden';
-        const computers = g.clients.map(c => hardwareComputerItem(c, c.ramModules && c.ramModules.length ? `<small>${c.ramModules.length} module${c.ramModules.length === 1 ? '' : 's'}</small>` : '')).join('');
+        const computers = g.clients.map(c => hardwareComputerItem(c, c.ramModules && c.ramModules.length ? `<small>${escapeHtml(c.ramModules.length)} module${c.ramModules.length === 1 ? '' : 's'}</small>` : '')).join('');
         return `<tr>
           <td><button class="link-button" type="button" data-hw="${id}">${escapeHtml(g.totalGb)}</button></td>
           <td class="hw-num">${g.clients.length}</td>
